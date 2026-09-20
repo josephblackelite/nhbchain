@@ -72,7 +72,9 @@ Refusals are counted in `nhb_module_throttles_total{reason="query_capacity"}` an
   block, bounded to the most recent 2,000,000). Address history, the snapshot
   look-back, transaction-window counts and the latest transactions read only the
   blocks the summaries point at. The summaries are derived from committed blocks
-  and are rebuilt after a restart as queries need them.
+  and are rebuilt after a restart as queries need them. A block that could not be
+  read is remembered as unreadable for a few seconds only, then read again, so a
+  one-off store read error is put right within seconds.
 * **Snapshots.** Any window other than the default is computed once per chain
   height and shared; at most 8 windows are kept. `nhb_txWindowStats` keeps at most
   32 results.
@@ -87,7 +89,10 @@ Refusals are counted in `nhb_module_throttles_total{reason="query_capacity"}` an
 * **Lending replay.** The lending reads rebuild a pool from the committed lending
   transactions. The heights of the blocks that hold one are remembered, the
   first read after start-up no longer waits for it (a background task finds
-  them at a quarter of one core), and none of it runs inside the state lock.
+  them at a quarter of one core), and none of it runs inside the state lock. A
+  block that could not be read when it was looked at is not taken for one with no
+  lending transaction: it is read again a few seconds later, and again every few
+  seconds for as long as it stays unreadable.
 
 ## The explorer loop
 

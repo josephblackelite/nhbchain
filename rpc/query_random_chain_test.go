@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"math/rand"
@@ -30,14 +31,81 @@ import (
 )
 
 // countingDB counts the reads that reach the store, block reads included, so a
-// test can say how much work a query did instead of how long it took.
+// test can say how much work a query did instead of how long it took. It can
+// also be told to fail the reads of chosen keys, as a store with a bad moment
+// does, and to hold one read until the test lets it go, so that a test can act
+// at a chosen point of a scan without racing it.
 type countingDB struct {
 	storage.Database
-	gets atomic.Int64
+	gets   atomic.Int64
+	failed atomic.Int64 // reads that were made to fail
+
+	armed atomic.Bool // a failure or a stall is set; keeps the common read lock-free
+	mu    sync.Mutex
+	fails map[string]int // key -> reads still to fail; negative: every read
+	stall atomic.Pointer[readStall]
+}
+
+var errInjectedRead = errors.New("injected store read failure")
+
+// readStall holds the first read made once the count of reads has reached at.
+type readStall struct {
+	at      int64
+	fired   atomic.Bool
+	reached chan struct{}
+	resume  chan struct{}
+}
+
+// stallAt holds the first read that finds the count of reads at n or more until
+// the returned function is called (or a minute has passed, so that a test that
+// forgets cannot hang); reached is closed when a read is being held.
+func (c *countingDB) stallAt(n int64) (reached <-chan struct{}, resume func()) {
+	s := &readStall{at: n, reached: make(chan struct{}), resume: make(chan struct{})}
+	c.stall.Store(s)
+	c.armed.Store(true)
+	var once sync.Once
+	return s.reached, func() { once.Do(func() { close(s.resume) }) }
+}
+
+// failReads makes the next n reads of key fail (every read when n is negative).
+func (c *countingDB) failReads(key []byte, n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fails == nil {
+		c.fails = map[string]int{}
+	}
+	c.fails[string(key)] = n
+	c.armed.Store(true)
+}
+
+func (c *countingDB) shouldFail(key []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.fails[string(key)]
+	if !ok || n == 0 {
+		return false
+	}
+	if n > 0 {
+		c.fails[string(key)] = n - 1
+	}
+	return true
 }
 
 func (c *countingDB) Get(key []byte) ([]byte, error) {
-	c.gets.Add(1)
+	n := c.gets.Add(1)
+	if c.armed.Load() {
+		if s := c.stall.Load(); s != nil && n >= s.at && s.fired.CompareAndSwap(false, true) {
+			close(s.reached)
+			select {
+			case <-s.resume:
+			case <-time.After(time.Minute):
+			}
+		}
+		if c.shouldFail(key) {
+			c.failed.Add(1)
+			return nil, errInjectedRead
+		}
+	}
 	return c.Database.Get(key)
 }
 

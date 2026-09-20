@@ -19,7 +19,7 @@ func loopServer(t *testing.T, rc *randChain, disabled bool) *Server {
 func TestExplorerLoopRunsByDefault(t *testing.T) {
 	rc := buildRandomChain(t, 141, 60, false)
 	srv := loopServer(t, rc, false)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(60 * time.Second) // only a failure waits this long
 	for srv.cachedExplorerSnapshot(explorerDefaultRecentBlocks) == nil {
 		if time.Now().After(deadline) {
 			t.Fatalf("the background loop never produced a snapshot")

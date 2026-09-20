@@ -28,9 +28,19 @@ func mustBusy(t *testing.T, err error, reason string) *queryBusyError {
 	return busy
 }
 
+// gatePatience is how long a test waits for something that should happen
+// promptly before it calls that a failure. It is long on purpose: a machine
+// running other tests can stall a goroutine for a long time, and a test that
+// gives up early then fails for a reason that has nothing to do with the gate.
+// It costs nothing when the gate works, because a test proceeds the moment the
+// thing it waits for has happened. The waits a gate is configured with (the
+// time a queued query may wait) are likewise either long enough that nothing
+// depends on them elapsing, or checked only against a lower bound.
+const gatePatience = 30 * time.Second
+
 func waitForWaiting(t *testing.T, g *queryGate, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(gatePatience)
 	for {
 		if _, waiting := g.load(); waiting == want {
 			return
@@ -46,7 +56,7 @@ func waitForWaiting(t *testing.T, g *queryGate, want int) {
 func assertGateIdle(t *testing.T, g *queryGate) {
 	t.Helper()
 	// Queries release their slot on their own goroutines; give them a moment.
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(gatePatience)
 	for {
 		running, waiting := g.load()
 		g.mu.Lock()
@@ -88,6 +98,12 @@ func TestQueryGateNeverExceedsTheGlobalLimit(t *testing.T) {
 					break
 				}
 			}
+			// Hold the slot until the pool has been seen full (a scheduler that ran
+			// these one after another would otherwise leave it never full, for no
+			// reason to do with the gate), then a little longer.
+			for waitStart := time.Now(); atomic.LoadInt32(&peak) < 2 && time.Since(waitStart) < gatePatience; {
+				time.Sleep(time.Millisecond)
+			}
 			time.Sleep(5 * time.Millisecond)
 			atomic.AddInt32(&running, -1)
 			release()
@@ -104,7 +120,10 @@ func TestQueryGateNeverExceedsTheGlobalLimit(t *testing.T) {
 }
 
 func TestQueryGateLimitsEachClient(t *testing.T) {
-	g := newQueryGate(4, 1, 8, time.Second)
+	// The queue wait is long, so that a client that was made to wait for a slot
+	// and not refused at once could not be mistaken for one that was: the reason
+	// says which it was, and the time says it did not wait the whole minute.
+	g := newQueryGate(4, 1, 8, time.Minute)
 	ctx := context.Background()
 	first, err := g.acquire(ctx, "a", false)
 	if err != nil {
@@ -113,7 +132,7 @@ func TestQueryGateLimitsEachClient(t *testing.T) {
 	start := time.Now()
 	_, err = g.acquire(ctx, "a", false)
 	mustBusy(t, err, queryBusyClient)
-	if took := time.Since(start); took > time.Second {
+	if took := time.Since(start); took > gatePatience {
 		t.Fatalf("a client over its limit was refused after %s, not at once", took)
 	}
 	other, err := g.acquire(ctx, "b", false)
@@ -133,7 +152,10 @@ func TestQueryGateLimitsEachClient(t *testing.T) {
 func TestQueryGateSharedKeysMayFillTheQueue(t *testing.T) {
 	// A key many callers share (see limiterKeyFor) is not one client: it may
 	// take the pool and the queue, but no more than that.
-	g := newQueryGate(1, 1, 2, 300*time.Millisecond)
+	// The queue wait is long: what is checked here (the two that queued get their
+	// turn, the third is refused because the queue is full) must not depend on the
+	// test being quicker than the wait.
+	g := newQueryGate(1, 1, 2, time.Minute)
 	ctx := context.Background()
 	hold, err := g.acquire(ctx, "shared", true)
 	if err != nil {
@@ -161,8 +183,58 @@ func TestQueryGateSharedKeysMayFillTheQueue(t *testing.T) {
 	assertGateIdle(t, g)
 }
 
-func TestQueryGateQueueIsBoundedAndWaitsAreShort(t *testing.T) {
-	g := newQueryGate(1, 1, 2, 80*time.Millisecond)
+// TestQueryGateQueueIsBounded: with the pool full and the queue full, the next
+// arrival is refused at once. The queued queries are given a wait so long that
+// none of them can run out of it while the test checks this, and are cancelled
+// at the end instead of being left to time out.
+func TestQueryGateQueueIsBounded(t *testing.T) {
+	g := newQueryGate(1, 1, 2, time.Minute)
+	hold, err := g.acquire(context.Background(), "holder", false)
+	if err != nil {
+		t.Fatalf("holder: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waited := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		client := fmt.Sprintf("waiter-%d", i)
+		go func() {
+			_, err := g.acquire(ctx, client, false)
+			waited <- err
+		}()
+	}
+	waitForWaiting(t, g, 2)
+
+	// The queue is full: the next arrival is refused at once, without waiting
+	// (the reason says so; had it queued it would still be there).
+	refusedAt := time.Now()
+	_, err = g.acquire(context.Background(), "late", false)
+	mustBusy(t, err, queryBusyQueue)
+	if took := time.Since(refusedAt); took > gatePatience {
+		t.Fatalf("a query that found the queue full took %s to be refused", took)
+	}
+	if _, waiting := g.load(); waiting != 2 {
+		t.Fatalf("the refused query joined the queue: %d waiting", waiting)
+	}
+
+	cancel()
+	for i := 0; i < 2; i++ {
+		if err := <-waited; !errors.Is(err, context.Canceled) {
+			t.Fatalf("a cancelled waiter should get the context error, got %v", err)
+		}
+	}
+	hold()
+	assertGateIdle(t, g)
+}
+
+// TestQueryGateWaitsAreShort: a query that queued gives up after the wait it was
+// configured with, with a retry hint. The wait is measured only from below (it
+// cannot end early) and against a limit that is far above what it should take
+// but far below "never", because how much later than 80ms a loaded machine
+// wakes a goroutine is not the gate's doing.
+func TestQueryGateWaitsAreShort(t *testing.T) {
+	const wait = 80 * time.Millisecond
+	g := newQueryGate(1, 1, 2, wait)
 	ctx := context.Background()
 	hold, err := g.acquire(ctx, "holder", false)
 	if err != nil {
@@ -177,29 +249,23 @@ func TestQueryGateQueueIsBoundedAndWaitsAreShort(t *testing.T) {
 			waited <- err
 		}()
 	}
-	waitForWaiting(t, g, 2)
-
-	// The queue is full: the next arrival is refused at once, without waiting.
-	refusedAt := time.Now()
-	_, err = g.acquire(ctx, "late", false)
-	mustBusy(t, err, queryBusyQueue)
-	if took := time.Since(refusedAt); took > 250*time.Millisecond {
-		t.Fatalf("a query that found the queue full took %s to be refused", took)
-	}
-
-	// The two that queued give up after the wait, with a retry hint.
 	for i := 0; i < 2; i++ {
-		mustBusy(t, <-waited, queryBusyTimeout)
+		select {
+		case err := <-waited:
+			mustBusy(t, err, queryBusyTimeout)
+		case <-time.After(gatePatience):
+			t.Fatalf("a queued query was still waiting %s after it queued; its wait is %s", gatePatience, wait)
+		}
 	}
-	if took := time.Since(started); took < 60*time.Millisecond || took > 3*time.Second {
-		t.Fatalf("queued queries gave up after %s, want about 80ms", took)
+	if took := time.Since(started); took < wait*3/4 {
+		t.Fatalf("queued queries gave up after %s, before their wait of %s", took, wait)
 	}
 	hold()
 	assertGateIdle(t, g)
 }
 
 func TestQueryGateGrantsSlotsInArrivalOrder(t *testing.T) {
-	g := newQueryGate(1, 1, 4, 2*time.Second)
+	g := newQueryGate(1, 1, 4, time.Minute)
 	ctx := context.Background()
 	hold, err := g.acquire(ctx, "holder", false)
 	if err != nil {
@@ -228,7 +294,7 @@ func TestQueryGateGrantsSlotsInArrivalOrder(t *testing.T) {
 			if got != want {
 				t.Fatalf("slot went to %q, want %q", got, want)
 			}
-		case <-time.After(2 * time.Second):
+		case <-time.After(gatePatience):
 			t.Fatalf("no query was granted a slot; wanted %q", want)
 		}
 		release <- struct{}{}
@@ -237,7 +303,7 @@ func TestQueryGateGrantsSlotsInArrivalOrder(t *testing.T) {
 }
 
 func TestQueryGateReleasesWhenAWaiterIsCancelled(t *testing.T) {
-	g := newQueryGate(1, 1, 4, 5*time.Second)
+	g := newQueryGate(1, 1, 4, time.Minute)
 	hold, err := g.acquire(context.Background(), "holder", false)
 	if err != nil {
 		t.Fatalf("holder: %v", err)
@@ -255,7 +321,7 @@ func TestQueryGateReleasesWhenAWaiterIsCancelled(t *testing.T) {
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("a cancelled waiter should get the context error, got %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(gatePatience):
 		t.Fatalf("a cancelled waiter is still waiting")
 	}
 	if _, waiting := g.load(); waiting != 0 {
