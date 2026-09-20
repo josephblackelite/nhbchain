@@ -472,9 +472,9 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 
 	// The Genesis Treasury Distribution Curve (core/tokenomics/curve), not
 	// the price-proof rate above, is ZNHB's authoritative treasury price.
-	// The price-proof check just above still matters (it validates the
-	// OTC gateway's own submitted rate is internally consistent with what
-	// it requested), but the curve independently prices exactly how much
+	// The price-proof check just above still matters (it validates that
+	// the submitted rate is internally consistent with what the submitter
+	// requested), but the curve independently prices exactly how much
 	// this voucher's ZNHB amount actually costs against the treasury's
 	// own Sale Pool schedule, and the transfer below draws from that same
 	// pool -- mirroring applyBuyZNHB, never sp.MintToken.

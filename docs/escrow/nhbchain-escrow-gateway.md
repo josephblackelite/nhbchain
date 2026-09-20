@@ -106,7 +106,7 @@ Runs as a standalone binary (`escrow-gateway`) under a process supervisor (syste
 
 1. Funds held by on-chain vault (E1).
 2. Gateway only creates on-chain escrow via node RPC and returns pay intent (address + memo/ID) plus optional QR.
-3. Gateway watches chain events to update REST status & trigger webhooks.
+3. The gateway does not watch chain events (the node has no method that lists them); `GET /escrow/{id}` reads the escrow from the node on demand, and the only webhook it raises is `escrow.created`.
 
 ### REST Endpoints
 
@@ -135,6 +135,7 @@ Body: {
 
 ```
 GET /escrow/{id}
+Headers: API key, HMAC, X-Timestamp, X-Nonce (reads are authenticated like writes)
 → {
   "status": "INIT|FUNDED|RELEASED|REFUNDED|EXPIRED|DISPUTED",
   "payer":"nhb1…",
@@ -185,8 +186,10 @@ separately and letting the gateway reassemble them.
 
 ### Webhooks
 
-- `escrow.created`, `escrow.funded`, `escrow.released`, `escrow.refunded`, `escrow.expired`, `escrow.disputed`, `escrow.resolved`.
-- Payload: `{escrowId, payer, payee, token, amount, txHash?, meta.reference, provider}` with `provider` covering the realm scope/type, provider profile, arbitration fee basis points, and fee recipient address.
+- Only `escrow.created` is delivered. The gateway raises it itself when `POST /escrow/create` succeeds and delivers it to the
+  subscriptions an operator has put in the gateway's `webhooks` table. The other events this section used to list
+  (`escrow.funded`, `.released`, `.refunded`, `.expired`, `.disputed`, `.resolved`) are not delivered: they would come from a
+  watcher of chain events, and the node has no method that lists them.
 
 ### Node Integration
 
@@ -244,7 +247,7 @@ RPC) are unaffected.
 ### Acceptance Criteria
 
 - Unit tests: auth (HMAC + sig), idempotency, signature mismatch, invalid bech32, deadline checks.
-- Integration: create → pay → funded → release → settlement → webhook.
+- Integration: create -> pay -> funded -> release -> settlement (the only webhook is `escrow.created`).
 
 ## Part B — P2P Market Hooks (Auto-Escrow + Arbitration)
 
@@ -377,12 +380,12 @@ Body: { "offerId":"OFF_123", "buyer":"nhb1...", "reference":"P2P-123" }
 
 ### Expiry
 
-- Gateway monitors deadline, auto-refunds funded leg if counterpart never funds and fires `escrow.trade.expired` webhook.
+- The gateway does not monitor the deadline, refund a funded leg or fire `escrow.trade.expired`: it has no watcher of chain events.
 
 ### Webhooks
 
-- `escrow.trade.created`, `.partial_funded`, `.funded`, `.disputed`, `.resolved`, `.settled`, `.expired` (the gateway's trade
-  watcher switches on the on-chain `escrow.trade.*` namespace, not `p2p.trade.*`). There is no `.cancelled` variant.
+- None are delivered. The `escrow.trade.*` events (`.created`, `.partial_funded`, `.funded`, `.disputed`, `.resolved`, `.settled`,
+  `.expired`) would come from a watcher of chain events, which the gateway does not have.
 
 ### Security
 

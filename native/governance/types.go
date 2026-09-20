@@ -193,9 +193,9 @@ const (
 	// pre-allocated genesis treasury Sale Pool rather than minting new
 	// supply (see core/swap_voucher_tx.go's applySwapVoucherMintTransaction),
 	// so it carries no external financial risk needing a
-	// governance-adjustable circuit breaker -- only the NHB-custody-backed
-	// redeem direction (real money leaving the system via the NOWPayments
-	// custody wallet) does. These redeem caps used to live in every
+	// governance-adjustable circuit breaker -- only the redeem direction
+	// (real money leaving the system through an external settlement service)
+	// does. These redeem caps used to live in every
 	// validator's own local config.toml, individually operator-tuned and
 	// requiring a coordinated, lockstep restart of every validator to
 	// change; moving them here means a single passed proposal changes the

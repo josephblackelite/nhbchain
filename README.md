@@ -338,15 +338,14 @@ Unlike purely wealth-based systems, POTSO heavily weights your **Engagement Scor
 `nhb-cli` streamlines wallet management and operational tasks:
 
 ```bash
-./nhb-cli generate-key              # Creates a new NHB wallet (saves to wallet.key; required before other commands)
+./nhb-cli generate-key              # Creates a new NHB wallet (saves to wallet.key; required before other commands). Never overwrites an existing wallet.key: --force saves a backup copy first
 ./nhb-cli balance nhb1...            # Queries balances and staking state
 ./nhb-cli send-nhb <to> <amount> wallet.key
 ./nhb-cli send-znhb <to> <amount> wallet.key   # Same syntax as send-nhb; sends ZNHB instead of NHB
-./nhb-cli deploy <contract.hex> wallet.key
-./nhb-cli id set-alias --addr <addr> --alias <alias>
+./nhb-cli id resolve --alias <alias>
 ```
 
-For the full identity management toolkit, refer to [`docs/identity/identity-cli.md`](./docs/identity/identity-cli.md). Always store `wallet.key` and RPC tokens securely; never commit secrets to source control—`wallet.key` is now ignored by Git to prevent accidental publication.
+Every command that fails exits non-zero. The commands whose node method is retired (the identity alias mutators, `claimable create|claim|cancel`, `p2p create-trade|settle|dispute|resolve`, `stake claim`, `pos sweep-voids`, `potso reward claim`) say so and exit non-zero; see [`docs/identity/identity-cli.md`](./docs/identity/identity-cli.md) for the identity lookups. Always store `wallet.key` and RPC tokens securely; never commit secrets to source control; `wallet.key` is now ignored by Git to prevent accidental publication.
 
 ## APIs, SDKs, and Documentation
 

@@ -75,7 +75,9 @@ curl -s \
 ## `net_peers`
 
 Returns enriched per-peer state combining live connections, peerstore metrics
-and reputation scores.
+and reputation scores. This method requires authentication, like `net_dial` and
+`net_ban`: the list names every peer's address, score and ban state. `p2p_peers`
+returns the same list and takes the same credential.
 
 ### Request
 
@@ -83,6 +85,7 @@ and reputation scores.
 curl -s \
   -X POST \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $NHB_RPC_TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"net_peers","params":[]}' \
   http://127.0.0.1:8080/
 ```

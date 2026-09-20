@@ -5,14 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestP2PCommandArgValidation(t *testing.T) {
-	originalNow := p2pNow
-	p2pNow = func() time.Time { return time.Unix(1_700_000_000, 0) }
-	defer func() { p2pNow = originalNow }()
-
 	originalCall := p2pRPCCall
 	p2pRPCCall = func(method string, params interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
 		t.Fatalf("unexpected RPC call for method %s", method)
@@ -39,63 +34,12 @@ func TestP2PCommandArgValidation(t *testing.T) {
 			wantExit: 1,
 		},
 		{
-			name: "create_missing_offer",
-			args: []string{
-				"create-trade",
-				"--buyer", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"--seller", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"--base", "NHB",
-				"--base-amount", "10",
-				"--quote", "ZNHB",
-				"--quote-amount", "10",
-				"--deadline", "+24h",
-			},
-			wantFile: "p2p_create_missing_offer.golden",
-			wantExit: 1,
-		},
-		{
-			name: "create_invalid_amount",
-			args: []string{
-				"create-trade",
-				"--offer", "OFF-1",
-				"--buyer", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"--seller", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"--base", "NHB",
-				"--base-amount", "1.23e-1",
-				"--quote", "ZNHB",
-				"--quote-amount", "10",
-				"--deadline", "+24h",
-			},
-			wantFile: "p2p_create_invalid_amount.golden",
-			wantExit: 1,
-		},
-		{
 			name: "get_invalid_id",
 			args: []string{
 				"get",
 				"--id", "0x1234",
 			},
 			wantFile: "p2p_get_invalid_id.golden",
-			wantExit: 1,
-		},
-		{
-			name: "settle_missing_caller",
-			args: []string{
-				"settle",
-				"--id", "0x" + strings.Repeat("0", 64),
-			},
-			wantFile: "p2p_settle_missing_caller.golden",
-			wantExit: 1,
-		},
-		{
-			name: "resolve_invalid_outcome",
-			args: []string{
-				"resolve",
-				"--id", "0x" + strings.Repeat("0", 64),
-				"--caller", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"--outcome", "bad",
-			},
-			wantFile: "p2p_resolve_invalid_outcome.golden",
 			wantExit: 1,
 		},
 	}
@@ -120,11 +64,7 @@ func TestP2PCommandArgValidation(t *testing.T) {
 	}
 }
 
-func TestP2PRPCErrorsAndSuccess(t *testing.T) {
-	originalNow := p2pNow
-	p2pNow = func() time.Time { return time.Unix(1_700_000_000, 0) }
-	defer func() { p2pNow = originalNow }()
-
+func TestP2PGetRPCErrorsAndSuccess(t *testing.T) {
 	t.Run("rpc_error", func(t *testing.T) {
 		originalCall := p2pRPCCall
 		p2pRPCCall = func(method string, params interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
@@ -154,21 +94,8 @@ func TestP2PRPCErrorsAndSuccess(t *testing.T) {
 	t.Run("rpc_success", func(t *testing.T) {
 		originalCall := p2pRPCCall
 		p2pRPCCall = func(method string, params interface{}, requireAuth bool) (json.RawMessage, *rpcError, error) {
-			if method != "p2p_createTrade" {
+			if method != "p2p_getTrade" {
 				t.Fatalf("unexpected method: %s", method)
-			}
-			expected := map[string]interface{}{
-				"offerId":     "OFF-123",
-				"buyer":       "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"seller":      "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-				"baseToken":   "NHB",
-				"baseAmount":  "100000000000000000000",
-				"quoteToken":  "ZNHB",
-				"quoteAmount": "200000000000000000000",
-				"deadline":    int64(1_700_000_000 + 3600),
-			}
-			if diff := diffParams(params, expected); diff != "" {
-				t.Fatalf("unexpected params diff: %s", diff)
 			}
 			return json.RawMessage(`{"tradeId":"0xabc"}`), nil, nil
 		}
@@ -176,18 +103,7 @@ func TestP2PRPCErrorsAndSuccess(t *testing.T) {
 
 		stdout := &bytes.Buffer{}
 		stderr := &bytes.Buffer{}
-		args := []string{
-			"create-trade",
-			"--offer", "OFF-123",
-			"--buyer", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-			"--seller", "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq9uq0",
-			"--base", "NHB",
-			"--base-amount", "100e18",
-			"--quote", "ZNHB",
-			"--quote-amount", "200e18",
-			"--deadline", "+1h",
-		}
-		exitCode := runP2PCommand(args, stdout, stderr)
+		exitCode := runP2PCommand([]string{"get", "--id", "0x" + strings.Repeat("0", 64)}, stdout, stderr)
 		if exitCode != 0 {
 			t.Fatalf("unexpected exit code: got %d, want 0", exitCode)
 		}

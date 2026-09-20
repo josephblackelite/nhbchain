@@ -77,6 +77,14 @@ func main() {
 		WithWebhookHistoryCapacity(cfg.WebhookHistorySize),
 		WithWebhookTTL(cfg.WebhookQueueTTL),
 	)
+	// The queue holds the escrow.created events the server enqueues; nothing
+	// delivered them until this worker was started. It delivers to the rows an
+	// operator has put in the webhooks table (there is no endpoint to add one),
+	// and only for the events the server itself raises: the gateway has no feed of
+	// chain events, so the funded/released/refunded/... events are not produced.
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	defer stopWorker()
+	go NewWebhookWorker(store, queue).Run(workerCtx)
 	intents := NewPayIntentBuilder()
 	server := NewServer(auth, node, store, queue, intents, cfg.MerchantConfigs)
 

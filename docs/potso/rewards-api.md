@@ -5,43 +5,16 @@ features. All methods follow JSON-RPC 2.0 semantics and are exposed by the node 
 
 ## RPC Methods
 
-### `potso_reward_claim`
+### `potso_reward_claim` (retired)
 
-Claims a pending reward. Requires RPC auth and a signature produced by the winning address.
-
-**Parameters**
-
-```json
-{
-  "epoch": 123,
-  "address": "nhb1examplewinner...",
-  "signature": "0x..."   // 65 byte secp256k1 signature over the claim digest
-}
-```
-
-**Digest format**
-
-```
-potso_reward_claim|<epoch>|<lowercase_bech32_address>
-```
-
-**Response**
-
-```json
-{
-  "paid": true,
-  "amount": "899000000000000000000"
-}
-```
-
-`paid` is `false` on idempotent retries. Errors map to:
-
-| Condition | HTTP status | JSON-RPC error | Notes |
-|-----------|-------------|----------------|-------|
-| Invalid signature/parameters | 400 | `codeInvalidParams` | Signature must recover the provided address. |
-| Reward not found | 404 | `codeServerError` | Ledger entry was not created for the epoch/address pair. |
-| Claiming disabled | 400 | `codeInvalidParams` | Current payout mode is `auto`. |
-| Insufficient treasury | 409 | `codeServerError` with data `INSUFFICIENT_TREASURY` | Treasury must be refilled; claim remains pending. |
+Retired. The method answers every call with HTTP 410 and JSON-RPC error `-32060`
+(`codeMethodDisabled`) and does nothing. It used to pay a claim-mode reward by
+debiting the treasury and crediting the claimant on the state of the one
+validator that handled the call, outside block execution, so that validator's
+next block differed from every other validator's. Rewards are paid at epoch end
+in `auto` mode, which needs no claim, and the queries below are unchanged. A
+claim-mode payout will need a signed transaction that every validator executes
+in a block; none exists yet, so do not run a deployment in `claim` mode.
 
 ### `potso_rewards_history`
 
@@ -100,12 +73,12 @@ sorted in winner order.
 
 The CLI surfaces helper commands under `nhb-cli potso reward`:
 
-* `nhb-cli potso reward claim --epoch 199 --addr nhb1... [--key wallet.key]`
+* `nhb-cli potso reward claim` (retired: it reports that `potso_reward_claim` is retired and exits non-zero)
 * `nhb-cli potso reward history --addr nhb1... [--cursor N] [--limit M]`
 * `nhb-cli potso reward export --epoch 199 > rewards-199.csv`
 
-The claim command signs the digest locally using the provided key file and requires `NHB_RPC_TOKEN` to be set. `history`
-returns the raw JSON payload. `export` streams the decoded CSV bytes to STDOUT, making shell redirects straightforward.
+`history` returns the raw JSON payload. `export` streams the decoded CSV bytes to STDOUT, making shell redirects
+straightforward.
 
 ## OpenAPI Fragment
 
@@ -127,7 +100,7 @@ paths:
                   example: "2.0"
                 method:
                   type: string
-                  enum: [potso_reward_claim, potso_rewards_history, potso_export_epoch]
+                  enum: [potso_rewards_history, potso_export_epoch]
                 params:
                   type: array
                   items:

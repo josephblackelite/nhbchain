@@ -26,7 +26,7 @@ import (
 // throttle -- so restored here as static, config.toml-driven caps (as
 // before), a deliberately lighter-weight control than
 // native/swap/redeem_risk.go's RedeemRiskParameters, which protects the
-// swap-out burn path (real custodied money leaving the system) and is
+// swap-out burn path (real money leaving the system) and is
 // governance-adjustable via native/governance's ProposalKindSwapRiskParams
 // (see core/swap_risk_params.go) since that path's risk profile can change
 // over time. The mint side's caps are a simpler, static circuit breaker on

@@ -1,7 +1,10 @@
 # Snapshot distribution format
 
-NHB nodes can now publish state snapshots that allow fresh nodes to fast-sync without replaying the full chain. A snapshot is
-a directory containing binary chunk files and a JSON manifest.
+The `core/sync` package defines a state snapshot format that lets a fresh node start without replaying the full chain. A
+snapshot is a directory containing binary chunk files and a JSON manifest. The node itself does not publish or install
+snapshots: nothing in it signs a manifest, and the `sync_snapshot_export` and `sync_snapshot_import` RPC methods are retired
+(HTTP 410, error `-32060`; see [Fast sync workflow](sync.md)). What follows describes the format and the checks the package
+applies when a tool drives it.
 
 ## Manifest
 

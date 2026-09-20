@@ -83,9 +83,10 @@ state before the error is returned.
 
 ## Operations
 
-* Operators can trigger an immediate expiry sweep with
-  `nhb-cli pos sweep-voids`. Passing `--timestamp` overrides the evaluation
-  time, allowing historical replays or future-dated dry runs.
+* Every block sweeps the expired authorizations as part of its own execution.
+  The on-demand sweep (`pos_sweepVoids`, `nhb-cli pos sweep-voids`) is retired:
+  it ran on one validator's state outside a block, and both now report that
+  and exit non-zero.
 
 ## Errors
 
@@ -132,9 +133,12 @@ resolve outstanding holds.
   * `pos_getAuthorizationByIntentRef(intentRef)` -- the way a merchant/gateway
     discovers an authorization ID from a client-supplied `intent_ref` after
     submitting an Authorize transaction. Same response shape.
-  * `pos_sweepVoids(timestamp?)` -- the RPC-level equivalent of
-    `nhb-cli pos sweep-voids`; requires RPC auth (unlike the two lookups
-    above) and returns `{"voided": N}`.
+  * `pos_sweepVoids(timestamp?)` -- retired: it answers HTTP 410 with error
+    `-32060` and does nothing (`nhb-cli pos sweep-voids` reports the same and
+    exits non-zero). It voided expired authorizations on the one validator
+    that handled the call, outside block execution; every block already voids
+    the authorizations that have passed their expiry as part of its own
+    execution, so nothing needs to call it.
 * **Testing**: Unit tests cover partial capture, double-capture rejection, and
   automatic expiry handling.
 * **Telemetry**: Existing payment processors can subscribe to the new event

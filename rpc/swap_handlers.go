@@ -169,7 +169,32 @@ func (s *Server) handleSwapVoucherGet(w http.ResponseWriter, _ *http.Request, re
 	writeResult(w, req.ID, formatVoucherRecord(record))
 }
 
-func (s *Server) handleSwapVoucherList(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+// maxSwapVoucherListLimit caps how many records one swap_voucher_list call may
+// ask for. The ledger reads every record of the page while the node's state
+// lock is held; a caller that needs more follows nextCursor.
+const maxSwapVoucherListLimit = 200
+
+// requireSwapLedgerAuth guards the reads of the voucher ledger (swap_voucher_get,
+// swap_voucher_list, swap_voucher_export). The ledger holds every partner order:
+// the recipient, the fiat and mint amounts and the provider transaction ids.
+// When partner authentication is configured the check that runs before the
+// dispatch switch has already required a signed partner request for these
+// methods, and that signature is the caller's credential. When it is not
+// configured (the shipped configurations leave RPCSwapAuth unset) nothing stood
+// between the ledger and any client that could reach the port, so the bearer
+// token or client certificate that the privileged swap methods take is required.
+func (s *Server) requireSwapLedgerAuth(w http.ResponseWriter, r **http.Request, req *RPCRequest) bool {
+	if s.swapAuth != nil {
+		return true
+	}
+	if authErr := s.requireAuthInto(r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleSwapVoucherList(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) < 2 || len(req.Params) > 4 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected startTs, endTs, [cursor], [limit]", nil)
 		return
@@ -198,9 +223,17 @@ func (s *Server) handleSwapVoucherList(w http.ResponseWriter, _ *http.Request, r
 			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid limit", err.Error())
 			return
 		}
+		if limit64 > maxSwapVoucherListLimit {
+			limit64 = maxSwapVoucherListLimit
+		}
 		if limit64 > 0 {
 			limit = int(limit64)
 		}
+	}
+	// Reading a page holds the node's state lock for as long as the page is long,
+	// so it takes a slot in the query pool first.
+	if !s.admitHeavy(w, r, req) {
+		return
 	}
 	records, nextCursor, err := s.node.SwapListVouchers(startTs, endTs, cursor, limit)
 	if err != nil {
@@ -214,7 +247,7 @@ func (s *Server) handleSwapVoucherList(w http.ResponseWriter, _ *http.Request, r
 	writeResult(w, req.ID, map[string]interface{}{"vouchers": formatted, "nextCursor": nextCursor})
 }
 
-func (s *Server) handleSwapVoucherExport(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleSwapVoucherExport(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) != 2 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected startTs and endTs", nil)
 		return
@@ -226,6 +259,11 @@ func (s *Server) handleSwapVoucherExport(w http.ResponseWriter, _ *http.Request,
 	}
 	if err := json.Unmarshal(req.Params[1], &endTs); err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid endTs", err.Error())
+		return
+	}
+	// An export reads the whole range under the node's state lock, so it takes a
+	// slot in the query pool first.
+	if !s.admitHeavy(w, r, req) {
 		return
 	}
 	csvBase64, count, total, err := s.node.SwapExportVouchers(startTs, endTs)

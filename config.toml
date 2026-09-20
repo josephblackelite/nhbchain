@@ -482,10 +482,14 @@ ClientVersion = ""
         UseLastGoodPriceFallback = true
 
 [consensus]
-  ProposalTimeout = "0s"
-  PrevoteTimeout = "0s"
-  PrecommitTimeout = "0s"
-  CommitTimeout = "0s"
+  # The round timers, written out. A validator whose file says "0s" for a timer runs
+  # on the built-in default for it, which is these values (the live validators do), but
+  # consensusd refuses a timer that is not positive, so the shipped file carries the
+  # values themselves.
+  ProposalTimeout = "2s"
+  PrevoteTimeout = "2s"
+  PrecommitTimeout = "2s"
+  CommitTimeout = "4s"
   # The least time a validator lets pass between seeing a block commit and starting
   # the round of the next height: the pace of block production, at most one block per
   # interval. Everything counted in blocks (epoch length, emission per epoch, interest
@@ -493,8 +497,8 @@ ClientVersion = ""
   # the wait off and blocks then come as fast as the validators can make them (tens a
   # second while they are in step). The value is local to the validator, changes no
   # message or state rule, and is limited to half the commit timeout (2s at the default
-  # 4s). See docs/consensus/block-cadence.md.
-  MinBlockInterval = "1s"
+  # 4s). See docs/consensus/block-cadence.md. Both live validators run with 2s.
+  MinBlockInterval = "2s"
 
 [network_security]
   ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"

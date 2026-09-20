@@ -34,8 +34,8 @@ this movement happens, but finance teams retain responsibility for cash manageme
 
 ## Controls Checklist
 
-1. **Access separation:** store `NHB_RPC_TOKEN` in a secrets manager. Only treasury automation and approved operators should be
-   able to call `potso_reward_claim`.
+1. **Access separation:** store `NHB_RPC_TOKEN` in a secrets manager and limit it to treasury automation and approved
+   operators (`potso_reward_claim` is retired, so no RPC moves reward funds any more).
 2. **Dual approval (optional):** in claim mode, route ready notifications through internal workflow tools (e.g., Jira, GRC
    systems) before running the claim bot.
 3. **Reconciliation cadence:**

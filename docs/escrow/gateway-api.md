@@ -1,8 +1,9 @@
 # Escrow Gateway REST API
 
 The escrow gateway (`services/escrow-gateway`) exposes a small REST surface over the on-chain escrow and P2P trade primitives. It
-creates escrows/trades via node RPC, tracks status locally, and delivers webhook notifications as on-chain events arrive. This
-document describes the endpoints, authentication, idempotency, and webhook mechanisms actually implemented by the service.
+creates escrows/trades via node RPC and tracks status locally. It delivers webhook notifications only for the `escrow.created`
+event it raises itself (see section 5); it has no feed of on-chain events. This document describes the endpoints, authentication,
+idempotency, and webhook mechanisms actually implemented by the service.
 
 ---
 
@@ -18,7 +19,7 @@ served directly at the paths listed below (e.g. `POST /escrow/create`, not `POST
 
 Two layers of authentication protect gateway requests:
 
-1. **API key + HMAC.** Every write request must include:
+1. **API key + HMAC.** Every request, reads (`GET`) included, must include:
    * `X-Api-Key` — the caller's API key identifier.
    * `X-Timestamp` — Unix seconds. Requests outside the configured skew window (default up to 2 minutes) are rejected.
    * `X-Nonce` — a per-request nonce; reuse of the same `(timestamp, nonce)` pair for an API key is rejected as a replay.
@@ -98,6 +99,11 @@ There is no self-service subscription endpoint (no `POST /webhooks`). Webhook ta
 table (`api_key`, `event_type`, `url`, `secret`, `rate_limit`, `active`), registered by whoever operates the gateway rather than
 through a public API.
 
+The gateway starts the delivery worker (`services/escrow-gateway/webhook.go`) at startup. The only event it queues is the
+gateway-originated `escrow.created`, fired immediately when `POST /escrow/create` succeeds. The funded, released, refunded,
+disputed, resolved, expired and `escrow.trade.*` events are not delivered: the node has no method that lists events (the
+gateway's watcher called an `events_since` method that does not exist, and has been removed), so nothing observes them.
+
 Delivery, implemented in `services/escrow-gateway/webhook.go`:
 
 * Header: `X-Webhook-Signature` — hex-encoded HMAC-SHA256 of the raw JSON body, signed with the subscription's stored secret.
@@ -115,9 +121,8 @@ Delivery, implemented in `services/escrow-gateway/webhook.go`:
   }
   ```
 
-  `provider` is only present when the underlying event carries realm/provider attributes. Event `type` values mirror the on-chain
-  event namespace (`escrow.*` and `escrow.trade.*` — see [`escrow.md`](./escrow.md) §4), plus a gateway-originated `escrow.created`
-  fired immediately when `POST /escrow/create` succeeds.
+  `provider` is only present when the underlying event carries realm/provider attributes, which the gateway-originated
+  `escrow.created` event does not. A subscription for any other event type is never matched.
 * Delivery is at-least-once with exponential backoff (1s, 2s, 4s, ... capped at 5 minutes), up to 5 attempts per event, subject to a
   per-subscription rate limit. There is no `retry_policy` field on the subscription payload and no dead-letter/email escalation.
 

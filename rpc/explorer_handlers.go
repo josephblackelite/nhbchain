@@ -106,7 +106,11 @@ func (s *Server) handleGetValidatorInfo(w http.ResponseWriter, _ *http.Request, 
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address parameter", nil)
 		return
 	}
-	addr := common.HexToAddress(addrStr)
+	addr, err := parseValidatorAddress(addrStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address parameter", err.Error())
+		return
+	}
 	acc, err := s.node.GetAccount(addr.Bytes())
 	if err != nil || acc == nil {
 		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "validator not found", nil)
@@ -126,6 +130,22 @@ func (s *Server) handleGetValidatorInfo(w http.ResponseWriter, _ *http.Request, 
 		"delegatedValidator":    delegatedValidator,
 		"nonce":                 acc.Nonce,
 	})
+}
+
+// parseValidatorAddress reads the address parameter of nhb_getValidatorInfo: a
+// bech32 address (nhb1... or znhb1...) or hex. A bech32 address used to be read
+// as hex, which turned it into an unrelated address and answered for that one.
+func parseValidatorAddress(text string) (common.Address, error) {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "nhb1") || strings.HasPrefix(lower, "znhb1") {
+		raw, err := decodeBech32(trimmed)
+		if err != nil {
+			return common.Address{}, err
+		}
+		return common.BytesToAddress(raw[:]), nil
+	}
+	return common.HexToAddress(text), nil
 }
 
 func (s *Server) handleGetNetworkStats(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
@@ -200,13 +220,66 @@ func (s *Server) handleGetTotalSupply(w http.ResponseWriter, _ *http.Request, re
 	})
 }
 
+// handleGetLoyaltyBudgetStatus backs nhb_getLoyaltyBudgetStatus. The figures
+// come from the loyalty engine's own state (Node.LoyaltyBudgetStatus): the
+// remaining daily base-reward budget in wei, the day's paid and proposed
+// totals, and when the day rolls over. The answer is chain-wide; it takes no
+// parameters and is not split per merchant.
+//
+// twapScalingFactor keeps the name the method has always had. It is the share
+// of the day's proposed base rewards that has actually been paid ("1.0" while
+// none was cut, lower once the daily budget or the treasury balance made the
+// engine pro-rate a payout). guardFallback is present only while the price
+// guard has the budget computed with a fallback price.
 func (s *Server) handleGetLoyaltyBudgetStatus(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	// Twap deviation parameters for the loyalty platform.
-	writeResult(w, req.ID, map[string]any{
-		"twapScalingFactor": "1.0", // 100% emission baseline
-		"budgetRemaining":   "1000000000000000000000",
-		"resetAt":           time.Now().Add(24 * time.Hour).Unix(),
-	})
+	if s == nil || s.node == nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
+		return
+	}
+	status, err := s.node.LoyaltyBudgetStatus()
+	if err != nil {
+		slog.Error("rpc: failed to load loyalty budget status",
+			slog.String("method", "nhb_getLoyaltyBudgetStatus"),
+			slog.Any("error", err))
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load loyalty budget status", nil)
+		return
+	}
+	result := map[string]any{
+		"twapScalingFactor": loyaltyScalingFactor(status.PaidTodayZNHB, status.ProposedTodayZNHB),
+		"budgetRemaining":   bigIntString(status.BudgetRemainingZNHB),
+		"resetAt":           status.ResetAt.Unix(),
+		"day":               status.Day,
+		"paidToday":         bigIntString(status.PaidTodayZNHB),
+		"proposedToday":     bigIntString(status.ProposedTodayZNHB),
+	}
+	if status.GuardFallback != "" {
+		result["guardFallback"] = status.GuardFallback
+	}
+	writeResult(w, req.ID, result)
+}
+
+// loyaltyScalingFactor formats paid/proposed as a decimal string with at most
+// six digits after the point and at least one ("1.0", "0.5", "0.333333"). With
+// nothing proposed, or everything paid, no reward was cut and the factor is 1;
+// a factor that was cut never rounds to 1.0 or, once anything was paid, to 0.0.
+func loyaltyScalingFactor(paid, proposed *big.Int) string {
+	if proposed == nil || proposed.Sign() <= 0 || paid == nil || paid.Cmp(proposed) >= 0 {
+		return "1.0"
+	}
+	if paid.Sign() <= 0 {
+		return "0.0"
+	}
+	text := strings.TrimRight(new(big.Rat).SetFrac(paid, proposed).FloatString(6), "0")
+	if strings.HasSuffix(text, ".") {
+		text += "0"
+	}
+	switch text {
+	case "1.0":
+		return "0.999999"
+	case "0.0":
+		return "0.000001"
+	}
+	return text
 }
 
 func (s *Server) handleGetOwnerWalletStats(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

@@ -394,7 +394,7 @@ type SwapStableMetrics struct {
 	errors   *prometheus.CounterVec
 }
 
-// SwapStable returns the singleton metrics registry for swapd stable endpoints.
+// SwapStable returns the singleton metrics registry for the swap service's stable endpoints.
 func SwapStable() *SwapStableMetrics {
 	swapStableOnce.Do(func() {
 		swapStableReg = &SwapStableMetrics{

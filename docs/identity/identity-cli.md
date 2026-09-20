@@ -1,14 +1,15 @@
 # `nhb-cli` Identity Commands
 
-The `nhb-cli` tool includes subcommands under `nhb-cli id` for interacting with the identity module. Ensure your CLI is
-configured with the correct node endpoint (`--node`) and chain ID.
+The `nhb-cli` tool includes subcommands under `nhb-cli id` for looking up identity records.
+
+> **Retired:** `set-alias`, `set-avatar`, `add-address`, `remove-address`, `set-primary`, `rename`, `create-claimable` and
+> `claim` called node methods that are retired (HTTP 410, JSON-RPC error `-32060`): they changed validator-local state outside
+> block execution. Each of these commands now says so and exits non-zero without contacting the node. Only `resolve` and
+> `reverse` are served. The sections below describe the retired commands as they behaved and are kept for reference.
 
 ## Common Flags
 
-* `--node`: JSON-RPC endpoint (default from config).
-* `--chain-id`: chain ID (e.g., `14699254016670310680`).
-
-Commands build and submit their RPC payload directly — there is no local signing step or broadcast confirmation prompt.
+* `--rpc`: JSON-RPC endpoint (default from the `RPC_URL` environment variable, else `http://localhost:8080`).
 
 ## Register Alias
 

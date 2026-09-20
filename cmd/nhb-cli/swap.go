@@ -137,7 +137,9 @@ func runSwapVoucherCommand(args []string, stdout, stderr io.Writer) int {
 func callSwapRPC(method string, params []interface{}) (json.RawMessage, error) {
 	payload := map[string]interface{}{"id": 1, "method": method, "params": params}
 	body, _ := json.Marshal(payload)
-	resp, err := doRPCRequest(body, false)
+	// The voucher ledger reads take the bearer token: the node no longer
+	// answers them without a credential.
+	resp, err := doRPCRequest(body, true)
 	if err != nil {
 		return nil, err
 	}
