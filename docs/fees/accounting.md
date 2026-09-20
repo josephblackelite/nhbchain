@@ -31,6 +31,15 @@ its value is empty or zero as noted:
 A `feeWei` of `0` with `freeTierApplied=true` means the free tier covered the
 transfer. The RPC explorer views render this event as `FeeApplied`.
 
+**Retention.** The events a node reports (`Node.Events`, used by the explorer
+fee views) are kept in memory only and are not part of the state root. The
+node keeps the last 20,000 events of all kinds, plus a second log of up to
+100,000 events that holds `fees.applied`, POTSO penalty and `escrow.*` events,
+so busy events of other kinds do not push them out (`maxRetainedEvents` and
+`maxPinnedEvents`, `core/event_log.go`). When a log is full the oldest event is
+dropped. The totals returned by `fees_listTotals` are state, not events, and
+are not affected by this limit.
+
 ## Transfer fee status
 
 `fees_getTransferStatus` and `fees_getTransferQuote` report the protocol
@@ -56,7 +65,8 @@ curl -s -X POST "$RPC_URL" -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"fees_listTotals","params":[{"domain":"pos"}]}'
 ```
 
-The `fees.applied` event stream and the totals RPC are the sources used by the
-fee dashboard described in [the transparency page](../transparency/fees-dashboard.md).
+The `fees.applied` event stream and the totals RPC are the on-chain inputs the
+fee dashboard described in [the transparency page](../transparency/fees-dashboard.md)
+is meant to be fed from.
 For SQL and export examples see [`docs/queries/fees.sql`](../queries/fees.sql)
 and [`docs/api/fees-query.md`](../api/fees-query.md).

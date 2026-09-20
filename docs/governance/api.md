@@ -12,7 +12,10 @@ when compatibility mode is enabled; also listed in
 [monolith to gateway](../migrate/monolith-to-gateway.md)) still maps the
 method names `gov_getProposal`, `gov_listProposals`, `gov_getTally`,
 `gov_submitProposal`, `gov_vote` and `gov_deposit` to `/v1/gov/...` HTTP paths
-on `governd`. Those are not node RPC methods and they are not a governance
+on `governd`. The gateway serves that table at its `/rpc` endpoint behind the
+same authenticator and a rate limit (`compat`) as its other routes
+(`gateway/routes/router.go`), and holds each call to its service's scopes
+(`compat.ScopeGuard`). Those are not node RPC methods and they are not a governance
 write path: `governd` (`services/governd`) has no HTTP handlers, it serves
 gRPC only, and its write RPCs cannot change chain state (see
 [governance service](../gov/service.md)). Submit governance transactions with
