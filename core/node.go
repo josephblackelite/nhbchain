@@ -3440,6 +3440,9 @@ const (
 //     become valid.
 //   - ErrPOSInvalidAuthorizationID: a capture or void whose authorization id
 //     is not 64 hex characters is decided by the payload alone.
+//   - swap.ErrVoucherNotReconcilable: a TxTypeSwapMarkReconciled naming a
+//     reversed voucher; a voucher's status only moves forward, so it can never
+//     become reconcilable (the same one-way rule as ErrSwapVoucherNotMinted).
 //   - loyalty.ErrPaymasterConsentRequired: an owner naming a wallet other than
 //     its own as the loyalty paymaster can never succeed for that signer (only
 //     a loyalty admin may name another wallet).
@@ -3528,6 +3531,9 @@ const (
 //     the chain has not entered yet becomes valid the moment that epoch
 //     opens, so it stays in the mempool and is offered again -- the
 //     counterpart to ErrBuybackRefPriceStaleEpoch (PRUNE) above.
+//   - swap.ErrVoucherNotFound: a TxTypeSwapMarkReconciled naming a provider
+//     transaction id the ledger does not know yet; the voucher can still be
+//     minted by a later transaction (ErrSwapVoucherReversalNotFound's reasoning).
 //   - loyalty.ErrPaymasterConsent: a loyalty admin naming a wallet that has
 //     not yet recorded its own opt-in; the opt-in is a later transaction from
 //     the named wallet, after which the same assignment succeeds.
@@ -3684,6 +3690,8 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// already-committed ledger state" reasoning above.
 		errors.Is(err, ErrSwapVoucherNotMinted),
 		errors.Is(err, ErrSwapVoucherAlreadyReversed),
+		// Reconciling a reversed voucher is the same one-way status rule.
+		errors.Is(err, swap.ErrVoucherNotReconcilable),
 		// A ref price for a given epoch, once recorded, can never become
 		// unrecorded -- the epoch number only moves forward -- so a
 		// duplicate submission is a permanently dead transaction, never
@@ -3770,6 +3778,8 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// transaction (e.g. one still sitting in the same mempool) -- see
 		// ErrSwapVoucherReversalNotFound's doc comment (core/swap.go).
 		errors.Is(err, ErrSwapVoucherReversalNotFound),
+		// The same for a reconciliation naming a voucher not minted yet.
+		errors.Is(err, swap.ErrVoucherNotFound),
 		// A same-block-or-later credit to the voucher's recipient could
 		// make a currently-insufficient reversal succeed on a later
 		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning
