@@ -112,11 +112,16 @@ Full detail, including the exact pricing formula, buyback mechanics, and RPC res
 
 > **If you're setting up a validator, skip straight to ["Join As A Validator In
 > One Command"](#join-as-a-validator-in-one-command) below** — it's the
-> current, actually-one-command path: clone the repo, run one script, done.
-> It installs its own prerequisites (including Go) automatically. The manual
+> current path: clone the repo, run one script with a snapshot location and a
+> bootnode, done. It installs its own prerequisites (including Go)
+> automatically. The manual
 > walkthrough below is for standing up a full node for other reasons and
 > assumes more hands-on setup, including config files under `/etc/nhbchain/`
-> this walkthrough does not generate for you.
+> this walkthrough does not generate for you. **It starts a node from genesis,
+> which cannot sync the current mainnet: to run a peer or full node of that
+> network, use the snapshot procedure in
+> [Onboarding a validator from a snapshot](docs/validators/snapshot-onboarding.md)
+> too.**
 
 We have intentionally designed this process so that **anyone**, regardless of Linux experience, can spin up a node in under 5 minutes. 
 
@@ -153,7 +158,10 @@ cd nhbchain
 ```
 
 ### Step 5: Run the Automated Node Bootstrap
-The repository now includes a single node bootstrap script intended to be the public operator entrypoint. It installs the runtime stack, builds the binaries, installs the service units, and brings the node online once your server-side config is ready. Run:
+
+> **Warning: do not use this step to join the current mainnet.** `scripts/run_nhbcoin_node.sh` starts a node from an **empty data directory** (`--reset-state` empties it first): a from-genesis start. **Block sync from genesis is not supported on this network** (chain id `18346390202490284624`): a node started that way rejects block 1 and stays at height 0, however long it runs. To bring a node online on it, as a validator or as a plain peer or full node, start from a verified snapshot instead, with the procedure in [Onboarding a validator from a snapshot](docs/validators/snapshot-onboarding.md) ([why](docs/validators/snapshot-onboarding.md#why-block-sync-from-genesis-is-not-supported)). What follows is for a chain that does start from genesis, such as a network you launch yourself for development.
+
+The repository includes a node bootstrap script for that case. It installs the runtime stack, builds the binaries, installs the service units, and starts the node from genesis once your server-side config is ready. Run:
 
 > **Before you run this:** `scripts/run_nhbcoin_node.sh` execs `scripts/bringup_production_stack.sh`, which requires the following files to already exist under `/etc/nhbchain/` on the server — it fails with no guidance if any are missing:
 > - `config.toml`
@@ -165,13 +173,13 @@ The repository now includes a single node bootstrap script intended to be the pu
 bash scripts/run_nhbcoin_node.sh
 ```
 
-If you are launching a fresh genesis/reset deployment, use:
+If you are launching a fresh genesis/reset deployment of your own chain, use:
 
 ```bash
 bash scripts/run_nhbcoin_node.sh --reset-state
 ```
 
-**That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
+**On a network that can sync from genesis, that brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. **On the current mainnet it does not: see the warning above.** After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
 ### Step 6: Get paid (stake at least 10,000 ZNHB)
 The validator's signing key and your everyday NHBCoin wallet are **two
@@ -182,15 +190,21 @@ anywhere for this step.
 1. On your Ubuntu validator server, run:
 
 ```bash
-bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
+bash scripts/validator-only-bootstrap.sh \
+  --beneficiary YOUR_NHB_WALLET_ADDRESS \
+  --snapshot-url SNAPSHOT_URL \
+  --bootnode BOOTNODE_HOST_PORT \
+  --max-snapshot-age 72h
 ```
 
    This generates a fresh validator key **on this machine** the first time
-   it runs (reused on later runs), prints that validator's node address, and
-   automatically redirects its future epoch reward payouts to your
-   `--beneficiary` wallet address (required), signed locally before the key
-   is used for anything else. Add `--email you@example.com` to also get the
-   node address and instructions emailed to you.
+   it runs (reused on later runs), installs a verified snapshot of the chain,
+   waits until the node is at the network tip, and then automatically
+   redirects its future epoch reward payouts to your `--beneficiary` wallet
+   address (required), signed locally before the key is used for anything
+   else. It prints that validator's node address at the end. See
+   [Join As A Validator In One Command](#join-as-a-validator-in-one-command)
+   for where `SNAPSHOT_URL` and `BOOTNODE_HOST_PORT` come from.
 
 2. **Get the validator's stake to at least 10,000 ZNHB.** A validator's stake
    is its account's total stake, which includes ZNHB that other wallets
@@ -200,13 +214,19 @@ bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS -
    - **Self-stake:** send ZNHB to the validator's own node address, then run
      step 3 on the server.
 3. **If you chose to self-stake:** stake it on the server itself, using the
-   validator's own key:
+   validator's own key. The key belongs to the service user, so the command runs
+   as that user, and the node's RPC only accepts a signed transaction with a
+   short-lived token (`NHB_RPC_TOKEN`): the first line makes one from the node's
+   own secret, the second signs and sends the stake:
 
 ```bash
-sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
 ```
 
-   `10000000000000000000000` is 10,000 ZNHB in base units.
+   `10000000000000000000000` is 10,000 ZNHB in base units. The token lasts ten
+   minutes: make a new one for the next command. (The bootstrap script prints
+   these same two lines when a step of its own fails.)
 
 A validator is eligible when all three of these are true:
 
@@ -236,7 +256,7 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 If you are setting up a frontend application, a Web3 wallet (like MetaMask), or configuring your Node manually, here are the official Mainnet parameters:
 
 - **Network Name:** NHBCoin Mainnet
-- **Network ID:** `430060579445266314` *(P2P handshake identifier for the live mainnet deployment, effective from the Phase E genesis relaunch on 2026-08-06 -- genesis-hash-derived, not a chosen number. Nodes advertising a different value will not be able to peer with mainnet validators. Verify against the live node's `net_info`/`p2p_info` RPC result if this ever looks stale. The prior GTM 2026 genesis (10698789873712925303) was abandoned after a real consensus bug was found: no second validator could ever sync it -- see config/genesis.phase-e.json and core/mint.go's MintChainID comment for the full story. Account balances were snapshotted forward into the new genesis, nobody lost funds.)*
+- **Network ID (chain id):** `18346390202490284624` *(the first 8 bytes of the genesis block hash of `config/genesis.relaunch.json`, whose hash is `0xfe9b78af9223ea50f456f63c41084dd99bac4aaa3a790a10fcc26d1dc63210a2`; this is what a node's `net_info` RPC result reports as `chainId`. Nodes advertising a different value will not be able to peer with mainnet validators. The identifiers of the earlier networks no longer apply. See [Onboarding a validator from a snapshot](docs/validators/snapshot-onboarding.md) for everything a new node is pinned to.)*
 - **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`
@@ -249,17 +269,38 @@ If you are setting up a frontend application, a Web3 wallet (like MetaMask), or 
 For the full step-by-step walkthrough, including troubleshooting, see
 [Validator Onboarding Guide](docs/validators/onboarding.md).
 
-On a fresh Ubuntu server, clone the repo and run:
+**This network cannot be joined by syncing from genesis.** The script starts a
+node from a verified snapshot of the chain database, so you need two things from
+whoever operates the network, neither of which is built into the script: the
+location of a snapshot (`SNAPSHOT_URL`, a directory URL holding `manifest.json`
+and the archive it names) and a bootnode (`BOOTNODE_HOST_PORT`; the "Mainnet P2P
+Bootnode" above is one). Read the source commit the snapshot's manifest names
+(on a clean machine there is no tool for it yet: it is the `binaryCommit` field of
+the manifest's JSON, `curl -fsS SNAPSHOT_URL/manifest.json | sed -n 's/.*"binaryCommit": *"\([0-9a-f]*\)".*/\1/p'`),
+check that it is a release you recognise (the manifest is not signed), and check
+it out. It has to contain this procedure, `scripts/deployvalidator.sh` and
+`cmd/nhb-snapshot`, because you run the script from it: a snapshot made by a
+validator that still runs an earlier build names a commit whose script syncs from
+genesis, which does not work on this network; see
+[What you need](docs/validators/snapshot-onboarding.md#what-you-need). Then on a
+fresh Ubuntu server run:
 
 ```bash
-bash scripts/validator-only-bootstrap.sh --beneficiary YOUR_NHB_WALLET_ADDRESS --reset-state
+bash scripts/validator-only-bootstrap.sh \
+  --beneficiary YOUR_NHB_WALLET_ADDRESS \
+  --snapshot-url SNAPSHOT_URL \
+  --bootnode BOOTNODE_HOST_PORT \
+  --max-snapshot-age 72h \
+  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT
 ```
 
-**`--reset-state` is only safe on a brand-new server with no existing chain
-data.** It wipes this node's local block history before starting, which is
-correct the very first time this runs on a fresh machine but destructive if
-copy-pasted again later against a node that's already synced or already
-validating -- drop the flag on any re-run.
+It is safe to run again: what is already in place is left alone, and a node that
+already holds the chain is not given a snapshot (so it does not depend on the
+snapshot host). `--reset-state` is only for a node whose data directory is broken
+(a node that is already a validator included): it unpacks a verified snapshot
+next to that directory first, then stops the node, moves the old directory aside
+(never deletes it) and puts the snapshot in its place, keeping the node's p2p
+identity and vote state.
 
 Never pass a private key to this script -- it generates one for you, on
 this machine, the first time it runs. `--beneficiary` is **required**: it
@@ -276,9 +317,12 @@ What this does:
 - writes `/etc/nhbchain/node.env` with that key
 - installs `nhb.service`
 - builds the validator binaries
-- points the node at the NHBCoin mainnet bootnode
-- syncs block history from the network until it reaches the current head
-- starts the validator and keeps validator heartbeats flowing automatically
+- checks the snapshot is for this network and for the same node binary, downloads
+  it, verifies it (checksum, structure, and that its state matches its header)
+  and installs it -- never over data that is already there
+- starts the node as a follower that does not vote, syncing new blocks from the
+  bootnode you gave, and waits until it is at the network tip
+- keeps validator heartbeats flowing automatically
 - signs a one-time transaction locally redirecting this validator's
   epoch reward payouts to the `--beneficiary` address you provided
 - signs a second one-time, zero-value transaction registering this
@@ -295,20 +339,32 @@ Getting paid:
   it stakes itself. To delegate, send a stake transaction targeting the
   validator's node address (the NHBCoin wallet's Validator Hub -> Delegate
   tab does this). To self-stake, send ZNHB to the node address this script
-  printed, then run
-  `sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key`
-  on the server (`10000000000000000000000` is 10,000 ZNHB in base units; the
-  script already ran the same command once with amount `0` to register the
-  validator, which needs no funds).
+  printed, then run these two lines on the server. The key belongs to the
+  service user, so the command runs as that user, and the node's RPC only
+  accepts a signed transaction with a short-lived token (`NHB_RPC_TOKEN`): the
+  first line makes one from the node's own secret, the second signs and sends
+  the stake (`10000000000000000000000` is 10,000 ZNHB in base units; the script
+  already ran the same command once with amount `0` to register the validator,
+  which needs no funds):
+
+  ```bash
+  TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+  NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+  ```
 - **Staking yield**: accrues against each account's own stake. ZNHB you
   delegate to a validator accrues to you, the delegator; the validator's own
   accrual excludes what others delegated to it.
 - **Epoch reward payouts**: paid to the validator's own address unless a
   beneficiary is set. `--beneficiary` sets it automatically; you can set or
   change it later, signed with the validator's own key file on the server,
-  without rerunning the whole script:
-  `nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key`
-  (the beneficiary cannot be the validator's own address).
+  without rerunning the whole script. Only the service user can read that key
+  file, so the command runs as that user, with a short-lived token like the one
+  above (the beneficiary cannot be the validator's own address):
+
+  ```bash
+  TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+  NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key
+  ```
 
 Operational model:
 

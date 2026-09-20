@@ -49,18 +49,13 @@ DataDir = "./nhb-data"
 # first 8 bytes of its block hash, so this file must never be edited.
 GenesisFile = "./config/genesis.relaunch.json"
 AllowAutogenesis = false
-# Matches the coordinated activation height both live mainnet validators are
-# currently enforcing for NHB-TRIAGE-C1's quorum-certificate check on the
-# untrusted P2P block-sync path (see config/config.go's QuorumCertActivationHeight
-# doc comment and core/node.go's commitBlock). This value must stay identical
-# across every validator -- a new validator whose config leaves this at 0
-# (unset) will sync and commit every historical block above this height with
-# NO quorum-certificate verification at all: a silent security gap, not a
-# functional failure, since sync otherwise succeeds normally. Set 2026-09-02
-# to match the live validators' already-active height; if the network is
-# ever upgraded again with a new activation height, update this value (and
-# redeploy every validator) together, never independently.
-QuorumCertActivationHeight = 451949
+# Quorum-certificate verification on the P2P block-sync path (see
+# config/config.go's QuorumCertActivationHeight doc comment and core/node.go's
+# commitBlock). 0 leaves it disabled, which is what both live validators run
+# with. It does not change state or any block's validity, but it must not be
+# changed on one validator alone: set it on every validator together, as one
+# coordinated change.
+QuorumCertActivationHeight = 0
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
@@ -127,7 +122,7 @@ ClientVersion = ""
     AlphaStakeBps = 7000
     MinPayoutWei = "1000000000000000"
     EmissionPerEpoch = "50000000000000000000" # 50 ZNHB reward per epoch (example)
-    TreasuryAddress = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+    TreasuryAddress = "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn"
     MaxWinnersPerEpoch = 5000
     CarryRemainder = true
     PayoutMode = "auto"
@@ -251,11 +246,11 @@ ClientVersion = ""
   ManagementFeeCapBps = 500
   # Treasury receives every charge's management-fee share. Required once
   # ManagementFeeBps > 0 -- node startup panics otherwise. Set to the
-  # network's single treasury wallet (NHB_MASTER_TREASURY in node.env),
-  # which already receives every other fee app-wide -- confirmed
-  # 2026-08-13 after this placeholder caused both live validators to
-  # crash-loop on their first restart after this section was added.
-  Treasury = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+  # network's admin/treasury wallet (the genesis adminWallet), which already
+  # receives every other fee app-wide. Leave NHB_MASTER_TREASURY unset: the
+  # live validators run without it, and a node that points it at any other
+  # address computes different state (core/node.go, NewNode).
+  Treasury = "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
   # MaxRetries is how many consecutive failed charge attempts a
   # subscription tolerates (spaced RetryIntervalSeconds apart) before
   # being permanently suspended.
@@ -438,17 +433,17 @@ ClientVersion = ""
   [global.Fees]
     FreeTierTxPerMonth = 100
     MDRBasisPoints = 150
-    OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+    OwnerWallet = "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
 
     [[global.Fees.Assets]]
       Asset = "NHB"
       MDRBasisPoints = 150
-      OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+      OwnerWallet = "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
 
     [[global.Fees.Assets]]
       Asset = "ZNHB"
       MDRBasisPoints = 200
-      OwnerWallet = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+      OwnerWallet = "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn"
   [global.Loyalty]
     [global.Loyalty.Dynamic]
       TargetBPS = 50

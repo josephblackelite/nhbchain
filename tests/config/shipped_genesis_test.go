@@ -288,6 +288,64 @@ func TestShippedConfigsNameTheLiveChain(t *testing.T) {
 			t.Errorf("%s: genesis sha256 %s, want %s", rel, got, liveGenesisFileSHA256)
 		}
 	}
+	// The validator bootstrap installs a snapshot only if it is for this
+	// genesis block, so it pins the block hash as well as the file.
+	pinned := regexp.MustCompile(`(?m)^GENESIS_HASH_DEFAULT='0x([0-9a-f]{64})'\s*$`)
+	if got := onlyMatch(t, pinned, "scripts/deployvalidator.sh", readRepoFile(t, "scripts/deployvalidator.sh")); got != liveGenesisHash {
+		t.Errorf("scripts/deployvalidator.sh: genesis hash %s, want %s", got, liveGenesisHash)
+	}
+}
+
+// config.toml is what a new validator's config is made from. The values in it
+// that change what a block does must be the network's: the treasuries the genesis
+// file names, and the quorum-certificate height the live validators run with. A
+// node started from a snapshot with any other value computes different state at
+// the first block that touches it (the first reward epoch, for the POTSO
+// treasury).
+func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
+	var spec struct {
+		AdminWallet   string `json:"adminWallet"`
+		LoyaltyGlobal struct {
+			Treasury string `json:"treasury"`
+		} `json:"loyaltyGlobal"`
+	}
+	if err := json.Unmarshal(readRepoFile(t, liveGenesisFile), &spec); err != nil {
+		t.Fatalf("parse %s: %v", liveGenesisFile, err)
+	}
+	admin, znhb := spec.AdminWallet, spec.LoyaltyGlobal.Treasury
+	if !strings.HasPrefix(admin, "nhb1") || !strings.HasPrefix(znhb, "znhb1") {
+		t.Fatalf("genesis treasuries %q and %q", admin, znhb)
+	}
+	cfg := readRepoFile(t, "config.toml")
+
+	all := func(pattern string) []string {
+		var out []string
+		for _, m := range regexp.MustCompile(pattern).FindAllSubmatch(cfg, -1) {
+			out = append(out, string(m[1]))
+		}
+		return out
+	}
+	expectAll := func(what string, got []string, want string, atLeast int) {
+		if len(got) < atLeast {
+			t.Errorf("config.toml: expected at least %d %s, found %d", atLeast, what, len(got))
+		}
+		for _, g := range got {
+			if g != want {
+				t.Errorf("config.toml: %s is %s, the genesis says %s", what, g, want)
+			}
+		}
+	}
+	expectAll("[potso.rewards] TreasuryAddress", all(`(?m)^\s*TreasuryAddress\s*=\s*"([^"]*)"`), znhb, 1)
+	expectAll("[subscriptions] Treasury", all(`(?m)^\s*Treasury\s*=\s*"([^"]*)"`), admin, 1)
+	expectAll("an NHB OwnerWallet", all(`(?m)^\s*OwnerWallet\s*=\s*"(nhb1[^"]*)"`), admin, 2)
+	expectAll("a ZNHB OwnerWallet", all(`(?m)^\s*OwnerWallet\s*=\s*"(znhb1[^"]*)"`), znhb, 1)
+	if got := all(`(?m)^QuorumCertActivationHeight\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
+		t.Errorf("config.toml: QuorumCertActivationHeight is %v, the live validators run with 0", got)
+	}
+	// No other treasury of an earlier network is left behind.
+	if bytes.Contains(cfg, []byte("10lephh6ffd79cc7lk6edc6rkxe9ha8xe")) {
+		t.Errorf("config.toml still names the treasury of an earlier network")
+	}
 }
 
 // A config generated on first run names the live network too.
