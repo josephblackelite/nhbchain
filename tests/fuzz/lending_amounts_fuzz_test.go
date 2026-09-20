@@ -195,8 +195,13 @@ func FuzzLendingSupplyWithdrawAmounts(f *testing.F) {
 		if state.market.TotalSupplyShares.Cmp(initialShares) != 0 {
 			t.Fatalf("total shares not restored: got %s want %s", state.market.TotalSupplyShares, initialShares)
 		}
-		if state.market.TotalNHBSupplied.Cmp(initialSupply) < 0 {
-			t.Fatalf("total supplied underflow: got %s want >= %s", state.market.TotalNHBSupplied, initialSupply)
+		// Shares<->NHB conversion is documented half-up (docs/lending/risk-controls.md), so
+		// a supply+withdraw round trip may hand the supplier at most floor((index/ray+1)/2) wei
+		// of pool value; anything beyond that is a real accounting fault.
+		tol := new(big.Int).Div(new(big.Int).Add(new(big.Int).Add(index, lendingRay), big.NewInt(1)), new(big.Int).Lsh(lendingRay, 1))
+		floorSupply := new(big.Int).Sub(initialSupply, tol)
+		if state.market.TotalNHBSupplied.Cmp(floorSupply) < 0 {
+			t.Fatalf("total supplied underflow beyond rounding tolerance: got %s want >= %s (tol %s)", state.market.TotalNHBSupplied, floorSupply, tol)
 		}
 		moduleAfter, _ := state.GetAccount(moduleAddr)
 		if moduleAfter == nil || moduleAfter.BalanceNHB.Sign() < 0 {
