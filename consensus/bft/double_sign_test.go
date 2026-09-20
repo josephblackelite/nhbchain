@@ -77,7 +77,7 @@ func (n *signGuardNode) CreateBlock([]*types.Transaction) (*types.Block, error) 
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.seq++
-	header := &types.BlockHeader{Height: n.height + 1, Validator: n.self, PrevHash: []byte(fmt.Sprintf("built-%d", n.seq))}
+	header := &types.BlockHeader{Height: n.height + 1, Validator: n.self, PrevHash: []byte(fmt.Sprintf("built-%d", n.seq)), TxRoot: testTxRoot()}
 	return types.NewBlock(header, nil), nil
 }
 func (n *signGuardNode) ValidateBlock(b *types.Block) error {

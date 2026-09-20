@@ -47,7 +47,7 @@ func (n *simNode) CreateBlock(_ []*types.Transaction) (*types.Block, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.seq++
-	header := &types.BlockHeader{Height: n.height + 1, Validator: n.self, PrevHash: []byte(fmt.Sprintf("seq-%d", n.seq))}
+	header := &types.BlockHeader{Height: n.height + 1, Validator: n.self, PrevHash: []byte(fmt.Sprintf("seq-%d", n.seq)), TxRoot: testTxRoot()}
 	return types.NewBlock(header, nil), nil
 }
 func (n *simNode) ValidateBlock(b *types.Block) error {
