@@ -191,14 +191,15 @@ type Engine struct {
 	// needs. roundSkipCh wakes the round loop when that evidence says this
 	// validator should be in a later round than it is. dropNotes rate-limits the
 	// warnings about dropped messages. proposerCache holds the proposers chosen
-	// since the last round start, and proposerEpoch changes when it is cleared, so
-	// a proposer chosen from an older validator set is never stored into it. All
+	// for a height and round since it was last cleared (resetProposerCacheLocked:
+	// at every round start and whenever the height moves on), and proposerEpoch
+	// changes when it is, so a proposer chosen before is never stored into it. All
 	// of these are guarded by mu.
 	selfAddr      []byte
 	roundClaims   map[string]roundClaim
 	roundSkipCh   chan struct{}
 	dropNotes     map[string]*dropNote
-	proposerCache map[int][]byte
+	proposerCache map[proposerKey][]byte
 	proposerEpoch uint64
 	// earlyVotes holds the votes of the current round that arrived before a
 	// proposal was accepted, keyed by validator and vote type (guarded by mu).
@@ -1126,6 +1127,11 @@ func (e *Engine) commit() bool {
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
+	// Who proposes a round depends on the last block, which is new, and the validator
+	// set may be too: nothing chosen at the height just committed holds for the next.
+	// Proposals for it are handled from here on, before the round loop has started
+	// its first round.
+	e.resetProposerCacheLocked()
 	e.syncHeightWithNodeLocked()
 	e.broadcastCommittedBlock(block)
 	e.broadcastStatus()
@@ -1556,8 +1562,7 @@ func (e *Engine) startNewRound() {
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
 	// The proposers chosen so far were chosen from the previous validator set.
-	e.proposerCache = nil
-	e.proposerEpoch++
+	e.resetProposerCacheLocked()
 	// Move on to a later round than the next one only when enough of the voting
 	// power has been seen there (round_sync.go, supportedRoundLocked) -- never on
 	// a single validator's message, and to the highest round that is supported,
@@ -1635,6 +1640,9 @@ func (e *Engine) syncHeightWithNodeLocked() bool {
 	if e.currentState.Height <= nodeHeight {
 		e.currentState.Height = nodeHeight + 1
 		e.currentState.Round = 0
+		// The node has a new last block: what was chosen for the old height is not
+		// what is chosen for this one.
+		e.resetProposerCacheLocked()
 		for height := range e.bufferedProposal {
 			if height <= nodeHeight {
 				delete(e.bufferedProposal, height)
