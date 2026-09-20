@@ -29,9 +29,11 @@ per-asset LTV settings and no per-asset enable/disable switch.
 ### Liquidation
 A position is liquidatable when `collateralValue * LiquidationThreshold <
 debt * 10000` (see [on-chain.md](on-chain.md#health-and-borrow-limits)). Any
-other account can liquidate by signing a `TxTypeLendingLiquidate` transaction;
-the liquidator repays the borrower's whole flexible-rate debt and receives the
-seized ZNHB.
+account other than the borrower can liquidate by signing a
+`TxTypeLendingLiquidate` transaction (a borrower cannot liquidate their own
+position); the liquidator repays the borrower's whole flexible-rate debt and
+receives the seized ZNHB, converted from the repaid NHB value at the reference
+price.
 
 ### Fixed-term products
 Besides the flexible pool, the module has fixed-term loans (30 or 90 days by
@@ -53,8 +55,9 @@ default) and fixed-term deposits with locked rates. See
 
 1. **Supply / deposit collateral**: `0x13` supplies NHB; `0x15` deposits ZNHB.
 2. **Borrow**: `0x17` borrows NHB, subject to the checks above.
-3. **Accrual**: indexes advance per block whenever a pool action touches the
-   pool.
+3. **Accrual**: indexes advance by the block time elapsed since the pool was
+   last touched, whenever a pool action touches it (annual rates over
+   31,536,000 seconds, so the block interval does not change the yield).
 4. **Repay or adjust**: `0x18` repays; `0x16` withdraws collateral while the
    position stays healthy.
 5. **Liquidation**: `0x1D` by a third party once the position is unhealthy.

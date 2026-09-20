@@ -44,17 +44,29 @@ and `ProtocolFeeBps = 0`.
 ## Accrual
 
 `accrueInterest` runs at the start of supply, withdraw, collateral
-withdrawal, borrow, repay and liquidate, and per block-height delta:
+withdrawal, borrow, repay, liquidate and fixed-term repay
+(`native/lending/engine.go`, `fixed_term.go`), and interest is measured in
+**seconds of block time**, not in blocks:
 
-1. `delta = currentHeight - market.LastUpdateBlock`. Nothing accrues when
-   `delta == 0` or nothing is borrowed.
-2. Per-block rate is `APR / 31,536,000` (`blocksPerYear`, which equals seconds
-   per year, so it assumes one block per second). The borrow and supply
-   indexes grow by `1 + perBlockRate * delta` (linear within one step).
-3. Interest `= TotalNHBBorrowed * perBlockRate * delta` is added to both
+1. `elapsed = block timestamp - market.LastUpdateTimestamp` (Unix seconds,
+   `Market.LastUpdateTimestamp` in `native/lending/types.go`). Nothing accrues
+   when `elapsed == 0` (blocks that share a second) or nothing is borrowed. A
+   market with no stored timestamp, or an engine that was given no block time,
+   accrues once by `(current height - LastUpdateBlock)` times one second per
+   block and is then stamped (`Engine.elapsedSeconds`).
+2. The per-second rate is `APR / 31,536,000` (`secondsPerYear`, 365 days). The
+   borrow and supply indexes grow by `1 + APR / 31,536,000 * elapsed` (linear
+   within one step).
+3. Interest `= TotalNHBBorrowed * APR / 31,536,000 * elapsed` is added to both
    `TotalNHBBorrowed` and `TotalNHBSupplied`.
 4. `ReserveFactorBps` and `ProtocolFeeBps` shares of that interest are added
    to `FeeAccrual.ProtocolFeesWei`.
+
+The block time comes from the block header timestamp the state processor is
+given (`core/lending_native.go`), so a year of interest is a year of block time
+whatever the block interval is (see
+[`docs/consensus/block-cadence.md`](../../consensus/block-cadence.md)). The
+read RPCs project accrual to the newest committed block's timestamp.
 
 Borrower debt is stored as `ScaledDebt` (debt divided by the borrow index at
 borrow time) and read back as `ScaledDebt * BorrowIndex / 1e27`.
@@ -83,7 +95,10 @@ liquidation, and on collateral withdrawal while the account has debt:
 * If `Oracle.MaxAgeBlocks > 0`: a market whose `OracleUpdatedBlock` is `0`
   (never updated) or older than `MaxAgeBlocks` returns `oracle quote stale`.
   With the shipped `OracleMaxAgeBlocks = 1000`, borrowing is blocked until a
-  first reference price lands.
+  first reference price lands. The age is counted in blocks, so its length in
+  time follows the block interval: 1,000 blocks is 2,000 seconds at one block
+  every 2 seconds, which is what the shipped `[consensus] MinBlockInterval`
+  gives.
 * If `Oracle.MaxDeviationBps > 0` and both medians are positive: a move larger
   than that share of the previous median returns `oracle deviation too large`.
 
@@ -108,16 +123,27 @@ stale; it is blocked only by pauses.
 
 `Engine.Liquidate(liquidator, borrower)`:
 
-1. Requires the borrower to have flexible-rate debt and to be **not healthy**
-   (fixed-term debt is not counted for liquidation eligibility). Runs
-   `guardOracle` first.
+1. Refuses a liquidator that is the borrower (`lending engine: a borrower
+   cannot liquidate their own position`; the transaction handler adds `; use
+   repay instead`). Requires the borrower to have flexible-rate debt and to be
+   **not healthy** (fixed-term debt is not counted for liquidation
+   eligibility). Runs `guardOracle` first.
 2. The liquidator repays the borrower's **entire** flexible debt in NHB; there
    is no close factor and no partial liquidation.
-3. The seized collateral is `repayAmount * (10000 + LiquidationBonus) / 10000`,
-   computed directly on the NHB-wei debt amount and taken from the borrower's
-   ZNHB collateral (capped at the collateral held). No oracle price is applied
-   to this conversion.
+3. The seized collateral is the bonus-inclusive NHB value of the repaid debt
+   converted to ZNHB at the market's reference price
+   (`CollateralForDebtValue`): `repayAmount * (10000 + LiquidationBonus) *
+   1e18 / (OracleMedianWei * 10000)`, rounded down, and capped at the
+   collateral the borrower holds. With no reference price the conversion is
+   1:1, `repayAmount * (10000 + LiquidationBonus) / 10000`, the same valuation
+   `OracleAdjustedCollateralValue` uses for the eligibility check.
 4. The borrower's debt and scaled debt are set to zero.
+
+Each address involved (liquidator, borrower, module account, collateral
+account, developer and protocol targets) is loaded once and written once, so
+roles that resolve to the same address cannot overwrite each other's balance
+changes (`native/lending/accounts.go` for borrow and fee withdrawals, the same
+pattern inside `Liquidate`).
 
 The node binaries never set `LiquidationBonus` (see below), so the bonus is
 `0`.
@@ -170,6 +196,16 @@ These values are fixed per node from local config. Governance can currently
 change only the fixed-term rate schedules (`policy.lendingRateSchedule`,
 `policy.lendingDepositRateSchedule`). Every validator must run the same config.
 
+## Treasury wallet
+
+`TxTypeLendingDepositZNHB`, `TxTypeLendingWithdrawZNHB` and
+`TxTypeLendingLiquidate` are among the transaction types whose net ZNHB
+movement onto or off the admin/treasury wallet is booked into the ZNHB Reward
+Pool ledger in the same state transition (`treasuryZNHBFlowTracked`,
+`core/znhb_treasury_pool.go`). When that wallet is the depositor, withdrawer or
+liquidator and an outflow is larger than the Reward Pool holds, the transaction
+is refused with `znhb: treasury reward pool cannot cover this outflow`.
+
 ## Fixed-term products
 
 Separate state from the flexible ledger (`native/lending/fixed_term.go`,
@@ -178,7 +214,8 @@ Separate state from the flexible ledger (`native/lending/fixed_term.go`,
 * **Fixed-term loan**: one active loan per borrower per pool. Interest is
   `principal * rateBps / 10000` for the whole tenure regardless of when it is
   repaid. Default schedule: 30 days at 1200 bps, 90 days at 1600 bps.
-* **Auto-debit**: interest is collected in 30-day cycles (a 30-day loan has one
+* **Auto-debit**: interest is collected in 30-day cycles, dated by block
+  timestamp (a 30-day loan has one
   cycle, a 90-day loan three). Three consecutive missed debits mark the loan
   `delinquent`; no collateral is seized by that transition.
 * **Fixed-term deposit**: locked rate and tenure; payout is either

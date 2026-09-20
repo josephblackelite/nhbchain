@@ -11,22 +11,38 @@ Every method on this page requires an RPC credential accepted by
 `config.toml`), or a verified client certificate when the server requires
 client certificates. `nhb-cli` reads the token to send from the
 `NHB_RPC_TOKEN` environment variable (`cmd/nhb-cli/main.go`); the node itself
-does not read that variable.
+does not read that variable. `nhb-cli rpc-token` prints a short-lived token
+(default 10 minutes, at most 24 hours) signed with the secret the node's
+`[RPCJWT]` section names (`HSSecretEnv`, `NHB_RPC_JWT_SECRET` in the shipped
+`config.toml`), read from that environment variable or from standard input
+with `--secret-stdin` (`cmd/nhb-cli/rpc_token.go`). Run it on the node host and
+export the output as `NHB_RPC_TOKEN`.
 
 `swap_voucher_reverse` and `swap_markReconciled` additionally need an on-chain
 signature from a key holding `ROLE_SWAP_ADMIN` (below).
 
 ## Reversal policy
 
+Rules of `applySwapVoucherReverseTransaction` (`core/swap_admin_tx.go`):
+
 * Only vouchers in `minted` status can be reversed. `reconciled` vouchers
-  return `swap: voucher not in minted state`
-  (`core/swap_admin_tx.go` lines 225-232).
-* The recipient's balance of the voucher token (ZNHB) must cover the voucher's
-  `mintAmountWei`; otherwise `swap: insufficient balance to reverse voucher`.
-* The amount moves from the recipient to the refund sink. The sink is the node's
-  treasury address: the genesis admin wallet, replaced by `NHB_MASTER_TREASURY`
-  when that variable is set, and the node's validator address when neither is
-  configured (`core/node.go` lines 484-516). Nothing is burned.
+  return `swap: voucher not in minted state`; an already reversed voucher
+  returns `swap: voucher already reversed`.
+* Vouchers are minted onto the recipient's ordinary ZNHB account balance, so
+  the reversal works on the same balances: the recipient's ZNHB balance must
+  cover the voucher's `mintAmountWei`, otherwise `swap: insufficient balance to
+  reverse voucher`. The voucher's token must be `ZNHB`.
+* The amount moves from the recipient to the refund sink. The sink is the
+  node's treasury address: the genesis admin wallet, replaced by
+  `NHB_MASTER_TREASURY` when that variable is set, and the node's validator
+  address when neither is configured (`core.NewNode`,
+  `StateProcessor.SetSwapRefundSink`). Nothing is burned. A voucher whose
+  recipient is the sink is refused (`voucher recipient is the refund sink`),
+  because the reversal would move nothing.
+* When the sink is the admin wallet, the amount also rejoins the Sale Pool: the
+  Sale Pool balance grows by it and the cumulative sale distributed counter is
+  lowered by it (not below zero). A sink that is any other address leaves both
+  pool counters untouched.
 * Both `swap_voucher_reverse` and `swap_markReconciled` build a real
   transaction (`TxTypeSwapVoucherReverse` `0x4A`, `TxTypeSwapMarkReconciled`
   `0x4B`) carrying the admin signature. The RPC call only enqueues it; state
@@ -95,7 +111,7 @@ failures return synchronously:
 | Not in `minted` state | 409 | `swap: voucher not in minted state` |
 | Recipient balance too low | 409 | `swap: insufficient balance to reverse voucher` |
 | Unknown `providerTxId` | 404 | `swap: voucher not found` |
-| Anything else | 500 | `failed to reverse voucher` |
+| Anything else (for example a recipient that is the refund sink) | 500 | `failed to reverse voucher` |
 
 On success the block emits `swap.voucher.reversed` with `providerTxId`,
 `admin`, `recipient`, `token`, `amountWei`, `observedAt`.
@@ -113,9 +129,15 @@ with each id trimmed, blank entries removed, and the original order kept
 (`core.SwapMarkReconciledSigningHash`).
 
 Result: `{"ok": true, "txHash": "0x..."}`. When applied, every listed voucher
-that exists has its status set to `reconciled`, unknown IDs are skipped
-silently, and the block emits `swap.treasury.reconciled` with `vouchers` and
-`observedAt`.
+moves from `minted` to `reconciled` (`Ledger.MarkReconciled`,
+`native/swap/ledger.go`); a voucher that is already `reconciled` is left as it
+is, so submitting a batch twice is harmless. An unknown ID
+(`ledger: voucher not found`) or a reversed voucher (`ledger: voucher cannot be
+reconciled`) makes the whole batch fail, and nothing in it is written. The RPC
+simulates the transaction first, so these surface synchronously as a 500
+`failed to mark vouchers reconciled` (a wrong signer is a 403 `swap:
+unauthorized admin`). On success the block emits `swap.treasury.reconciled`
+with `vouchers` and `observedAt`.
 
 ## `swap_setManualQuote`
 
@@ -135,7 +157,8 @@ Sets a quote on the in-process manual oracle source. Params: one object.
 
 The manual source only matters to the in-process `OracleAggregator`, which no
 current code path reads (see [oracle.md](oracle.md#where-it-is-used)). It does
-not affect voucher mints. The method is not gated by any on-chain role.
+not affect voucher mints. The method is not gated by any on-chain role; the RPC
+bearer credential is all it needs.
 
 ## `swap_burn_list`
 
@@ -148,43 +171,3 @@ Result: `{"receipts": [...], "nextCursor": "..."}`. See
 `swap.alert.limit_hit`, `swap.alert.velocity` and `swap.alert.sanction` are
 emitted by the mint path; attributes are listed in
 [risk-controls.md](risk-controls.md#events).
-
-Submit a signed batch marking one or more vouchers as reconciled against treasury records. `signature` is a hex-encoded 65-byte secp256k1 signature over `keccak256("NHB_SWAP_MARK_RECONCILED_V1|providerTxIds=<comma-joined providerTxIds>")` (trimmed, blank entries removed, in the exact order submitted), produced by a key holding `ROLE_SWAP_ADMIN`.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "swap_markReconciled",
-  "params": [{"providerTxIds": ["order-12345", "order-12346"], "signature": "0x..."}]
-}
-```
-
-Returns `{ "ok": true, "txHash": "0x..." }` the same way `swap_voucher_reverse` does.
-
-### `swap_setManualQuote`
-
-Publishes a manual override rate for a currency pair on the manual oracle tier. Manual rates sit at the bottom of the priority stack (see `docs/treasury/peg-policy.md`) and are the on-call circuit breaker used during custody outages or extreme volatility. Without a fresh call to this endpoint, the manual tier goes stale after `MaxQuoteAgeSeconds` and is skipped by the aggregator.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "swap_setManualQuote",
-  "params": [{"base": "USD", "quote": "ZNHB", "rate": "0.05", "timestamp": 1734000000}]
-}
-```
-
-* `base` / `quote` – currency pair, e.g. `USD` / `ZNHB`.
-* `rate` – decimal string, quote per base (must be positive).
-* `timestamp` – optional Unix seconds; defaults to the current time when omitted.
-
-Record the justification and incident ticket ID before invoking this command.
-
-## Incident Response
-
-* Spike in `swap.alert.velocity` – confirm PSP behaviour, temporarily raise `VelocityMaxMints` if needed, and log the change.
-* Sanctions alert – freeze the account, notify compliance, and coordinate with the sanctions provider.
-* Repeated provider rejections – verify the allow list matches the operational roster and update `[swap.providers]` if a new PSP is onboarded.
-
-Maintain a weekly audit of reversal activity by exporting the voucher ledger and filtering for `status = reversed`.
