@@ -157,4 +157,28 @@ re-executed, neither validator can commit or replace it. Only after confirming t
 **neither** validator committed a block at the stuck height (compare `GetHeight` on
 both): stop both, delete `<DataDir>/polc_lock.json` on both, and start both together.
 Deleting the lock on a validator that already committed the block, or restarting one
-side alone, can fork the chain.
+side alone, can fork the chain. Leave `bft_sign_state.json` (next section) where it is.
+
+### The double-sign record
+
+A validator that signs two different votes for the same height, round and vote type has
+double-signed, and any two such votes are a complete slashing proof. So the engine
+records every vote it signs, on disk, before it signs it (`bft_sign_state.json` in the
+data directory), and refuses a vote that conflicts with the record. After a restart it
+skips the rounds it already voted in, so a restart costs at most the round that was in
+flight. Nothing else is asked of the operator, but:
+
+- Keep `<DataDir>/bft_sign_state.json` with the validator's keys and chain data. A reset
+  that wipes the data directory removes it with the chain, which is right.
+- Never run one validator key on two hosts, and never copy the record between hosts: each
+  process keeps its own record and cannot see the other's votes.
+- Do not delete it while a height is in flight. It is not needed to clear a lock or to
+  recover a stall, and a record for a height that has committed is ignored at the next
+  start on its own.
+- `SAFETY: refused to sign a conflicting vote` (event `double_sign_refused`) is the
+  guard doing its job. Note the height and round; a validator that logs it repeatedly is
+  receiving conflicting proposals or is being run twice.
+- `SAFETY: could not persist the vote record` (event `sign_state_write_failed`) means the
+  disk refused the write. The validator keeps voting and is protected while it runs, but a
+  restart before the height commits is not: fix the disk first. A record that cannot be
+  read at start is logged as `sign_state_read_failed` and ignored.

@@ -477,7 +477,11 @@ func main() {
 		Prevote:   cfg.Consensus.PrevoteTimeout,
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
-	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")))
+	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
+		// What this validator has voted, so a restart cannot make it sign a
+		// different vote for a round it already voted in (a double-sign that
+		// anyone can turn into a slashing report).
+		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")))
 
 	// 4. Set the fully configured BFT engine on the node.
 	node.SetBftEngine(bftEngine)
