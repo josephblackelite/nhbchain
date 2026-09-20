@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/csv"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -37,6 +38,17 @@ const (
 	VoucherStatusMinted     = "minted"
 	VoucherStatusReconciled = "reconciled"
 	VoucherStatusReversed   = "reversed"
+)
+
+var (
+	// ErrVoucherNotFound is returned by MarkReconciled for a provider
+	// transaction id with no ledger record. It can clear on its own: the
+	// voucher may still be minted by a later transaction.
+	ErrVoucherNotFound = errors.New("ledger: voucher not found")
+	// ErrVoucherNotReconcilable is returned by MarkReconciled for a voucher
+	// that is neither minted nor already reconciled (a reversed voucher). A
+	// voucher's status only moves forward, so this can never clear.
+	ErrVoucherNotReconcilable = errors.New("ledger: voucher cannot be reconciled")
 )
 
 // VoucherRecord captures the metadata stored for every voucher processed by the
@@ -355,11 +367,20 @@ func (l *Ledger) ExportCSV(startTs, endTs int64) (string, int, *big.Int, error) 
 	return encoded, len(entries), total, nil
 }
 
-// MarkReconciled updates the status of the supplied vouchers to "reconciled".
+// MarkReconciled moves the supplied vouchers from "minted" to "reconciled". A
+// voucher that is already reconciled is left as it is, so a batch that is
+// submitted twice is harmless. An unknown id (ErrVoucherNotFound) or a voucher
+// that has been reversed (ErrVoucherNotReconcilable) is refused, and every id
+// is checked before the first is written, so a refused batch changes nothing.
 func (l *Ledger) MarkReconciled(ids []string) error {
 	if l == nil {
 		return fmt.Errorf("ledger not initialised")
 	}
+	type update struct {
+		key    []byte
+		stored storedVoucherRecord
+	}
+	updates := make([]update, 0, len(ids))
 	for _, id := range ids {
 		key := voucherKey(id)
 		var stored storedVoucherRecord
@@ -368,10 +389,20 @@ func (l *Ledger) MarkReconciled(ids []string) error {
 			return err
 		}
 		if !ok {
+			return fmt.Errorf("%w: %s", ErrVoucherNotFound, strings.TrimSpace(id))
+		}
+		switch strings.ToLower(strings.TrimSpace(stored.Status)) {
+		case VoucherStatusReconciled:
 			continue
+		case VoucherStatusMinted:
+		default:
+			return fmt.Errorf("%w: voucher %s is %s", ErrVoucherNotReconcilable, strings.TrimSpace(id), strings.TrimSpace(stored.Status))
 		}
 		stored.Status = VoucherStatusReconciled
-		if err := l.store.KVPut(key, stored); err != nil {
+		updates = append(updates, update{key: key, stored: stored})
+	}
+	for _, u := range updates {
+		if err := l.store.KVPut(u.key, u.stored); err != nil {
 			return err
 		}
 	}

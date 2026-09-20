@@ -81,6 +81,8 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"self liquidation", lending.ErrSelfLiquidation, proposalDispositionPrune},
 		// PRUNE, added with the POS branch: a pure function of the payload.
 		{"pos invalid authorization id", ErrPOSInvalidAuthorizationID, proposalDispositionPrune},
+		// PRUNE: a reversed voucher never becomes reconcilable.
+		{"swap voucher not reconcilable", swap.ErrVoucherNotReconcilable, proposalDispositionPrune},
 		// PRUNE, added with the loyalty and invariant branches: an owner naming
 		// a wallet other than its own can never succeed for that signer.
 		{"loyalty paymaster consent required", loyalty.ErrPaymasterConsentRequired, proposalDispositionPrune},
@@ -124,6 +126,8 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"mint recipient unresolved", ErrMintRecipientUnresolved, proposalDispositionSkip},
 		{"identity username taken", ErrIdentityUsernameTaken, proposalDispositionSkip},
 		{"buyback ref price future epoch", ErrBuybackRefPriceFutureEpoch, proposalDispositionSkip},
+		// SKIP: the voucher a reconciliation names can still be minted.
+		{"swap voucher not found", swap.ErrVoucherNotFound, proposalDispositionSkip},
 		// SKIP, added with the loyalty branch: the named wallet can still opt
 		// in, after which the same assignment succeeds.
 		{"loyalty paymaster consent", loyalty.ErrPaymasterConsent, proposalDispositionSkip},
