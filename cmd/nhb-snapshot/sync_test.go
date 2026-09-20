@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +39,9 @@ type fakeNode struct {
 	chainID    uint64
 	genesis    string
 	down       int32 // net_info fails while > 0
+	// noBlocks makes nhb_getLatestBlocks fail while net_info answers: a node whose
+	// RPC came up and then stopped answering what a follower asks.
+	noBlocks bool
 }
 
 // sameChainTime is the block time of a chain that every fakeNode shares.
@@ -63,6 +67,10 @@ func (n *fakeNode) handler() http.Handler {
 			}
 			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"nodeId":"0xabc","chainId":%d,"genesisHash":%q,"peerCounts":{"total":%d}}}`, n.chainID, n.genesis, peers)
 		case "nhb_getLatestBlocks":
+			if n.noBlocks {
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
 			count := 1
 			if len(req.Params) > 0 {
 				_ = json.Unmarshal(req.Params[0], &count)
@@ -238,6 +246,120 @@ func TestWaitSyncedTimesOut(t *testing.T) {
 	var ee *exitError
 	if !errors.As(err, &ee) || ee.code != exitTimeout {
 		t.Fatalf("got: %v", err)
+	}
+}
+
+// waitBounded runs wait-synced the way the deployment script runs it: the overall
+// timeout is far above what the stage being tested is given, so that a wait that
+// only ends at the overall timeout is told apart from one that ends on its own
+// bound.
+func waitBounded(t *testing.T, rpc string, extra ...string) (code int, output string, took time.Duration) {
+	t.Helper()
+	args := append([]string{"wait-synced", "--rpc", rpc, "--interval", "10ms", "--stall-timeout", "30s"}, extra...)
+	var out, errOut bytes.Buffer
+	started := time.Now()
+	code = run(args, &out, &errOut)
+	return code, out.String() + errOut.String(), time.Since(started)
+}
+
+// A service that is not running, or that crash-loops, never answers. The wait for
+// the node's RPC must end on its own bound, with a message that says so, and not
+// run for the whole of the overall timeout (two hours in the deployment script)
+// before saying anything.
+func TestWaitSyncedGivesUpOnARPCThatNeverComesUp(t *testing.T) {
+	expect := func(t *testing.T, code int, out string, took time.Duration) {
+		t.Helper()
+		if code != waitNoRPC {
+			t.Fatalf("exit %d, want %d:\n%s", code, waitNoRPC, out)
+		}
+		if !strings.Contains(out, "did not answer within 300ms") || !strings.Contains(out, "crash-looping") {
+			t.Fatalf("the message does not say that the RPC never came up:\n%s", out)
+		}
+		if took > 10*time.Second {
+			t.Fatalf("the wait ran for %s although the RPC was given 300ms and the overall timeout is 30s", took)
+		}
+	}
+	bounds := []string{"--timeout", "30s", "--rpc-timeout", "300ms"}
+
+	t.Run("nothing listens", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		url := srv.URL
+		srv.Close()
+		code, out, took := waitBounded(t, url, bounds...)
+		expect(t, code, out, took)
+	})
+	t.Run("connections are accepted and never answered", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var mu sync.Mutex
+		var held []net.Conn
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				mu.Lock()
+				held = append(held, c)
+				mu.Unlock()
+			}
+		}()
+		t.Cleanup(func() {
+			_ = ln.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			for _, c := range held {
+				_ = c.Close()
+			}
+		})
+		code, out, took := waitBounded(t, "http://"+ln.Addr().String(), bounds...)
+		expect(t, code, out, took)
+	})
+	t.Run("the node answers that it is still starting, for ever", func(t *testing.T) {
+		starting := &fakeNode{chainID: 7, genesis: "aa", down: 1 << 30}
+		code, out, took := waitBounded(t, starting.serve(t), bounds...)
+		expect(t, code, out, took)
+	})
+	// A node that has shown no sign of life for the stall timeout has not advanced
+	// either, so the stall timeout bounds this stage too when it is the shorter.
+	t.Run("the stall timeout bounds it as well", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		url := srv.URL
+		srv.Close()
+		code, out, took := waitBounded(t, url, "--timeout", "30s", "--rpc-timeout", "30s", "--stall-timeout", "300ms")
+		expect(t, code, out, took)
+	})
+	t.Run("the overall timeout still ends the wait when it is the shorter one", func(t *testing.T) {
+		srv := httptest.NewServer(http.NotFoundHandler())
+		url := srv.URL
+		srv.Close()
+		code, out, took := waitBounded(t, url, "--timeout", "300ms", "--rpc-timeout", "30s")
+		if code != waitTimeout || took > 10*time.Second {
+			t.Fatalf("exit %d after %s, want %d:\n%s", code, took, waitTimeout, out)
+		}
+	})
+	t.Run("a node that comes up in time is waited for", func(t *testing.T) {
+		slow := &fakeNode{height: 10, max: 10, chainID: 7, genesis: "aa", down: 5, timestamp: nowUnix}
+		code, out, _ := waitBounded(t, slow.serve(t), "--timeout", "30s", "--rpc-timeout", "20s")
+		if code != waitOK {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+	})
+}
+
+// The same holds after the RPC has answered once: a node that answers net_info
+// but nothing a follower is measured by has not advanced either, and the stall
+// timeout, not the overall timeout, ends the wait.
+func TestWaitSyncedDoesNotWaitOutTheTimeoutForANodeThatStopsAnswering(t *testing.T) {
+	broken := &fakeNode{height: 100, max: 100, chainID: 7, genesis: "aa", timestamp: nowUnix, noBlocks: true}
+	code, out, took := waitBounded(t, broken.serve(t), "--timeout", "8s", "--stall-timeout", "300ms")
+	if code != waitStalled || !strings.Contains(out, "has not answered a request for its newest block") {
+		t.Fatalf("exit %d, want %d:\n%s", code, waitStalled, out)
+	}
+	if took > 5*time.Second {
+		t.Fatalf("the wait ran for %s although the stall timeout is 300ms and the overall timeout is 8s", took)
 	}
 }
 

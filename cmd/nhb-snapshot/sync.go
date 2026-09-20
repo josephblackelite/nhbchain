@@ -22,9 +22,16 @@ const (
 	exitStalled = 4
 	exitChain   = 5
 	exitFork    = 6
+	exitNoRPC   = 7
 )
 
 const (
+	// defaultRPCTimeout is how long a node that is starting may take to answer
+	// its first request. A node that starts normally answers within a minute or
+	// two, so one that has not answered by then is not running or is
+	// crash-looping, and waiting out the whole of the overall timeout for it
+	// would tell the operator nothing for hours.
+	defaultRPCTimeout = 3 * time.Minute
 	// minPeers is how many peers a node must be connected to before it counts
 	// as being at the network tip: a node that hears from nobody has not
 	// followed the network to anywhere.
@@ -171,10 +178,13 @@ type waitOptions struct {
 	MaxLagSeconds int64
 	Interval      time.Duration
 	Timeout       time.Duration
-	StallTimeout  time.Duration
-	Stable        int
-	Out           io.Writer
-	Now           func() time.Time
+	// RPCTimeout bounds the wait for the node's RPC to answer for the first
+	// time; Timeout still bounds the whole wait.
+	RPCTimeout   time.Duration
+	StallTimeout time.Duration
+	Stable       int
+	Out          io.Writer
+	Now          func() time.Time
 }
 
 type syncResult struct {
@@ -200,6 +210,9 @@ func (o *waitOptions) defaults() {
 	}
 	if o.Timeout <= 0 {
 		o.Timeout = 2 * time.Hour
+	}
+	if o.RPCTimeout <= 0 {
+		o.RPCTimeout = defaultRPCTimeout
 	}
 	if o.StallTimeout <= 0 {
 		o.StallTimeout = 15 * time.Minute
@@ -242,6 +255,12 @@ func checkIdentity(info *netInfo, o *waitOptions, who string) error {
 //
 // The reference is used to decide when to stop waiting and to catch a node on
 // another chain; the node validates every block it applies itself.
+//
+// No stage of the wait may run for the whole of Timeout without saying so: the
+// node's RPC has RPCTimeout (or StallTimeout, when that is shorter) to answer for
+// the first time (a service that is not running, or that crash-loops, never
+// does), and a node that answers nothing or does not advance is given up on after
+// StallTimeout.
 func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 	o.defaults()
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
@@ -256,10 +275,18 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 	}
 	start := o.Now()
 
-	// The node may still be starting: wait for its RPC, but stop at once when
-	// it answers with the wrong chain.
+	// The node may still be starting: wait for its RPC, but only as long as a
+	// node that starts normally takes (and never longer than a node may go without
+	// advancing), and stop at once when it answers with the wrong chain.
+	rpcBound := o.RPCTimeout
+	if o.StallTimeout < rpcBound {
+		rpcBound = o.StallTimeout
+	}
+	rpcCtx, cancelRPC := context.WithTimeout(ctx, rpcBound)
+	defer cancelRPC()
+	var lastRPCErr error
 	for {
-		info, err := local.netInfo(ctx)
+		info, err := local.netInfo(rpcCtx)
 		if err == nil {
 			if err := checkIdentity(info, &o, "the node"); err != nil {
 				return nil, err
@@ -267,9 +294,19 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 			fmt.Fprintf(o.Out, "node is up: chain id %d, %d peers\n", info.ChainID, info.PeerCounts.Total)
 			break
 		}
+		if rpcCtx.Err() == nil {
+			lastRPCErr = err
+		}
 		fmt.Fprintf(o.Out, "waiting for the node's RPC: %v\n", err)
-		if err := sleepCtx(ctx, o.Interval); err != nil {
-			return nil, &exitError{exitTimeout, fmt.Errorf("the node's RPC did not come up: %v", lastErr(err, ctx))}
+		if err := sleepCtx(rpcCtx, o.Interval); err != nil {
+			if ctx.Err() != nil {
+				return nil, &exitError{exitTimeout, fmt.Errorf("the node's RPC did not come up: %v", lastErr(err, ctx))}
+			}
+			answer := "no answer"
+			if lastRPCErr != nil {
+				answer = lastRPCErr.Error()
+			}
+			return nil, &exitError{exitNoRPC, fmt.Errorf("the node's RPC did not answer within %s (last: %s): the node is not running, or it is crash-looping (check the service and its log)", rpcBound, answer)}
 		}
 	}
 	if ref != nil {
@@ -294,6 +331,11 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 		blocks, err := local.latestBlocks(ctx, window)
 		if err != nil {
 			fmt.Fprintf(o.Out, "could not read the node's newest block: %v\n", err)
+			// A node whose RPC answered once and then answers nothing has not
+			// advanced either: that ends the wait after StallTimeout, not Timeout.
+			if o.Now().Sub(lastAdvance) > o.StallTimeout {
+				return nil, &exitError{exitStalled, fmt.Errorf("the node has not answered a request for its newest block, and has not advanced past height %d, for %s: it is not running or not syncing (check the service and its log)", lastHeight, o.StallTimeout)}
+			}
 		} else {
 			status := blocks[0]
 			now := o.Now()

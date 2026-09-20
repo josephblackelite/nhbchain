@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -542,6 +543,111 @@ func TestManifestMustMatchPinnedIdentity(t *testing.T) {
 	wrongRoot.StateRoot = bytes.Repeat([]byte{0x02}, 32)
 	if _, _, err := extractSnapshot(extractOptions{ManifestPath: f.manifest, ArchivePath: f.archive, Target: target(), Expect: wrongRoot}); err == nil || !strings.Contains(err.Error(), "state root") {
 		t.Fatalf("pinned state root: %v", err)
+	}
+}
+
+// The age limit is about how old the snapshot's newest block is: that is how
+// many blocks a follower has to catch up on, and it is the one time in a manifest
+// that extract compares with the database it unpacked. The manifest's creation
+// time is free text that nobody signs, so a limit that rested on it would let a
+// stale snapshot, or one from before a release, through with a manifest that says
+// it was made a minute ago.
+func TestMaxAgeIsNotDefeatedByAManifestThatLiesAboutWhenItWasMade(t *testing.T) {
+	f := newFixture(t)
+	data, err := os.ReadFile(f.archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's newest block is dated 2023; the manifest claims a minute ago.
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	claimFresh := func(m *manifest) { m.CreatedAt = now.Add(-time.Minute).Format(time.RFC3339) }
+	limit := f.expect()
+	limit.MaxAge = time.Hour
+
+	t.Run("extract", func(t *testing.T) {
+		manifestPath, archivePath := f.hostile("stale", data, claimFresh)
+		target := filepath.Join(t.TempDir(), "data")
+		_, _, err := extractSnapshot(extractOptions{ManifestPath: manifestPath, ArchivePath: archivePath, Target: target, Expect: limit, Now: now})
+		if err == nil || !strings.Contains(err.Error(), "newest block is dated") || !strings.Contains(err.Error(), "older than the allowed 1h") {
+			t.Fatalf("a snapshot whose newest block is years old was accepted under --max-age 1h, or refused for another reason: %v", err)
+		}
+		mustNotLeaveTraces(t, target)
+	})
+
+	t.Run("verify", func(t *testing.T) {
+		manifestPath, archivePath := f.hostile("stale-verify", data, func(m *manifest) { m.CreatedAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339) })
+		var out, errOut bytes.Buffer
+		code := run([]string{"verify", "--manifest", manifestPath, "--archive", archivePath, "--max-age", "1h",
+			"--chain-id", fmt.Sprint(f.chainID), "--genesis-hash", hex0x(f.genesis)}, &out, &errOut)
+		if code == 0 || !strings.Contains(errOut.String(), "newest block is dated") {
+			t.Fatalf("verify accepted the stale snapshot (exit %d): %s", code, errOut.String())
+		}
+	})
+
+	// A manifest that lies about the block's time as well is caught when the
+	// database is opened, and the age is then judged on the database's own time.
+	t.Run("a manifest that lies about the newest block's time too", func(t *testing.T) {
+		manifestPath, archivePath := f.hostile("stale-lie", data, func(m *manifest) {
+			claimFresh(m)
+			m.TipTimestamp = now.Add(-time.Minute).Unix()
+		})
+		target := filepath.Join(t.TempDir(), "data")
+		_, _, err := extractSnapshot(extractOptions{ManifestPath: manifestPath, ArchivePath: archivePath, Target: target, Expect: limit, Now: now})
+		if err == nil || !strings.Contains(err.Error(), "the manifest says tip timestamp") {
+			t.Fatalf("got: %v", err)
+		}
+		mustNotLeaveTraces(t, target)
+	})
+
+	// The same snapshot, when its newest block is recent, is accepted: the limit
+	// refuses stale snapshots and only those.
+	t.Run("a snapshot whose newest block is recent is accepted", func(t *testing.T) {
+		tip := time.Unix(f.m.TipTimestamp, 0)
+		target := filepath.Join(t.TempDir(), "data")
+		_, id, err := extractSnapshot(extractOptions{ManifestPath: f.manifest, ArchivePath: f.archive, Target: target, Expect: limit, Now: tip.Add(30 * time.Minute)})
+		if err != nil {
+			t.Fatalf("a snapshot whose newest block is 30 minutes old was refused under --max-age 1h: %v", err)
+		}
+		if id.TipTimestamp != f.m.TipTimestamp {
+			t.Fatalf("tip time %d, want %d", id.TipTimestamp, f.m.TipTimestamp)
+		}
+	})
+}
+
+// The limit is judged on the newest block's time whatever the manifest says about
+// its own creation, and only when there is a limit.
+func TestMaxAgeIsJudgedOnTheNewestBlock(t *testing.T) {
+	f := newFixture(t)
+	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
+	tipAgo := func(d time.Duration) int64 { return now.Add(-d).Unix() }
+	cases := []struct {
+		name string
+		tip  int64
+		max  time.Duration
+		ok   bool
+	}{
+		{"no limit accepts any age", tipAgo(1000 * time.Hour), 0, true},
+		{"a recent block", tipAgo(time.Minute), time.Hour, true},
+		{"exactly the limit", tipAgo(time.Hour), time.Hour, true},
+		{"a second over the limit", tipAgo(time.Hour + time.Second), time.Hour, false},
+		{"a year old", tipAgo(365 * 24 * time.Hour), 72 * time.Hour, false},
+		{"the epoch", 0, 72 * time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := *f.m
+			m.CreatedAt = now.Format(time.RFC3339) // as recent as a manifest can say
+			m.TipTimestamp = tc.tip
+			e := f.expect()
+			e.MaxAge = tc.max
+			err := checkManifest(&m, e, now)
+			if tc.ok && err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			if !tc.ok && (err == nil || !strings.Contains(err.Error(), "older than the allowed")) {
+				t.Fatalf("got: %v", err)
+			}
+		})
 	}
 }
 

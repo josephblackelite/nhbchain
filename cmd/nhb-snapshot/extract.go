@@ -349,6 +349,11 @@ func extractSnapshot(o extractOptions) (*manifest, *chainIdentity, error) {
 	if err := compareIdentity(m, id); err != nil {
 		return nil, nil, err
 	}
+	// The age is checked once more on the block time the database itself holds,
+	// so it does not rest on the manifest's word for it.
+	if err := checkTipAge(id.TipTimestamp, o.Expect.MaxAge, o.Now); err != nil {
+		return nil, nil, err
+	}
 	for _, addr := range o.Expect.RejectValidators {
 		for _, v := range id.Validators {
 			if v == addr {

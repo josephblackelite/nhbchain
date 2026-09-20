@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -222,6 +223,8 @@ func TestDeployArgumentChecksRunBeforeAnythingIsTouched(t *testing.T) {
 		{"another network id", with("--network-id", "430060579445266314"), nil, "not the network this release is pinned to"},
 		{"a tip rpc that is not a url", with("--tip-rpc", "peer.example.invalid"), nil, "not an http(s) URL"},
 		{"a snapshot age without a unit", with("--max-snapshot-age", "48"), nil, "must look like 48h"},
+		{"an rpc timeout that is not a number", with("--rpc-timeout", "soon"), nil, "--rpc-timeout must be a number of seconds"},
+		{"an rpc timeout of zero", with("--rpc-timeout", "0"), nil, "--rpc-timeout must be a number of seconds"},
 		{"a treasury override in the environment", valid, []string{"NHB_MASTER_TREASURY=nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"}, "NHB_MASTER_TREASURY"},
 		{"an unknown flag", with("--frobnicate"), nil, "unknown argument: --frobnicate"},
 	}
@@ -429,6 +432,16 @@ func TestDeployBinaryIdentityPolicy(t *testing.T) {
 			}
 		})
 	}
+	// A manifest that names no commit gives the operator nothing to check out, and
+	// must not send them to "git checkout unknown".
+	t.Run("a snapshot that names no commit is not a commit to check out", func(t *testing.T) {
+		for _, commit := range []string{"unknown", "''"} {
+			out, code := h.run("check_binary_identity '' " + commit + " " + same + " c1")
+			if code != 1 || strings.Contains(out, "git checkout") || !strings.Contains(out, "does not say which commit") {
+				t.Fatalf("commit %s: exit %d:\n%s", commit, code, out)
+			}
+		}
+	})
 }
 
 func TestDeployRefusesASecondNodeAndAForeignKey(t *testing.T) {
@@ -696,6 +709,20 @@ prepare_data_dir`)
 		}
 	})
 
+	// The manifest says the snapshot was made an hour ago, well inside the limit,
+	// and nobody signs that. The newest block it holds is years old.
+	t.Run("a manifest that claims to be recent does not get a stale snapshot past the age limit", func(t *testing.T) {
+		h2 := newDeployHarness(t)
+		out, code := h2.run(strings.Replace(prelude, "--allow-insecure-http", "--allow-insecure-http --max-snapshot-age 48h", 1) + `fetch_manifest
+prepare_data_dir`)
+		if code == 0 || !strings.Contains(out, "newest block is dated") || !strings.Contains(out, "older than the allowed 48h") {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+		if entries, _ := os.ReadDir(filepath.Join(h2.state, "nhb-data")); len(entries) > 0 {
+			t.Fatalf("a refused snapshot left %d files in the data directory", len(entries))
+		}
+	})
+
 	t.Run("a missing manifest is a loud failure", func(t *testing.T) {
 		h2 := newDeployHarness(t)
 		empty := httptest.NewServer(http.NotFoundHandler())
@@ -801,12 +828,46 @@ echo reached`, "NHB_SYNC_INTERVAL=100ms")
 			t.Fatalf("no diagnostics, or success reported:\n%s", out)
 		}
 	})
+
+	// A service that crash-loops never answers. The script must say so after the
+	// RPC's own bound, with the same diagnostics as every other failure, and not
+	// hold the operator for the whole sync timeout.
+	t.Run("a node whose RPC never comes up", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		_ = ln.Close() // nothing listens any more
+		started := time.Now()
+		out, code := h.run(`RPC_ADDR=`+addr+`; SYNC_INTERVAL=100ms; SYNC_TIMEOUT_SECS=40; RPC_UP_TIMEOUT_SECS=1
+wait_until_synced
+echo reached`, "NHB_SYNC_INTERVAL=100ms")
+		if code == 0 || !strings.Contains(out, "the node's RPC did not come up within 1 seconds") || !strings.Contains(out, "crash-looping") {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+		if !strings.Contains(out, "systemctl status nhb.service") || !strings.Contains(out, "journalctl -u nhb.service") || strings.Contains(out, "reached") {
+			t.Fatalf("no diagnostics, or success reported:\n%s", out)
+		}
+		if strings.Contains(out, "--reset-state") {
+			t.Fatalf("a node that never answered was told its snapshot is too old:\n%s", out)
+		}
+		if took := time.Since(started); took > 30*time.Second {
+			t.Fatalf("the script waited %s although the RPC was given 1 s and the sync timeout is 40 s", took)
+		}
+	})
+	t.Run("the default bound on the RPC is far below the sync timeout", func(t *testing.T) {
+		out, code := h.run(`echo "rpc=${RPC_UP_TIMEOUT_SECS} sync=${SYNC_TIMEOUT_SECS}"`)
+		if code != 0 || !strings.Contains(out, "rpc=180 sync=7200") {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+	})
 }
 
 func TestDeployScriptMentionsTheDocumentedOperatorFlow(t *testing.T) {
 	raw := mustRead(t, filepath.Join(repoRoot(t), "scripts", "deployvalidator.sh"))
 	var have = map[string]bool{}
-	for _, f := range []string{"--snapshot-url", "--bootnode", "--tip-rpc", "--reset-state", "--allow-binary-mismatch", "--allow-existing-key", "--max-snapshot-age", "--allow-insecure-http", "--tip-hash", "--state-root", "--max-snapshot-gib"} {
+	for _, f := range []string{"--snapshot-url", "--bootnode", "--tip-rpc", "--reset-state", "--allow-binary-mismatch", "--allow-existing-key", "--max-snapshot-age", "--allow-insecure-http", "--tip-hash", "--state-root", "--max-snapshot-gib", "--rpc-timeout"} {
 		have[f] = strings.Contains(string(raw), f)
 	}
 	for f, ok := range have {

@@ -27,7 +27,9 @@ import (
 const (
 	waitOK      = 0
 	waitTimeout = 3
+	waitStalled = 4
 	waitFork    = 6
+	waitNoRPC   = 7
 )
 
 // waitCLI runs wait-synced against a node stand-in (and a reference stand-in when

@@ -261,7 +261,12 @@ whoever operates the network, neither of which is built into the script: the
 location of a snapshot (`SNAPSHOT_URL`, a directory URL holding `manifest.json`
 and the archive it names) and a bootnode (`BOOTNODE_HOST_PORT`; the "Mainnet P2P
 Bootnode" above is one). Check out the source commit the snapshot's manifest
-names, then on a fresh Ubuntu server run:
+names (it has to contain this procedure, `scripts/deployvalidator.sh` and
+`cmd/nhb-snapshot`, because you run the script from it: a snapshot made by a
+validator that still runs an earlier build names a commit whose script syncs from
+genesis, which does not work on this network; see
+[What you need](docs/validators/snapshot-onboarding.md#what-you-need)), then on a
+fresh Ubuntu server run:
 
 ```bash
 bash scripts/validator-only-bootstrap.sh \

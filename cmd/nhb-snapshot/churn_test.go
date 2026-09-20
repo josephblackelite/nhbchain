@@ -96,7 +96,7 @@ func TestMakeSnapshotUnderChurn(t *testing.T) {
 		work := filepath.Join(t.TempDir(), "work")
 		cmd := runBashScript(t, bash, repo, "scripts/make-snapshot.sh",
 			"--data-dir", slash(dir), "--out-dir", slash(out), "--work-dir", slash(work),
-			"--tool", slash(tool), "--node-binary", slash(filepath.Join(repo, "nonexistent")), "--max-passes", "60")
+			"--tool", slash(tool), "--node-binary", slash(filepath.Join(repo, "nonexistent")), "--binary-commit", testCommit, "--max-passes", "60")
 		if cmd.err != nil {
 			mu.Lock()
 			last := len(hashes)

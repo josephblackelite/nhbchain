@@ -8,6 +8,10 @@ import (
 	"testing"
 )
 
+// testCommit is a full commit id, as git rev-parse HEAD prints it: what a
+// producer that is not laid out like scripts/deployvalidator.sh has to pass.
+const testCommit = "0123456789abcdef0123456789abcdef01234567"
+
 // nodeDataDir builds the data directory of a stopped node: a chain database
 // plus everything else a node keeps there, including a key someone left in it.
 func nodeDataDir(t *testing.T) (dir string, secrets map[string][]byte) {
@@ -43,7 +47,7 @@ func TestMakeSnapshotNeverTakesWhatIdentifiesTheNode(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out")
 	res := runBashScript(t, bash, repo, "scripts/make-snapshot.sh",
 		"--data-dir", slash(dir), "--out-dir", slash(out), "--work-dir", slash(filepath.Join(t.TempDir(), "work")),
-		"--tool", slash(tool), "--node-binary", slash(filepath.Join(repo, "nonexistent")))
+		"--tool", slash(tool), "--node-binary", slash(filepath.Join(repo, "nonexistent")), "--binary-commit", testCommit)
 	if res.err != nil {
 		t.Fatalf("make-snapshot.sh: %v\n%s", res.err, res.out)
 	}
@@ -156,9 +160,9 @@ func TestMakeSnapshotPublishesNothingFromABrokenDatabase(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out")
 	res := runBashScript(t, bash, repo, "scripts/make-snapshot.sh",
 		"--data-dir", slash(dir), "--out-dir", slash(out), "--work-dir", slash(filepath.Join(t.TempDir(), "work")),
-		"--tool", slash(tool), "--max-passes", "3")
-	if res.err == nil {
-		t.Fatalf("a snapshot of a broken database was made:\n%s", res.out)
+		"--tool", slash(tool), "--binary-commit", testCommit, "--max-passes", "3")
+	if res.err == nil || strings.Contains(res.out, "dead end") {
+		t.Fatalf("a snapshot of a broken database was made, or it was refused for another reason than the database (err=%v):\n%s", res.err, res.out)
 	}
 	entries, _ := os.ReadDir(out)
 	if len(entries) > 0 {
@@ -192,7 +196,7 @@ func TestMakeSnapshotRefusesACopyThatLacksATable(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "out")
 	res := runBashScript(t, bash, repo, "scripts/make-snapshot.sh",
 		"--data-dir", slash(dir), "--out-dir", slash(out), "--work-dir", slash(filepath.Join(t.TempDir(), "work")),
-		"--tool", slash(tool), "--max-passes", "3")
+		"--tool", slash(tool), "--binary-commit", testCommit, "--max-passes", "3")
 	if res.err == nil || !strings.Contains(res.out, "does not open") {
 		t.Fatalf("expected the copy to be refused, got err=%v\n%s", res.err, res.out)
 	}

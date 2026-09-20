@@ -63,6 +63,10 @@ SNAPSHOT_HEIGHT=''
 MAX_LAG_BLOCKS=3
 SYNC_INTERVAL="${NHB_SYNC_INTERVAL:-5s}"
 SYNC_TIMEOUT_SECS=7200
+# How long the node's RPC may stay silent after the service starts. A node that
+# starts normally answers within a minute or two; one that has not answered by
+# then is not running or is crash-looping.
+RPC_UP_TIMEOUT_SECS=180
 CLI_RETRY_DELAY="${CLI_RETRY_DELAY:-5}"
 
 usage() {
@@ -97,8 +101,15 @@ Options:
                            --tip-rpc).
   --sync-timeout <secs>    Give up waiting for the catch-up after this long
                            (default 7200).
-  --max-snapshot-age <d>   Refuse a snapshot created longer ago than this, for
-                           example 48h. A follower can catch up only so many
+  --rpc-timeout <secs>     Give up when the node's RPC has not answered once
+                           after this long (default 180). A node that never
+                           answers is not running or is crash-looping; the
+                           script says so and shows how to see why.
+  --max-snapshot-age <d>   Refuse a snapshot whose newest block is older than
+                           this, for example 48h. The limit rests on the block's
+                           date, which is checked against the unpacked database;
+                           the creation time the manifest states is not signed
+                           by anyone. A follower can catch up only so many
                            blocks; see the documentation for the measured limit.
   --tip-hash <hex>         The tip hash the snapshot must have (32 bytes of hex),
                            as read from nodes you trust. A snapshot with another
@@ -181,6 +192,7 @@ parse_args() {
       --tip-rpc) TIP_RPC="${2:-}"; shift 2 ;;
       --max-lag-blocks) MAX_LAG_BLOCKS="${2:-}"; shift 2 ;;
       --sync-timeout) SYNC_TIMEOUT_SECS="${2:-}"; shift 2 ;;
+      --rpc-timeout) RPC_UP_TIMEOUT_SECS="${2:-}"; shift 2 ;;
       --max-snapshot-age) MAX_SNAPSHOT_AGE="${2:-}"; shift 2 ;;
       --tip-hash) TIP_HASH="${2:-}"; shift 2 ;;
       --state-root) STATE_ROOT="${2:-}"; shift 2 ;;
@@ -245,6 +257,7 @@ validate_inputs() {
     die "--max-lag-blocks ${MAX_LAG_BLOCKS} is more than the 15 blocks that can be compared with --tip-rpc's"
   fi
   [[ "${SYNC_TIMEOUT_SECS}" =~ ^[0-9]+$ ]] || die "--sync-timeout must be a number of seconds"
+  [[ "${RPC_UP_TIMEOUT_SECS}" =~ ^[1-9][0-9]{0,5}$ ]] || die "--rpc-timeout must be a number of seconds, at least 1"
   if [[ -n "${MAX_SNAPSHOT_AGE}" ]]; then
     [[ "${MAX_SNAPSHOT_AGE}" =~ ^[0-9]+(h|m|s)$ ]] || die "--max-snapshot-age must look like 48h"
   fi
@@ -300,7 +313,12 @@ check_binary_identity() {
   echo "        snapshot: commit ${m_commit:-unknown}, binary sha256 ${m_sha:-unknown}" >&2
   echo "        here:     commit ${l_commit:-unknown}, binary sha256 ${l_sha:-unknown}" >&2
   echo "        A node that executes blocks with different consensus code forks off the network." >&2
-  echo "        Check out the commit above (git checkout ${m_commit:-<commit>}) and run this script again." >&2
+  if [[ -n "${m_commit}" && "${m_commit}" != "unknown" ]]; then
+    echo "        Check out the commit above (git checkout ${m_commit}) and run this script again." >&2
+  else
+    echo "        The snapshot does not say which commit it was made with, so there is nothing to check out." >&2
+    echo "        Ask whoever published it for a snapshot that does (make-snapshot.sh refuses to make one that does not)." >&2
+  fi
   if [[ "${ALLOW_BINARY_MISMATCH}" == "1" ]]; then
     warn "continuing because --allow-binary-mismatch was given: only do this if the two builds differ in nothing that consensus executes"
     return 0
@@ -795,14 +813,16 @@ install_service() {
   fi
 }
 
-# wait_until_synced waits for the node's RPC, checks it reports the pinned
+# wait_until_synced waits for the node's RPC (for at most RPC_UP_TIMEOUT_SECS: a
+# service that is not running, or that crash-loops, never answers, and must not
+# hold the script for the whole sync timeout), checks it reports the pinned
 # network, and waits until it is at the network tip: connected to a peer and, when
 # this run installed a snapshot, past that snapshot's height, which a snapshot that
 # is not part of the network's chain can never be. With --tip-rpc the node's newest
 # blocks must also be the ones that node has.
 wait_until_synced() {
   local args=(wait-synced --rpc "http://${RPC_ADDR}/" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}"
-    --interval "${SYNC_INTERVAL}" --timeout "${SYNC_TIMEOUT_SECS}s" --stall-timeout 15m --max-lag-blocks "${MAX_LAG_BLOCKS}")
+    --interval "${SYNC_INTERVAL}" --timeout "${SYNC_TIMEOUT_SECS}s" --rpc-timeout "${RPC_UP_TIMEOUT_SECS}s" --stall-timeout 15m --max-lag-blocks "${MAX_LAG_BLOCKS}")
   if [[ -n "${TIP_RPC}" ]]; then args+=(--tip-rpc "${TIP_RPC}"); fi
   if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then args+=(--min-height "${SNAPSHOT_HEIGHT}"); fi
   log "waiting for the node to reach the network tip (this follows its progress; a few minutes to a few hours depending on the snapshot's age)"
@@ -816,16 +836,23 @@ wait_until_synced() {
       4) echo "[ERROR] the node has stopped making progress." ;;
       5) echo "[ERROR] the node is not on the pinned network (chain id ${NETWORK_ID_DEFAULT})." ;;
       6) echo "[ERROR] the node's newest blocks are not the ones the --tip-rpc node has: the snapshot it started from is not part of the network's chain." ;;
+      7) echo "[ERROR] the node's RPC did not come up within ${RPC_UP_TIMEOUT_SECS} seconds: nhb.service is not running, or it is crash-looping." ;;
       *) echo "[ERROR] the node could not be checked (exit ${rc})." ;;
     esac
     echo
     echo "Check what is actually wrong with:"
     echo "  sudo systemctl status nhb.service"
     echo "  sudo journalctl -u nhb.service -n 80 --no-pager"
-    echo "A node that is at the tip has a peer and has applied blocks past its snapshot:"
-    echo "check the --bootnode address, and that the snapshot is one of the network's."
-    echo "A snapshot that is too old for the node to catch up is the usual cause of a"
-    echo "stall; fetch a newer one and run this script again with --reset-state."
+    if [[ "${rc}" == "7" ]]; then
+      echo "A node that never answers usually cannot read its config (the owner and mode"
+      echo "of ${CONFIG_DIR}), cannot open its data directory, or was killed for lack of"
+      echo "memory: the journal says which. Fix that and run this script again."
+    else
+      echo "A node that is at the tip has a peer and has applied blocks past its snapshot:"
+      echo "check the --bootnode address, and that the snapshot is one of the network's."
+      echo "A snapshot that is too old for the node to catch up is the usual cause of a"
+      echo "stall; fetch a newer one and run this script again with --reset-state."
+    fi
     echo "=================================================================="
     exit 1
   fi

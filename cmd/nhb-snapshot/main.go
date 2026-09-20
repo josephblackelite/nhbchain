@@ -262,7 +262,7 @@ func addExpectFlags(fs *flag.FlagSet) *expectFlags {
 	e.chainID = fs.String("chain-id", "", "pinned chain id (or "+envChainID+")")
 	e.genesisHash = fs.String("genesis-hash", "", "pinned genesis hash, 32 bytes hex (or "+envGenesisHash+")")
 	e.minHeight = fs.Uint64("min-height", 0, "refuse a snapshot below this height")
-	e.maxAge = fs.Duration("max-age", 0, "refuse a snapshot created longer ago than this (0 = any age)")
+	e.maxAge = fs.Duration("max-age", 0, "refuse a snapshot whose newest block is older than this, or that its manifest says was created longer ago (0 = any age)")
 	e.tipHash = fs.String("tip-hash", "", "pin the tip hash (32 bytes hex)")
 	e.stateRoot = fs.String("state-root", "", "pin the state root (32 bytes hex)")
 	fs.Var(e.reject, "reject-validator", "refuse the snapshot if this address is a validator in its state (repeatable)")
@@ -447,6 +447,7 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	lagSecs := fs.Int64("max-lag-seconds", 60, "without --tip-rpc: how far from this host's clock, either side, the newest block may be dated")
 	interval := fs.Duration("interval", 5*time.Second, "time between polls")
 	timeout := fs.Duration("timeout", 2*time.Hour, "give up after this long")
+	rpcTimeout := fs.Duration("rpc-timeout", defaultRPCTimeout, "give up when the node's RPC has not answered once after this long, or after --stall-timeout when that is shorter (a node that is starting answers within a minute or two; one that never does is not running or is crash-looping)")
 	stall := fs.Duration("stall-timeout", 15*time.Minute, "give up when the height has not advanced for this long")
 	stable := fs.Int("stable", 2, "how many polls in a row must be within the lag")
 	if err := parseFlags(fs, args); err != nil {
@@ -461,7 +462,7 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	opts := waitOptions{
 		RPC: *rpc, TipRPC: *tipRPC, MinHeight: *minHeight,
 		MaxLagBlocks: *lagBlocks, MaxLagSeconds: *lagSecs,
-		Interval: *interval, Timeout: *timeout, StallTimeout: *stall, Stable: *stable,
+		Interval: *interval, Timeout: *timeout, RPCTimeout: *rpcTimeout, StallTimeout: *stall, Stable: *stable,
 		Out: stderr,
 	}
 	if v := firstNonEmpty(*chain, os.Getenv(envChainID)); v != "" {

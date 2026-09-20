@@ -314,12 +314,34 @@ func checkManifest(m *manifest, e expectations, now time.Time) error {
 		if age := now.Sub(created); age > e.MaxAge {
 			return fmt.Errorf("the snapshot was created %s ago, older than the allowed %s", age.Round(time.Second), e.MaxAge)
 		}
+		// createdAt is free text that nobody signs, so it cannot be what the
+		// limit rests on: the age of the newest block, which extract checks
+		// against the unpacked database, is.
+		if err := checkTipAge(m.TipTimestamp, e.MaxAge, now); err != nil {
+			return err
+		}
 	}
 	if e.TipHash != nil && m.TipHash != hex0x(e.TipHash) {
 		return fmt.Errorf("the snapshot tip hash is %s, expected %s", m.TipHash, hex0x(e.TipHash))
 	}
 	if e.StateRoot != nil && m.StateRoot != hex0x(e.StateRoot) {
 		return fmt.Errorf("the snapshot state root is %s, expected %s", m.StateRoot, hex0x(e.StateRoot))
+	}
+	return nil
+}
+
+// checkTipAge refuses a snapshot whose newest block is older than maxAge (any
+// age is accepted when maxAge is not positive). The age of a snapshot is the age
+// of its newest block: it is how many blocks a follower has to catch up on, and,
+// unlike the manifest's creation time, it is a value extract compares with the
+// database it unpacked, so a manifest cannot claim a fresher snapshot than the
+// one it holds.
+func checkTipAge(tipTimestamp int64, maxAge time.Duration, now time.Time) error {
+	if maxAge <= 0 {
+		return nil
+	}
+	if age := now.Sub(time.Unix(tipTimestamp, 0)); age > maxAge {
+		return fmt.Errorf("the snapshot's newest block is dated %s ago, older than the allowed %s: the snapshot is stale (its manifest may claim it was made more recently than that)", age.Round(time.Second), maxAge)
 	}
 	return nil
 }
