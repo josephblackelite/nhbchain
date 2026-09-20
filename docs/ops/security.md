@@ -37,6 +37,10 @@ Nodes now support multiple layers of RPC hardening beyond TLS:
 * **Mutual TLS.** Set `RPCTLSClientCAFile` to require client certificates from
   wallets, custodians, or gateways. When mTLS is enabled the node accepts either
   a valid client certificate or a JWT that satisfies the configured policy.
+* **Heavy read queries.** The public reads that scan blocks or hold the state
+  lock share a small pool, run under a deadline and are refused with HTTP 429
+  (code `-32020`) when it is full; the client address they are limited under is
+  validated. See [RPC query limits](rpc-query-limits.md).
 
 Swap HMAC authentication retains the existing defaults (±120 seconds skew,
 10-minute nonce TTL) but can be tuned via the `swapAuth` block in `config.toml`

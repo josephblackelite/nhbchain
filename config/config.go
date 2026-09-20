@@ -91,6 +91,34 @@ type Config struct {
 	RPCWebSocketOrigins         []string                     `toml:"RPCWebSocketOrigins"`
 	RPCWebSocketMaxConnections  int                          `toml:"RPCWebSocketMaxConnections"`
 	RPCWebSocketMaxPerIP        int                          `toml:"RPCWebSocketMaxPerIP"`
+	// The public read queries that are not cheap (transaction and address
+	// lookups the indexes cannot answer, explorer snapshots of a non-default
+	// window, transaction-window statistics, the lending and market reads that
+	// hold the state lock) share a small pool so they cannot take the CPU that
+	// block production needs; see docs/ops/rpc-query-limits.md. Every field is
+	// optional and zero selects its default, which needs no configuration:
+	//   RPCQueryMaxConcurrent  queries running their heavy part at once
+	//                          (half the CPUs, at least 1 and at most 2)
+	//   RPCQueryMaxPerClient   in flight (running or waiting) per client (1)
+	//   RPCQueryQueueDepth     queries allowed to wait for a slot (8)
+	//   RPCQueryQueueWaitMS    how long one waits before it is refused (100)
+	//   RPCQueryTimeoutSeconds bound on one such query, start to answer (10)
+	// A query the pool refuses gets HTTP 429, code -32020 and a Retry-After
+	// hint; one that runs out of time gets HTTP 503 and code -32021.
+	//
+	// RPCDisableExplorerLoop stops the background work that keeps the explorer
+	// current -- the loop that rebuilds the default explorer snapshot after every
+	// block and streams it to /ws/explorer, the advance of the all-time payment
+	// index that goes with it, and the warm-up of the lending read index. Set it
+	// on a node that serves no public RPC. The default (false) keeps them
+	// running. With it set, a snapshot that is asked for is built on demand and
+	// cached per window and chain height, and /ws/explorer refuses connections.
+	RPCDisableExplorerLoop      bool                         `toml:"RPCDisableExplorerLoop"`
+	RPCQueryMaxConcurrent       int                          `toml:"RPCQueryMaxConcurrent"`
+	RPCQueryMaxPerClient        int                          `toml:"RPCQueryMaxPerClient"`
+	RPCQueryQueueDepth          int                          `toml:"RPCQueryQueueDepth"`
+	RPCQueryQueueWaitMS         int                          `toml:"RPCQueryQueueWaitMS"`
+	RPCQueryTimeoutSeconds      int                          `toml:"RPCQueryTimeoutSeconds"`
 	RPCProxyHeaders             RPCProxyHeaders              `toml:"RPCProxyHeaders"`
 	RPCJWT                      RPCJWT                       `toml:"RPCJWT"`
 	RPCSwapAuth                 RPCSwapAuth                  `toml:"RPCSwapAuth"`

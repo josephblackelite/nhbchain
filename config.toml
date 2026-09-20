@@ -22,6 +22,20 @@ RPCMaxTxPerChain = 120
 RPCMaxTxPerIdentityChain = 120
 RPCRateLimitWindow = 60
 RPCCallerMetadataMaxTTL = 600
+# Public read queries that scan blocks or hold the state lock share a small pool
+# so they cannot take the CPU that block production needs (see
+# docs/ops/rpc-query-limits.md). The defaults need no configuration; these are
+# the knobs, each shown as zero, which selects the default in the comment.
+# A refused query gets HTTP 429, code -32020 and a Retry-After hint.
+# RPCQueryMaxConcurrent = 0   # half the CPUs, at least 1 and at most 2
+# RPCQueryMaxPerClient = 0    # 1
+# RPCQueryQueueDepth = 0      # 8
+# RPCQueryQueueWaitMS = 0     # 100
+# RPCQueryTimeoutSeconds = 0  # 10
+# Set on a node that serves no public RPC: stops the background rebuild of the
+# explorer snapshot after every block (and the streams and indexes that go with
+# it). Default false keeps today's behaviour.
+# RPCDisableExplorerLoop = false
 # Safe as-is: rpc/http.go refuses to bind plaintext on a non-loopback
 # address, and RPCAddress above stays 127.0.0.1 -- real TLS termination
 # happens at nginx, which proxies HTTPS down to this loopback-only listener.
