@@ -77,7 +77,7 @@ func TestTheNextRoundDoesNotProposeBeforeTheMinimumBlockIntervalHasPassed(t *tes
 				engine.runRound()
 			}()
 			defer func() {
-				engine.NotifyExternalCommit()
+				endRound(engine)
 				<-done
 			}()
 
@@ -158,27 +158,32 @@ func TestTheMinimumBlockIntervalIsWaitedOutOnceAndOnlyAfterACommit(t *testing.T)
 
 // A round that is over taken does not go on waiting: a block committed elsewhere, or a
 // later round the others are in, ends the wait and the round loop starts another round
-// (which is what ends a round in progress on the same two events).
+// (which is what ends a round in progress on the same two events). A block committed
+// elsewhere is one the chain holds by the height of the round: a signal for one that the
+// engine has committed itself does not end it (round_start_test.go).
 func TestTheMinimumBlockIntervalWaitIsGivenUpWhenTheRoundIsOvertaken(t *testing.T) {
 	tv := newTestValidators(t, 2)
 	// The interval is long, so that a wait that ends early can only have been given up.
 	const interval = 2 * time.Second
 	for _, tc := range []struct {
 		name   string
-		signal func(*Engine)
+		signal func(*Engine, *signGuardNode)
 	}{
-		{"a block committed outside the round", func(e *Engine) { e.NotifyExternalCommit() }},
-		{"a later round the others are in", func(e *Engine) { e.roundSkipCh <- struct{}{} }},
+		{"a block committed outside the round", func(e *Engine, n *signGuardNode) {
+			n.applySynced(candidateBlock(1, 1, tv.addrs[1], 0x31))
+			e.NotifyExternalCommit()
+		}},
+		{"a later round the others are in", func(e *Engine, _ *signGuardNode) { e.roundSkipCh <- struct{}{} }},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			engine, _, _ := newVoter(t, tv, WithTimeouts(intervalTimers), WithMinBlockInterval(interval))
+			engine, node, _ := newVoter(t, tv, WithTimeouts(intervalTimers), WithMinBlockInterval(interval))
 			engine.noteCommitSeen()
 			result := make(chan bool, 1)
 			started := time.Now()
 			go func() { result <- engine.waitMinBlockInterval() }()
 			time.Sleep(20 * time.Millisecond)
-			tc.signal(engine)
+			tc.signal(engine, node)
 			select {
 			case interrupted := <-result:
 				if !interrupted {

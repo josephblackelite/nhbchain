@@ -20,11 +20,14 @@ package bft
 // and a commit take, joined by links that deliver in order, one message at a time,
 // after a one-way delay -- the way a peer's read loop hands a message to the engine --
 // including the committed block each engine sends to its peer, which commits it
-// through the sync path when it has not committed the height itself. The mempool is
-// empty throughout. Timers can be scaled down (a report divides the 2 s, 2 s, 2 s and
-// 4 s of the defaults by ten) while the costs and the delay stay what they are on a
-// running chain, so the races between the messages and the round loop are the ones a
-// running pair has.
+// through the sync path when it has not committed the height itself. A block that the
+// chain already holds is committed already, and committing it again -- which is what the
+// engine and the sync path both do when the peer's block reaches the node while the
+// engine is committing the same one -- succeeds, as it does in the node (Node.commitBlock).
+// The mempool is empty throughout. Timers can be scaled down (a report divides the 2 s,
+// 2 s, 2 s and 4 s of the defaults by ten) while the costs and the delay stay what they
+// are on a running chain, so the races between the messages and the round loop are the
+// ones a running pair has.
 //
 // The report (TestCadenceReport, skipped unless NHB_CADENCE_REPORT is set) prints the
 // numbers for whatever engine this file is compiled with; min_block_interval_test.go
@@ -137,6 +140,9 @@ type cadenceChain struct {
 	// so that blocks built one round apart differ as they do on a running chain (a header
 	// carries the second it was built in).
 	clock func() int64
+	// duplicateFails makes a second commit of a block the chain holds fail, which the
+	// node's does not (see commit).
+	duplicateFails bool
 
 	syncMu   sync.Mutex // one block from the peer at a time, as blockSyncMu does
 	commitMu sync.Mutex // one commit at a time, as the chain's own lock does
@@ -190,14 +196,26 @@ func (n *cadenceChain) ValidateBlock(b *types.Block) error {
 
 func (n *cadenceChain) CommitBlock(b *types.Block) error { return n.commit(b, false) }
 
-// commit is the chain's own commit, whichever way the block came: the second of two
-// commits of the same height (the engine's and the sync path's) fails, as it does live.
+// commit is the chain's own commit, whichever way the block came. The second of two
+// commits of the same block (the engine's and the sync path's) does nothing and succeeds,
+// as the node's does: it answers a block it already holds with no error, and the sync path
+// then tells the engine about a block the engine has committed itself. A different block
+// for a height the chain holds fails.
 func (n *cadenceChain) commit(b *types.Block, viaSync bool) error {
 	n.commitMu.Lock()
 	defer n.commitMu.Unlock()
 	n.mu.Lock()
 	next := n.height + 1
+	held := false
+	if b != nil && b.Header != nil && b.Header.Height >= 1 && b.Header.Height < next && b.Header.Height <= uint64(len(n.blocks)) {
+		have, _ := n.blocks[b.Header.Height-1].Header.Hash()
+		got, _ := b.Header.Hash()
+		held = bytes.Equal(have, got)
+	}
 	n.mu.Unlock()
+	if held && !n.duplicateFails {
+		return nil
+	}
 	if b == nil || b.Header == nil || b.Header.Height != next {
 		return fmt.Errorf("block is not the next height (%d)", next)
 	}
@@ -284,6 +302,9 @@ type cadenceLink struct {
 	toChain *cadenceChain
 	back    *cadenceLink // what the receiving node answers over
 	queue   chan cadenceFrame
+	// dropPrecommits loses every precommit the link carries, so that the receiving node
+	// never commits a height through its own round and always takes the block from its peer.
+	dropPrecommits bool
 }
 
 type cadenceFrame struct {
@@ -334,6 +355,9 @@ func (l *cadenceLink) dispatch(msg *p2p.Message) {
 	case p2p.MsgTypeVote:
 		var sv SignedVote
 		if json.Unmarshal(msg.Payload, &sv) == nil {
+			if l.dropPrecommits && sv.Vote != nil && sv.Vote.Type == Precommit {
+				return
+			}
 			l.trace.add(to, "recv %s h=%d r=%d nil=%v", sv.Vote.Type, sv.Vote.Height, sv.Vote.Round, len(sv.Vote.BlockHash) == 0)
 			_ = l.to.HandleVote(&sv)
 		}
@@ -373,6 +397,20 @@ type cadenceModel struct {
 	noise  [2]float64
 	hiccup [2]time.Duration
 	seed   int64
+	// commitTimeout is the commit timeout of a chain with the default timers, before the
+	// scale divides it; zero is the default of 4 s.
+	commitTimeout time.Duration
+	// oneBehind starts validator 1 one round behind validator 0, which is where a pair
+	// is when one of them has been restarted and its peer has gone on.
+	oneBehind bool
+	// syncOnly[i] loses every precommit sent to node i, so that it takes each block from
+	// its peer and never commits a height through its own round.
+	syncOnly [2]bool
+	// duplicateFails makes a second commit of a block a chain holds fail on both nodes.
+	duplicateFails bool
+	// sampleStarts watches the round each engine is in, to find out which round each of
+	// them started every height in (cadenceRun.starts).
+	sampleStarts bool
 	// options are applied to both engines, after the timers and the interval.
 	options []Option
 }
@@ -397,7 +435,11 @@ func (m cadenceModel) timers() TimeoutConfig {
 		s = 1
 	}
 	div := func(d time.Duration) time.Duration { return time.Duration(float64(d) / s) }
-	return TimeoutConfig{Proposal: div(2 * time.Second), Prevote: div(2 * time.Second), Precommit: div(2 * time.Second), Commit: div(4 * time.Second)}
+	commit := m.commitTimeout
+	if commit <= 0 {
+		commit = 4 * time.Second
+	}
+	return TimeoutConfig{Proposal: div(2 * time.Second), Prevote: div(2 * time.Second), Precommit: div(2 * time.Second), Commit: div(commit)}
 }
 
 // cadenceRun is what one run measured, at validator 0.
@@ -413,6 +455,9 @@ type cadenceRun struct {
 	commitsAt []time.Duration // node 0's commit times, on the trace's clock
 	heightsOf []uint64        // the height each interval ends at
 	synced    map[uint64]bool // the heights that either node committed through the sync path
+	// starts[i] is the round node i's engine started each height in, when the run watched
+	// for it (cadenceModel.sampleStarts).
+	starts [2]map[uint64]int
 }
 
 const cadenceWarmup = 3 // heights left out of the numbers
@@ -428,8 +473,8 @@ func runCadence(t *testing.T, m cadenceModel, target int, limit time.Duration) c
 	}
 	clock := func() int64 { return 1_700_000_000 + int64(time.Since(origin).Seconds()*scale) }
 	chains := [2]*cadenceChain{
-		{tv: tv, self: tv.addrs[0], costs: m.costs[0], clock: clock, noise: newCadenceNoise(m.noise[0], m.hiccup[0]/4, m.hiccup[0], m.seed+1)},
-		{tv: tv, self: tv.addrs[1], costs: m.costs[1], clock: clock, noise: newCadenceNoise(m.noise[1], m.hiccup[1]/4, m.hiccup[1], m.seed+2)},
+		{tv: tv, self: tv.addrs[0], costs: m.costs[0], clock: clock, duplicateFails: m.duplicateFails, noise: newCadenceNoise(m.noise[0], m.hiccup[0]/4, m.hiccup[0], m.seed+1)},
+		{tv: tv, self: tv.addrs[1], costs: m.costs[1], clock: clock, duplicateFails: m.duplicateFails, noise: newCadenceNoise(m.noise[1], m.hiccup[1]/4, m.hiccup[1], m.seed+2)},
 	}
 	var trace *cadenceTrace
 	if os.Getenv("NHB_CADENCE_TRACE") != "" {
@@ -452,10 +497,17 @@ func runCadence(t *testing.T, m cadenceModel, target int, limit time.Duration) c
 	chains[0].engine, chains[1].engine = engines[0], engines[1]
 	links[0].to, links[0].toChain, links[0].back = engines[1], chains[1], links[1]
 	links[1].to, links[1].toChain, links[1].back = engines[0], chains[0], links[0]
+	links[1].dropPrecommits, links[0].dropPrecommits = m.syncOnly[0], m.syncOnly[1] // links[1-j] carries what node j receives
+	if m.oneBehind {
+		engines[0].mu.Lock()
+		engines[0].currentState.Round++
+		engines[0].mu.Unlock()
+	}
 
 	stop := make(chan struct{})
 	var stopped atomic.Bool
 	var wg sync.WaitGroup
+	starts := [2]map[uint64]int{{}, {}}
 	for i := 0; i < 2; i++ {
 		i := i
 		wg.Add(2)
@@ -466,6 +518,10 @@ func runCadence(t *testing.T, m cadenceModel, target int, limit time.Duration) c
 				engines[i].runRound()
 			}
 		}()
+		if m.sampleStarts {
+			wg.Add(1)
+			go func() { defer wg.Done(); sampleStartRounds(engines[i], &stopped, starts[i]) }()
+		}
 	}
 
 	started := time.Now()
@@ -486,12 +542,20 @@ wait:
 	elapsed := time.Since(started)
 	stopped.Store(true)
 	close(stop)
-	for _, e := range engines {
-		e.NotifyExternalCommit()
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	for done := false; !done; {
+		for _, e := range engines {
+			endRound(e)
+		}
+		select {
+		case <-finished:
+			done = true
+		case <-time.After(5 * time.Millisecond):
+		}
 	}
-	wg.Wait()
 
-	run := cadenceRun{model: m, elapsed: elapsed, trace: trace}
+	run := cadenceRun{model: m, elapsed: elapsed, trace: trace, starts: starts}
 	log := chains[0].commits()
 	run.heights = len(log)
 	for i, c := range log {
@@ -522,6 +586,28 @@ wait:
 		run.final[i] = chain.GetHeight()
 	}
 	return run
+}
+
+// sampleStartRounds watches the round an engine is in and records, for each height, the
+// first round it stayed in for a couple of milliseconds: the round it started the height in
+// (the state commit leaves for a moment, round 0 of the height it has just moved to, is
+// gone before that).
+func sampleStartRounds(e *Engine, stopped *atomic.Bool, into map[uint64]int) {
+	var height uint64
+	round := -1
+	var since time.Time
+	for !stopped.Load() {
+		h, r, _ := e.Status()
+		now := time.Now()
+		if h != height || r != round {
+			height, round, since = h, r, now
+		} else if now.Sub(since) >= 2*time.Millisecond {
+			if _, seen := into[h]; !seen {
+				into[h] = r
+			}
+		}
+		time.Sleep(200 * time.Microsecond)
+	}
 }
 
 // span is the time the measured heights took.
@@ -576,9 +662,9 @@ func (r cadenceRun) stalled() int {
 }
 
 // afterSync splits the heights by whether the height before was committed through the
-// sync path by either node, and counts how many of each stalled: a validator that took
-// its peer's block starts the next height one round behind the one that committed it
-// itself, which is where the stalls of both engines begin.
+// sync path by either node, and counts how many of each stalled: before the two started a
+// height in the same round whichever way it ended (see startNewRound), the stalls began
+// there.
 func (r cadenceRun) afterSync() (stalledAfter, after, stalledOther, other int) {
 	for i, d := range r.intervals {
 		stalled := d > r.stallLimit()
@@ -617,15 +703,15 @@ func (r cadenceRun) roundBuckets() map[string]int {
 	return out
 }
 
-// liveEquivalentPerSecond is the pace converted to a chain with the default timers. A
-// run scales the round timers and the minimum interval down by the scale of the run, so
-// what they cost is multiplied back; the time a block takes when nothing fails is not
-// scaled (it is what it is), and is kept as it is: the time of a height beyond its
-// minimum interval, without a failed round, is the median of those, and a height that
-// stalled costs that plus its failed rounds, scaled.
-func (r cadenceRun) liveEquivalentPerSecond() float64 {
+// liveEquivalentDurations is the time each measured height would have taken on a chain
+// with the default timers. A run scales the round timers and the minimum interval down by
+// the scale of the run, so what they cost is multiplied back; the time a block takes when
+// nothing fails is not scaled (it is what it is), and is kept as it is: the time of a
+// height beyond its minimum interval, without a failed round, is the median of those, and
+// a height that stalled costs that plus its failed rounds, scaled.
+func (r cadenceRun) liveEquivalentDurations() []time.Duration {
 	if len(r.intervals) == 0 {
-		return 0
+		return nil
 	}
 	scale := r.model.scale
 	if scale <= 0 {
@@ -644,16 +730,43 @@ func (r cadenceRun) liveEquivalentPerSecond() float64 {
 	if len(fast) > 0 {
 		typical = fast[len(fast)/2]
 	}
-	live := 0.0
+	live := make([]time.Duration, 0, len(r.intervals))
 	for _, d := range r.intervals {
 		switch {
 		case d <= r.stallLimit():
-			live += (beyond(d) + time.Duration(float64(interval)*scale)).Seconds()
+			live = append(live, beyond(d)+time.Duration(float64(interval)*scale))
 		default:
-			live += (typical + time.Duration(float64(beyond(d)-typical)*scale) + time.Duration(float64(interval)*scale)).Seconds()
+			live = append(live, typical+time.Duration(float64(beyond(d)-typical)*scale)+time.Duration(float64(interval)*scale))
 		}
 	}
-	return float64(len(r.intervals)) / live
+	return live
+}
+
+// liveEquivalentPerSecond is the pace converted to a chain with the default timers.
+func (r cadenceRun) liveEquivalentPerSecond() float64 {
+	total := 0.0
+	for _, d := range r.liveEquivalentDurations() {
+		total += d.Seconds()
+	}
+	if total <= 0 {
+		return 0
+	}
+	return float64(len(r.intervals)) / total
+}
+
+// liveEquivalentMeanMax is the mean and the longest time of a height on a chain with the
+// default timers.
+func (r cadenceRun) liveEquivalentMeanMax() (mean, longest time.Duration) {
+	live := r.liveEquivalentDurations()
+	var total time.Duration
+	for _, d := range live {
+		total += d
+		longest = max(longest, d)
+	}
+	if len(live) > 0 {
+		mean = total / time.Duration(len(live))
+	}
+	return
 }
 
 func (r cadenceRun) String() string {
@@ -664,11 +777,44 @@ func (r cadenceRun) String() string {
 		parts = append(parts, fmt.Sprintf("%s:%d", k, b[k]))
 	}
 	stalledAfter, after, stalledOther, other := r.afterSync()
-	return fmt.Sprintf("heights=%d in %v  %.2f blocks/s (run clock) %.2f blocks/s (live-equivalent)  interval p50=%v p90=%v p99=%v max=%v  stalled=%d (%.1f%%)  rounds{%s}  via-sync=%v  stalled-after-a-synced-height=%d/%d stalled-otherwise=%d/%d",
-		len(r.intervals), r.span().Round(time.Millisecond), r.perSecond(), r.liveEquivalentPerSecond(),
+	differ, both := r.startMismatch()
+	liveMean, liveMax := r.liveEquivalentMeanMax()
+	return fmt.Sprintf("heights=%d in %v  %.2f blocks/s (run clock) %.2f blocks/s (live-equivalent, mean %v max %v a height)  interval mean=%v p50=%v p90=%v p99=%v max=%v  stalled=%d (%.1f%%)  rounds{%s}  later-round=%d (%.1f%%)  start-rounds-differ=%d/%d  via-sync=%v  stalled-after-a-synced-height=%d/%d stalled-otherwise=%d/%d",
+		len(r.intervals), r.span().Round(time.Millisecond), r.perSecond(), r.liveEquivalentPerSecond(), liveMean.Round(time.Millisecond), liveMax.Round(time.Millisecond),
+		(r.span() / time.Duration(max(1, len(r.intervals)))).Round(100*time.Microsecond),
 		r.quantile(.5).Round(100*time.Microsecond), r.quantile(.9).Round(100*time.Microsecond), r.quantile(.99).Round(100*time.Microsecond), r.quantile(1).Round(time.Millisecond),
-		r.stalled(), 100*float64(r.stalled())/float64(max(1, len(r.intervals))), strings.Join(parts, " "), r.viaSync,
+		r.stalled(), 100*float64(r.stalled())/float64(max(1, len(r.intervals))), strings.Join(parts, " "),
+		r.laterRound(), 100*float64(r.laterRound())/float64(max(1, len(r.intervals))), differ, both, r.viaSync,
 		stalledAfter, after, stalledOther, other)
+}
+
+// laterRound counts the heights decided in a round after the first one a height starts in
+// (round 1: see startNewRound).
+func (r cadenceRun) laterRound() int {
+	n := 0
+	for _, round := range r.rounds {
+		if round > 1 {
+			n++
+		}
+	}
+	return n
+}
+
+// startMismatch counts the measured heights that the two validators started in different
+// rounds, out of the ones both were seen to start (cadenceModel.sampleStarts).
+func (r cadenceRun) startMismatch() (differ, both int) {
+	for _, h := range r.heightsOf {
+		a, seenA := r.starts[0][h]
+		b, seenB := r.starts[1][h]
+		if !seenA || !seenB {
+			continue
+		}
+		both++
+		if a != b {
+			differ++
+		}
+	}
+	return
 }
 
 // dumpStalls prints what the two nodes did during the first few heights that stalled.
@@ -724,6 +870,12 @@ func envDurations(name string, def []time.Duration) []time.Duration {
 // validator (the other has a quarter of the chance and half the length), and
 // NHB_CADENCE_TRACE the events of the first stalled heights. Intervals are the ones a
 // chain with the default timers would use: the run divides them by the scale.
+// NHB_CADENCE_FAST_MS and NHB_CADENCE_SLOW_MS are what a build, a validation and a commit
+// cost at the first and at the second validator (default 5 and 8).
+// NHB_CADENCE_COMMIT is the commit timeout of that chain (default 4s; an interval of more
+// than half of it is lowered to half), NHB_CADENCE_BEHIND starts the second validator one
+// round behind the first, and NHB_CADENCE_DUPLICATE_FAILS makes a second commit of a block
+// a node holds fail, which the node's does not.
 func TestCadenceReport(t *testing.T) {
 	if os.Getenv("NHB_CADENCE_REPORT") == "" {
 		t.Skip("set NHB_CADENCE_REPORT to print the cadence of an idle pair")
@@ -736,9 +888,21 @@ func TestCadenceReport(t *testing.T) {
 	for _, live := range envDurations("NHB_CADENCE_MIN", []time.Duration{0}) {
 		for trial := 1; trial <= trials; trial++ {
 			m := liveCadenceModel(scale)
+			for i, name := range []string{"NHB_CADENCE_FAST_MS", "NHB_CADENCE_SLOW_MS"} {
+				if ms := envInt(name, 0); ms > 0 {
+					cost := time.Duration(ms) * time.Millisecond
+					m.costs[i] = cadenceCosts{build: cost, validate: cost, commit: cost}
+				}
+			}
 			m.minInterval = time.Duration(float64(live) / scale)
 			m.noise, m.hiccup, m.seed = [2]float64{noise / 4, noise}, [2]time.Duration{hiccup / 2, hiccup}, int64(trial)
-			run := runCadence(t, m, heights+cadenceWarmup, 30*time.Minute)
+			if d := envDurations("NHB_CADENCE_COMMIT", nil); len(d) > 0 {
+				m.commitTimeout = d[0]
+			}
+			m.oneBehind = os.Getenv("NHB_CADENCE_BEHIND") != ""
+			m.duplicateFails = os.Getenv("NHB_CADENCE_DUPLICATE_FAILS") != ""
+			m.sampleStarts = true
+			run := runCadence(t, m, heights+cadenceWarmup, 6*time.Hour)
 			fmt.Fprintf(os.Stderr, "\nCADENCE|scale=%g|live-min-interval=%v|trial=%d|%s\n", scale, live, trial, run)
 			run.dumpStalls(envInt("NHB_CADENCE_TRACE_STALLS", 2))
 		}
