@@ -2896,7 +2896,11 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	}
 	if err != nil {
-		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) {
+		// A rejection that is itself reported by an event keeps that event: the
+		// two transfer pauses, a refused sponsorship and a paused staking
+		// module (the stake.paused event StakeDelegate and its siblings emit
+		// before they refuse the request).
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) && !errors.Is(err, ErrStakePaused) {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -6182,17 +6186,17 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 		return nil, err
 	}
 
-	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, entry.Validator)
-	sp.AppendEvent(&types.Event{
-		Type: "stake.claimed",
-		Attributes: map[string]string{
-			"delegator":   delegatorAddr.String(),
-			"validator":   validatorAddr.String(),
-			"amount":      entry.Amount.String(),
-			"unbondingId": strconv.FormatUint(entry.ID, 10),
-		},
-	})
+	// Not "stake.claimed": that name belongs to the legacy alias of the
+	// rewards claim event (events.TypeStakeRewardsClaimedLegacy), which carries
+	// different attributes.
+	if evt := (events.StakeUnbondClaimed{
+		Delegator:   bytesToAddress(delegator),
+		Validator:   bytesToAddress(entry.Validator),
+		Amount:      entry.Amount,
+		UnbondingID: entry.ID,
+	}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
 
 	return &entry, nil
 }
