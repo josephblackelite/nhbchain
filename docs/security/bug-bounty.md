@@ -1,7 +1,7 @@
 # Bug Bounty Program
 
 ## Scope
-Our bug bounty program covers the NHBChain core node implementation, official SDKs, and reference wallets. Third-party integrations, experimental branches, and deprecated releases are out of scope unless explicitly stated otherwise. See the [audit readiness guide](./audit-readiness.md) for the code layout and configuration samples when planning your research.
+Our bug bounty program covers the NHBChain core node implementation and the SDKs and command-line utilities in this repository. Third-party integrations, experimental branches, and deprecated releases are out of scope unless explicitly stated otherwise. See the [audit readiness guide](./audit-readiness.md) for the code layout and configuration samples when planning your research.
 
 ## Rewards
 We offer tiered rewards based on the severity and impact of the vulnerability. Reward amounts

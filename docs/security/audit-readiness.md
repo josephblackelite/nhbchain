@@ -10,11 +10,13 @@ The code most relevant to an audit lives in `consensus/` (BFT engine and POTSO),
 
 - **Revision under audit.** No commit hash is recorded in the repository. Record the exact commit (`git rev-parse HEAD`) with the audit.
 - **Build.** CI (`.github/workflows/ci.yml`) builds the node with Go 1.24.3 using `go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/nhb ./cmd/nhb`; `go.mod` declares `go 1.24.0` and `toolchain go1.24.3`. `go.sum` is committed.
-- **Configuration samples.** `config.toml`, `config/prod.toml`, `config/genesis*.json`, `config/security.yaml`, `gateway/config.yaml`, and the deployment manifests under `deploy/` (`compose/`, `helm/`, `systemd/`, `env/`).
+- **Configuration samples.** `config.toml`, `config/prod.toml` (a template that `scripts/verify_prod_config.sh` accepts), `config/security.yaml`, `gateway/config.yaml`, and the deployment manifests under `deploy/` (`compose/`, `helm/`, `systemd/`, `env/`).
+- **Genesis files.** `config/genesis.relaunch.json` is the genesis file of the live network (chain ID 18346390202490284624) and is the file embedded as the default in `config/embed.go`; its hash is the chain ID, so it must not be edited. `config/genesis.local.json` and `config/genesis.phase-e.json` are the other genesis files in `config/`.
 - **Tests and fixtures.** Go tests throughout the tree, integration tests under `tests/`, golden files under `tests/golden/`, and audit phase plans and fixtures under `ops/audit/`.
 - **Audit tooling.** See [../audit/overview.md](../audit/overview.md) for the `make audit:*` and `make bugcheck` targets.
 - **Change history.** `docs/CHANGELOG.md` and `docs/changelogs/` record documentation changes.
 - **Related security documents.** [transport.md](./transport.md), [network-hardening.md](./network-hardening.md), [api-auth.md](./api-auth.md), [handshake.md](./handshake.md), [snapshots-audit.md](./snapshots-audit.md), [mint-controls.md](./mint-controls.md).
+- **Snapshots.** A new validator starts from a snapshot of a running node's chain database made with `scripts/make-snapshot.sh` and `cmd/nhb-snapshot`; see [snapshots-audit.md](./snapshots-audit.md) and [../validators/snapshot-onboarding.md](../validators/snapshot-onboarding.md).
 
 ## Embargo and disclosure
 
