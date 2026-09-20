@@ -864,9 +864,9 @@ func TestMissingOrShortTableIsDetected(t *testing.T) {
 
 // A copy of a running node may hold a table that was still being written. It
 // belongs to no version of the database. The script that makes the copy leaves
-// such a table out (TestMakeSnapshotStagesOnlyWhatTheDatabaseRefersTo), and the
-// packer does not skip one it is handed: a table nothing lists is a file the
-// database does not refer to, and a stage that holds one is refused, whole.
+// such a table out (TestMakeSnapshotDoesNotPackAFileThatOnlyHasTheNameOfOneOfTheDatabases),
+// and the packer does not skip one it is handed: a table nothing lists is a file
+// the database does not refer to, and a stage that holds one is refused, whole.
 func TestPackRefusesATableNothingRefersTo(t *testing.T) {
 	f := newFixture(t)
 	if err := os.WriteFile(filepath.Join(f.stage, "999999.ldb"), []byte("half written"), 0o644); err != nil {
