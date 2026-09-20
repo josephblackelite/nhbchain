@@ -45,9 +45,10 @@ func TestRegistryCreatePlan_EnforcesTheBoundsOnPlanTerms(t *testing.T) {
 			p.PriceWei = new(big.Int).Sub(subscriptions.MinPlanPriceWei(), big.NewInt(1))
 		}},
 	}
-	for _, tc := range refused {
+	for i, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := valid()
+			plan.ID = subscriptions.PlanID(1000 + i)
 			tc.mutate(plan)
 			err := registry.CreatePlan(merchant, plan)
 			if !errors.Is(err, subscriptions.ErrInvalidPlan) {
@@ -58,8 +59,10 @@ func TestRegistryCreatePlan_EnforcesTheBoundsOnPlanTerms(t *testing.T) {
 	if ids, err := registry.ListPlansByMerchant(merchant); err != nil || len(ids) != 0 {
 		t.Fatalf("a refused plan must not be stored or indexed: ids=%v err=%v", ids, err)
 	}
-	if _, ok := registry.GetPlan(0); ok {
-		t.Fatalf("a refused plan must not be stored")
+	for i := range refused {
+		if _, ok := registry.GetPlan(subscriptions.PlanID(1000 + i)); ok {
+			t.Fatalf("plan %d was refused but is stored", 1000+i)
+		}
 	}
 
 	// The bounds themselves are allowed.
