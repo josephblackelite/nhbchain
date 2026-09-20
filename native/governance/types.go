@@ -351,7 +351,8 @@ const (
 	// ProposalKindParamUpdate proposal -- no dedicated proposal kind needed
 	// (see core/market_native.go's readGovernedMarketFlatFeeWei).
 	ParamKeyMarketFlatFeeWei = "market.flatFeeWei"
-	// ParamKeyPaymasterTopUpFeeWei controls the flat ZNHB fee skimmed from
+	// ParamKeyPaymasterTopUpFeeWei controls the flat fee, in the top-up asset (NHB
+	// unless the policy names ZNHB), skimmed from
 	// the configured Paymaster.AutoTopUp.Governance.FundingAccount on every
 	// automatic paymaster top-up (core/sponsorship.go's
 	// maybeAutoTopUpPaymaster), on top of the TopUpAmountWei credited to the

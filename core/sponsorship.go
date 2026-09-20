@@ -116,6 +116,8 @@ func (l PaymasterLimits) Clone() PaymasterLimits {
 }
 
 // PaymasterAutoTopUpPolicy captures the automatic top-up policy applied to paymaster accounts.
+// Token is the asset the top-up watches, debits and credits: NHB, the asset
+// sponsored gas is paid in, when empty (see paymasterSponsoredAsset), or ZNHB.
 type PaymasterAutoTopUpPolicy struct {
 	Enabled        bool
 	Token          string
@@ -571,8 +573,46 @@ func (sp *StateProcessor) emitPaymasterAutoTopUpEvent(paymaster [20]byte, token 
 // ProposalKindParamUpdate proposal once ready.
 const defaultPaymasterTopUpFeeWei = "0"
 
-// readGovernedPaymasterTopUpFeeWei resolves the flat ZNHB fee skimmed from
-// the funding account on every automatic paymaster top-up from the generic
+// paymasterSponsoredAsset is the asset sponsored gas is paid in: the sponsor's
+// BalanceNHB is what EvaluateSponsorship checks and what a sponsored transfer
+// debits (core/state_transition.go). It is therefore the asset an automatic
+// top-up replenishes unless the policy names ZNHB explicitly.
+const paymasterSponsoredAsset = "NHB"
+
+// topUpAssetBalance returns account's balance of the top-up asset (NHB or
+// ZNHB), reading an unset balance as zero.
+func topUpAssetBalance(account *types.Account, token string) *big.Int {
+	balance := account.BalanceNHB
+	if token == "ZNHB" {
+		balance = account.BalanceZNHB
+	}
+	if balance == nil {
+		return big.NewInt(0)
+	}
+	return balance
+}
+
+// setTopUpAssetBalance stores value as account's balance of the top-up asset.
+func setTopUpAssetBalance(account *types.Account, token string, value *big.Int) {
+	if token == "ZNHB" {
+		account.BalanceZNHB = value
+		return
+	}
+	account.BalanceNHB = value
+}
+
+// accountHeld reports whether addr is one of the addresses in held.
+func accountHeld(held [][]byte, addr []byte) bool {
+	for _, h := range held {
+		if bytes.Equal(h, addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// readGovernedPaymasterTopUpFeeWei resolves the flat fee, in the top-up asset,
+// skimmed from the funding account on every automatic paymaster top-up from the generic
 // governance param store, falling back to defaultPaymasterTopUpFeeWei when
 // never set. Mirrors core/market_native.go's readGovernedMarketFlatFeeWei
 // exactly -- both are thin wrappers over readGovernedSwapRiskWei (defined in
@@ -652,9 +692,9 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 		account = &types.Account{}
 	}
 	if m.previousBalance != nil {
-		account.BalanceZNHB = new(big.Int).Set(m.previousBalance)
+		setTopUpAssetBalance(account, m.token, new(big.Int).Set(m.previousBalance))
 	} else {
-		account.BalanceZNHB = big.NewInt(0)
+		setTopUpAssetBalance(account, m.token, big.NewInt(0))
 	}
 	if err := sp.setAccount(m.paymasterRaw, account); err != nil {
 		return err
@@ -668,9 +708,9 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 			fundingAccount = &types.Account{}
 		}
 		if m.previousFunding != nil {
-			fundingAccount.BalanceZNHB = new(big.Int).Set(m.previousFunding)
+			setTopUpAssetBalance(fundingAccount, m.token, new(big.Int).Set(m.previousFunding))
 		} else {
-			fundingAccount.BalanceZNHB = big.NewInt(0)
+			setTopUpAssetBalance(fundingAccount, m.token, big.NewInt(0))
 		}
 		if err := sp.setAccount(m.fundingRaw, fundingAccount); err != nil {
 			return err
@@ -685,9 +725,9 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 			treasuryAccount = &types.Account{}
 		}
 		if m.previousTreasury != nil {
-			treasuryAccount.BalanceZNHB = new(big.Int).Set(m.previousTreasury)
+			setTopUpAssetBalance(treasuryAccount, m.token, new(big.Int).Set(m.previousTreasury))
 		} else {
-			treasuryAccount.BalanceZNHB = big.NewInt(0)
+			setTopUpAssetBalance(treasuryAccount, m.token, big.NewInt(0))
 		}
 		if err := sp.setAccount(m.treasuryRaw, treasuryAccount); err != nil {
 			return err
@@ -719,7 +759,16 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 	return nil
 }
 
-func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byte, account *types.Account) (*paymasterTopUpMutation, error) {
+// maybeAutoTopUpPaymaster replenishes the sponsor's balance of the policy's
+// asset from the funding account when it has dipped below the floor. The
+// asset is chosen once, from the policy (NHB unless the policy names ZNHB),
+// and the balance check, the funding debit, the paymaster credit and the fee
+// credit all use it. held lists accounts whose objects the caller has loaded
+// and will still write after this call (the transfer's sender and
+// recipient): the funding and fee accounts may not be one of them, because the
+// caller's later write of its own object would undo this call's write to that
+// account.
+func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byte, account *types.Account, held ...[]byte) (*paymasterTopUpMutation, error) {
 	if sp == nil || sp.execContext == nil {
 		return nil, nil
 	}
@@ -732,9 +781,9 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	}
 	token := strings.ToUpper(strings.TrimSpace(policy.Token))
 	if token == "" {
-		token = "ZNHB"
+		token = paymasterSponsoredAsset
 	}
-	if token != "ZNHB" {
+	if token != "NHB" && token != "ZNHB" {
 		return nil, nil
 	}
 	if account == nil {
@@ -743,11 +792,8 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if policy.MinBalanceWei == nil || policy.MinBalanceWei.Sign() <= 0 {
 		return nil, nil
 	}
-	if account.BalanceZNHB == nil {
-		account.BalanceZNHB = big.NewInt(0)
-	}
-	currentBalance := new(big.Int).Set(account.BalanceZNHB)
-	if account.BalanceZNHB.Cmp(policy.MinBalanceWei) >= 0 {
+	currentBalance := new(big.Int).Set(topUpAssetBalance(account, token))
+	if currentBalance.Cmp(policy.MinBalanceWei) >= 0 {
 		return nil, nil
 	}
 	amount := policy.TopUpAmountWei
@@ -833,15 +879,30 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	}
 	funding := policy.FundingAccount
 	fundingRaw := append([]byte(nil), funding[:]...)
+	// The paymaster's own object is the one passed in, and the caller may hold
+	// more (see held): a funding account that is one of them would be loaded
+	// here as a second object for the same address and overwritten by the
+	// caller's write, so the top-up refuses to run rather than lose the debit.
+	if bytes.Equal(fundingRaw, raw) || accountHeld(held, fundingRaw) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "funding_account_in_use")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
+	}
+	if feeWei.Sign() > 0 && accountHeld(held, sp.escrowFeeTreasury[:]) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "treasury_account_in_use")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
+	}
 	fundingAccount, err := sp.getAccount(fundingRaw)
 	if err != nil {
 		return nil, err
 	}
 	if fundingAccount == nil {
 		fundingAccount = &types.Account{}
-	}
-	if fundingAccount.BalanceZNHB == nil {
-		fundingAccount.BalanceZNHB = big.NewInt(0)
 	}
 	operator := policy.Minter
 	if operator == ([20]byte{}) {
@@ -884,7 +945,7 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 			return nil, nil
 		}
 	}
-	fundingBalance := new(big.Int).Set(fundingAccount.BalanceZNHB)
+	fundingBalance := new(big.Int).Set(topUpAssetBalance(fundingAccount, token))
 	if fundingBalance.Cmp(totalDebit) < 0 {
 		var paymasterBytes [20]byte
 		copy(paymasterBytes[:], addr.Bytes())
@@ -916,42 +977,58 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	if statusRecord != nil {
 		mutation.previousStatus = statusRecord.Clone()
 	}
-	fundingAccount.BalanceZNHB = new(big.Int).Sub(fundingAccount.BalanceZNHB, totalDebit)
+
+	// One object per address, every delta applied to it, one write each. The
+	// fee treasury is the funding account (the fee returns to where it came
+	// from) or the paymaster itself in the configurations where those roles
+	// share an address; only a third account is loaded separately.
+	treasuryRaw := append([]byte(nil), sp.escrowFeeTreasury[:]...)
+	var treasuryAccount *types.Account
+	if feeWei.Sign() > 0 {
+		switch {
+		case bytes.Equal(treasuryRaw, fundingRaw):
+			treasuryAccount = fundingAccount
+		case bytes.Equal(treasuryRaw, raw):
+			treasuryAccount = account
+		default:
+			treasuryAccount, err = sp.getAccount(treasuryRaw)
+			if err != nil {
+				return nil, err
+			}
+			if treasuryAccount == nil {
+				treasuryAccount = &types.Account{}
+			}
+			mutation.treasuryRaw = treasuryRaw
+			mutation.previousTreasury = new(big.Int).Set(topUpAssetBalance(treasuryAccount, token))
+		}
+	}
+	setTopUpAssetBalance(fundingAccount, token, new(big.Int).Sub(topUpAssetBalance(fundingAccount, token), totalDebit))
+	setTopUpAssetBalance(account, token, new(big.Int).Add(topUpAssetBalance(account, token), amount))
+	if treasuryAccount != nil {
+		setTopUpAssetBalance(treasuryAccount, token, new(big.Int).Add(topUpAssetBalance(treasuryAccount, token), feeWei))
+	}
+	mutation.newFunding = new(big.Int).Set(topUpAssetBalance(fundingAccount, token))
+	mutation.newBalance = new(big.Int).Set(topUpAssetBalance(account, token))
+	if len(mutation.treasuryRaw) > 0 {
+		mutation.newTreasury = new(big.Int).Set(topUpAssetBalance(treasuryAccount, token))
+	}
+
 	if err := sp.setAccount(mutation.fundingRaw, fundingAccount); err != nil {
 		return nil, err
 	}
-	mutation.newFunding = new(big.Int).Set(fundingAccount.BalanceZNHB)
-
-	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
 	if err := sp.setAccount(raw, account); err != nil {
+		if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
+			return nil, errors.Join(err, rollbackErr)
+		}
 		return nil, err
 	}
-
-	if feeWei.Sign() > 0 {
-		treasuryRaw := append([]byte(nil), sp.escrowFeeTreasury[:]...)
-		treasuryAccount, err := sp.getAccount(treasuryRaw)
-		if err != nil {
+	if len(mutation.treasuryRaw) > 0 {
+		if err := sp.setAccount(mutation.treasuryRaw, treasuryAccount); err != nil {
 			if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
 				return nil, errors.Join(err, rollbackErr)
 			}
 			return nil, err
 		}
-		if treasuryAccount == nil {
-			treasuryAccount = &types.Account{}
-		}
-		if treasuryAccount.BalanceZNHB == nil {
-			treasuryAccount.BalanceZNHB = big.NewInt(0)
-		}
-		mutation.treasuryRaw = treasuryRaw
-		mutation.previousTreasury = new(big.Int).Set(treasuryAccount.BalanceZNHB)
-		treasuryAccount.BalanceZNHB = new(big.Int).Add(treasuryAccount.BalanceZNHB, feeWei)
-		if err := sp.setAccount(treasuryRaw, treasuryAccount); err != nil {
-			if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
-				return nil, errors.Join(err, rollbackErr)
-			}
-			return nil, err
-		}
-		mutation.newTreasury = new(big.Int).Set(treasuryAccount.BalanceZNHB)
 	}
 
 	updatedDay := dayRecord
@@ -973,6 +1050,5 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 		}
 		return nil, err
 	}
-	mutation.newBalance = new(big.Int).Set(account.BalanceZNHB)
 	return mutation, nil
 }

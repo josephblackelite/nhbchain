@@ -264,7 +264,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		potsoWeightConfig:        potso.DefaultWeightParams(),
 		paymasterEnabled:         true,
 		paymasterLimits:          PaymasterLimits{},
-		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
 		quotaConfig:              make(map[string]nativecommon.Quota),
 		intentTTL:                defaultIntentTTL,
 		feePolicy:                fees.Policy{Domains: map[string]fees.DomainPolicy{}},
@@ -3182,7 +3182,9 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 					}
 				}
 			}
-			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc)
+			// The sender and the recipient are written after this call from the
+			// objects loaded above, so the top-up may not touch their accounts.
+			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc, from, tx.To)
 			if err != nil {
 				return nil, err
 			}

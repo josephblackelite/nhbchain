@@ -626,7 +626,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		swapSanctions:        swap.DefaultSanctionsChecker,
 		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
 		paymasterLimits:      PaymasterLimits{},
-		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
 		timestampTolerance:   DefaultBlockTimestampTolerance,
 		timeSource:           func() time.Time { return time.Now().UTC() },
 		// Disabled by default (see the field doc comment): every existing
