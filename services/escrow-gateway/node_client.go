@@ -76,7 +76,6 @@ type NodeClient interface {
 	// ErrP2PTradeRetired.
 	P2PCreateTrade(ctx context.Context, req P2PAcceptRequest) (*P2PAcceptResponse, error)
 	P2PGetTrade(ctx context.Context, tradeID string) (*P2PTradeState, error)
-	FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error)
 	// RelayerBalance returns the configured relayer's current NHB balance
 	// (wei), so main.go's periodic low-balance check has something to poll --
 	// this relayer pays gas for every transaction the gateway submits, and
@@ -91,7 +90,7 @@ var ErrP2PTradeRetired = errors.New("escrow-gateway: p2p trade creation is perma
 
 // ErrRelayerNotConfigured is returned by every mutating escrow call when
 // InitRelayer has not been called (or failed) -- read endpoints (EscrowGet,
-// EscrowGetRealm, P2PGetTrade, FetchEvents) remain unaffected.
+// EscrowGetRealm, P2PGetTrade) remain unaffected.
 var ErrRelayerNotConfigured = errors.New("escrow-gateway: relayer key not configured -- mutating escrow endpoints are unavailable")
 
 // escrowRelayerGasLimit/GasPrice are fixed, following this project's usual
@@ -449,20 +448,6 @@ func (c *RPCNodeClient) P2PGetTrade(ctx context.Context, tradeID string) (*P2PTr
 	return &result, nil
 }
 
-func (c *RPCNodeClient) FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error) {
-	params := map[string]interface{}{
-		"after": afterSeq,
-	}
-	if limit > 0 {
-		params["limit"] = limit
-	}
-	var result []NodeEvent
-	if err := c.call(ctx, "events_since", []interface{}{params}, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
 func decodeHex(value string) ([]byte, error) {
 	trimmed := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(value), "0x"), "0X")
 	return hex.DecodeString(trimmed)
@@ -601,7 +586,6 @@ type EscrowRealmPolicy struct {
 // EscrowRealmMetadata exposes provider context for a realm.
 type EscrowRealmMetadata struct {
 	Scope             string `json:"scope"`
-	Type              string `json:"type,omitempty"`
 	ProviderProfile   string `json:"providerProfile,omitempty"`
 	ArbitrationFeeBps uint32 `json:"arbitrationFeeBps"`
 	FeeRecipient      string `json:"feeRecipient,omitempty"`
@@ -652,14 +636,4 @@ type P2PTradeState struct {
 	Deadline    int64  `json:"deadline"`
 	CreatedAt   int64  `json:"createdAt"`
 	Status      string `json:"status"`
-}
-
-// NodeEvent represents an emitted escrow or trade event returned by the node.
-type NodeEvent struct {
-	Sequence   int64             `json:"sequence"`
-	Type       string            `json:"type"`
-	Attributes map[string]string `json:"attributes"`
-	Height     uint64            `json:"height"`
-	TxHash     string            `json:"txHash"`
-	Timestamp  int64             `json:"timestamp"`
 }
