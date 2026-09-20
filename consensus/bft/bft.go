@@ -686,6 +686,9 @@ func boundedErrorText(err error) string {
 }
 
 func (e *Engine) HandleProposal(p *SignedProposal) error {
+	if p != nil && p.Proposal != nil && !roundInRange(p.Proposal.Round) {
+		return fmt.Errorf("proposal round %d is outside 0..%d", p.Proposal.Round, maxRound)
+	}
 	if err := e.verifySignedProposal(p); err != nil {
 		return err
 	}
@@ -726,11 +729,29 @@ func (e *Engine) HandleProposal(p *SignedProposal) error {
 }
 
 func (e *Engine) HandleVote(v *SignedVote) error {
+	// Refused before anything is checked, kept or counted: an honest vote is for a
+	// round in range and carries the hash of a header or none.
+	if v != nil && v.Vote != nil {
+		if !roundInRange(v.Vote.Round) {
+			return fmt.Errorf("vote round %d is outside 0..%d", v.Vote.Round, maxRound)
+		}
+		if len(v.Vote.BlockHash) > maxVoteHashLen {
+			return fmt.Errorf("vote block hash is %d bytes, at most %d allowed", len(v.Vote.BlockHash), maxVoteHashLen)
+		}
+	}
 	if err := e.verifySignedVote(v); err != nil {
 		return err
 	}
 	if v == nil || v.Vote == nil {
 		return fmt.Errorf("invalid vote payload")
+	}
+	// A secp256k1 signature is verified by recovering the signer, so the public
+	// key field is unused for it and not covered by the signature: whatever a
+	// relaying peer put in it is room for padding. Keep the vote without it.
+	if v.Signature.Scheme == SignatureSchemeSecp256k1 && len(v.Signature.PublicKey) > 0 {
+		signature := *v.Signature
+		signature.PublicKey = nil
+		v = &SignedVote{Vote: v.Vote, Validator: v.Validator, Signature: &signature}
 	}
 
 	e.mu.RLock()
@@ -1543,7 +1564,7 @@ func (e *Engine) startNewRound() {
 			// Same height, no commit: if the round that just ended was
 			// carrying this validator's own proposal, that proposal failed.
 			e.countOwnUncommittedLocked(previous)
-			e.currentState.Round++
+			e.currentState.Round = roundAfter(e.currentState.Round)
 		}
 	}
 	e.pruneOwnFailuresLocked()
@@ -1568,7 +1589,7 @@ func (e *Engine) startNewRound() {
 	// a single validator's message, and to the highest round that is supported,
 	// not to the lowest one anyone has mentioned.
 	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
-		e.currentState.Round = target
+		e.currentState.Round = min(target, maxRound)
 	}
 	// Never start a round this validator has already signed in (or one before
 	// it): the double-sign guard would refuse every vote there, so the round
@@ -1578,7 +1599,7 @@ func (e *Engine) startNewRound() {
 	// In a running process it changes nothing: the round has always moved past the
 	// last one signed in.
 	if floor, ok := e.signedRoundFloor(e.currentState.Height); ok && e.currentState.Round <= floor {
-		e.currentState.Round = floor + 1
+		e.currentState.Round = roundAfter(floor)
 	}
 	// Whatever was kept for the rounds this one has passed or jumped over can no
 	// longer be replayed. The wake-up for a round jump is spent: the evidence that
@@ -1685,6 +1706,26 @@ func engagementWeightBoost(stake *big.Int, engagementScore uint64) *big.Int {
 	return boost
 }
 
+// roundInRange reports whether round is one this engine is ever in or takes a
+// message for: 0 to maxRound.
+func roundInRange(round int) bool {
+	return round >= 0 && round <= maxRound
+}
+
+// roundAfter returns the round after round, never above maxRound and never
+// negative, whatever round is (it may come from a record on disk). At maxRound it
+// stays there: the round cannot be left, which after two years of rounds that never
+// committed is no worse than the wrap to a negative round it replaces.
+func roundAfter(round int) int {
+	if round < 0 {
+		return 0
+	}
+	if round >= maxRound {
+		return maxRound
+	}
+	return round + 1
+}
+
 func (e *Engine) selectProposer(round int) []byte {
 	return e.selectProposerIn(e.validatorSet, round)
 }
@@ -1723,7 +1764,8 @@ func (e *Engine) selectProposerIn(validatorSet map[string]*big.Int, round int) [
 		return nil
 	}
 	if totalPower.Sign() == 0 {
-		return validators[round%len(validators)]
+		// Unsigned, so that any round (not only 0 to maxRound) picks a validator.
+		return validators[uint64(round)%uint64(len(validators))]
 	}
 
 	lastCommit := e.node.GetLastCommitHash()
@@ -1788,6 +1830,10 @@ func verifyVoteSignature(v *SignedVote) error {
 	return verifySignature(hash[:], v.Signature, v.Validator)
 }
 
+// secp256k1HalfN is half the order of the secp256k1 group: the largest s that
+// ethcrypto.Sign produces.
+var secp256k1HalfN = new(big.Int).Rsh(ethcrypto.S256().Params().N, 1)
+
 func verifySignature(msgHash []byte, sig *Signature, expectedAddr []byte) error {
 	if sig == nil {
 		return fmt.Errorf("missing signature")
@@ -1796,6 +1842,13 @@ func verifySignature(msgHash []byte, sig *Signature, expectedAddr []byte) error 
 	case SignatureSchemeSecp256k1:
 		if len(sig.Signature) != 65 {
 			return fmt.Errorf("invalid secp256k1 signature length")
+		}
+		// The signer is recovered from (r, s, v), and (r, n-s, v^1) recovers the same
+		// one, so every message would have two valid encodings. Signing
+		// (ethcrypto.Sign) always yields the low s, so this refuses nothing an
+		// honest validator sends, and it makes the encoding of a signature unique.
+		if new(big.Int).SetBytes(sig.Signature[32:64]).Cmp(secp256k1HalfN) > 0 {
+			return fmt.Errorf("secp256k1 signature is not in canonical (low-s) form")
 		}
 		pubKey, err := ethcrypto.SigToPub(msgHash, sig.Signature)
 		if err != nil {

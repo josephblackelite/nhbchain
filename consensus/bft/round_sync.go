@@ -58,6 +58,22 @@ const (
 	// the message itself is dropped, never buffered.
 	maxFutureRounds = 8
 
+	// maxRound is the highest round this engine will be in, or take a message
+	// for, or record a validator as being in. A round that does not commit lasts
+	// commitTimeout (4 s by default) and no round is ever shorter than that
+	// unless more than a third of the voting power is somewhere later, so 1<<24
+	// rounds is more than two years of a height that never commits: no honest
+	// validator gets near it, and a message above it is not evidence of anything
+	// but a validator (or a coalition below a third) that is faulty. Without a
+	// cap one signed vote for round math.MaxInt64 was adopted as a position, and
+	// the next increment of the round wrapped to a negative one (roundAfter).
+	maxRound = 1 << 24
+
+	// maxVoteHashLen is the longest Vote.BlockHash the engine accepts: the size
+	// of the hash of a block header (sha256), which is all an honest validator
+	// signs; a vote for nil carries none. Anything longer only costs memory.
+	maxVoteHashLen = sha256.Size
+
 	// maxBufferedProposalsPerValidator is how many future-round proposals are
 	// kept per validator and height; a further one replaces the oldest. Only
 	// the round's proposer can have its proposal kept (see handleFutureProposal),
@@ -76,8 +92,10 @@ const (
 
 	// maxBufferedVotesPerValidator is how many future-round votes are kept per
 	// validator and height: one prevote and one precommit for each round of the
-	// window, which is all an honest validator sends for those rounds. A vote is
-	// a few hundred bytes, so the bound is on memory only in principle.
+	// window, which is all an honest validator sends for those rounds. A kept
+	// vote is bounded too -- its block hash is at most maxVoteHashLen bytes, and
+	// what its signature does not cover is dropped (HandleVote) -- so it is under
+	// a kilobyte and a validator's votes for a height are a few kilobytes.
 	maxBufferedVotesPerValidator = 2 * maxFutureRounds
 
 	// dropLogInterval is the shortest time between two warnings about dropped
@@ -275,6 +293,9 @@ func (e *Engine) admitFutureRoundLocked(signer []byte, what string, height uint6
 	if round == e.currentState.Round {
 		return admitNow
 	}
+	if round > maxRound {
+		return admitDrop
+	}
 	e.recordRoundClaimLocked(signer, height, round)
 	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
 		// Do not wait for the end of the round: the validators this one needs
@@ -291,14 +312,23 @@ func (e *Engine) admitFutureRoundLocked(signer []byte, what string, height uint6
 	return admitBuffer
 }
 
+// proposalDigest is the hash of what the proposer signed: the content of the
+// proposal, whatever the encoding of its signature.
+func proposalDigest(p *SignedProposal) [sha256.Size]byte {
+	return sha256.Sum256(p.Proposal.bytes())
+}
+
 // sameProposal reports whether a and b are the same message: the same signer and
-// the same signature (a signature is deterministic, so a proposal sent twice
-// carries the same one).
+// the same content. It is not the signature that is compared: a signature has more
+// than one encoding (the twin of a secp256k1 signature, (r, n-s), recovers the same
+// signer), so a peer relaying a proposal could otherwise make each re-encoding a
+// new proposal.
 func sameProposal(a, b *SignedProposal) bool {
-	if a == nil || b == nil || a.Signature == nil || b.Signature == nil {
+	if a == nil || b == nil || a.Proposal == nil || b.Proposal == nil {
 		return a == b
 	}
-	return bytes.Equal(a.Proposer, b.Proposer) && bytes.Equal(a.Signature.Signature, b.Signature.Signature)
+	return bytes.Equal(a.Proposer, b.Proposer) && a.Proposal.Round == b.Proposal.Round &&
+		proposalDigest(a) == proposalDigest(b)
 }
 
 // evictOldestProposalLocked drops the oldest buffered proposal at height -- the
