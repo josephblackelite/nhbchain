@@ -55,9 +55,9 @@ func (sp *StateProcessor) settleSubscriptionCharges(timestamp int64) error {
 	// in the same calendar day (a Subscribe transaction in a later block,
 	// or a same-day retry re-bucketing after a failed charge), so it must
 	// be re-scanned every block for as long as it remains "today" --
-	// cheap, since settleSubscriptionsDueOnDay clears whatever it
-	// processes, leaving nothing but genuinely new entries to find on the
-	// next pass. Only a day that has fully elapsed (today has moved past
+	// cheap, since settleSubscriptionsDueOnDay removes whatever it
+	// processes, leaving nothing but genuinely new entries (and entries that
+	// are not due yet) to find on the next pass. Only a day that has fully elapsed (today has moved past
 	// it) can never receive another entry and is safe to mark closed
 	// forever.
 	lastClosed, hasWatermark, err := manager.SubscriptionsLastProcessedDay()
@@ -101,19 +101,34 @@ func (sp *StateProcessor) settleSubscriptionsDueOnDay(manager *nhbstate.Manager,
 	if len(due) == 0 {
 		return nil
 	}
+	// Settling an entry can schedule the same subscription again on this very
+	// day: a retry shorter than the time left in the day, or a billing
+	// interval under a day. Those entries are appended to the bucket being
+	// settled, so the bucket is not cleared as a whole: only the entries read
+	// above and handled are removed, and the ones a charge added stay for a
+	// later pass, which charges them once they are due.
+	handled := make([]subscriptions.SubscriptionID, 0, len(due))
 	for _, subID := range due {
-		if err := sp.settleOneSubscriptionCharge(manager, registry, cfg, subID, now); err != nil {
+		done, err := sp.settleOneSubscriptionCharge(manager, registry, cfg, subID, now)
+		if err != nil {
 			return err
 		}
+		if done {
+			handled = append(handled, subID)
+		}
 	}
-	return manager.SubscriptionsClearDue(day)
+	return manager.SubscriptionsRemoveDue(day, handled)
 }
 
-func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager, registry *subscriptions.Registry, cfg subscriptions.Config, subID subscriptions.SubscriptionID, now uint64) error {
+// settleOneSubscriptionCharge charges one due-list entry. It reports whether
+// the entry is finished with -- charged, failed, or dropped because its
+// subscription is gone or terminal -- and false when the entry is not due yet
+// and has to stay in its bucket.
+func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager, registry *subscriptions.Registry, cfg subscriptions.Config, subID subscriptions.SubscriptionID, now uint64) (bool, error) {
 	sub, ok := registry.GetSubscription(subID)
 	if !ok {
 		// Nothing to do -- not an error.
-		return nil
+		return true, nil
 	}
 	// A subscription can reach a terminal status (payer/merchant/admin
 	// cancellation) while still sitting in a due-index bucket -- see
@@ -121,27 +136,35 @@ func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager,
 	// cancellation never rewrites the bucket it happens to be in. Skip
 	// silently: this is expected, not a bug.
 	if sub.Status != subscriptions.SubscriptionStatusActive && sub.Status != subscriptions.SubscriptionStatusPastDue {
-		return nil
+		return true, nil
+	}
+	// The bucket is a calendar day, the charge time is a second. Today's
+	// bucket is scanned on every block, so an entry whose own NextChargeAt is
+	// still ahead (a retry or a short interval scheduled for later today) has
+	// to wait for it: charging it on the next block would bill the payer a
+	// block after the last attempt instead of one interval after it.
+	if sub.NextChargeAt > now {
+		return false, nil
 	}
 
 	existingCharges, err := registry.ListCharges(subID)
 	if err != nil {
-		return fmt.Errorf("subscriptions: load charge history for %d: %w", subID, err)
+		return false, fmt.Errorf("subscriptions: load charge history for %d: %w", subID, err)
 	}
 	attemptNumber := uint32(len(existingCharges) + 1)
 
 	payerAcc, err := sp.getAccount(sub.Payer[:])
 	if err != nil {
-		return fmt.Errorf("subscriptions: load payer %x: %w", sub.Payer, err)
+		return false, fmt.Errorf("subscriptions: load payer %x: %w", sub.Payer, err)
 	}
 	balance := assetBalance(payerAcc, sub.Asset)
 
 	decision := subscriptions.DecideCharge(sub, cfg, balance, now)
 
 	if decision.Success {
-		return sp.applySuccessfulSubscriptionCharge(manager, registry, sub, decision, payerAcc, balance, cfg, attemptNumber, now)
+		return true, sp.applySuccessfulSubscriptionCharge(manager, registry, sub, decision, payerAcc, balance, cfg, attemptNumber, now)
 	}
-	return sp.applyFailedSubscriptionCharge(manager, registry, sub, decision, attemptNumber, now)
+	return true, sp.applyFailedSubscriptionCharge(manager, registry, sub, decision, attemptNumber, now)
 }
 
 func (sp *StateProcessor) applySuccessfulSubscriptionCharge(manager *nhbstate.Manager, registry *subscriptions.Registry, sub *subscriptions.Subscription, decision subscriptions.ChargeDecision, payerAcc *types.Account, payerBalance *big.Int, cfg subscriptions.Config, attemptNumber uint32, now uint64) error {

@@ -66,6 +66,40 @@ func (m *Manager) SubscriptionsClearDue(day uint64) error {
 	return m.KVDelete(subscriptionsDueListKey(day))
 }
 
+// SubscriptionsRemoveDue removes the entries a settlement pass has handled
+// from a day's due list and keeps every other entry, in order. One occurrence
+// is removed per processed id, so an id listed twice is removed twice only if
+// it was processed twice. Entries a pass appends to the day it is settling (a
+// retry or a short billing interval that lands on the same UTC day) sit behind
+// the ones it read, so they are never the first occurrence of a processed id
+// and survive. When nothing is left the bucket is deleted, which is exactly
+// what SubscriptionsClearDue leaves behind.
+func (m *Manager) SubscriptionsRemoveDue(day uint64, processed []subscriptions.SubscriptionID) error {
+	if len(processed) == 0 {
+		return nil
+	}
+	existing, err := m.SubscriptionsDueOnDay(day)
+	if err != nil {
+		return err
+	}
+	drop := make(map[subscriptions.SubscriptionID]int, len(processed))
+	for _, id := range processed {
+		drop[id]++
+	}
+	remaining := make([]uint64, 0, len(existing))
+	for _, id := range existing {
+		if drop[id] > 0 {
+			drop[id]--
+			continue
+		}
+		remaining = append(remaining, uint64(id))
+	}
+	if len(remaining) == 0 {
+		return m.KVDelete(subscriptionsDueListKey(day))
+	}
+	return m.KVPut(subscriptionsDueListKey(day), remaining)
+}
+
 // SubscriptionsLastProcessedDay returns the UTC day number the settlement
 // hook last finished processing through (inclusive), and whether a
 // watermark has ever been recorded. A brand-new chain has no watermark --
