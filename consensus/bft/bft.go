@@ -475,6 +475,16 @@ func (e *Engine) runRound() {
 			if sp.Proposal.Block.Header.Height != height || sp.Proposal.Round != round {
 				continue
 			}
+			// Only the round's proposer proposes in it. HandleProposal accepts a
+			// proposal from any validator, so without this any one validator could
+			// front-run the real proposer with a block of its own and draw this
+			// validator's prevote (and, sent a second proposal, its answer to that).
+			// The proposer was chosen from the chain state at the top of this round,
+			// the same choice this validator makes to decide whether to propose.
+			if len(proposer) > 0 && !bytes.Equal(sp.Proposer, proposer) {
+				fmt.Printf("ignoring a proposal for height %d round %d from %x: this round's proposer is %x\n", height, round, sp.Proposer, proposer)
+				continue
+			}
 			if err := e.node.ValidateBlock(sp.Proposal.Block); err != nil {
 				fmt.Printf("rejected invalid proposal for height %d: %v\n", sp.Proposal.Block.Header.Height, err)
 				e.rejectProposal(err)
