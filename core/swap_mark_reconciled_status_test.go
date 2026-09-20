@@ -7,6 +7,7 @@ import (
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
+	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -35,6 +36,95 @@ func voucherStatusOnNode(t *testing.T, node *Node, id string) string {
 		t.Fatalf("voucher %s: ok=%v err=%v", id, ok, err)
 	}
 	return record.Status
+}
+
+// TestSwapRecordBurnNamingARefusedVoucherRecordsNothing covers the burn receipt
+// call, which stores a receipt and reconciles the vouchers it names. A receipt
+// naming a reversed or unknown voucher is refused before anything is written, so
+// the same receipt id can be sent again once the list is corrected; before, the
+// receipt was stored first and the refusal came after it, leaving the id taken.
+func TestSwapRecordBurnNamingARefusedVoucherRecordsNothing(t *testing.T) {
+	node := newTestNode(t)
+	seed := func(id string) {
+		t.Helper()
+		if err := node.WithState(func(m *nhbstate.Manager) error {
+			return swap.NewLedger(m).Put(&swap.VoucherRecord{
+				Provider:        "test",
+				ProviderTxID:    id,
+				FiatCurrency:    "USD",
+				FiatAmount:      "1",
+				Rate:            "1",
+				Token:           "ZNHB",
+				MintAmountWei:   big.NewInt(1),
+				QuoteTimestamp:  1,
+				OracleSource:    "manual",
+				PriceProofID:    "proof-" + id,
+				OracleFeeders:   []string{"manual"},
+				MinterSignature: "sig",
+			})
+		}); err != nil {
+			t.Fatalf("seed voucher %s: %v", id, err)
+		}
+	}
+	seed("np-live")
+	seed("np-reversed")
+	if err := node.WithState(func(m *nhbstate.Manager) error {
+		return swap.NewLedger(m).MarkReversed("np-reversed")
+	}); err != nil {
+		t.Fatalf("mark reversed: %v", err)
+	}
+	burnRecorded := func() bool {
+		t.Helper()
+		found := false
+		if err := node.WithState(func(m *nhbstate.Manager) error {
+			_, ok, err := swap.NewBurnLedger(m).Get("burn-1")
+			found = ok
+			return err
+		}); err != nil {
+			t.Fatalf("read burn ledger: %v", err)
+		}
+		return found
+	}
+	receipt := func(voucherIDs ...string) *swap.BurnReceipt {
+		return &swap.BurnReceipt{ReceiptID: "burn-1", ProviderTxID: "np-live", Token: "ZNHB", AmountWei: big.NewInt(1), VoucherIDs: voucherIDs, ObservedAt: 2_100_000_000}
+	}
+
+	for _, tc := range []struct {
+		name string
+		ids  []string
+		want error
+	}{
+		{"reversed voucher", []string{"np-live", "np-reversed"}, swap.ErrVoucherNotReconcilable},
+		{"unknown voucher", []string{"np-live", "np-unknown"}, swap.ErrVoucherNotFound},
+	} {
+		if err := node.SwapRecordBurn(receipt(tc.ids...)); !errors.Is(err, tc.want) {
+			t.Fatalf("receipt naming a %s: got %v, want %v", tc.name, err, tc.want)
+		}
+		if burnRecorded() {
+			t.Fatalf("a receipt naming a %s was stored before it was refused", tc.name)
+		}
+		if got := voucherStatusOnNode(t, node, "np-live"); got != swap.VoucherStatusMinted {
+			t.Fatalf("voucher listed beside a %s is %q, want minted", tc.name, got)
+		}
+		for _, evt := range node.Events() {
+			if evt.Type == events.TypeSwapBurnRecorded || evt.Type == events.TypeSwapTreasuryReconciled {
+				t.Fatalf("a refused receipt left a %s event", evt.Type)
+			}
+		}
+	}
+
+	if err := node.SwapRecordBurn(receipt("np-live")); err != nil {
+		t.Fatalf("the same receipt id with the list corrected: %v", err)
+	}
+	if !burnRecorded() {
+		t.Fatalf("the corrected receipt was not stored")
+	}
+	if got := voucherStatusOnNode(t, node, "np-live"); got != swap.VoucherStatusReconciled {
+		t.Fatalf("voucher is %q after its receipt was recorded, want reconciled", got)
+	}
+	if got := voucherStatusOnNode(t, node, "np-reversed"); got != swap.VoucherStatusReversed {
+		t.Fatalf("reversed voucher is %q, want it untouched", got)
+	}
 }
 
 // TestSwapMarkReconciledRefusesAReversedOrUnknownVoucher applies a signed
