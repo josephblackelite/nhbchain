@@ -110,13 +110,24 @@ func FuzzPotsoEvidencePipeline(f *testing.F) {
 			weights[i] = rewards.WeightEntry{Address: addr, Weight: entry.Value}
 		}
 		pools := []*big.Int{big.NewInt(6000), big.NewInt(4500)}
+		cumAssigned, cumPools := big.NewInt(0), big.NewInt(0)
 		for epoch := range pools {
+			carryIn := bucket.Balance()
 			dist, err := rewards.SplitRewards(pools[epoch], weights, bucket)
 			if err != nil {
 				t.Fatalf("split rewards: %v", err)
 			}
-			if dist.TotalAssigned.Cmp(pools[epoch]) > 0 {
-				t.Fatalf("epoch %d over-mint: assigned=%s pool=%s", epoch, dist.TotalAssigned, pools[epoch])
+			// The rounding bucket carries the previous epoch's dust into this epoch's pool
+			// (rewards.SplitRewards doc), so the per-epoch cap is pool+carryIn, and over
+			// all epochs assigned+bucket must equal the pools exactly (nothing minted or lost).
+			cap := new(big.Int).Add(pools[epoch], carryIn)
+			if dist.TotalAssigned.Cmp(cap) > 0 {
+				t.Fatalf("epoch %d over-mint: assigned=%s pool=%s carryIn=%s", epoch, dist.TotalAssigned, pools[epoch], carryIn)
+			}
+			cumAssigned.Add(cumAssigned, dist.TotalAssigned)
+			cumPools.Add(cumPools, pools[epoch])
+			if got := new(big.Int).Add(cumAssigned, bucket.Balance()); got.Cmp(cumPools) != 0 {
+				t.Fatalf("epoch %d conservation broken: assigned+bucket=%s pools=%s", epoch, got, cumPools)
 			}
 			entries := make([]*rewards.RewardEntry, len(dist.Shares))
 			for i, share := range dist.Shares {
