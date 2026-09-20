@@ -334,7 +334,7 @@ func readGovPayload(value string) (string, error) {
 }
 
 func govUsage() string {
-	return `Usage: nhb gov <command>
+	return `Usage: nhb-cli gov <command>
 
 Commands:
   propose   Submit a new governance proposal (--kind --payload --key --deposit)

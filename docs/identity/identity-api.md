@@ -300,7 +300,8 @@ without transferring additional funds.
 
 ## CLI Helpers
 
-The `nhb-cli` binary wraps the RPCs above:
+The `nhb-cli` binary wraps the RPCs above. Every command in the table that calls a retired method (all but `resolve` and
+`reverse`) says so and exits non-zero without contacting the node:
 
 | Command | Description |
 | --- | --- |

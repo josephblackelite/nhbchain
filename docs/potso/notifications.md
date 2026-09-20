@@ -57,8 +57,8 @@ Downstream services commonly deliver events using an HTTP POST with the followin
 * **Alerting:** trigger alerts when ready events remain unclaimed past SLA thresholds. History pagination exposes which entries
   are still pending.
 * **Auditing:** store webhook payloads (after signature verification) alongside the CSV exports to maintain a full audit trail.
-* **Testing:** use `nhb-cli potso reward claim` and `potso_export_epoch` against a devnet to validate webhook consumers before
-  flipping the production node to claim mode.
+* **Testing:** use `potso_export_epoch` against a devnet to validate webhook consumers. `nhb-cli potso reward claim` is
+  retired, so claim mode cannot be exercised end to end today.
 
 These guidelines keep notification pipelines resilient and verifiable while delivering real-time visibility into reward
 settlement.

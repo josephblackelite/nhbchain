@@ -48,7 +48,9 @@ rm -f validator.keystore
 export NHB_ENV="prod"
 
 echo "Generating new Hot Validator Key..."
-HOT_ADDRESS=$(./bin/nhb-cli generate-key | grep -oE 'nhb1[a-zA-Z0-9]+' | head -n 1)
+# --force: a wallet.key left by an earlier run is copied to wallet.key.bak-<time>
+# before it is replaced (generate-key refuses to overwrite a key otherwise).
+HOT_ADDRESS=$(./bin/nhb-cli generate-key --force | grep -oE 'nhb1[a-zA-Z0-9]+' | head -n 1)
 
 if [ -z "$HOT_ADDRESS" ]; then
     echo "Failed to generate Hot Address!"
