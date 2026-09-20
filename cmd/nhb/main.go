@@ -76,6 +76,8 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load config: %v", err))
 	}
+	// Every problem in the effective configuration is logged as a WARN; none stops the node.
+	checkConfiguration(logger, cfg)
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
 	if err != nil {

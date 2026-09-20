@@ -81,10 +81,18 @@ different rounds: a third before, none after).
 validator lets pass between seeing a block commit and starting the round of the next
 height: before it proposes, votes or starts that round's timers.
 
-* The default is one second. `0s` turns the wait off and the blocks then come as fast as
-  the validators can make them; a peer that is not a configured persistent peer is
-  disconnected when the messages of that many blocks pass the p2p rate limit (32 a
-  second with a burst of 200 by default).
+* The default is one second (a config that leaves the key out keeps it); the shipped
+  `config.toml` writes out `2s`, which is what both live validators run with. `0s`
+  turns the wait off and the blocks then come as fast as the validators can make them; a
+  peer that is not a configured persistent peer is disconnected when the messages of
+  that many blocks pass the p2p rate limit (32 a second with a burst of 200 by default).
+* The four round timers (`ProposalTimeout`, `PrevoteTimeout`, `PrecommitTimeout`,
+  `CommitTimeout`) that a config writes as `0s` run on the engine's defaults, 2 s, 2 s,
+  2 s and 4 s, which is what the live validators do; the shipped `config.toml` writes
+  those values out because `consensusd` refuses a timer that is not positive. At start-up
+  `nhb` checks the settings it will actually use (a timer that is not positive counted
+  as its default) and logs a `configuration problem` warning, with the section and the
+  problem, for each one it finds; it never refuses to start because of them.
 * It is local to the validator. It is not a rule a block is checked against, it puts
   nothing in a message and changes nothing a validator signs or commits. Validators
   with different values, or one with none, take part in the same rounds, so a change
