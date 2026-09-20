@@ -14,13 +14,15 @@ validators exchange a proposal, a prevote and a precommit, and each commits. Bet
 two validators in step that takes a few tens of milliseconds, so a chain that stayed in
 step would commit 20 to 30 blocks a second.
 
-A chain does not stay in step, and the pace it keeps over minutes is decided by that,
-not by the speed of a height. A round that does not commit is not cut short: it lasts
-the whole commit timeout (4 s by default), and a height whose validators are not in the
-same round goes through several of them. Heights are therefore of two kinds and nothing
-between: a height that commits in its first round takes a tenth of a second at most, and
-a height that does not takes four seconds or more. Measured on a running two-validator
-chain, from the moment each height's first round started (almost every block empty):
+A chain stays in step only if its validators start every height in the same round, and
+the pace it keeps over minutes is decided by that, not by the speed of a height. A round
+that does not commit is not cut short: it lasts the whole commit timeout (4 s by
+default), and a height whose validators are not in the same round goes through several
+of them. Heights are therefore of two kinds and nothing between: a height that commits in
+its first round takes a tenth of a second at most, and a height that does not takes four
+seconds or more. Measured on a running two-validator chain, from the moment each
+height's first round started (almost every block empty), with engines from before the two
+validators were made to start every height in the same round (below):
 
 | stretch of the chain | heights | blocks/s | heights done in 0.25 s | heights of 4 s or more | share of the time spent in those |
 | --- | --- | --- | --- | --- | --- |
@@ -34,21 +36,44 @@ The median height took 34 to 51 ms in every stretch. What differed is how often 
 height stalled and for how long (without the round-bound changes 2.9% of all heights go
 through five rounds or more, with them 0.2%), and that alone moved the pace from 0.4 to
 2.4 blocks a second with the machines and the chain unchanged.
-`TestCadenceReport` (`consensus/bft/cadence_test.go`) runs two real engines on a rig
-that reproduces it: with the same height of about 35 ms and the stalls of a running pair,
-the engine without the round-bound changes commits 0.4 to 0.9 blocks a second and the
-one with them 1.6 to 3.4.
 
-Why heights stall: the two validators leave a height in different rounds. After a
-validator commits a block itself it starts the next height in round 1; after the node
-takes a block from its peer it starts in round 0. A validator sends nothing in a round in
-which it neither proposes nor has received a proposal, so validators a round apart hear
-nothing from each other until a round comes whose proposer is the one that is ahead;
-the one behind then moves up to it at once (the round-bound changes added that; before
-them it got there only when its own round timer happened to bring it there). In the
-rig every stalled height follows a height one of the validators took through the sync
-path, and none stalls otherwise (0 of 2,158 heights in six runs); with the round-bound
-changes about half of the heights that follow one stall, without them all do.
+Why heights stalled: the two validators started a height in different rounds. A validator
+sends nothing in a round in which it neither proposes nor has a proposal to vote on, so two
+validators a round apart hear nothing from each other until a round comes whose proposer is
+the one that is ahead (the one behind then moves up to it at once) or the round of the one
+behind times out. Two things put them a round apart:
+
+* A block the node took from its peer. A validator that committed a block itself started the
+  next height in round 1, and one that was told the block by its peer started it in round 0.
+* A signal for a block the engine had committed itself. The peer's copy of a block reaches a
+  node while its engine is committing the same one, and the node answers the second commit of
+  a block it already holds with no error: the sync path then tells the engine about a block
+  the engine has already counted. The signal ended the first round of the next height before
+  anything had been done in it, and the height started in round 2 at that validator and in
+  round 1 at the other. It is the larger of the two: on the rig it needs no hiccup and no
+  difference in speed between the validators.
+
+Both are fixed. Every height starts in round 1 at both validators, whichever way the height
+before it ended (a commit of its own, a block from the peer, a restart), and a signal for a
+block the chain has not reached at the height of the round changes nothing. It is round 1 and
+not 0 because a validator that still runs the engine without this change starts the height
+after its own commit in round 1, and a pair of one of each must agree: such a pair is no worse
+than two of the old ones. The change is local. Nothing goes in a message, and nothing a
+validator signs, votes for or commits changes; the restart rules (a validator never starts a
+round it signed in), the lock, moving to a later round on the evidence of a quorum, the
+buffers of messages and the minimum block interval work as they did.
+
+`TestCadenceReport` (`consensus/bft/cadence_test.go`) runs two real engines on a rig that
+reproduces it: two validators that take 5 ms for a build, a validation and a commit, messages
+that cross in 1 ms, hiccups in 3% of the steps (up to 40 ms at one validator, half of that at
+the other), and a node that answers the second commit of a block with no error. With the
+engine from before the change, at a one-second interval, it commits 0.45 blocks a second (a
+height takes 2.2 s on average and the longest 33 s), 15% of the heights stall, a third of them
+are decided after their first round and 14% in round 3 or later: close to what the running
+pair did (0.5 blocks a second, 11% of the heights in round 3 or later). With the change it
+commits 0.97 blocks a second, no height stalls, and every height is decided in its first round
+(2,000 heights each; the report also counts the heights whose two validators started in
+different rounds: a third before, none after).
 
 ## The minimum block interval
 
@@ -72,28 +97,30 @@ height: before it proposes, votes or starts that round's timers.
   saw. It does not delay a round that follows a failed one, nor the first round of a
   validator that has just started, and a validator that has just taken the last blocks
   from its peer waits at most the interval after the last of them.
-* The pace with it is at most one block per interval. The stalls are not removed by it
-  (see above), so the pace over minutes is a little below that. On the rig, with the
-  stalls of a running pair:
+* The pace with it is one block per interval plus what a height itself takes, about 30 ms
+  between two validators in step: about `1 / (interval + 0.03 s)`. The two validators start
+  every height in the same round (see above), so no height waits out a failed round and that
+  is the pace over minutes. On the rig, with its hiccups on, for the engine from before that
+  change and for the engine now:
 
-| interval | blocks a second | heights that stalled |
-| --- | --- | --- |
-| none, without the round-bound changes | 0.4 to 0.9 | 7 to 14% |
-| none, with the round-bound changes | 1.6 to 3.4 | 3.5 to 7% |
-| 500 ms | 1.0 to 1.2 | 4.5 to 7% |
-| 750 ms | 0.84 to 1.0 | 3 to 6% |
-| 1 s (default) | 0.69 to 0.84 | 2 to 5% |
-| 1.25 s | 0.57 to 0.74 | 1 to 5% |
-| 2 s | 0.42 to 0.44 | 4 to 5.5% |
+| interval | blocks a second before | blocks a second now | heights that stalled before | now |
+| --- | --- | --- | --- | --- |
+| 500 ms | 0.65 | 1.89 | 14% | 0 |
+| 750 ms | 0.59 | 1.29 | 12% | 0 |
+| 1 s (default) | 0.45 | 0.97 | 15% | 0 |
+| 1.25 s | 0.49 | 0.78 | 10% | 0 |
+| 2 s (the longest at the default commit timeout) | 0.33 | 0.49 | 14% | 0 |
+| 2.5 s (commit timeout 5 s) | 0.25 | 0.40 | 15% | 0 |
 
-(Two settings of the rig's hiccups, two or three runs of 400 heights for each figure. The
-rig reproduces how many heights stall, not the pace to the last digit: for the engine
-without the round-bound changes it gives 0.4 to 0.9 where the running pair kept 0.8.
-Pace is about `1 / (interval + 0.04 s + the cost of the stalls per height)`, and the
-stalls cost about 0.3 s a height with the round-bound changes.)
+(2,000 heights for each figure at 1 s, 2 s and 2.5 s and 1,000 for the others, with the timers
+of the rig a tenth of the defaults and the figures converted back to a chain with the default
+timers; the first column varies by about 0.05 blocks a second from one run to the next, since
+what it measures is a few long stalls. The rig has no round that fails for another reason -- a
+proposal that does not validate, a validator that is down -- and such a round still lasts the
+commit timeout.)
 
 To slow the chain to the 2.5 s a block that the reward schedule was written for, set
-`CommitTimeout` to at least 5 s and `MinBlockInterval` to 2.5 s.
+`CommitTimeout` to at least 5 s and `MinBlockInterval` to 2.5 s: a block then takes 2.53 s.
 
 ## What counts blocks
 

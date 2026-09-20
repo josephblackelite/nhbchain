@@ -291,8 +291,8 @@ loop:
 		}
 	}
 	s.stop.Store(true)
-	s.engA.NotifyExternalCommit()
-	s.engB.NotifyExternalCommit()
+	endRound(s.engA)
+	endRound(s.engB)
 	for _, done := range []chan struct{}{s.doneA, s.doneB} {
 		if done == nil {
 			continue
