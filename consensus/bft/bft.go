@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -166,6 +167,16 @@ type Engine struct {
 	// transaction at all. Zero disables the fallback. Both are guarded by mu.
 	ownFailed  map[uint64]int
 	emptyAfter int
+
+	// signed is the record of the last vote this validator signed, and
+	// signStatePath (WithSignStatePath) is where it is made durable. Together
+	// they are the double-sign guard: createVote signs nothing that conflicts
+	// with them (see sign_state.go). signMu guards both; createVote takes it
+	// while mu may already be held (broadcastPrevoteNilLocked), so the lock
+	// order is always mu, then signMu, never the reverse.
+	signMu        sync.Mutex
+	signed        signState
+	signStatePath string
 }
 
 // defaultEmptyAfterFailures is how many of its own failed proposals at one
@@ -383,6 +394,11 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		}
 	}
 
+	// Restore the double-sign record: what this validator signed before this
+	// start. Without it a restart in the middle of a height forgets every vote
+	// and can sign a different block for a round it already voted in.
+	engine.restoreSignState()
+
 	return engine
 }
 
@@ -461,9 +477,7 @@ func (e *Engine) runRound() {
 			}
 			if err := e.node.ValidateBlock(sp.Proposal.Block); err != nil {
 				fmt.Printf("rejected invalid proposal for height %d: %v\n", sp.Proposal.Block.Header.Height, err)
-				e.mu.Lock()
-				e.broadcastPrevoteNilLocked(fmt.Sprintf("invalid proposal: %v", err))
-				e.mu.Unlock()
+				e.rejectProposal(err)
 				continue
 			}
 			if e.acceptProposal(sp) {
@@ -495,6 +509,26 @@ func (e *Engine) runRound() {
 		if committed {
 			return
 		}
+	}
+}
+
+// rejectProposal answers a proposal that failed validation with a prevote for
+// nil -- once. A validator votes once per round: if it has already prevoted in
+// this round (for a block, or nil) a further proposal, however bad, draws no
+// second vote. Before this, the nil prevote was signed regardless, so a bad
+// proposal that followed a good one made this validator sign two conflicting
+// prevotes for one round, which anyone can turn into a slashing proof. The
+// double-sign guard in createVote refuses the second vote on its own; checking
+// here as well keeps the intent readable and the log quiet.
+func (e *Engine) rejectProposal(reason error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.prevoteSent {
+		fmt.Printf("PREVOTE NIL: not voting again: this validator already prevoted in round %d\n", e.currentState.Round)
+		return
+	}
+	if e.broadcastPrevoteNilLocked(fmt.Sprintf("invalid proposal: %v", reason)) {
+		e.prevoteSent = true
 	}
 }
 
@@ -780,6 +814,12 @@ func (e *Engine) prevote() {
 
 	vote, err := e.createVote(Prevote, blockHash, round, height)
 	if err != nil {
+		if errors.Is(err, errConflictingVote) {
+			// This validator already voted in this round for something else. That
+			// vote stands and no other is sent, so prevoteSent stays set.
+			fmt.Printf("PREVOTE: not voting for block %x: %v\n", blockHash, err)
+			return
+		}
 		fmt.Printf("failed to create prevote: %v\n", err)
 		e.mu.Lock()
 		e.prevoteSent = false
@@ -914,6 +954,12 @@ func (e *Engine) precommit() {
 
 	vote, err := e.createVote(Precommit, blockHash, round, height)
 	if err != nil {
+		if errors.Is(err, errConflictingVote) {
+			// Already precommitted in this round for something else: that vote
+			// stands and no other is sent, so precommitSent stays set.
+			fmt.Printf("PRECOMMIT: not voting for block %x: %v\n", blockHash, err)
+			return
+		}
 		fmt.Printf("failed to create precommit: %v\n", err)
 		e.mu.Lock()
 		e.precommitSent = false
@@ -948,7 +994,13 @@ func (e *Engine) commit() bool {
 		return false
 	}
 
-	// Try to commit the block; on failure, broadcast prevote(nil) and reset.
+	// Try to commit the block; on failure, broadcast prevote(nil) and reset. A
+	// validator that already prevoted this block in this round (the usual case:
+	// it prevoted and precommitted it before getting here) does not get to
+	// change that vote: the prevote for nil is then refused by the double-sign
+	// guard and only the reset happens. The reset clears the "already voted"
+	// flags for the next proposal, but not the guard's record, so no proposal in
+	// this round can draw a vote that conflicts with the ones already signed.
 	block := e.activeProposal.Proposal.Block
 	block.QuorumCert = e.buildQuorumCertLocked(block, e.activeProposal.Proposal.Round)
 	fmt.Printf("COMMIT: Attempting to commit block %d.\n", block.Header.Height)
@@ -1121,7 +1173,15 @@ func (e *Engine) broadcastVote(vote *SignedVote) {
 	e.broadcaster.Broadcast(msg)
 }
 
+// createVote is the only place a vote is signed. It first claims the vote's
+// slot with the double-sign guard (claimVote): a validator that has already
+// signed a different value for this height, round and vote type -- or has
+// already signed for a later round -- gets errConflictingVote and no signature,
+// whichever path asked. See sign_state.go.
 func (e *Engine) createVote(t VoteType, blockHash []byte, round int, height uint64) (*SignedVote, error) {
+	if err := e.claimVote(t, blockHash, round, height); err != nil {
+		return nil, err
+	}
 	vote := &Vote{BlockHash: blockHash, Round: round, Type: t, Height: height}
 	voteHash := sha256.Sum256(vote.bytes())
 	sig, err := ethcrypto.Sign(voteHash[:], e.privKey.PrivateKey)
@@ -1257,18 +1317,28 @@ func stopTimer(t *time.Timer) {
 	}
 }
 
+// broadcastPrevoteNilLocked signs and broadcasts a prevote for nil in the current
+// round and reports whether it did. It does not when this validator has already
+// voted in the round for anything else (the double-sign guard refuses -- a nil
+// prevote after a block prevote is exactly the conflicting pair a slashing proof
+// is made of), when it cannot sign, or when there is no broadcaster.
+//
 // NOTE: called with e.mu **locked**
-func (e *Engine) broadcastPrevoteNilLocked(reason string) {
+func (e *Engine) broadcastPrevoteNilLocked(reason string) bool {
 	if e.broadcaster == nil {
-		return
+		return false
 	}
 	round := e.currentState.Round
 	height := e.currentState.Height
 
 	vote, err := e.createVote(Prevote, nil, round, height) // nil = vote for NIL
 	if err != nil {
-		fmt.Printf("failed to create prevote nil: %v\n", err)
-		return
+		if errors.Is(err, errConflictingVote) {
+			fmt.Printf("PREVOTE NIL: not voting nil (%s): %v\n", reason, err)
+		} else {
+			fmt.Printf("failed to create prevote nil: %v\n", err)
+		}
+		return false
 	}
 
 	if _, ok := e.receivedVotes[Prevote]; !ok {
@@ -1280,9 +1350,10 @@ func (e *Engine) broadcastPrevoteNilLocked(reason string) {
 	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: payload}
 	if err := e.broadcaster.Broadcast(msg); err != nil {
 		fmt.Printf("failed to broadcast prevote nil: %v\n", err)
-		return
+		return false
 	}
 	fmt.Printf("PREVOTE NIL: Broadcasting nil vote: %s\n", reason)
+	return true
 }
 
 // NOTE: called with e.mu **locked**
@@ -1367,6 +1438,16 @@ func (e *Engine) startNewRound() {
 	e.recalculateVotingPowerLocked()
 	if nextRound, ok := e.nextBufferedRoundLocked(e.currentState.Height, e.currentState.Round+1); ok {
 		e.currentState.Round = nextRound
+	}
+	// Never start a round this validator has already signed in (or one before
+	// it): the double-sign guard would refuse every vote there, so the round
+	// could only be dead. This is what a restart does -- the engine comes back at
+	// the first round of the height while its record says it voted in a later one
+	// -- and it skips the rounds in between at once instead of waiting each out.
+	// In a running process it changes nothing: the round has always moved past the
+	// last one signed in.
+	if floor, ok := e.signedRoundFloor(e.currentState.Height); ok && e.currentState.Round <= floor {
+		e.currentState.Round = floor + 1
 	}
 	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
