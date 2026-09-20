@@ -3440,6 +3440,8 @@ const (
 //     become valid.
 //   - ErrPOSInvalidAuthorizationID: a capture or void whose authorization id
 //     is not 64 hex characters is decided by the payload alone.
+//   - ErrBuybackAskTooSmall: an ask below the fixed minimum is decided by its
+//     own amount.
 //   - ErrPOSRegistryInvalidPayload, pos.ErrInvalidRequest, pos.ErrStaleNonce: a
 //     registry transaction that does not decode, names no registry message,
 //     claims an authority other than its signer or breaks a rule of the
@@ -3539,6 +3541,8 @@ const (
 //   - swap.ErrVoucherNotFound: a TxTypeSwapMarkReconciled naming a provider
 //     transaction id the ledger does not know yet; the voucher can still be
 //     minted by a later transaction (ErrSwapVoucherReversalNotFound's reasoning).
+//   - ErrBuybackAskLimit: the epoch's ask list, or the seller's share of it, is
+//     full; the count starts again with the next epoch.
 //   - ErrPOSRegistryUnauthorized, pos.ErrDeviceNotRegistered: a registry change
 //     whose signer is neither the merchant's owner nor a holder of
 //     RolePOSRegistryAdmin (the role can be granted later), and a change to a
@@ -3745,6 +3749,8 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// by its own bytes; a nonce at or below the authority's last one can
 		// never be valid again, since that nonce only grows.
 		errors.Is(err, ErrPOSRegistryInvalidPayload),
+		// A buyback ask under the minimum is a pure function of its own amount.
+		errors.Is(err, ErrBuybackAskTooSmall),
 		errors.Is(err, pos.ErrInvalidRequest),
 		errors.Is(err, pos.ErrStaleNonce),
 		// An owner naming a wallet other than its own as the loyalty paymaster
@@ -3802,6 +3808,9 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// a device that is not registered yet, which can still be registered.
 		errors.Is(err, ErrPOSRegistryUnauthorized),
 		errors.Is(err, pos.ErrDeviceNotRegistered),
+		// The ask list of an epoch is full, or the seller's share of it is; the
+		// count starts again with the next epoch.
+		errors.Is(err, ErrBuybackAskLimit),
 		// A same-block-or-later credit to the voucher's recipient could
 		// make a currently-insufficient reversal succeed on a later
 		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning

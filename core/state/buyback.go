@@ -37,6 +37,21 @@ func (m *Manager) BuybackAsksForEpoch(epoch uint64) ([]BuybackAskRecord, error) 
 	return asks, nil
 }
 
+// BuybackAskCounts returns how many asks are pending for the epoch in all, and
+// how many of them are the seller's.
+func (m *Manager) BuybackAskCounts(epoch uint64, seller [20]byte) (total, bySeller int, err error) {
+	asks, err := m.BuybackAsksForEpoch(epoch)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, ask := range asks {
+		if ask.Seller == seller {
+			bySeller++
+		}
+	}
+	return len(asks), bySeller, nil
+}
+
 // BuybackAppendAsk records a new pending ask for the given epoch. Unlike
 // KVAppend, this never deduplicates -- two identical {seller, amount} asks
 // from the same seller in the same epoch are both real, independent
