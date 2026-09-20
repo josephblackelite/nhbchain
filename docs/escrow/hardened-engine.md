@@ -24,7 +24,7 @@ For the status machine, fees and transaction table see [`escrow.md`](./escrow.md
    | `TxTypeDelegatedReleaseEscrow`, `...RefundEscrow`, `...DisputeEscrow` | `Engine.ReleaseWithSignature`, `RefundWithSignature`, `DisputeWithSignature` |
    | `TxTypeEscrowCreateRealm`, `TxTypeEscrowUpdateRealm` | `Engine.CreateRealm`, `Engine.UpdateRealm` (after a `ROLE_ESCROW_REALM_ADMIN` check) |
 
-   After the engine call succeeds the sender's account nonce is incremented on the freshly persisted account (`updateSenderNonce`), so balance changes made by the engine are preserved. The arbitration handler (`applyArbitrate`) does not increment the sender nonce.
+   After the engine call succeeds the sender's account nonce is incremented on the freshly persisted account (`updateSenderNonce`), so balance changes made by the engine are preserved. The arbitration handler (`applyArbitrate`) also advances the sender nonce after `ResolveWithSignatures` succeeds, although the sender is not authorized by the transaction.
 3. **Fee treasury.** `StateProcessor.SetEscrowFeeTreasury` sets the address that receives escrow fees; the node wires it when it starts (`core/node.go`). The engine returns `escrow engine: fee treasury not configured` if a release or refund has a non-zero fee and no treasury is set.
 4. **Trade engine.** The trade engine is constructed and configured in the same place, but no escrow transaction handler notifies it: `applyLockEscrow` calls only `Engine.Fund`. See [`trade.md`](./trade.md).
 
@@ -64,9 +64,9 @@ escrowID = keccak256(payer || payee || metaHash || nonce)
 
 ## Behavioural notes
 
-* **Nonce handling.** Handlers increment the sender nonce after the engine mutates state.
+* **Nonce handling.** Handlers, including the arbitration handler, increment the sender nonce after the engine mutates state.
 * **Idempotency.** Repeating fund, release, refund, expire or dispute on an escrow that already reached the target state succeeds without change. `ResolveWithSignatures` returns success without change for any escrow that is already `released`, `refunded` or `expired`, whatever the decision submitted (`native/escrow/engine.go`).
-* **Determinism.** The engine's clock is the block timestamp (`sp.now()`), and the expiry handler passes the block timestamp explicitly.
+* **Determinism.** The engine's clock is the block timestamp (`sp.blockTimestamp()`, set through `SetNowFunc` in `configureTradeEngine`), and the expiry handler passes the block timestamp explicitly.
 * **Events.** Every engine call appends the events listed in [`escrow.md`](./escrow.md) section 6.
 
 ## Legacy migration
@@ -74,7 +74,7 @@ escrowID = keccak256(payer || payee || metaHash || nonce)
 When a handler looks up an escrow ID and the modern record does not exist, `ensureEscrowReady` calls `migrateLegacyEscrow` (`core/state_transition.go`):
 
 * The legacy record is read from the trie key `keccak256("escrow-" || id)` and decoded as an `escrow.LegacyEscrow` (`buyer`, `seller`, `amount`, `status`).
-* It is converted by `convertLegacyEscrow`: payer = legacy seller, payee = legacy buyer (or the seller if no buyer), token `NHB`, no mediator, `feeBps` 0, nonce 1, `createdAt` = now, `deadline` = now + 30 days. Legacy status maps as: released to `released`, refunded to `refunded`, disputed to `disputed`, open or in-progress (and anything else) to `funded`.
+* It is converted by `convertLegacyEscrow`: payer = legacy seller, payee = legacy buyer (or the seller if no buyer), token `NHB`, no mediator, `feeBps` 0, nonce 1, `createdAt` = block time, `deadline` = block time + 30 days (`convertLegacyEscrow` uses `sp.blockTimestamp()`). Legacy status maps as: released to `released`, refunded to `refunded`, disputed to `disputed`, open or in-progress (and anything else) to `funded`.
 * For `funded` and `disputed` results the amount is credited to the escrow's vault balance and to the vault account, so later releases and refunds operate on real balances.
 * The legacy key is cleared so the migration runs once.
 

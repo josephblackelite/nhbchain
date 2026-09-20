@@ -18,7 +18,7 @@ Code: `core/mint.go`, `core/node.go` (`MintWithSignature`), `core/state_transiti
 | `recipient` | string | An NHB bech32 address, or an identity alias. The address is tried first; if it does not decode, the value is resolved through the identity registry (`IdentityResolve`, primary address). |
 | `token` | string | Trimmed and upper-cased. Only `NHB` is accepted. |
 | `amount` | string | Base-unit integer, strictly positive. |
-| `chainId` | number | Must equal `core.MintChainID` (`430060579445266314`). |
+| `chainId` | number | Must equal the constant `core.MintChainID` (`430060579445266314`, `core/mint.go`), checked in `Node.MintWithSignature` and again in `applyMintTransaction`. It is a fixed number in the source, not read from the running chain: the shipped configuration's network id is `18346390202490284624` (`config.toml`, `NetworkId`), so a voucher that carries the running chain's id is refused with `ErrMintInvalidChainID`. |
 | `expiry` | number | Unix seconds. Must be later than the current time (node time when submitting, block time when executing). |
 
 The mint transaction itself uses chain ID `types.NHBChainID()` (`0x4e4842`), gas limit 0 and gas price 0, and has no sender signature; the voucher signature is the authorization (`RequiresSignature(TxTypeMint)` is false).
@@ -37,7 +37,7 @@ Go helpers: `core.MintVoucher.CanonicalJSON`, `Digest`, `core.MintVoucherHash`.
 `applyMintTransaction` checks, in this order: decode payload; positive amount; `chainId`; expiry against block time; canonical JSON; 65-byte signature; token is not ZNHB and is NHB; non-empty `invoiceId` and `recipient`; the token's `MintPaused` metadata flag (`ErrMintPaused`); signer holds `MINTER_NHB` (`ErrMintInvalidSigner`); invoice not already used (`ErrMintInvoiceUsed`); recipient resolvable (`ErrMintRecipientUnresolved`); yearly emission cap.
 
 * **Replay protection.** A successful mint stores a flag under the invoice key (`MintInvoiceKey`) in state. The mempool also rejects a second pending mint transaction with the same invoice ID.
-* **Emission cap.** The governance parameter `mint.nhb.maxEmissionPerYearWei` sets the maximum NHB minted per calendar year (UTC, by block time). Unset, empty, or `0` means no cap. Exceeding it fails with `ErrMintEmissionCapExceeded`. The year-to-date total is tracked in state.
+* **Emission cap.** The governance parameter `mint.nhb.maxEmissionPerYearWei` sets the maximum NHB minted per calendar year (UTC, by block time). The value may be stored bare or as a quoted decimal string (`nativecommon.ParamDecimal`, `mintMaxEmissionPerYear` in `core/state_transition.go`). Unset, empty, or `0` means no cap. Exceeding it fails with `ErrMintEmissionCapExceeded`. The year-to-date total is tracked in state.
 * **Supply.** The recipient's NHB balance is credited, the tracked total NHB supply is increased by the amount, and a supply-change event is recorded.
 
 ## Event

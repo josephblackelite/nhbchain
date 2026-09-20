@@ -45,6 +45,8 @@ The sample genesis files under `config/` set `priceGuard.enabled` true, `twapWin
 * When the price is unavailable: if `useLastGoodPriceFallback` is true and any earlier proof exists, that price is used and the fallback signal has strategy `last_good_price`; otherwise `budget` is 0.
 * If `fallbackMinEmissionZNHB` is greater than zero and `budget` is 0 or lower than it, `budget` becomes that minimum (strategy `min_emission`, unless `last_good_price` already applied).
 
+The remaining budget and the day's paid and proposed totals are readable over RPC with `nhb_getLoyaltyBudgetStatus` (see [`loyalty.md`](./loyalty.md) section 6); the values come from `Node.LoyaltyBudgetStatus`, which calls the same `GetRemainingDailyBudgetZNHB` the settlement uses.
+
 A fallback signal increments the Prometheus counter `nhb_loyalty_price_fallback_total{strategy}` and emits `loyalty.price.fallback` with attributes `strategy`, `base`, `budget`.
 
 `twapWindowSeconds` and `maxDeviationBps` are stored and validated but no code reads them, so there is no TWAP or deviation check.
@@ -56,7 +58,7 @@ When the stored `dynamic.enableProRate` is true (the default, and the only value
 1. `demand` is the sum of the block's queued rewards; it is added to the day's "proposed" total.
 2. `budget` is the remaining daily budget (above).
 3. The ratio is `1` if `budget >= demand`, `budget / demand` if `0 < budget < demand`, and `0` if `budget <= 0`.
-4. Each reward is paid as `reward * ratio` (integer division), never more than the remaining budget and never more than the treasury's balance, moved from the treasury account to the spender. The amount paid is added to the day's "paid" total.
+4. Each reward is paid as `reward * ratio` (integer division), never more than the remaining budget and never more than the treasury's balance, moved from the treasury account to the spender. The amount paid is added to the day's "paid" total. If the treasury is the node's admin/treasury wallet, the ZNHB Reward Pool ledger is adjusted by the net movement of the whole step in the same state transition (see [`payouts.md`](./payouts.md)).
 5. If the ratio is below 1, `loyalty.budget.prorated` is emitted with `day` (`YYYY-MM-DD`), `budget_zn`, `demand_zn` and `ratio_fp` (ratio scaled by `1e18`).
 6. Prometheus gauges are updated: `nhb_loyalty_budget_zn`, `nhb_loyalty_demand_zn`, `nhb_loyalty_prorate_ratio`, `nhb_loyalty_paid_today_zn` (the amounts are wei values converted to `float64`, not whole-ZNHB units; the ratio gauge is 0 to 1).
 

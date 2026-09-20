@@ -7,7 +7,7 @@ A pointer page for integrators building escrow and loyalty flows. Each item link
 * State machine, transaction types, fees, arbitration: [`../escrow/escrow.md`](../escrow/escrow.md).
 * Transaction routing inside the state processor: [`../escrow/hardened-engine.md`](../escrow/hardened-engine.md).
 * REST gateway for relayed escrow actions (`services/escrow-gateway`): [`../escrow/gateway-api.md`](../escrow/gateway-api.md) and [`../escrow/nhbchain-escrow-gateway.md`](../escrow/nhbchain-escrow-gateway.md).
-* Milestone projects: [`../escrow/milestones.md`](../escrow/milestones.md).
+* Milestone projects: [`../escrow/milestones.md`](../escrow/milestones.md) (only the read method `escrow_milestoneGet` is live; the write methods answer HTTP 410).
 * Command line: `nhb-cli escrow ...` (see [`../escrow/escrow.md`](../escrow/escrow.md) section 8).
 
 ## Payee alias lookup for escrows (API gateway)

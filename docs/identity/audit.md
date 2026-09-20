@@ -22,7 +22,7 @@ The one live way to create an alias, `TxTypeRegisterIdentity` (`applyRegisterIde
 
 ## Where events go
 
-Events emitted during block execution are appended to the block's event list (`StateProcessor.AppendEvent`). The node exposes recent events of the escrow module through `escrow_listEvents`; there is no identity-specific event RPC.
+Events emitted during block execution are appended to the block's event list (`StateProcessor.AppendEvent`). The node keeps committed events in a bounded in-memory log (the last 20,000 events, plus up to 100,000 fee, POTSO-penalty and `escrow.` events kept separately; `core/event_log.go`) and exposes the `escrow.` ones through `escrow_listEvents`; there is no identity-specific event RPC.
 
 ## Identity gateway records
 
