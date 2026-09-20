@@ -2,7 +2,6 @@ package subscriptions_test
 
 import (
 	"errors"
-	"math/big"
 	"testing"
 
 	subscriptions "nhbchain/native/subscriptions"
@@ -28,7 +27,7 @@ func TestRegistryCreateSubscription_RejectsSelfSubscription(t *testing.T) {
 		PlanID:          plan.ID,
 		Payer:           account,
 		Merchant:        account,
-		PriceWei:        big.NewInt(10_000),
+		PriceWei:        subscriptions.MinPlanPriceWei(),
 		Asset:           subscriptions.AssetNHB,
 		IntervalSeconds: 86400,
 		Status:          subscriptions.SubscriptionStatusActive,

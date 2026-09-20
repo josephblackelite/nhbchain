@@ -102,11 +102,11 @@ func (sp *StateProcessor) settleSubscriptionsDueOnDay(manager *nhbstate.Manager,
 		return nil
 	}
 	// Settling an entry can schedule the same subscription again on this very
-	// day: a retry shorter than the time left in the day, or a billing
-	// interval under a day. Those entries are appended to the bucket being
-	// settled, so the bucket is not cleared as a whole: only the entries read
-	// above and handled are removed, and the ones a charge added stay for a
-	// later pass, which charges them once they are due.
+	// day: a retry shorter than the time left in the day (a billing interval is
+	// at least a day, so the next cycle never lands on it). That entry is
+	// appended to the bucket being settled, so the bucket is not cleared as a
+	// whole: only the entries read above and handled are removed, and the ones a
+	// charge added stay for a later pass, which charges them once they are due.
 	handled := make([]subscriptions.SubscriptionID, 0, len(due))
 	for _, subID := range due {
 		done, err := sp.settleOneSubscriptionCharge(manager, registry, cfg, subID, now)
@@ -140,9 +140,9 @@ func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager,
 	}
 	// The bucket is a calendar day, the charge time is a second. Today's
 	// bucket is scanned on every block, so an entry whose own NextChargeAt is
-	// still ahead (a retry or a short interval scheduled for later today) has
-	// to wait for it: charging it on the next block would bill the payer a
-	// block after the last attempt instead of one interval after it.
+	// still ahead (a retry, or a trial that ends, later today) has to wait for
+	// it: charging it on the next block would bill the payer a block after the
+	// last attempt instead of one interval after it.
 	if sub.NextChargeAt > now {
 		return false, nil
 	}

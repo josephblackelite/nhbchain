@@ -110,9 +110,14 @@ func (f *treasuryFixture) assertDeltas(label, asset string, before map[[20]byte]
 // --- subscription billing ----------------------------------------------------
 
 const (
-	subscriptionTestPrice = 100_000
-	subscriptionTestFee   = 1_000 // the 1% management fee on the price
+	subscriptionTestPrice   = 1_000_000_000_000_000_000 // the smallest price a plan may have: one whole token
+	subscriptionTestFee     = 10_000_000_000_000_000    // the 1% management fee on the price
+	subscriptionTestFunding = 5 * subscriptionTestPrice // what each account starts with
 )
+
+// subscriptionTestSupply is the ZNHB the treasury wallet holds in these tests,
+// enough for it to pay a plan's price when it is the payer.
+var subscriptionTestSupply = new(big.Int).Mul(big.NewInt(subscriptionTestPrice), big.NewInt(100))
 
 func subscriptionTestSetup(f *treasuryFixture, asset subscriptions.Asset, payer, merchant, treasury int) {
 	f.t.Helper()
@@ -195,13 +200,13 @@ func (f *treasuryFixture) storeSubscription(asset subscriptions.Asset, payer, me
 // Subscribe refuses it, so that subscription is stored directly.
 func chargeSubscriptionForRoles(t *testing.T, asset subscriptions.Asset, who []int) {
 	t.Helper()
-	f := newTreasuryFixture(t)
+	f := newTreasuryFixtureWithSupply(t, subscriptionTestSupply)
 	payer, merchant, treasury := who[0], who[1], who[2]
 	for _, id := range who {
-		f.fund(id, 5_000_000)
+		f.fund(id, subscriptionTestFunding)
 	}
 	for _, id := range who {
-		f.fundNHB(id, 5_000_000)
+		f.fundNHB(id, subscriptionTestFunding)
 	}
 	subscriptionTestSetup(f, asset, payer, merchant, treasury)
 
@@ -243,11 +248,11 @@ func TestSubscriptionChargeRolesConserveNHB(t *testing.T) {
 func TestSelfSubscriptionDoesNotMint(t *testing.T) {
 	for _, asset := range []subscriptions.Asset{subscriptions.AssetZNHB, subscriptions.AssetNHB} {
 		t.Run(string(asset), func(t *testing.T) {
-			f := newTreasuryFixture(t)
+			f := newTreasuryFixtureWithSupply(t, subscriptionTestSupply)
 			const user, feeTreasury = 0, 1
 			for _, id := range []int{user, feeTreasury} {
-				f.fund(id, 5_000_000)
-				f.fundNHB(id, 5_000_000)
+				f.fund(id, subscriptionTestFunding)
+				f.fundNHB(id, subscriptionTestFunding)
 			}
 			subscriptionTestSetup(f, asset, user, user, feeTreasury)
 

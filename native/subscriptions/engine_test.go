@@ -1,6 +1,7 @@
 package subscriptions
 
 import (
+	"math"
 	"math/big"
 	"testing"
 )
@@ -148,5 +149,53 @@ func TestComputeManagementFee_NeverExceedsAmount(t *testing.T) {
 	fee := ComputeManagementFee(big.NewInt(3), cfg)
 	if fee.Cmp(big.NewInt(3)) > 0 {
 		t.Fatalf("fee %s must never exceed the amount 3", fee)
+	}
+}
+
+// The next charge of a subscription is never scheduled sooner than a day after
+// the last one, whatever interval the record carries: a plan cannot be created
+// with a shorter one, but a record that got into state some other way must not
+// make the chain charge its payer on every block.
+func TestDecideCharge_NextCycleIsNeverSoonerThanTheMinimumInterval(t *testing.T) {
+	cfg := testConfig()
+	const now = uint64(1_800_000_000)
+	for _, interval := range []uint64{0, 1, 60, 3600, MinPlanIntervalSeconds - 1} {
+		sub := &Subscription{PriceWei: big.NewInt(10_000), IntervalSeconds: interval}
+		decision := DecideCharge(sub, cfg, big.NewInt(50_000), now)
+		if !decision.Success {
+			t.Fatalf("interval %d: expected success", interval)
+		}
+		if want := now + MinPlanIntervalSeconds; decision.NextChargeAt != want {
+			t.Fatalf("interval %d: next charge at %d, want %d (one day on)", interval, decision.NextChargeAt, want)
+		}
+	}
+	// An interval at or over the minimum is honoured as it is.
+	for _, interval := range []uint64{MinPlanIntervalSeconds, 2_592_000, MaxPlanIntervalSeconds} {
+		sub := &Subscription{PriceWei: big.NewInt(10_000), IntervalSeconds: interval}
+		decision := DecideCharge(sub, cfg, big.NewInt(50_000), now)
+		if want := now + interval; decision.NextChargeAt != want {
+			t.Fatalf("interval %d: next charge at %d, want %d", interval, decision.NextChargeAt, want)
+		}
+	}
+}
+
+// A time computed from a stored duration stops at the end of the uint64 range.
+// Wrapped around, it would be a time in the past, and a subscription due in the
+// past is charged again on the very next block.
+func TestDecideCharge_TimesSaturateInsteadOfWrappingToThePast(t *testing.T) {
+	cfg := testConfig()
+	const now = uint64(1_800_000_000)
+
+	sub := &Subscription{PriceWei: big.NewInt(10_000), IntervalSeconds: math.MaxUint64}
+	decision := DecideCharge(sub, cfg, big.NewInt(50_000), now)
+	if !decision.Success || decision.NextChargeAt != math.MaxUint64 {
+		t.Fatalf("a charge with the longest interval: success=%v next=%d, want next=%d", decision.Success, decision.NextChargeAt, uint64(math.MaxUint64))
+	}
+
+	cfg.RetryIntervalSeconds = math.MaxUint64
+	failing := &Subscription{PriceWei: big.NewInt(10_000), IntervalSeconds: 86400}
+	decision = DecideCharge(failing, cfg, big.NewInt(1), now)
+	if decision.Success || decision.NewStatus != SubscriptionStatusPastDue || decision.NextChargeAt != math.MaxUint64 {
+		t.Fatalf("a failed charge with the longest retry interval: %+v, want past due with the retry at %d", decision, uint64(math.MaxUint64))
 	}
 }

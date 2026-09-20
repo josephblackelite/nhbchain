@@ -70,10 +70,10 @@ func (m *Manager) SubscriptionsClearDue(day uint64) error {
 // from a day's due list and keeps every other entry, in order. One occurrence
 // is removed per processed id, so an id listed twice is removed twice only if
 // it was processed twice. Entries a pass appends to the day it is settling (a
-// retry or a short billing interval that lands on the same UTC day) sit behind
-// the ones it read, so they are never the first occurrence of a processed id
-// and survive. When nothing is left the bucket is deleted, which is exactly
-// what SubscriptionsClearDue leaves behind.
+// retry that lands on the same UTC day) sit behind the ones it read, so they
+// are never the first occurrence of a processed id and survive. When nothing
+// is left the bucket is deleted, which is exactly what SubscriptionsClearDue
+// leaves behind.
 func (m *Manager) SubscriptionsRemoveDue(day uint64, processed []subscriptions.SubscriptionID) error {
 	if len(processed) == 0 {
 		return nil

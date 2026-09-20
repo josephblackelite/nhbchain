@@ -22,7 +22,8 @@ full REST API built on top of it live in the `nhbportal` repository.
 1. **Create a Plan** — a merchant signs a transaction defining a
    recurring price. `PriceWei`/`Asset`/`IntervalSeconds`/`TrialPeriodSeconds`
    are fixed forever once the plan exists (see [Plan immutability](#plan-immutability)
-   below); only `Name` and `Active` can change later.
+   below) and must stay within the [plan limits](#plan-limits); only `Name`
+   and `Active` can change later.
 2. **Subscribe** — a payer signs a transaction naming a `PlanID`. This
    transaction moves no funds and requires no funds up front — it only
    records a standing authorization, snapshotting the plan's price/asset/
@@ -78,6 +79,29 @@ where it *did* retroactively reprice active subscribers — silently
 raising what someone already agreed to pay. `Name` and `Active` remain
 mutable so a merchant can rename a plan or stop it from accepting new
 subscribers without disturbing anyone already on it.
+
+## Plan Limits
+
+Every charge is made by the chain itself, in the lifecycle of a block, with
+no transaction paying for it, so how often a subscription is charged bounds
+the work a single subscribe transaction can cause. The terms of a plan are
+therefore checked against fixed limits when the plan is created, and a plan
+outside them is refused as an invalid plan (the block builder drops such a
+transaction rather than retrying it):
+
+| Term | Limit |
+| --- | --- |
+| `PriceWei` | at least one whole token (10^18 wei) of the plan's asset |
+| `IntervalSeconds` | from one day (86,400) to ten years (315,360,000) |
+| `TrialPeriodSeconds` | at most ten years (315,360,000); zero for no trial |
+
+The limits are constants of the chain software, not configuration. They are
+also enforced where the next charge is scheduled: whatever interval a
+subscription record carries, its next cycle is never scheduled sooner than a
+day after the last charge, and times saturate at the end of the `uint64`
+range instead of wrapping to the past. A subscription is therefore charged
+at most once a day, plus at most `MaxRetries` attempts after a failed charge
+(spaced `RetryIntervalSeconds` apart) before it is suspended.
 
 ## State Model
 

@@ -89,6 +89,8 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"pos registry stale nonce", pos.ErrStaleNonce, proposalDispositionPrune},
 		// PRUNE: a buyback ask under the minimum is decided by its own amount.
 		{"buyback ask too small", ErrBuybackAskTooSmall, proposalDispositionPrune},
+		// PRUNE: plan terms outside the fixed bounds are decided by the payload.
+		{"subscription plan invalid", subscriptions.ErrInvalidPlan, proposalDispositionPrune},
 		// PRUNE: a reversed voucher never becomes reconcilable.
 		{"swap voucher not reconcilable", swap.ErrVoucherNotReconcilable, proposalDispositionPrune},
 		// PRUNE, added with the loyalty and invariant branches: an owner naming

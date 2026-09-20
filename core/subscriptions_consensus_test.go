@@ -43,6 +43,11 @@ func TestSubscriptionsCreatePlanSubscribeAndCharge_ProposerAndValidatorAgree(t *
 	merchantAddr := toAddress(merchantKey)
 	payerAddr := toAddress(payerKey)
 	payerAddrStr := payerKey.PubKey().Address().String()
+	// The plan costs the smallest price a plan may have and the payer starts
+	// with ten times that.
+	price := subscriptions.MinPlanPriceWei()
+	funding := new(big.Int).Mul(price, big.NewInt(10))
+	remaining := new(big.Int).Sub(funding, price)
 
 	genesisValidatorKeyA, err := crypto.GeneratePrivateKey()
 	if err != nil {
@@ -63,7 +68,7 @@ func TestSubscriptionsCreatePlanSubscribeAndCharge_ProposerAndValidatorAgree(t *
 		// post-construction trie write -- see potso_stake_consensus_test.go's
 		// comment on resetDriftUnlessSelfProposedLocked for why.
 		Alloc: map[string]map[string]string{
-			payerAddrStr: {"NHB": "1000", "ZNHB": "0"},
+			payerAddrStr: {"NHB": funding.String(), "ZNHB": "0"},
 		},
 	}
 	data, err := json.Marshal(spec)
@@ -109,7 +114,7 @@ func TestSubscriptionsCreatePlanSubscribeAndCharge_ProposerAndValidatorAgree(t *
 		TrialPeriodSeconds uint64
 	}{
 		Name:            "Pro Monthly",
-		PriceWei:        big.NewInt(100),
+		PriceWei:        price,
 		Asset:           "NHB",
 		IntervalSeconds: 86400,
 	})
@@ -207,8 +212,8 @@ func TestSubscriptionsCreatePlanSubscribeAndCharge_ProposerAndValidatorAgree(t *
 		if plan.Merchant != merchantAddr {
 			t.Fatalf("plan merchant mismatch")
 		}
-		if plan.PriceWei.Cmp(big.NewInt(100)) != 0 {
-			t.Fatalf("plan price = %s, want 100", plan.PriceWei)
+		if plan.PriceWei.Cmp(price) != 0 {
+			t.Fatalf("plan price = %s, want %s", plan.PriceWei, price)
 		}
 
 		sub, ok := node.SubscriptionByID(subscriptions.SubscriptionID(1))
@@ -239,24 +244,24 @@ func TestSubscriptionsCreatePlanSubscribeAndCharge_ProposerAndValidatorAgree(t *
 		if charges[0].Status != subscriptions.ChargeStatusPaid {
 			t.Fatalf("charge status = %v, want paid", charges[0].Status)
 		}
-		if charges[0].AmountWei.Cmp(big.NewInt(100)) != 0 {
-			t.Fatalf("charge amount = %s, want 100", charges[0].AmountWei)
+		if charges[0].AmountWei.Cmp(price) != 0 {
+			t.Fatalf("charge amount = %s, want %s", charges[0].AmountWei, price)
 		}
 
 		merchantAcc, err := node.GetAccount(merchantAddr[:])
 		if err != nil {
 			t.Fatalf("load merchant account: %v", err)
 		}
-		if merchantAcc.BalanceNHB.Cmp(big.NewInt(100)) != 0 {
-			t.Fatalf("merchant NHB balance = %s, want 100", merchantAcc.BalanceNHB)
+		if merchantAcc.BalanceNHB.Cmp(price) != 0 {
+			t.Fatalf("merchant NHB balance = %s, want %s", merchantAcc.BalanceNHB, price)
 		}
 
 		payerAcc, err := node.GetAccount(payerAddr[:])
 		if err != nil {
 			t.Fatalf("load payer account: %v", err)
 		}
-		if payerAcc.BalanceNHB.Cmp(big.NewInt(900)) != 0 {
-			t.Fatalf("payer NHB balance = %s, want 900", payerAcc.BalanceNHB)
+		if payerAcc.BalanceNHB.Cmp(remaining) != 0 {
+			t.Fatalf("payer NHB balance = %s, want %s", payerAcc.BalanceNHB, remaining)
 		}
 	}
 }
