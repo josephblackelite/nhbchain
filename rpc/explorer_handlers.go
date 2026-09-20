@@ -128,7 +128,7 @@ func (s *Server) handleGetValidatorInfo(w http.ResponseWriter, _ *http.Request, 
 	})
 }
 
-func (s *Server) handleGetNetworkStats(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetNetworkStats(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	currentEpoch := uint64(0)
 	if summary, ok := s.node.LatestEpochSummary(); ok && summary != nil {
 		currentEpoch = summary.Epoch
@@ -136,12 +136,17 @@ func (s *Server) handleGetNetworkStats(w http.ResponseWriter, _ *http.Request, r
 		currentEpoch = s.node.GetHeight() / cfg.Length
 	}
 
+	tps, err := s.recentTPS(r.Context())
+	if err != nil {
+		s.writeQueryFailure(w, req.ID, req.Method, err)
+		return
+	}
 	writeResult(w, req.ID, map[string]any{
 		"activeValidators": len(s.node.GetValidatorSet()),
 		"currentEpoch":     currentEpoch,
 		"currentTime":      time.Now().Unix(),
 		"mempoolSize":      s.node.MempoolSize(),
-		"tps":              estimateRecentTPS(s.node),
+		"tps":              tps,
 	})
 }
 

@@ -82,7 +82,7 @@ func (s *Server) startExplorerSnapshotLoop() {
 
 			needsRefresh := cachedSnapshot == nil || currentHeight != cachedHeight || currentHeight != lastHeight
 			if needsRefresh {
-				snapshot, err := s.buildExplorerSnapshot(window)
+				snapshot, err := s.buildExplorerSnapshot(context.Background(), window)
 				if err != nil {
 					slog.Warn("rpc: refresh explorer snapshot failed", slog.Any("error", err))
 				} else {
@@ -131,6 +131,10 @@ func (s *Server) handleExplorerWS(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.isClientAllowed(clientIP) {
 		http.Error(w, "client address not allowed", http.StatusForbidden)
+		return
+	}
+	if s.explorerLoopOff {
+		http.Error(w, "explorer stream disabled", http.StatusServiceUnavailable)
 		return
 	}
 	release, ok := s.acquireStream(clientIP)
