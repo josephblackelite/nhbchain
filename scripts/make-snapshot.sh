@@ -15,11 +15,14 @@
 # Run as root, it would read whatever the user pointed a link at (a link named
 # like a journal, aimed at a file only root can read) and publish it. The script
 # therefore refuses to run as root against a directory root does not own, or that
-# root owns but its group or others can write; run it as the directory's owner and
-# nothing it reads is more than that user already holds. (When the node itself
-# runs as root, the directory is root's and it may
-# be run as root: then --tool, --work-dir and --out-dir have to be given, and all
-# three have to be places nobody but root can change; they are checked (a
+# root owns but its group or others can write, or that has above it a directory
+# another user owns or its group or others can write (that user can rename the
+# directory away, at any moment of a run that lasts minutes, and put one of its own
+# under the name); run it as the directory's owner and nothing it reads is more than
+# that user already holds. (When the node itself runs as root, the directory is
+# root's and it may be run as root: then --tool, --work-dir and --out-dir have to
+# be given, and the data directory and all three have to be places nobody but root
+# can change; each one is checked together with every directory above it (a
 # directory that does not exist yet is made only where the nearest one that does is
 # root's own). Run as anyone else, the default tool is used only when the user
 # running the script, or root, owns it.)
@@ -292,8 +295,9 @@ make_private_dir() {
 # the path belongs to root and cannot be written by its group or by others, and
 # neither can any directory above it, except that a directory others can write
 # but whose entries only their owners can remove (sticky, like /tmp) counts, the
-# entry below it being root's. As root this script executes the tool and writes
-# its staging and output; all of them have to be places nobody else can change.
+# entry below it being root's. As root this script reads the data directory,
+# executes the tool and writes its staging and output; all of them have to be
+# places nobody else can change.
 root_only_path() {
   local path=$1 child='' owner mode parent
   path=$(readlink -f -- "${path}" 2>/dev/null) || return 1
@@ -528,12 +532,17 @@ main() {
   fi
   # A directory that is root's but that its group or others can write (root:nhb
   # 0775, say) is the node user's in every way that matters here: it can put a link
-  # or a file of its own choosing in it, and root would read it.
+  # or a file of its own choosing in it, and root would read it. So is one that is
+  # closed but stands in a directory someone else owns or can write: that user can
+  # rename it away at any moment of a run that lasts minutes and put a directory of
+  # its own under the name. The place and every directory above it have to be root's,
+  # as they have to be for the tool, the work directory and the output.
   if [[ "${run_uid}" == "0" ]]; then
     [[ "${data_mode}" =~ ^[0-7]+$ ]] || die "cannot tell who can write ${DATA_DIR}"
     if (( (8#${data_mode} & 8#022) != 0 )); then
       die "refusing to run as root: ${DATA_DIR} is root's, but its group or others can write it (mode ${data_mode}), so a user other than root can put anything in it, and what this script copies is published. Make it writable by root alone (chmod go-w ${DATA_DIR}), or run this as the user that runs the node."
     fi
+    root_only_path "${DATA_DIR}" || die "refusing to run as root: ${DATA_DIR} is root's, but a directory above it can be changed by someone other than root, so that user can rename ${DATA_DIR} away and put a directory of its own under the name at any moment of a run that lasts minutes, and what this script copies is published. Make every directory above it root's and writable by root alone (namei -l ${DATA_DIR} lists them), or run this as the user that runs the node."
   fi
 
   if [[ -z "${TOOL}" && "${run_uid}" == "0" ]]; then

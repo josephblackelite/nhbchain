@@ -31,11 +31,13 @@ Not as root. The node's user controls the data directory, and what the script co
 is published, so a root-run script would read whatever that user pointed a link at
 and publish it. The script refuses to run as root against a directory root does not
 own, or that root owns but its group or others can write (`root:nhb` with mode `0775`
-lets the node's user put a link in it just the same), and says how to run it. (If the
-node itself runs as root, the script may be run as root, and then `--tool`,
-`--work-dir` and `--out-dir` have to be given and have to be places only root can
-change.) Whoever uploads `--out-dir` as another user must
-copy regular files only and never follow a link.
+lets the node's user put a link in it just the same), or that stands in a directory
+that another user owns or can write (that user can rename it away in the middle of a
+run and put one of its own under the name), and says how to run it. (If the node
+itself runs as root, the script may be run as root, and then `--tool`, `--work-dir`
+and `--out-dir` have to be given, and they and the data directory have to be places
+only root can change, with every directory above them.) Whoever uploads `--out-dir`
+as another user must copy regular files only and never follow a link.
 
 That command is for a host that `scripts/deployvalidator.sh` installed: the script
 reads the node binary from `/opt/nhbchain/bin/nhb` and the commit it was built from
