@@ -35,6 +35,14 @@ import (
 // another is simply read again.
 const snapshotDigestSlots = 1024
 
+// snapshotDigestMaxTxs is the most transaction records a block's digest may hold
+// and still be kept. A block can carry as many transactions as consensus allows
+// (500 by default) and a record is about half a kilobyte, so without a bound a
+// run of full blocks would pin hundreds of megabytes in the ring; with it the
+// ring holds a few tens at most. A block above the bound is read again whenever
+// a rebuild needs it, as every rebuild did before digests existed.
+const snapshotDigestMaxTxs = 128
+
 type digestTx struct {
 	record     ExplorerTransactionResult
 	userFacing bool
@@ -112,8 +120,9 @@ func digestBlock(block *types.Block) *blockDigest {
 
 // digestAt returns the digest of the block at height, or nil when the block
 // cannot be read. tip is the chain height the caller read before asking: only a
-// block below it is kept (see the file comment). Reading a block is charged to
-// the request's ticket.
+// block below it is kept (see the file comment), and only one with at most
+// snapshotDigestMaxTxs records. Reading a block is charged to the request's
+// ticket.
 func (s *Server) digestAt(ctx context.Context, chain *core.Blockchain, height, tip uint64) (*blockDigest, error) {
 	if d := s.digests.get(height); d != nil {
 		return d, nil
@@ -126,7 +135,7 @@ func (s *Server) digestAt(ctx context.Context, chain *core.Blockchain, height, t
 		return nil, nil
 	}
 	d := digestBlock(block)
-	if height < tip {
+	if height < tip && len(d.txs) <= snapshotDigestMaxTxs {
 		s.digests.put(d)
 	}
 	return d, nil

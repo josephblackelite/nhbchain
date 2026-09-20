@@ -26,9 +26,9 @@ RPCDisableExplorerLoop = true
 	}
 }
 
-// The knobs are optional: a config that does not mention them (the live one
-// does not) must load with every one at zero, which the RPC server reads as its
-// default.
+// The knobs are optional: a config that does not mention them (an existing
+// one does not) must load with every one at zero, which the RPC server reads
+// as its default.
 func TestQueryPoolSettingsDefaultToZero(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")

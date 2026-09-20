@@ -81,8 +81,9 @@ Refusals are counted in `nhb_module_throttles_total{reason="query_capacity"}` an
   an operator recovery can rewrite) in a ring of 1,024 blocks. A rebuild after a
   new block reads that block and the one that stopped being the tip, not the
   window again, and the look-back over older blocks costs no reads at all once
-  those blocks have been seen. The snapshot is the same as before, field for
-  field.
+  those blocks have been seen. A block with more than 128 such records is read
+  again rather than kept, which holds the ring to a few tens of megabytes at
+  most. The snapshot is the same as before, field for field.
 * **Lending replay.** The lending reads rebuild a pool from the committed lending
   transactions. The heights of the blocks that hold one are remembered, the
   first read after start-up no longer waits for it (a background task finds
