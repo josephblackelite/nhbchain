@@ -136,6 +136,7 @@ var (
 	lendingMarketPrefix              = []byte("lending/market/")
 	lendingFeeAccrualPrefix          = []byte("lending/fees/")
 	lendingUserPrefix                = []byte("lending/user/")
+	lendingLegacyReconciledPrefix    = []byte("lending/legacy-reconciled/")
 	lendingPoolIndexKey              = []byte("lending/pools/index")
 	// lendingFixedTermLoanPrefix/lendingFixedTermActiveLoanPrefix back the new
 	// fixed-term (locked-rate, 30/90-day) borrow product -- a separate record
@@ -1833,6 +1834,49 @@ func (m *Manager) LendingPutMarket(poolID string, market *lending.Market) error 
 		return err
 	}
 	return m.lendingEnsurePoolIndexed(normalized)
+}
+
+// LendingLegacyReconciled reports whether the one-time sweep that moves the
+// lending positions still recorded on plain accounts into the pool's own
+// records (core/lending_native.go's reconcileLegacyPoolState) has completed for
+// the pool. Only lending transactions and the lifecycle steps that run a
+// lending engine ever set it, so it stays unset, and unread, on a chain that
+// has executed none.
+func (m *Manager) LendingLegacyReconciled(poolID string) (bool, error) {
+	if m == nil {
+		return false, fmt.Errorf("state manager unavailable")
+	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return false, err
+	}
+	var done bool
+	ok, err := m.KVGet(lendingLegacyReconciledKey(normalized), &done)
+	if err != nil {
+		return false, err
+	}
+	return ok && done, nil
+}
+
+// LendingMarkLegacyReconciled records that the sweep has completed for the
+// pool, so the accounts are not listed again by every later lending call.
+func (m *Manager) LendingMarkLegacyReconciled(poolID string) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	return m.KVPut(lendingLegacyReconciledKey(normalized), true)
+}
+
+func lendingLegacyReconciledKey(poolID string) []byte {
+	trimmed := strings.TrimSpace(poolID)
+	buf := make([]byte, len(lendingLegacyReconciledPrefix)+len(trimmed))
+	copy(buf, lendingLegacyReconciledPrefix)
+	copy(buf[len(lendingLegacyReconciledPrefix):], trimmed)
+	return buf
 }
 
 // LendingGetFeeAccrual loads the current lending fee accrual totals if present
