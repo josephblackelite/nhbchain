@@ -31,7 +31,7 @@ These day-keyed meters are separate from the per-epoch engagement counters that 
 
 `Node.PotsoHeartbeat` (`core/node.go`) is the only code that adds `uptimeSeconds`. The `potso_heartbeat` RPC method is the only caller, and it is disabled: `handlePotsoHeartbeat` (`rpc/potso_handlers.go`) always returns HTTP 503 with the message "potso heartbeat rpc is temporarily disabled; submit engagement through the canonical transaction pipeline". `nhb-cli potso heartbeat` calls that method and therefore fails.
 
-`TxTypeHeartbeat` (`0x08`) is a different mechanism. `applyHeartbeat` (`core/state_transition.go`) updates the account's `EngagementMinutes` / `EngagementLastHeartbeat` fields (`core/engagement`), not the POTSO meter. `EngagementLastHeartbeat` is also what keeps a validator in the active set: `validatorReadyForActivation` (`core/epochs.go`) requires it to be non-zero and recent, so a registered validator that stops sending `TxTypeHeartbeat` transactions is dropped from the set at the next epoch boundary (unless no validator qualifies, in which case `fallbackValidatorSet` refills it). See [consensus integration](consensus-integration.md#voting-power-quorums).
+`TxTypeHeartbeat` (`0x08`) is a different mechanism (its RPC entry point and device tokens are described in [engagement program](../overview/engagement-program.md)). `applyHeartbeat` (`core/state_transition.go`) updates the account's `EngagementMinutes` / `EngagementLastHeartbeat` fields (`core/engagement`), not the POTSO meter. `EngagementLastHeartbeat` is also what keeps a validator in the active set: `validatorReadyForActivation` (`core/epochs.go`) requires it to be non-zero and recent, so a registered validator that stops sending `TxTypeHeartbeat` transactions is dropped from the set at the next epoch boundary (unless no validator qualifies, in which case `fallbackValidatorSet` refills it). See [consensus integration](consensus-integration.md#voting-power-quorums).
 
 ## Storage keys
 
@@ -52,9 +52,14 @@ Both working methods are read-only and require exactly one parameter object in `
 - `potso_top` - params `{"day": "...", "limit": N}`, both optional (`day` defaults to today UTC, `limit` defaults to 10 when `<= 0`). Returns an array of `{"user": "nhb1...", "meter": {...}}`, ordered by `score` desc, then `rawScore` desc, then `uptimeSeconds` desc, then address bytes ascending (`Node.PotsoTop`).
 - `potso_heartbeat` - disabled, see above.
 
-Other POTSO methods are documented with their subjects: `potso_leaderboard`, `potso_params`, `potso_getWeight` ([leaderboard](leaderboard.md)); `potso_stake_info` ([stake](stake.md)); `potso_epoch_info`, `potso_epoch_payouts`, `potso_reward_claim`, `potso_rewards_history`, `potso_rewards_outflow`, `potso_export_epoch` ([rewards API](rewards-api.md), [epoch rewards](../potso_rewards.md)); `potso_submitEvidence`, `potso_getEvidence`, `potso_listEvidence` ([evidence](evidence-and-penalties.md)).
+Other POTSO methods are documented with their subjects: `potso_leaderboard`, `potso_params`, `potso_getWeight` ([leaderboard](leaderboard.md)); `potso_stake_info` ([stake](stake.md)); `potso_epoch_info`, `potso_epoch_payouts`, `potso_rewards_history`, `potso_rewards_outflow`, `potso_export_epoch` ([rewards API](rewards-api.md), [epoch rewards](../potso_rewards.md)); `potso_getEvidence`, `potso_listEvidence` ([evidence](evidence-and-penalties.md)).
 
-Errors use the RPC codes in `rpc/http.go`: `-32602` invalid params (HTTP 400), `-32000` server error, `-32001` unauthorized (HTTP 401).
+Two methods that older clients may still call are gone:
+
+- `potso_reward_claim` is routed but always answers HTTP 410, JSON-RPC code `-32060` (`handlePotsoRewardClaim`, `rpc/potso_reward_handlers.go`; `codeMethodDisabled` in `rpc/http.go`). See [rewards API](rewards-api.md).
+- `potso_submitEvidence` no longer exists; the node answers it as an unknown method (HTTP 404, code `-32601`, `default` branch of the dispatcher in `rpc/http.go`). Evidence is reported with a signed transaction, see [evidence](evidence-and-penalties.md).
+
+Errors use the RPC codes in `rpc/http.go`: `-32602` invalid params (HTTP 400), `-32000` server error, `-32001` unauthorized (HTTP 401), `-32060` method disabled (HTTP 410), `-32601` unknown method (HTTP 404).
 
 ## CLI
 
@@ -63,4 +68,4 @@ nhb-cli potso user-meters --user nhb1... [--day 2025-09-24]
 nhb-cli potso top [--day 2025-09-24] [--limit 10]
 ```
 
-`nhb-cli potso heartbeat`, `stake` and `reward` are described in [stake](stake.md) and [rewards API](rewards-api.md).
+`nhb-cli potso heartbeat` calls `potso_heartbeat` and therefore fails (exit code 1). `nhb-cli potso reward claim` is retired: it prints an error and exits 1 without contacting the node (`reportRetired`, `cmd/nhb-cli/retired_cmd.go`). `stake` and `reward history` / `reward export` are described in [stake](stake.md) and [rewards API](rewards-api.md). Commands that need a bearer token read it from `NHB_RPC_TOKEN`; `nhb-cli rpc-token` prints a short-lived token signed with `NHB_RPC_JWT_SECRET` (run it on the node host; `cmd/nhb-cli/rpc_token.go`).

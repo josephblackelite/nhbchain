@@ -1,10 +1,12 @@
 # Reputation Lifecycle
 
+This page describes the behaviour of the reputation ledger in `native/reputation` and the node methods around it. No running node exposes it: `reputation_verifySkill` answers HTTP 410 and nothing else calls the node methods (see [overview](overview.md)).
+
 An attestation is identified by `reputation.AttestationID`, the Keccak-256 of `subject || Keccak256(lowercase(trim(skill))) || verifier` (`ComputeAttestationID`, `native/reputation/types.go`). The ID appears as `attestationId` (hex) in the events below. Only one attestation exists per `(subject, skill, verifier)` combination.
 
 ## Issuance
 
-`Node.ReputationVerifySkill` (called from the `reputation_verifySkill` RPC, see [overview](overview.md)) checks that the verifier holds `ROLE_REPUTATION_VERIFIER`, otherwise returns `ErrReputationVerifierUnauthorized`. It then validates the record, and `Ledger.Put` stores it at `reputation/skill/<subject hex>/<skill digest hex>/<verifier hex>` with an index entry `reputation/attestation/<id hex>` that maps the ID back to the subject, skill and verifier (values are `KVPut` RLP records).
+`Node.ReputationVerifySkill` checks that the verifier holds `ROLE_REPUTATION_VERIFIER`, otherwise returns `ErrReputationVerifierUnauthorized`. It then validates the record, and `Ledger.Put` stores it at `reputation/skill/<subject hex>/<skill digest hex>/<verifier hex>` with an index entry `reputation/attestation/<id hex>` that maps the ID back to the subject, skill and verifier (values are `KVPut` RLP records).
 
 `Put` overwrites any earlier record for the same `(subject, skill, verifier)`, including a revoked one: re-issuing replaces the record with a fresh, non-revoked one.
 
@@ -25,4 +27,4 @@ Event `reputation.skillVerified`, attributes: `subject` and `verifier` (hex, no 
 
 Event `reputation.skillRevoked`, attributes: `attestationId`, `subject`, `verifier`, `skill`, `revokedAt`, and `reason` if non-empty.
 
-This method is not reachable over RPC: no RPC handler or CLI command calls it.
+Nothing calls this method: no RPC handler, transaction type or CLI command reaches it.
