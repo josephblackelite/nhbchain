@@ -611,6 +611,15 @@ func (m *LendingModule) reconcileLegacyPoolStateInto(manager *nhbstate.Manager, 
 	if id == "" {
 		id = defaultLendingPoolID
 	}
+	// Once a lending transaction has completed the sweep for this pool, every
+	// account that held a legacy position has been migrated already (see
+	// core/lending_native.go's reconcileLegacyPoolState), and listing them all
+	// again would find nothing.
+	if done, err := manager.LendingLegacyReconciled(id); err != nil {
+		return err
+	} else if done {
+		return nil
+	}
 	accounts, err := manager.AccountList()
 	if err != nil {
 		return err

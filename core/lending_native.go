@@ -571,9 +571,21 @@ type lendingStateAdapter struct {
 	processor *StateProcessor
 }
 
+// reconcileLegacyPoolState moves every lending position still recorded on a
+// plain account into the pool's own records. It reads every account, so it
+// runs once per pool: once a full pass has completed the pool is marked, and
+// later calls return at once. Nothing writes a lending position onto an account
+// any more, so an account created after the pass has none to move.
 func (a *lendingStateAdapter) reconcileLegacyPoolState() error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("lending: state manager unavailable")
+	}
+	done, err := a.manager.LendingLegacyReconciled(a.poolID)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
 	}
 	accounts, err := a.manager.AccountList()
 	if err != nil {
@@ -584,7 +596,7 @@ func (a *lendingStateAdapter) reconcileLegacyPoolState() error {
 			return err
 		}
 	}
-	return nil
+	return a.manager.LendingMarkLegacyReconciled(a.poolID)
 }
 
 func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*lending.UserAccount, error) {
