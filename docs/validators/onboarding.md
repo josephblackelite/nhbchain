@@ -162,10 +162,17 @@ many colons in address`. The script refuses it.
    `t3.micro`-class box was OOM-killed compiling this dependency tree).
 4. Creates the `nhb` system user, `/etc/nhbchain` (owned `nhb:nhb`, mode `700`)
    and `/var/lib/nhbchain`.
-5. Rsyncs the repo to `/opt/nhbchain`, checks `config/genesis.relaunch.json` is
-   byte for byte the live genesis, and builds `bin/nhb`, `bin/nhb-cli` and
-   `bin/nhb-snapshot` with disk-backed `GOCACHE`/`GOPATH`/`GOTMPDIR` under
-   `/opt/nhbchain` (`/tmp` is often a small RAM-backed tmpfs).
+5. Rsyncs the repo to `/opt/nhbchain` (which the service user then owns), checks
+   `config/genesis.relaunch.json` is byte for byte the live genesis, and builds
+   `nhb`, `nhb-cli` and `nhb-snapshot` from your checkout, as root, in
+   `/var/cache/nhbchain-build`: a directory only root can write, with disk-backed
+   `GOCACHE`/`GOPATH`/`GOTMPDIR` (`/tmp` is often a small RAM-backed tmpfs). The
+   builds are copied into `/opt/nhbchain/bin` for the service user. The tools the
+   script runs itself (`nhb-cli generate-key`, `nhb-snapshot check-config` and
+   `wait-synced`) are the ones in `/var/cache/nhbchain-build/bin`, never the copies
+   in `/opt/nhbchain`, which the service user could have replaced. For the same
+   reason the script refuses to run from inside `/opt/nhbchain`,
+   `/var/lib/nhbchain` or `/etc/nhbchain`: run it from a checkout of your own.
 6. When it will install a snapshot (an empty data directory, or `--reset-state`;
    a node that already holds the chain needs none, and then nothing is fetched),
    fetches the snapshot manifest, checks it is for the pinned chain id and genesis
@@ -188,8 +195,8 @@ many colons in address`. The script refuses it.
    consensus depends on (treasuries, `QuorumCertActivationHeight`) with
    `nhb-snapshot check-config`.
 10. Writes `/etc/nhbchain/node.env` (mode `600`, owned `root:root`; the RPC secret
-    of an earlier run is kept), installs `deploy/systemd/nhb.service`, and starts
-    or restarts it.
+    of an earlier run is kept), installs `deploy/systemd/nhb.service` from your
+    checkout, and starts or restarts it.
 11. Waits for the node's RPC (at most `--rpc-timeout`, 180 seconds), checks it
     reports the pinned chain id and genesis hash, and waits until it is at the
     network tip: connected to a peer, past the snapshot's height (when this run
@@ -199,9 +206,11 @@ many colons in address`. The script refuses it.
     that time (the service is not running or is crash-looping), stops making
     progress, or is on another chain. (Health checks of the RPC must be a
     **POST**: a bare `GET` always returns 400 even on a healthy node.)
-12. Only then runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` and
-    `nhb-cli register-validator 0 <validator.key>` as the `nhb` user. If a step
-    fails, the script stops with the exact retry commands.
+12. Only then, with a short-lived RPC token (`NHB_RPC_TOKEN`) that it makes from
+    the node's own secret, runs `nhb-cli set-reward-beneficiary <addr> <validator.key>`
+    and `nhb-cli register-validator 0 <validator.key>` as the `nhb` user. If a step
+    fails, the script stops and prints the command that makes a token and the exact
+    retry commands (the same form as in Step 2 below).
 13. Prints the node address and what to do next.
 
 ### A note on QuorumCertActivationHeight
@@ -251,10 +260,15 @@ server.
    actually hold ZNHB — an ordinary transfer, the same as sending to any
    other address. Not a portal delegation.
 2. **Self-stake it and register in one transaction**, run on the server
-   itself using the validator's own key:
+   itself using the validator's own key. The key belongs to the service user, so
+   the command runs as that user, and the node's RPC only accepts a signed
+   transaction with a short-lived token (`NHB_RPC_TOKEN`): the first line makes
+   one from the node's own secret, the second signs and sends the stake. The
+   token lasts ten minutes; make a new one for the next command.
 
    ```bash
-   sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+   TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+   NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
    ```
 
    (`10000000000000000000000` is exactly 10,000 ZNHB in base units --
@@ -272,10 +286,14 @@ server.
 Without `--beneficiary`, the consensus reward would accrue to the
 validator's own server-only address — the bootstrap script requires
 `--beneficiary` up front specifically to avoid that. You can also change
-the beneficiary later, directly on the server:
+the beneficiary later, directly on the server. The key file belongs to the
+service user (mode `0600`, in a directory only that user can enter), so the
+command runs as that user, and the node's RPC only accepts it with a short-lived
+token (`NHB_RPC_TOKEN`) made from the node's own secret:
 
 ```bash
-nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key
+TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key
 ```
 
 Pass an empty string instead of an address to clear a previously-set
@@ -284,9 +302,9 @@ beneficiary.
 This command **must** be run using the validator's own local key file
 (`/etc/nhbchain/validator.key`) directly on the validator server itself —
 it's deliberately a local signed-transaction operation, and the key should
-never leave the server. This is exactly the retry command the bootstrap
-script prints if its automatic `--beneficiary` attempt only warned instead
-of succeeding.
+never leave the server. If the bootstrap script's own `--beneficiary` attempt
+fails, it stops and prints the command that makes a token and this command, with
+your address in it, as the way to run it again (the same two lines as here).
 
 **Do not use the portal's "Reward Payout" tab (Validator Hub) to set a real
 server-hosted validator's beneficiary.** That form signs with your logged-in
@@ -367,8 +385,8 @@ Otherwise, manually add swap, or move to a larger instance
 **Cause:** `/tmp` is a small RAM-backed tmpfs on many EC2 AMIs, and Go's
 build scratch space defaults there.
 **Fix:** the current script builds with disk-backed
-`GOCACHE`/`GOPATH`/`GOTMPDIR` under `/opt/nhbchain`. If you're hitting this,
-confirm you're on a current script checkout.
+`GOCACHE`/`GOPATH`/`GOTMPDIR` under `/var/cache/nhbchain-build`. If you're
+hitting this, confirm you're on a current script checkout.
 
 ### 3. `nhb.service` crash-loops with `panic: Failed to load config: ... permission denied`
 
@@ -449,7 +467,8 @@ done. If it didn't (a manually-migrated or hand-configured node, for
 example), run it yourself once:
 
 ```bash
-sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 0 /etc/nhbchain/validator.key
+TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli register-validator 0 /etc/nhbchain/validator.key
 ```
 
 This costs no funds and only needs to succeed once. After that, delegate
@@ -459,9 +478,10 @@ heartbeating.
 
 **"Where do I set my reward beneficiary — the portal or the server?"**
 The server, using `nhb-cli set-reward-beneficiary` with
-`/etc/nhbchain/validator.key`. The portal's "Reward Payout" tab signs with
-your portal wallet's key, not your validator server's key, so it can't
-correctly redirect a real server-hosted validator's rewards.
+`/etc/nhbchain/validator.key` and a short-lived token, as in Step 2. The
+portal's "Reward Payout" tab signs with your portal wallet's key, not your
+validator server's key, so it can't correctly redirect a real server-hosted
+validator's rewards.
 
 ## Known discrepancy
 

@@ -30,9 +30,11 @@ sudo -u nhb bash scripts/make-snapshot.sh \
 Not as root. The node's user controls the data directory, and what the script copies
 is published, so a root-run script would read whatever that user pointed a link at
 and publish it. The script refuses to run as root against a directory root does not
-own, and says how to run it. (If the node itself runs as root, the script may be run
-as root, and then `--tool`, `--work-dir` and `--out-dir` have to be given and have to
-be places only root can change.) Whoever uploads `--out-dir` as another user must
+own, or that root owns but its group or others can write (`root:nhb` with mode `0775`
+lets the node's user put a link in it just the same), and says how to run it. (If the
+node itself runs as root, the script may be run as root, and then `--tool`,
+`--work-dir` and `--out-dir` have to be given and have to be places only root can
+change.) Whoever uploads `--out-dir` as another user must
 copy regular files only and never follow a link.
 
 That command is for a host that `scripts/deployvalidator.sh` installed: the script

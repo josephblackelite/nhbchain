@@ -80,7 +80,9 @@ esac
 `
 
 // stubNodeBinaries puts in the install root the two binaries main() looks for
-// after the build, and returns the sha256 of the node binary.
+// after the build (the node, and the CLI that answers as the service user), and the
+// CLI in root's own tool directory (the copy the script runs itself, to make the
+// key), and returns the sha256 of the node binary.
 func (h *deployHarness) stubNodeBinaries() string {
 	h.t.Helper()
 	body := []byte("fake-nhb-binary")
@@ -89,8 +91,10 @@ func (h *deployHarness) stubNodeBinaries() string {
 	}
 	fresh := crypto.MustNewAddress(crypto.NHBPrefix, bytes.Repeat([]byte{0x5a}, 20)).String()
 	cli := strings.Replace(fakeCLIScript, "%s", fresh, 1)
-	if err := os.WriteFile(filepath.Join(h.install, "bin", "nhb-cli"), []byte(cli), 0o755); err != nil {
-		h.t.Fatal(err)
+	for _, dir := range []string{filepath.Join(h.install, "bin"), h.tools} {
+		if err := os.WriteFile(filepath.Join(dir, "nhb-cli"), []byte(cli), 0o755); err != nil {
+			h.t.Fatal(err)
+		}
 	}
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
