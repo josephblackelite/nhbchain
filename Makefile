@@ -24,7 +24,7 @@ bugcheck-race:
 	@go test -race ./...
 
 bugcheck-fuzz:
-	@go test -run ^$$ -fuzz=Fuzz -fuzztime=60s ./tests/... ./p2p
+	@bash scripts/fuzz_all.sh
 
 bugcheck-determinism:
 	@$(MAKE) audit\:determinism
@@ -109,7 +109,7 @@ audit\:determinism:
 		--suite consensus=artifacts/determinism/consensus-tests.json \
 		--out artifacts/determinism/summary.json \
 		--markdown artifacts/determinism/summary.md'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh determinism ops/audit/determinism.yaml artifacts/determinism 2>&1 | tee logs/audit-determinism.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh determinism ops/audit/determinism.yaml artifacts/determinism 2>&1 | tee logs/audit-determinism.log'
 
 .PHONY: audit\:e2e
 audit\:e2e:
@@ -121,12 +121,12 @@ audit\:e2e:
 		--suite smoke=artifacts/e2e/smoke.json \
 		--out artifacts/e2e/summary.json \
 		--markdown artifacts/e2e/summary.md'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh e2e ops/audit/e2e.yaml artifacts/e2e --compose deploy/compose/docker-compose.audit-e2e.yaml --hash deploy/compose/docker-compose.audit-e2e.yaml 2>&1 | tee logs/audit-e2e.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh e2e ops/audit/e2e.yaml artifacts/e2e --compose deploy/compose/docker-compose.audit-e2e.yaml --hash deploy/compose/docker-compose.audit-e2e.yaml 2>&1 | tee logs/audit-e2e.log'
 
 .PHONY: audit\:chaos
 audit\:chaos:
 	@mkdir -p logs artifacts/chaos
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh chaos ops/audit/chaos.yaml artifacts/chaos 2>&1 | tee logs/audit-chaos.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh chaos ops/audit/chaos.yaml artifacts/chaos 2>&1 | tee logs/audit-chaos.log'
 
 .PHONY: audit\:perf
 audit\:perf:
@@ -136,7 +136,7 @@ audit\:perf:
 		cp artifacts/perf/bench.txt logs/perf-bench.txt && \
 		mv tests/perf/consensus_latency_report.json artifacts/perf/consensus_latency_report.json && \
 		mv tests/perf/consensus_latency_report.txt artifacts/perf/consensus_latency_report.txt'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh perf ops/audit/perf.yaml artifacts/perf --hash artifacts/perf/bench.txt --hash artifacts/perf/consensus_latency_report.json 2>&1 | tee logs/audit-perf.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh perf ops/audit/perf.yaml artifacts/perf --hash artifacts/perf/bench.txt --hash artifacts/perf/consensus_latency_report.json 2>&1 | tee logs/audit-perf.log'
 
 .PHONY: audit\:netsec
 audit\:netsec:
@@ -148,7 +148,7 @@ audit\:netsec:
 		--suite netsec=artifacts/netsec/tests.json \
 		--out artifacts/netsec/summary.json \
 		--markdown artifacts/netsec/summary.md'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh netsec ops/audit/netsec.yaml artifacts/netsec 2>&1 | tee logs/audit-netsec.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh netsec ops/audit/netsec.yaml artifacts/netsec 2>&1 | tee logs/audit-netsec.log'
 
 .PHONY: audit\:ledger
 audit\:ledger:
@@ -160,7 +160,7 @@ audit\:ledger:
 		--suite ledger=artifacts/ledger/tests.json \
 		--out artifacts/ledger/summary.json \
 		--markdown artifacts/ledger/summary.md'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh ledger ops/audit/ledger.yaml artifacts/ledger --hash ops/audit/ledger.yaml 2>&1 | tee logs/audit-ledger.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh ledger ops/audit/ledger.yaml artifacts/ledger --hash ops/audit/ledger.yaml 2>&1 | tee logs/audit-ledger.log'
 
 .PHONY: audit\:supply
 audit\:supply:
@@ -172,18 +172,18 @@ audit\:supply:
 		--suite supply=artifacts/supply/tests.json \
 		--out artifacts/supply/summary.json \
 		--markdown artifacts/supply/summary.md'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh supply ops/audit/supply.yaml artifacts/supply --hash ops/audit/supply.yaml 2>&1 | tee logs/audit-supply.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh supply ops/audit/supply.yaml artifacts/supply --hash ops/audit/supply.yaml 2>&1 | tee logs/audit-supply.log'
 
 .PHONY: audit\:config
 audit\:config:
 	@mkdir -p logs artifacts/config
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh config ops/audit/config.yaml artifacts/config --hash config/config.toml --hash config-peer.toml --hash config-local.toml 2>&1 | tee logs/audit-config.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh config ops/audit/config.yaml artifacts/config --hash config.toml --hash config/prod.toml 2>&1 | tee logs/audit-config.log'
 
 .PHONY: audit\:docs
 audit\:docs:
 	@mkdir -p logs artifacts/docs
 	@bash -o errexit -o nounset -o pipefail -c 'go run ./tools/docs/verify.go 2>&1 | tee logs/docs-verify.log'
-	@bash -o errexit -o nounset -o pipefail -c './scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs --hash docs/security/audit-readiness.md --hash ops/audit-pack/BUILD_STEPS.md 2>&1 | tee logs/audit-docs.log'
+	@bash -o errexit -o nounset -o pipefail -c 'bash ./scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs --hash docs/security/audit-readiness.md 2>&1 | tee logs/audit-docs.log'
 
 .PHONY: audit\:endpoints
 audit\:endpoints:
