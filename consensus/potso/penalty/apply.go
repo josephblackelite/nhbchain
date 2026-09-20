@@ -140,10 +140,14 @@ func (e *Engine) Apply(record *evidence.Record, ctx Context) (*Result, error) {
 	}
 	var slashApplied *big.Int
 	if penalty.SlashAmount != nil && penalty.SlashAmount.Sign() > 0 && e.slasher != nil {
-		if err := e.slasher.Slash(record.Evidence.Offender, penalty.SlashAmount); err != nil {
+		// The slasher forfeits no more than the offender really has bonded, so
+		// what it took, not what was asked for, is what the result and the
+		// event report.
+		applied, err := statebank.SlashReporting(e.slasher, record.Evidence.Offender, penalty.SlashAmount)
+		if err != nil {
 			return nil, fmt.Errorf("penalty: slash: %w", err)
 		}
-		slashApplied = new(big.Int).Set(penalty.SlashAmount)
+		slashApplied = applied
 	} else {
 		slashApplied = big.NewInt(0)
 	}
