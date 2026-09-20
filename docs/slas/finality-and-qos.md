@@ -1,16 +1,17 @@
 # POS Finality and QoS SLA Validation
 
-The `POS-READINESS-3` initiative introduces an automated readiness harness that verifies the
-priority lane remains healthy under sustained load. The goal is to ensure that POS-tagged
-transactions finalize within five seconds (p95) while the reserved lane does not saturate.
+The repository ships a load generator and one automated test that check the
+POS-tagged transaction path: finality latency for POS transactions and the
+fill level of the POS-reserved mempool lane.
 
-## Load Harness (`bench/posloader`)
+## Load generator (`bench/posloader`)
 
-The `bench/posloader` utility produces a stream of POS-tagged transactions against a JSON-RPC
-endpoint. Transactions are emitted at a configurable rate and the loader consumes the POS finality
-websocket stream to capture end-to-end latency. Usage:
+`bench/posloader/main.go` submits POS-tagged transfers to a JSON-RPC endpoint and
+measures the time until each one is reported finalized on the node's POS
+finality websocket (`/ws/pos/finality`, registered in `rpc/http.go`, line 784).
 
 ```bash
+NHB_RPC_TOKEN=<jwt> POSLOADER_KEY=<hex private key> \
 go run ./bench/posloader \
   --rpc http://127.0.0.1:8545 \
   --rate 600 \
@@ -18,22 +19,48 @@ go run ./bench/posloader \
   --intent-prefix pos-qos
 ```
 
-Required environment variables:
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--rpc` | `http://127.0.0.1:8545` | RPC endpoint. The websocket URL is derived from it (`ws` or `wss`). |
+| `--key` | empty | Hex secp256k1 private key of a funded account. Overrides `POSLOADER_KEY`. |
+| `--rate` | `600` | Target transactions **per minute** (the loader sleeps `1 minute / rate` between submissions). |
+| `--duration` | `2m` | How long to submit. |
+| `--intent-prefix` | `pos-load` | Prefix for the generated `IntentRef` (`<prefix>-<nonce>`). |
 
-- `NHB_RPC_TOKEN` – bearer token for RPC authentication.
-- `POSLOADER_KEY` – hex-encoded secp256k1 private key seeded with gas funds.
+Environment:
 
-The loader logs submission totals, observed finality counts, and latency statistics to help diagnose
-violations.
+- `NHB_RPC_TOKEN` (required): bearer token sent with every `nhb_sendTransaction`.
+  The loader exits without it.
+- `POSLOADER_KEY`: hex private key, used when `--key` is empty. One of the two is
+  required.
 
-## Readiness Test (`TestPosQosSla`)
+Each transaction is a zero-value `TxTypeTransfer` with a 5-minute `IntentExpiry`,
+`MerchantAddress = "pos-qos"` and `DeviceID = "loader"`, signed by the key.
+After the submission window the loader waits up to 30 seconds for outstanding
+finality events, then logs the number submitted, the number finalized (and still
+pending), and the average and maximum latency.
 
-`tests/posreadiness/qos/qos_test.go` boots an in-memory chain via the POS readiness harness,
-executes the load harness for a short burst, and then inspects Prometheus metrics:
+## Readiness test (`TestPosQosSla`)
 
-- `nhb_mempool_pos_lane_fill` must remain ≤ 1.0 to confirm the reserved lane does not saturate.
-- `nhb_mempool_pos_p95_finality_ms` must report a p95 latency ≤ 5,000 ms.
-- `nhb_mempool_pos_tx_enqueued_total` must match the number of finalized samples to guard against
-  starvation.
+`tests/posreadiness/qos/qos_test.go` carries the build tag `posreadiness`:
 
-The test fails if the SLA thresholds are exceeded or if finality events lag behind enqueue events.
+```bash
+go test -tags posreadiness -run TestPosQosSla ./tests/posreadiness/qos
+```
+
+It starts an in-memory mini chain (`tests/posreadiness/harness`), funds an
+account, runs `go run ./bench/posloader` against the mini chain for 25 seconds
+at 3 transactions per minute (chosen to avoid RPC throttling), finalizes the
+mempool every 200 ms, and then reads the default Prometheus registry:
+
+- `nhb_mempool_pos_p95_finality_ms` is a histogram (buckets 50 ms to 12,800 ms).
+  The test computes the 95th percentile as the upper bound of the bucket that
+  contains the 95th-percentile sample and fails if it is above 5,000 ms. It also
+  fails if the histogram has no samples.
+- `nhb_mempool_pos_lane_fill` (gauge) must not exceed `1.0`.
+- `nhb_mempool_pos_tx_enqueued_total` (counter) must be non-zero, and the
+  finality histogram's sample count must be at least that many (no starved
+  transactions).
+
+The metrics are registered in `observability/metrics.go` (`Mempool()`), which also
+registers `nhb_mempool_pos_lane_backlog{asset}`.

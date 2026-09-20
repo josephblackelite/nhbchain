@@ -1,71 +1,66 @@
-# Wallet Lite Demo
+# Wallet Lite
 
-Wallet Lite is a static-friendly Next.js application that exercises the identity module on
-`nhbcoin.net` JSON-RPC endpoints. It focuses on three workflows: username registration, pay-by-email
-claimables, and QR payment intents.
+`examples/wallet-lite` is a Next.js 14 app (workspace member `@nhb/wallet-lite`). A single page holds the panels below; each panel calls a Next.js API route under `app/api`, and the routes call the node or the identity gateway. The README in that directory has the start-up commands.
 
-## Pages & Features
+## Current status
 
-The single-page interface is split into panels:
+Several panels call RPC methods the node has retired. The node answers those with HTTP `410` (`identityRPCDisabledMessage` in `rpc/identity_handlers.go`, `creatorRPCDisabledMessage` in `rpc/creator_handlers.go`). See the [examples index](README.md) for the full list.
 
-* **Local session** – Paste or generate a throwaway secp256k1 private key. The app derives the NHB
-  bech32 address locally and never persists the key.
-* **Account snapshot** – Fetches balances and alias metadata via `nhb_getBalance` for the derived
-  address.
-* **Register username** – Calls `identity_setAlias` through a server-side API route that attaches the
-  configured RPC bearer token.
-* **Send via claimable** – Creates escrowed payments with `identity_createClaimable`. Users can select
-  alias, email, or raw preimage recipients. For email targets, the server hashes the address with the
-  configured salt before invoking the RPC.
-* **Claim funds** – Redeems claimables via `identity_claim`. The form auto-derives the alias preimage
-  when the claimant enters their username.
-* **QR payment intent** – Generates a `znhb://pay` URI and renders a QR code for scanning wallets.
+| Panel | API route | Calls | Works today |
+| --- | --- | --- | --- |
+| Local session | none | Client-side key handling | Yes |
+| Account snapshot | `GET /api/account` | `nhb_getBalance` | Yes |
+| Alias lookup | `GET /api/identity/resolve` | `identity_resolve` | Yes |
+| Creator profile | `GET /api/identity/profile` | `identity_resolve`, then `GET <NHB_API_URL>/creator/v1/content?alias=` | Alias part yes; content list falls back to a placeholder item if the request fails or returns nothing |
+| Register username | `POST /api/identity/set-alias` | none (returns `410` itself) | No, retired |
+| Send via claimable | `POST /api/payments/claimables` | `identity_createClaimable` | No, node returns `410` |
+| Claim funds | `POST /api/identity/claim` | `identity_claim` | No, node returns `410` |
+| Tip, stake, unstake | `POST /api/creator/tips`, `/stake`, `/unstake` | none (each returns `410` itself) | No, retired |
+| Subscription preview | `POST /api/creator/subscriptions` | none (computed in the route) | Yes; it is a local schedule preview only |
+| Payment QR | none | Client-side | Yes |
+| Escrow details / dispute | `GET /api/escrow/[id]`, `POST /api/escrow/[id]/mark-scam` | see below | See below |
 
-## RPC & Gateway Usage
+## What each working piece does
 
-Wallet Lite interacts with the following endpoints:
+- **Local session.** You paste or generate a 32-byte secp256k1 private key. The address is derived in the browser (`app/lib/wallet.ts`): keccak-256 of the uncompressed public key, last 20 bytes, Bech32 with prefix `nhb`. The key lives in React state only; the page uses no `localStorage` or `sessionStorage`.
+- **Account snapshot.** `nhb_getBalance` for the derived address (no bearer token). The fields are described in the [cookbook](cookbook.md#2-account-snapshot-nhb_getbalance).
+- **Alias lookup.** `identity_resolve(alias)` normalises the alias (`identity.NormalizeAlias`) and returns `alias`, `aliasId`, `primary`, `addresses`, `avatarRef`, `createdAt`, `updatedAt` (`identityRecordToResult`, `rpc/identity_handlers.go`). An unknown alias is HTTP 404 `alias not found`. `identity_reverse(address)` also exists and returns `{alias, aliasId}` or 404 `address has no alias`.
+- **Payment QR.** Builds `znhb://pay?to=@<alias>&token=<NHB|ZNHB>&amount=<text>` and renders it with `qrcode.react`. That URI is a convention of this example; nothing in the chain code parses it.
+- **Subscription preview.** Returns up to six due dates, 7 days apart for `weekly` and 30 days apart otherwise, starting at `startDate`. It moves no funds.
+- **Escrow details.** `GET /api/escrow/[id]` fetches `<NHB_RPC_URL>/wallet/escrows/<id>` with an `X-Chain-Id` header. That path is a gateway route (`gateway/routes/wallet.go`, `r.Get("/wallet/escrows/{escrowID}", ...)`, which calls `escrow_get` on the node); the node's own HTTP server only serves JSON-RPC on `/`. The gateway mounts that route only under its `consensus` route, whose prefix is `/v1/consensus` (`cmd/gateway/main.go`, `gateway/routes/router.go`), so the real gateway path is `<gateway>/v1/consensus/wallet/escrows/<id>`. The route builds its URL by appending `wallet/escrows/<id>` to `NHB_RPC_URL`, so `NHB_RPC_URL` would have to end in `/v1/consensus`; with `NHB_RPC_URL` set to the gateway root the request has no matching route. `NHB_RPC_URL` is also the endpoint for this app's JSON-RPC calls (`nhb_getBalance`, `identity_resolve`); whether one URL can serve both was not verified.
+- **Mark as scam.** `POST /api/escrow/[id]/mark-scam` imports `EscrowDisputeClient` from a relative path that resolves to `examples/clients/ts/escrow/dispute`. That file does not exist (the client is at `clients/ts/escrow/dispute.ts` in the repository root), so the route does not build as written.
 
-| Flow | RPC Method | Notes |
-| --- | --- | --- |
-| Account snapshot | `nhb_getBalance` | Read-only; no authentication required. |
-| Username registration | `identity_setAlias` | Requires `Authorization: Bearer <NHB_RPC_TOKEN>`. |
-| Claimable creation | `identity_createClaimable` | Accepts alias strings or salted email hashes. |
-| Claim redemption | `identity_claim` | Invoked when the recipient has the alias/email preimage. |
-| Alias discovery | `identity_resolve` | Used to surface avatars, created-at timestamps, and primary addresses. |
+## Environment
 
-Server-side routes proxy the identity gateway using `IDENTITY_GATEWAY_URL`, `IDENTITY_GATEWAY_KEY`,
-and `IDENTITY_GATEWAY_SECRET`. Email hashing still happens on the server via `IDENTITY_EMAIL_SALT`
-before invoking `identity_createClaimable`. `NHB_WS_URL` is read from the root environment for future
-live updates but is not yet consumed by the UI.
+The server reads these variables (`app/lib/config.ts`). All of `NHB_RPC_URL`, `NHB_RPC_TOKEN`, `NHB_CHAIN_ID`, `IDENTITY_EMAIL_SALT`, `IDENTITY_GATEWAY_URL`, `IDENTITY_GATEWAY_KEY`, `IDENTITY_GATEWAY_SECRET` are required; the config check throws `Wallet Lite configuration invalid` if any is missing or empty.
 
-For future send capabilities, follow the [authenticated submission flow for
-`nhb_sendTransaction`](../transactions/znhb-transfer.md#authenticated-submission)
-so the RPC bearer token remains confined to server-side routes.
+| Variable | Use |
+| --- | --- |
+| `NHB_RPC_URL`, `NHB_RPC_TOKEN` | Node endpoint and bearer token (attached only to calls made with `withAuth`, server side) |
+| `NHB_CHAIN_ID` | Sent as the `x-nhb-chain-id` header; the node does not read it |
+| `IDENTITY_EMAIL_SALT` | Key for the email hash: `0x` + hex `HMAC-SHA256(salt, lowercased NFKC-normalised email)` (`app/lib/email.ts`) |
+| `IDENTITY_GATEWAY_URL`, `IDENTITY_GATEWAY_KEY`, `IDENTITY_GATEWAY_SECRET` | Identity gateway endpoint and credentials |
+| `APP_PUBLIC_BASE` | Optional. Base for avatar and sample-content links in the profile route |
+| `NHB_WS_URL` | Optional. Parsed, never used to open a socket |
+| `NHB_API_URL` | Optional. Base for the creator content lookup; defaults to `https://gw.nhbcoin.net` in `app/api/identity/profile/route.ts` |
 
-## Security Posture
+`readClientConfig` exposes only `appBaseUrl` and `chainId` to client code; the token, salt and gateway secret are read only by server-side code.
 
-* Private keys live only in client state. Refreshing the page clears them.
-* Sensitive credentials (`NHB_RPC_TOKEN`, `IDENTITY_EMAIL_SALT`) stay on the Next.js server runtime
-  and are never injected into the browser bundle.
-* Claimable payloads are validated and normalised before hitting the RPC to avoid malformed requests.
-* Follow the [wallet key management UX patterns](../wallet/key-management.md) when implementing
-  reveal, export, or recovery surfaces so production builds enforce MFA and off-chain custody
-  requirements.
-* The default production base URL is `https://nhbcoin.com`. Set `APP_PUBLIC_BASE` accordingly when
-  hosting behind CloudFront or S3.
-* Follow the [authenticated transaction submission guide](../transactions/znhb-transfer.md#authenticated-submission)
-  when wiring send flows so `nhb_sendTransaction` continues to proxy through the server and the RPC
-  bearer token never leaves trusted infrastructure.
+## Identity gateway calls
 
-## Claimables Walkthrough
+The email routes (`/api/identity/email/register`, `/api/identity/email/verify`, `/api/identity/alias/bind-email`) proxy `services/identity-gateway`. Each request is a `POST` with:
 
-1. Register a username for the payer address.
-2. Choose **Email** as the recipient type and enter the recipient's email. Wallet Lite hashes the
-   email and sends `identity_createClaimable` with the resulting 32-byte hex string.
-3. Share the returned `claimId` with the recipient. They verify the email through the identity
-   gateway, register an alias, and claim using the same app by entering the claim ID and alias (the
-   preimage is derived automatically).
-4. When the claim succeeds, the alert surface confirms the token and amount released.
+```
+X-API-Key: <IDENTITY_GATEWAY_KEY>
+X-API-Timestamp: <unix seconds>
+X-API-Signature: hex(HMAC-SHA256(secret, METHOD "\n" path "\n" hex(SHA-256(body)) "\n" timestamp))
+Idempotency-Key: <optional>
+```
 
-Because the UI also supports alias recipients, the same claimable flow can be used to send funds to
-registered usernames—helpful for showcasing escrow holds and expiry countdowns.
+(`app/lib/identity-gateway.ts`; verified server-side in `authenticateRequest` and `computeSignature`, `services/identity-gateway/server.go`, default timestamp skew 5 minutes.) Request bodies: register `{email, aliasHint}`, verify `{email, code}`; verify returns `bindToken`, which bind-email requires. The gateway's bind-email handler additionally requires `alias` and `aliasSignature` in the body; the wallet-lite client does not send them, so bind-email requests from this app are rejected with `alias required` (HTTP 401).
+
+See [`identity/email-verify.http`](identity/email-verify.http) for the request shapes.
+
+## Sending funds from a real wallet
+
+Wallet Lite has no transfer panel. To send NHB or ZNHB, sign a transfer and submit it as described in [wallets.md](wallets.md), from server-side code only, so the bearer token stays off the client. Key handling guidance for production wallets is in [`docs/wallet/key-management.md`](../wallet/key-management.md).

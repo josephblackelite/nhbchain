@@ -1,42 +1,66 @@
 # Reputation service overview
 
-The reputation module introduces a minimal skill verification primitive. Verifiers attest that a subject possesses a specific capability. The current release now enforces verifier authorization within the node; calls from wallets that do not hold the `roleReputationVerifier` assignment fail before any state transition.
+The reputation module stores skill attestations: a verifier records that a subject has a named skill. Code: `native/reputation`, `Node.ReputationVerifySkill` / `ReputationRevokeSkill` in `core/node.go`, `rpc/reputation_handlers.go`.
 
-## Status of the RPC
+The only reputation RPC method is `reputation_verifySkill`. There is no RPC method to read, list or revoke attestations (`Node.ReputationRevokeSkill` exists in Go but nothing in the repository calls it). Reads exist only as `Ledger.Get` inside the module.
 
-`reputation_verifySkill` is retired: every call gets HTTP 410 with JSON-RPC error `-32060` and nothing is
-executed. The method wrote the attestation into the state of the one validator that handled the call, outside block
-execution, and it took the verifier's address from the request body without proof that the caller held that key, so that
-validator's next block differed from the others'. A signed-transaction replacement that every validator executes in a block is
-pending; until it exists no attestation can be recorded through the node. The sections below describe the module's design
-(`Node.ReputationVerifySkill` is kept for its tests and is not reachable from any RPC).
+## `reputation_verifySkill`
 
-## Verification flow
+Requires authentication: a JWT bearer token or verified client certificate (HTTP 401, code `-32001` otherwise). Exactly one parameter object:
 
-1. A wallet with verifier privileges submits the attestation (through the RPC in earlier previews).
-2. The address and skill strings are validated and normalised.
-3. The node enforces role membership, persists the verification and emits `reputation.skillVerified`.
+```json
+{
+  "verifier": "nhb1...",
+  "subject": "nhb1...",
+  "skill": "solidity",
+  "expiresAt": 1893456000
+}
+```
 
-The earlier RPC returned the canonical payload comprising the subject, verifier, skill, issuance timestamp and optional expiry.
+- `verifier`, `subject`: Bech32 addresses.
+- `skill`: required; trimmed. Skill names compare case-insensitively.
+- `expiresAt`: optional Unix seconds. A value `<= 0` or omitted means no expiry. It must be later than the issue time, which is the node's current time.
 
-### Error semantics
+The RPC does not verify a signature over the request: `verifier` is taken from the parameter. Authorization is the role check below.
 
-Validation failures return `codeInvalidParams` (`-32602`) with the specific guard encoded in the `message`/`data` pair (for example `"invalid_params"` + `"invalid bech32 string"` or `"skill required"`). Calls from wallets that lack the verifier role surface `codeUnauthorized` (`-32001`) as the JSON-RPC error code, alongside a separate HTTP `403` status, while infrastructure failures fall back to `codeServerError` (`-32000`).
+### Flow
 
-### Authorization
+1. The RPC validates the addresses and skill.
+2. `Node.ReputationVerifySkill` builds the record with `IssuedAt` = node time and calls `Validate`: non-empty skill, non-zero subject and verifier, positive `IssuedAt`, and `ExpiresAt > IssuedAt` if set.
+3. It checks that `verifier` holds the role `ROLE_REPUTATION_VERIFIER` (`roleReputationVerifier`, `core/node.go`). Otherwise it returns `ErrReputationVerifierUnauthorized` ("reputation: caller lacks verifier role").
+4. The record is stored and `reputation.skillVerified` is appended to the node's events.
 
-`Node.ReputationVerifySkill` checks that the caller holds `roleReputationVerifier` and returns `ErrReputationVerifierUnauthorized` when the role is missing. The RPC layer surfaces the error as `codeUnauthorized` (`-32001`, the JSON-RPC error code — returned alongside a separate HTTP `403` status) with the canonical message and `data` payload so client SDKs can present actionable guidance. Follow the [role allow-list governance workflow](../governance/overview.md#supported-proposal-kinds) to grant or revoke verifier privileges; operators running private networks can edit the genesis role map or submit equivalent `role.allowlist` proposals during rollout.
+Response: `{"verifier", "subject", "skill", "issuedAt", "expiresAt"?}` (`expiresAt` omitted when there is none).
 
-### Migration considerations
+### Errors
 
-Earlier previews only emitted warnings when the caller lacked the verifier role. Integrations that relied on that soft enforcement must now ensure every attesting wallet holds `roleReputationVerifier` before submitting RPC calls. Update automated test fixtures, back-office runbooks, and multisig or KMS policies to cover the stricter requirement; failing to do so will result in `ErrReputationVerifierUnauthorized` responses and no attestation being recorded.
+Errors raised by the RPC layer itself (before the node is called):
 
-## Responsibilities of verifiers
+| Condition | HTTP | Code | `message` | `data` |
+| --- | --- | --- | --- | --- |
+| Not exactly one parameter, bad JSON, invalid Bech32 address, empty skill | 400 | `-32602` | `invalid_params` | detail such as `skill required` or the Bech32 error |
 
-* Maintain an auditable log of evidence backing each verification.
-* Ensure expiring attestations are revisited and either renewed or revoked off-chain.
-* Coordinate with governance to define what constitutes acceptable proof for a skill category.
+Errors returned by `Node.ReputationVerifySkill` go through `writeReputationError`, which classifies by substring of the error text:
+
+| Error text contains | HTTP | Code | `message` | `data` |
+| --- | --- | --- | --- | --- |
+| `invalid` | 400 | `-32602` | `invalid_params` | error text |
+| `unauthorized`, or is `ErrReputationVerifierUnauthorized` | 403 | `-32001` | `forbidden` | error text (`reputation: caller lacks verifier role`) |
+| anything else | 500 | `-32000` | `internal_error` | error text |
+
+The validation errors in `SkillVerification.Validate` ("expiresAt must be after issuedAt", "subject required", "verifier required", ...) do not contain "invalid", so they are returned as HTTP 500 `internal_error`.
+
+## Granting the verifier role
+
+The role name is `ROLE_REPUTATION_VERIFIER`. Ways to give it to an address:
+
+- The `roles` map in the genesis file (role name to list of addresses; `core/genesis/spec.go`).
+- A `role.allowlist` governance proposal ([governance overview](../governance/overview.md#supported-proposal-kinds)). The proposal is rejected unless the role is listed in the node's `[governance] AllowedRoles`. The `AllowedRoles` list in the repository's `config.toml` does not include `ROLE_REPUTATION_VERIFIER`, and `MINTER_ZNHB` can never be granted this way.
+
+## Verifier responsibilities
+
+Off-chain policy, not enforced by code: keep evidence for each attestation, re-issue or revoke expiring ones, and agree acceptable proof per skill.
 
 ## Disputes
 
-The module does not yet ship automated dispute tooling. Consumers should subscribe to the `reputation.skillVerified` event stream and build application-specific review workflows. When the fully stateful module lands it will include revocation semantics and anchoring into escrow dispute committees.
+There is no dispute tooling in the module. Consumers can watch the `reputation.skillVerified` and `reputation.skillRevoked` events and build their own review process.

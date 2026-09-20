@@ -1,51 +1,75 @@
 # BFT Height Synchronisation
 
-The BFT engine now aligns its internal height with the node's committed chain
-height whenever it boots or resets a round. This prevents validators from
-replaying proposals for heights that have already been finalised and ensures the
-next proposal always targets `chain height + 1`.
+The BFT engine (`consensus/bft/bft.go`) aligns its own height with the node's
+committed chain height when it is constructed, when it starts a new round, and
+after it commits. A validator therefore always targets `chain height + 1`, even
+when the chain advanced by some other path (for example a block adopted from a
+peer during sync).
 
 ## Interface contract
 
-Consensus nodes must implement `NodeInterface.GetHeight()` alongside the
-existing methods. The return value represents the latest block height that has
-been durably committed to the local chain. The engine consumes this method in
-three places:
+The engine talks to the node through `bft.NodeInterface`
+(`consensus/bft/interface.go`):
 
-- **Engine construction:** `NewEngine` seeds `currentState.Height` to
-  `node.GetHeight() + 1` so a restarted validator immediately targets the next
-  block height.
-- **Round transitions:** `startNewRound` prunes any stale `committedBlocks`
-  entries and fast-forwards to `node.GetHeight() + 1` when the cached state falls
-  behind the node.
-- **Post-commit cleanup:** `commit` re-runs the synchronisation helper to clear
-  out entries for heights that have been finalised on the node.
+```go
+GetMempool() []*types.Transaction
+RequeueTransactions(txs []*types.Transaction)
+CreateBlock(txs []*types.Transaction) (*types.Block, error)
+ValidateBlock(block *types.Block) error
+CommitBlock(block *types.Block) error
+GetValidatorSet() map[string]*big.Int
+GetAccount(addr []byte) (*types.Account, error)
+GetLastCommitHash() []byte
+GetHeight() uint64
+```
 
-## The round a height starts in
+`GetHeight()` returns the latest block height committed to the local chain. The
+engine uses it in three places:
 
-A height starts in round 1 at every validator, whichever way the height before it ended.
-After the engine's own commit, `commit` leaves round 0 and `startNewRound` moves on one
-round from it, as it does for an engine that has just been built; a height the node reaches
-because it took a block from a peer (`syncHeightWithNodeLocked`, which sets round 0) is moved
-to round 1 in the same way. Two validators that start a height in different rounds hear
-nothing from each other until the round of the one behind times out.
+- **Construction (`NewEngine`, `bft.go` line 241).** `currentState.Height` is
+  set to `node.GetHeight() + 1` with round 0.
+- **Round start (`startNewRound`, line 1196).** It calls
+  `syncHeightWithNodeLocked`. If the engine's height is at or below the node
+  height, it jumps to `node.GetHeight() + 1`, resets the round to 0 and drops
+  buffered proposals and votes for heights at or below the node height. If the
+  engine did not need to jump: when the current height is already marked
+  committed, it advances one height; otherwise it increments the round.
+- **After a commit (`commit`, line 800).** Once `CommitBlock` succeeds the engine
+  increments its height, resets the round and lock state, refreshes the
+  validator set and voting power from `node.GetValidatorSet()`, and calls
+  `syncHeightWithNodeLocked` again.
 
-`NotifyExternalCommit` ends the round in progress only when the node's chain has reached the
-height of that round. A peer's block that reaches the node while the engine is committing the
-same one is answered without an error and signalled all the same, and the engine has already
-counted it: taken for news it ended the first round of the next height and started that height
-one round ahead of the peer. See [Block cadence](block-cadence.md).
+`syncHeightWithNodeLocked` (line 1267) also deletes every `committedBlocks`
+entry whose height is at or below the node height, so a stale entry cannot
+short-circuit a later round.
 
-## Operational impact
+`NotifyExternalCommit` (line 917) lets the node tell the engine that a block was
+committed by some path other than the engine's own round. It only signals
+(non-blocking, safe from any goroutine); the engine re-reads the real height from
+`GetHeight()` at its next round start.
 
-- **Restarts:** Validators that restart after falling behind no longer need to
-  manually advance their consensus height. As soon as the engine enters the next
-  round it observes the node height and jumps ahead automatically.
-- **State safety:** Stale `committedBlocks` entries are pruned on every
-  synchronisation pass, preventing spurious short-circuiting of later rounds.
-- **Testing:** `consensus/bft/bft_test.go` now seeds a non-zero node height to
-  ensure proposals targeting the resynchronised height are accepted after a
-  simulated restart.
+## Quorum rule the engine applies
 
-This behaviour keeps consensus progress aligned with the canonical chain without
-requiring additional coordination from operators.
+`hasTwoThirdsPowerLocked` (line 1182) requires received power for a vote type to
+be at least `(2 * totalVotingPower + 2) / 3` (integer division), where
+`totalVotingPower` is the sum of the validator set's weights. `commit` runs only
+when that holds for precommits. The committed block carries a `QuorumCert` built
+from the precommit signatures (`buildQuorumCertLocked`, line 853), which peers
+that sync the block later verify (see
+[Consensus invariants](invariants.md)).
+
+## Lock persistence across restarts
+
+When started through `cmd/nhb` or `cmd/consensusd`, the engine is created with a
+lock snapshot path of `<DataDir>/polc_lock.json` (`bft.WithLockSnapshotPath`).
+At construction it restores a persisted lock only if the snapshot's height equals
+the height the engine is about to contest (`bft.go`, line 288 onward); a snapshot
+for any other height is ignored. Because `currentState.Height` is derived from
+`GetHeight()`, a lock left over from an already-committed height is never
+reapplied.
+
+## Tests
+
+`consensus/bft/bft_test.go` includes nodes whose `GetHeight()` returns a
+non-zero height (for example `syncedHeightNode`) to check that the engine
+resynchronises after the node height moves ahead.

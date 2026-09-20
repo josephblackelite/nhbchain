@@ -1,12 +1,15 @@
-# JSON-RPC Highlights
+# JSON-RPC reference (core methods)
 
-## `nhb_getTransaction`
+This page covers the transport rules and the core account/transaction/staking
+methods of the node's JSON-RPC server (`rpc/http.go`). Module-specific methods
+(escrow, identity, loyalty, lending, ...) are documented with their modules.
 
 Returns a transaction summary with the asset inferred from the type. ZapNHB
 (transfer type `TransferZNHB`) responses will include `"asset": "ZNHB"` so
 explorers and wallets can distinguish token flows without re-simulating the
-payload. All RPC calls issued to validator endpoints must include the standard
-bearer token in the `Authorization` header (see the
+payload. `nhb_getTransaction` needs no token. Methods that mutate state or expose
+privileged data require the bearer token in the `Authorization` header;
+`nhb_sendTransaction` is one of them (see the
 [`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
 guide for full header context).
 
@@ -64,7 +67,8 @@ the next nonce from `nhb_getBalance` before signing so the payload aligns with
 validator expectations. The `NHB_RPC_TOKEN` referenced in the examples below must
 be a short-lived JWT issued by your infrastructure with the issuer/audience
 configured under `RPCJWT`; refresh the token before it expires so the server
-accepts the request:
+accepts the request. `nhb_getBalance` itself does not require the token, so the
+header in the first request below is optional:
 
 ```jsonc
 // Request
@@ -94,8 +98,11 @@ from trusted infrastructure. Attach `Authorization: Bearer <NHB_RPC_TOKEN>` to
 the HTTP headers (see the
 [`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md#authenticated-submission)
 walkthrough for the complete header list). The RPC layer enforces the bearer
-token via [`requireAuth`](../../rpc/http.go#L2230-L2256), which rejects requests
-missing the header or using the wrong scheme.
+token via `requireAuth` in `rpc/http.go`, which rejects requests missing the
+header or using the wrong scheme. `to` and `data` are byte fields, so they are
+sent as base64 strings (the `to` below is the 20-byte address
+`0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a` in base64); the numeric fields
+accept a number, a decimal string or a `0x` hex string.
 
 ```bash
 curl https://validator.nhbchain.example/rpc \
@@ -110,21 +117,22 @@ curl https://validator.nhbchain.example/rpc \
         "chainId": "0x4e4842",
         "type": 16,
         "nonce": 42,
-        "to": "0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a",
+        "to": "XJ1M3iP2jNIgmi9erwodNKw+Xyo=",
         "value": "0xde0b6b3a7640000",
         "gasLimit": "0x61a8",
-        "gasPrice": "0x3b9aca00",
-        "data": "0x",
-        "r": "0x9d6bb1226fb5c07f42d41f017cbf6f6fb1dcf1c563cb5b5b6f2a7d2639a4bce1",
-        "s": "0x42fdedb6f5b1f59fa3d793c9d86b8b156382fa4995df794ba53d0d2ca4f8cb22",
-        "v": "0x1c"
+        "gasPrice": "0x1",
+        "data": "",
+        "r": "<signature r>",
+        "s": "<signature s>",
+        "v": "<signature v>"
       }
     ]
   }'
 ```
 
-The example above mirrors the exact payload format validators accept,
-including populated `r`/`s`/`v` signature components:
+The same request as a JSON-RPC body. `r`, `s` and `v` are placeholders: the
+signature must be produced over the transaction hash described in the
+[wallet builder guide](../sdk/wallets.md).
 
 ```json
 // Authorization: Bearer <NHB_RPC_TOKEN>
@@ -137,38 +145,39 @@ including populated `r`/`s`/`v` signature components:
       "chainId": "0x4e4842",
       "type": 16,
       "nonce": 42,
-      "to": "0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a",
+      "to": "XJ1M3iP2jNIgmi9erwodNKw+Xyo=",
       "value": "0xde0b6b3a7640000",
       "gasLimit": "0x61a8",
-      "gasPrice": "0x3b9aca00",
-      "data": "0x",
-      "r": "0x9d6bb1226fb5c07f42d41f017cbf6f6fb1dcf1c563cb5b5b6f2a7d2639a4bce1",
-      "s": "0x42fdedb6f5b1f59fa3d793c9d86b8b156382fa4995df794ba53d0d2ca4f8cb22",
-      "v": "0x1c"
+      "gasPrice": "0x1",
+      "data": "",
+      "r": "<signature r>",
+      "s": "<signature s>",
+      "v": "<signature v>"
     }
   ]
 }
 ```
 
-The RPC returns the transaction hash on success. Poll `nhb_getTransactionReceipt`
-to observe settlement and the emitted ZNHB `Transfer` log, or see
-[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md) for a
-full walkthrough that pairs the JSON-RPC example with signing guidance.
+`to` above is the base64 form of the 20-byte address
+`5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a`. The `r`/`s`/`v` values must be a real
+signature over the hash of exactly these fields. See
+[`docs/transactions/znhb-transfer.md`](../transactions/znhb-transfer.md).
 
-## Staking helpers
+## `nhb_getBalance`
 
-The staking surface now exposes read-only previews and a reward claim helper.
-All three methods require the standard bearer token in the `Authorization`
-header. Calls are rate limited using the same per-source window that guards
-transaction submission and will reject requests with HTTP `429` and the
-`staking rate limit exceeded` message once the limit is hit. If governance
-pauses the staking module the methods return HTTP `503` with the
-`staking module paused` error payload.
+Two read-only staking methods are enabled, `stake_previewClaim` and
+`stake_getPosition`. Both require the standard bearer token in the
+`Authorization` header. Calls are rate limited using the same per-source window
+that guards transaction submission and are rejected with HTTP `429` and the
+`staking rate limit exceeded` message once the limit is hit. If the staking
+module is paused the methods return HTTP `503`, code `-32050` and the
+`staking module paused` message. The reference is
+[`docs/staking/staking.md`](../staking/staking.md).
 
 ### `stake_previewClaim`
 
-Returns the rewards currently payable for the supplied delegator alongside the
-timestamp of the next eligible payout window.
+Returns the rewards payable now for the supplied delegator alongside the
+timestamp of the next payout.
 
 ```json
 // Authorization: Bearer <NHB_RPC_TOKEN>
@@ -182,103 +191,59 @@ timestamp of the next eligible payout window.
 
 ```json
 {
-  "id": 3,
+  "id": 1,
   "jsonrpc": "2.0",
   "result": {
-    "payable": "7425000000000000000000",
-    "nextPayoutTs": 1719969600
+    "address": "nhb1...",
+    "balanceNHB": 10000000000000000,
+    "balanceZNHB": 2500000000000000000,
+    "stake": 0,
+    "lockedZNHB": 0,
+    "pendingStakingRewards": 0,
+    "username": "",
+    "nonce": 42,
+    "engagementScore": 0,
+    "validatorRegistered": false
   }
 }
 ```
 
-If the payout window has not elapsed the method returns a zero `payable` value
-and the timestamp of the next payout window. When the module is paused the
-response mirrors the claim helper below.
+If no full payout period has elapsed since the last payout, `payable` is `"0"`.
 
-### `stake_getPosition`
+## `nhb_getTransaction`
 
-Exposes the delegator’s current staking ledger snapshot so operators can check
-shares, reward index, and payout timing without inspecting raw account state.
-
-```json
-// Authorization: Bearer <NHB_RPC_TOKEN>
-{
-  "id": 4,
-  "jsonrpc": "2.0",
-  "method": "stake_getPosition",
-  "params": ["nhb1exampledelegator…"]
-}
-```
+Returns the delegator's reward accounting fields (`StakeShares`,
+`StakeLastIndex`, `StakeLastPayoutTs`).
 
 ```json
 {
-  "id": 4,
-  "jsonrpc": "2.0",
-  "result": {
-    "shares": "5000000000000000000",
-    "lastIndex": "1500",
-    "lastPayoutTs": 1717387200
-  }
+  "hash": "0x...",
+  "type": "TransferZNHB",
+  "asset": "ZNHB",
+  "blockHash": "0x...",
+  "blockNumber": "0x1a",
+  "from": "nhb1...",
+  "to": "nhb1...",
+  "value": "0xde0b6b3a7640000",
+  "nonce": "0x2a",
+  "gasLimit": "0x61a8",
+  "gasPrice": "0x3b9aca00",
+  "input": "0x"
 }
 ```
 
-### `stake_claimRewards`
+`type` is the name from `formatTxType`; `asset` is set by `assetLabel` (`NHB` for
+`Transfer` and the NHB lending types, `ZNHB` for `TransferZNHB`, the ZNHB lending
+types and `BuyZNHB`, and `NHB` for `RedeemNHB`; it is omitted for every other type).
 
-Claims accrued staking rewards and returns the total minted amount, the number
-of reward periods settled, the APR (in basis points) used for the payout, and
-the timestamp when the next payout becomes available.
+### Disabled methods: `stake_claimRewards`, `stake_delegate`, `stake_undelegate`, `stake_claim`
 
-```json
-// Authorization: Bearer <NHB_RPC_TOKEN>
-{
-  "id": 5,
-  "jsonrpc": "2.0",
-  "method": "stake_claimRewards",
-  "params": ["nhb1exampledelegator…"]
-}
-```
-
-```json
-{
-  "id": 5,
-  "jsonrpc": "2.0",
-  "result": {
-    "minted": "7425000000000000000000",
-    "periods": 2,
-    "aprBps": 1250,
-    "nextEligibleTs": 1722561600
-  }
-}
-```
-
-Attempting to claim before the payout window elapses yields a `409` response
-with the `stake: claim not yet due` message and a `nextEligibleTs` hint in the
-error `data` field. For example:
-
-```json
-{
-  "id": 5,
-  "jsonrpc": "2.0",
-  "error": {
-    "code": -32602,
-    "message": "stake: claim not yet due",
-    "data": {
-      "nextEligibleTs": 1719979200
-    }
-  }
-}
-```
-
-When the module is paused the helper returns HTTP `503` with the `staking
-module paused` message.
-
-Error responses include:
-
-* `503 Service Unavailable` with JSON-RPC code `-32050` (`codeModulePaused`) and
-  the `staking module paused` message when governance pauses staking.
-* `409 Conflict` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
-  `stake: claim not yet due` message when the payout window has not elapsed. The
-  response includes a `nextEligibleTs` hint in the error `data` field.
-* `400 Bad Request` with JSON-RPC code `-32602` (`codeInvalidParams`) and the
-  `failed to claim staking rewards` message for malformed parameters or other
-  validation failures.
+These four methods no longer do anything. Every call is answered with HTTP `410
+Gone`, JSON-RPC code `-32060` (`codeMethodDisabled`) and a message telling the
+caller to sign a `TxTypeStake`, `TxTypeUnstake`, `TxTypeStakeClaim` or
+`TxTypeStakeClaimRewards` transaction and submit it with `nhb_sendTransaction`
+(`rpc/stake_handlers.go`). In particular, `stake_claimRewards` no longer returns
+`minted`, `periods`, `aprBps` or `nextEligibleTs`, and there is no `409` response
+for a claim that is not yet due from this method. Rewards are claimed with a
+`TxTypeStakeClaimRewards` (`0x34`) transaction; see
+[`docs/staking/staking.md`](../staking/staking.md).

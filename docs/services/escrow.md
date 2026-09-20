@@ -1,18 +1,30 @@
 # Escrow Service API
 
-The Escrow service exposes read-only helpers for governance tooling and arbitration dashboards. It complements transactional `escrow_*` endpoints by exposing realm metadata, deterministic escrow snapshots (including frozen arbitrator policies), and the raw event feed consumed by downstream indexers.
+The node's JSON-RPC exposes three read-only escrow helpers (`rpc/modules/escrow.go`,
+registered in `rpc/http.go`) alongside `escrow_get`:
+
+- `escrow_getRealm` returns an arbitration realm definition.
+- `escrow_getSnapshot` returns an escrow record with its frozen arbitrator policy.
+- `escrow_listEvents` returns `escrow.*` events from the node's event buffer.
+
+These three methods do not call the JWT check; they are subject to the RPC
+server's per-source rate limit (`RPCMaxTxPer*` in `config.toml`).
+
+The mutating methods `escrow_create`, `escrow_fund`, `escrow_release`,
+`escrow_refund`, `escrow_dispute`, `escrow_expire` and `escrow_resolve` are
+disabled: each returns HTTP `410` with JSON-RPC code `-32060` and a message
+beginning `this method is disabled` (`rpc/escrow_handlers.go`,
+`escrowRPCDisabledMessage`). Escrow state changes go through signed transactions.
+
+All three read methods take a single parameter object in `params`.
 
 ## Methods
 
 ### `escrow_getRealm`
 
-Returns the latest arbitration realm definition.
+Params: `[{"id": "<realm id>"}]`. `id` is required.
 
-**Parameters**
-
-- `id` – realm identifier (`string`).
-
-**Result**
+Result:
 
 ```json
 {
@@ -24,33 +36,44 @@ Returns the latest arbitration realm definition.
   "arbitrators": {
     "scheme": "committee",
     "threshold": 2,
-    "members": ["nhb1…", "nhb1…"]
+    "members": ["nhb1...", "nhb1..."]
+  },
+  "metadata": {
+    "scope": "platform",
+    "providerProfile": "...",
+    "arbitrationFeeBps": 0,
+    "feeRecipient": "nhb1..."
   }
 }
 ```
 
+`scheme` is `single`, `committee` or `unspecified`. `metadata` is present only
+when the realm has metadata; `scope` is `platform`, `marketplace` or
+`unspecified`; `feeRecipient` is omitted when empty. An unknown realm returns
+HTTP `404` with message `realm not found`.
+
 ### `escrow_getSnapshot`
 
-Fetches the canonical escrow record and any frozen arbitrator policy captured at creation time.
+Params: `[{"id": "0x<64 hex characters>"}]` (32 bytes; a missing `0x` prefix is
+accepted).
 
-**Parameters**
-
-- `id` – escrow identifier (`0x`-prefixed hex string).
-
-**Result**
+Result:
 
 ```json
 {
-  "id": "0x…",
-  "payer": "nhb1…",
-  "payee": "nhb1…",
+  "id": "0x...",
+  "payer": "nhb1...",
+  "payee": "nhb1...",
+  "mediator": "nhb1...",
   "token": "NHB",
   "amount": "1000000000000000000",
   "feeBps": 50,
   "deadline": 1720204800,
   "createdAt": 1719952000,
+  "nonce": 1,
   "status": "funded",
-  "meta": "0x…",
+  "meta": "0x...",
+  "disputeReason": "...",
   "realm": "core",
   "frozenPolicy": {
     "realmId": "core",
@@ -58,26 +81,30 @@ Fetches the canonical escrow record and any frozen arbitrator policy captured at
     "policyNonce": 17,
     "scheme": "committee",
     "threshold": 2,
-    "members": ["nhb1…", "nhb1…"],
-    "frozenAt": 1719952000
-  }
+    "members": ["nhb1...", "nhb1..."],
+    "frozenAt": 1719952000,
+    "metadata": { "scope": "platform", "providerProfile": "...", "arbitrationFeeBps": 0 }
+  },
+  "resolutionHash": "0x..."
 }
 ```
 
-If a dispute has been resolved the `resolutionHash` field contains the recorded decision payload hash.
+`mediator`, `disputeReason`, `realm`, `frozenPolicy` and `resolutionHash` are
+omitted when unset. `status` is one of `init`, `funded`, `released`, `refunded`,
+`expired`, `disputed`, `unknown`. `meta` is the 32-byte metadata hash. An unknown
+escrow returns HTTP `404` with message `escrow not found`.
 
 ### `escrow_listEvents`
 
-Streams recent `escrow.*` events emitted by the node. Front-ends can use these payloads to display signer fingerprints (`decisionSigners`), frozen policy metadata, and realm lifecycle information without custom parsing.
+Params: none, or `[{"prefix": "<event type prefix>", "limit": <int>}]`. Both keys
+are optional. `prefix` defaults to `escrow.` and is matched case-insensitively.
+`limit` keeps the first N matching events (a negative value becomes 0).
 
-The node keeps these events in memory only, so the list starts empty after a restart. It retains up to 100,000 events of the escrow, fee and penalty kinds together, and events of other kinds never push them out; once a node has seen more than that the oldest are dropped and the `sequence` numbers restart at 1 from the oldest event still held.
+The events come from the node's in-memory event buffer (`Node.Events()`), in
+buffer order. `sequence` is the 1-based position in the returned list, not a
+persistent identifier.
 
-**Parameters (optional)**
-
-- `prefix` – filter by event type prefix (defaults to `escrow.`).
-- `limit` – maximum number of events to return.
-
-**Result**
+Result:
 
 ```json
 [
@@ -87,35 +114,51 @@ The node keeps these events in memory only, so the list starts empty after a res
     "attributes": {
       "realmId": "core",
       "version": "3",
-      "arbScheme": "1",
+      "nextNonce": "42",
+      "createdAt": "1716403200",
+      "updatedAt": "1719081600",
+      "arbScheme": "2",
       "arbThreshold": "2",
-      "arbitrators": "0x…"
+      "arbitrators": "0x..."
     }
   }
 ]
 ```
 
-## CLI Helper
+Event types are defined in `native/escrow/events.go` (for example
+`escrow.created`, `escrow.funded`, `escrow.released`, `escrow.refunded`,
+`escrow.expired`, `escrow.disputed`, `escrow.resolved`, `escrow.realm.created`,
+`escrow.realm.updated`, `escrow.trade.*`, `escrow.milestone.*`). In realm events
+`arbScheme` is numeric: `1` single, `2` committee. Escrow events carry the
+frozen-policy attributes `realmVersion`, `policyNonce`, `arbScheme` and
+`arbThreshold`, and `decisionSigners` when a decision is recorded.
 
-A lightweight CLI (`cmd/nhb/escrowcmd`) is available for interacting with the new endpoints:
+## CLI helper
+
+`cmd/nhb/escrowcmd` is a small Go program (its usage text calls it `nhb-escrow`;
+build it with `go build -o nhb-escrow ./cmd/nhb/escrowcmd`). The global flags
+must come before the command:
 
 ```bash
-# Fetch realm metadata
+nhb-escrow [--rpc URL] [--auth TOKEN] <command> [options]
+
 nhb-escrow realm get --id core
-
-# Inspect an escrow snapshot (including frozen arbitrator policy)
-nhb-escrow snapshot --id 0x…
-
-# Tail recent escrow events for dashboards or indexers
-nhb-escrow events --limit 10
-
-# Open a new escrow and submit arbitration outcomes via RPC
-nhb-escrow open --payer nhb1... --payee nhb1... --token NHB --amount 1000000000000000000 --fee-bps 50 --deadline 1720204800 --realm core
-nhb-escrow resolve --id 0x... --caller nhb1... --outcome release
+nhb-escrow snapshot --id 0x...
+nhb-escrow events --prefix escrow.realm. --limit 10
 ```
 
-The CLI honours `--auth`/`NHB_RPC_TOKEN` and `--rpc`/`NHB_RPC_URL` for secure deployments.
+`--rpc` defaults to `NHB_RPC_URL`, else `http://127.0.0.1:8545`; `--auth` defaults
+to `NHB_RPC_TOKEN`.
 
-## Event Stream Integration
+The CLI also has `open` (flags `--payer`, `--payee`, `--token` (default `NHB`),
+`--amount`, `--fee-bps`, `--deadline`, `--mediator`, `--meta`, `--realm`) and
+`resolve` (`--id`, `--caller`, `--outcome release|refund`). They call
+`escrow_create` and `escrow_resolve`, which the node currently rejects with the
+`410` described above.
 
-The existing gateway indexer now receives the enriched `escrow.*` events returned by `escrow_listEvents`. Because every attribute is persisted in SQLite and propagated to webhooks, front-ends can display signer fingerprints (`decisionSigners`), frozen arbitrator policies (`realmVersion`, `policyNonce`, `arbThreshold`, `arbitrators`), and other metadata without additional state reads.
+## Gateway indexing
+
+`services/escrow-gateway` stores idempotency keys, audit entries and P2P
+offers/trades in SQLite (`services/escrow-gateway/storage.go`) and reads escrow
+state from the node with `escrow_get` and `escrow_getRealm`. See
+[Escrow gateway](../escrow/nhbchain-escrow-gateway.md) for its behaviour.

@@ -1,241 +1,63 @@
-# Epoch Rewards and ZNHB Budgeting
+# Epoch Rewards (validators, stakers, engagement)
 
-This document describes the epoch reward emission system for ZapNHB (ZNHB).
-It supports the due-diligence needs of auditors, investors, developers,
-implementers, end-users, and regulators.
+This page describes the per-epoch ZNHB emission that is split across validators, stakers and engagement scores. It is separate from loyalty rewards ([`loyalty.md`](./loyalty.md)). Code: `core/rewards/` (`config.go`, `halving.go`, `accumulator.go`, `types.go`), `core/rewards_logic.go`, `core/rewards_state.go`, `core/epochs.go`, `rpc/rewards_handlers.go`.
 
 ## Overview
 
-* Emissions follow a configurable schedule `E(t)` (per epoch) and are split across
-  validators, stakers, and engagement reward pools using basis-point weights.
-* Rewards accrue deterministically per block and are settled when an epoch
-  finalises. Settlement produces immutable records in state and structured
-  events for off-chain observers.
-* Payouts are credited directly to account ZNHB balances—no treasury account is
-  involved. Undistributed portions remain recorded as "unused" allocations.
-* JSON-RPC endpoints expose settlement summaries and per-account payout data.
+* Each epoch has a planned emission taken from a schedule (`rewards.Config`). The emission is split into validator, staker and engagement pools by basis-point weights.
+* A per-block accumulator (`accrueEpochRewards`) tracks the planned amounts, and the payout is settled when the epoch closes.
+* Payouts are transfers of ZNHB. When the node has an admin wallet configured (`hasAdminWallet`), the payout is limited by the ZNHB **Reward Pool** balance and debited from the admin wallet's ZNHB balance; the pool ledger is reduced by the amount that reaches other accounts (`settleEpochRewards`). Without an admin wallet (for example in unit tests) no pool check or debit is made.
+* Anything not distributed stays undistributed: settlement records planned and paid amounts separately, so unused amounts are visible.
 
-Founder note: mainnet relies on treasury-funded `ZNHB` payouts rather than fresh
-inflation. Treat this scheduler as optional/legacy unless it is explicitly
-funded from a configured reserve.
-
-## Configuration Surface
-
-Reward configuration is represented by `rewards.Config` (see
-`core/rewards/config.go`). The state processor and node expose the following
-helpers:
-
-| Method | Description |
-|--------|-------------|
-| `StateProcessor.RewardConfig()` | Returns a defensive copy of the active configuration. |
-| `StateProcessor.SetRewardConfig(cfg rewards.Config)` | Validates and applies a new configuration, pruning settlement history to the configured retention window. |
-| `Node.RewardConfig()` / `Node.SetRewardConfig(cfg)` | Remote accessors mirroring the state processor helpers. |
-| `StateProcessor.RewardEpochSettlement(epoch uint64)` | Fetch a specific settlement record (copy) from state. |
-| `StateProcessor.LatestRewardEpochSettlement()` | Fetch the newest settlement (copy) if present. |
-| `Node.RewardEpochSettlement(epoch)` / `Node.LatestRewardEpochSettlement()` | Node-level convenience wrappers. |
+## Configuration
 
 `rewards.Config` fields:
 
-* `Schedule []EmissionStep` – piecewise-constant emission amounts. Each step is
-  active from `StartEpoch` (1-indexed) until the next entry. Amounts are integer
-  ZNHB values (no decimals).
-* `ValidatorSplit`, `StakerSplit`, `EngagementSplit` – basis point weights (0 to
-  10,000). Non-zero configurations must sum to exactly 10,000.
-* `HistoryLength` – number of settlement records retained (0 keeps the full
-  history).
+| Field | Meaning |
+|-------|---------|
+| `Schedule []EmissionStep` | Piecewise-constant emission: each `{StartEpoch, Amount}` applies from `StartEpoch` (1-indexed, greater than zero, no duplicates) until the next step. Amounts are non-negative wei. No schedule means zero emission. |
+| `ValidatorSplit`, `StakerSplit`, `EngagementSplit` | Basis points. Must sum to exactly 10000, or all be zero (disabled). |
+| `HistoryLength` | Number of settlement records kept; 0 keeps all. |
 
-`Config.Validate()` enforces monotonic schedule ordering, non-negative amounts,
-and correct basis-point totals. `SplitEmission(total)` splits the per-epoch
-emission into category amounts, allocating rounding dust to the engagement
-bucket to preserve conservation.
+`rewards.DefaultConfig()` is disabled (empty schedule, zero splits, `HistoryLength` 64). `IsEnabled` is true only with a non-empty schedule, at least one non-zero split and at least one positive step. `SplitEmission` computes `total * split / 10000` per pool and adds any rounding dust to the engagement pool.
 
-## Accrual and Settlement Flow
+**What the node runs.** When the node has an admin wallet, it applies `rewards.HalvingScheduleConfig(2000, 5000, 3000, 2000)` at start-up (`core/node.go`): 20% validators, 50% stakers, 30% engagement, history length 2000. The configuration is held in memory and recomputed at each start; it is not governance-adjustable (a code comment in `core/node.go` says so). The halving schedule (`core/rewards/halving.go`):
 
-1. **Per-block accrual:** During `ProcessBlockLifecycle`,
-   `StateProcessor.accrueEpochRewards(height)` increments category accruals for
-   the current epoch. Each block receives the deterministic per-block share, with
-   remainders carried to the earliest blocks.
-2. **Epoch finalisation:** When `height % epoch.Length == 0`,
-   `settleEpochRewards(snapshot)` executes:
-   * Copies the validator weight snapshot (stake + engagement) computed for the
-     epoch.
-   * Uses the per-epoch emission totals to build deterministic payouts:
-     - Validator pool: equal split across the rotated validator set (`snapshot.Selected`).
-     - Staker pool: proportional to validator stake.
-     - Engagement pool: proportional to engagement scores. Zero-denominator pools
-       remain unused and are recorded as such.
-   * Credits account ZNHB balances, emits `rewards.paid` events per recipient,
-     persists settlement metadata (with payout breakdowns), and finally emits a
-     `rewards.epoch_closed` summary event.
-   * Settlement is idempotent—if a record for an epoch already exists, rerunning
-     the lifecycle results in no additional payouts or events.
+* Base emission `HalvingBaseEmissionZNHB` = 200 ZNHB per epoch in the first era.
+* Era length `HalvingEraLengthEpochs` = 500,000 epochs; the emission is halved (right shift at wei precision, rounding down) each era, for at most 80 eras.
 
-Settlement records are stored under the `reward-history` trie key. Each record
-captures planned vs. paid totals, unused amounts, block counts, and per-account
-payout components (validators/stakers/engagement).
+Epoch length in blocks comes from the epoch configuration (`epoch.Config.Length`; default 100).
+
+## Accrual and settlement
+
+1. **Per block** (`accrueEpochRewards(height)`): epoch number = `((height-1) / length) + 1`; the accumulator for that epoch is created with the planned pool amounts and accrues one block's share per block.
+2. **At the epoch boundary** (`height % length == 0`, `ProcessBlockLifecycle` in `core/epochs.go`, epoch number `height / length`): `finalizeEpoch` computes the validator weight snapshot and runs `settleEpochRewards`, then buyback settlement, then applies validator selection. If a settlement for the epoch already exists, nothing is paid again.
+3. **Pool limit**: with an admin wallet, if the planned total exceeds the Reward Pool balance, every pool's plan is scaled down proportionally (rounded down).
+4. **Distribution**:
+   * Validator pool: split equally across the unique addresses in the snapshot's selected validators, ordered by address; remainder units go to the first addresses in that order.
+   * Staker pool: pro-rata by each weight entry's `Stake`. A validator's share is then split between the validator's own basis (its stake minus stake delegated in by others) and its indexed delegators, pro-rata by the delegators' `LockedZNHB`; with no indexed delegators the validator receives the whole share.
+   * Engagement pool: pro-rata by engagement score.
+   * Pro-rata rounding: leftover units go first to the largest remainders (ties by address), then by address order. A pool with a zero denominator pays nothing and stays unused.
+5. **Credit**: each account's ZNHB balance is increased. If the account has a reward beneficiary set (`Account.RewardBeneficiary`, set with `TxTypeSetRewardBeneficiary`, `0x1A`) and it differs from the account, the credit goes to the beneficiary instead.
+6. **Persist**: the settlement is appended to the history, pruned to `HistoryLength`, and stored in state under the key `keccak256("reward-history")`. `Blocks` in the record is the configured epoch length.
+7. With an admin wallet the ledger and wallet updates run: Reward Pool balance reduced by the paid amount that did not go back to the admin wallet, and the admin wallet's ZNHB balance reduced by the full paid total. If that balance is below the paid total, settlement returns an error.
 
 ## Events
 
-### `rewards.paid`
+**`rewards.paid`** (one per account with a non-zero payout): `epoch`, `account` (bech32, the account the reward was earned by), `amount`; `paidTo` (bech32) when redirected to a beneficiary; `validators`, `stakers`, `engagement` when the portion is non-zero.
 
-Emitted once per account receiving a reward during settlement.
+**`rewards.epoch_closed`**: `epoch`, `height`, `closed_at` (unix seconds), `blocks`, `planned_total`, `paid_total`, `validators_planned`, `validators_paid`, `stakers_planned`, `stakers_paid`, `engagement_planned`, `engagement_paid`.
 
-| Attribute | Description |
-|-----------|-------------|
-| `epoch` | Epoch number. |
-| `account` | Bech32 address of the recipient. |
-| `amount` | Total ZNHB paid. |
-| `validators` | Portion derived from the validator pool (optional, omitted if zero). |
-| `stakers` | Portion from the staker pool (optional). |
-| `engagement` | Portion from the engagement pool (optional). |
+## JSON-RPC
 
-### `rewards.epoch_closed`
+None of these methods require authentication.
 
-Summarises the epoch settlement results.
+**`nhb_getRewardEpoch`**: optional param: an epoch number or `{"epoch": n}`; without it the latest settlement is returned. Result fields: `epoch`, `height`, `closedAt`, `blocks`, `plannedTotal`, `paidTotal`, `validatorsPlanned`, `validatorsPaid`, `stakersPlanned`, `stakersPaid`, `engagementPlanned`, `engagementPaid`, `unusedTotal`, `unusedValidators`, `unusedStakers`, `unusedEngagement`, `payouts` (array of `{account, total, validators, stakers, engagement}` where `account` is `0x` plus hex of the credited address, that is the beneficiary when redirected). Amounts are decimal strings. Unknown epoch: HTTP 404, code `-32000`, message `reward epoch not found`.
 
-| Attribute | Description |
-|-----------|-------------|
-| `epoch` | Epoch number. |
-| `height` | Block height that finalised the epoch. |
-| `closed_at` | Block timestamp (Unix seconds). |
-| `blocks` | Number of blocks accrued in the epoch. |
-| `planned_total` / `paid_total` | Emission vs. distributed totals (decimal strings). |
-| `validators_planned` / `validators_paid` | Category-level totals. |
-| `stakers_planned` / `stakers_paid` | Category-level totals. |
-| `engagement_planned` / `engagement_paid` | Category-level totals. |
+**`nhb_getRewardPayout`**: param `{"account": "<bech32 or 0x hex>", "epoch": n (optional)}` (a bare account string also works). Result `{"epoch": n, "payout": {...}}`. Errors: `reward epoch not found` or `payout not found`, both HTTP 404 with code `-32000`. The account is matched against the credited address.
 
-Unused amounts can be derived by subtracting `*_paid` from `*_planned`.
+**`nhb_getRewardHistory`**: param `{"account": ...}` or a bare account string. Result `{"account": "0x...", "entries": [{epoch, height, closedAt, total, validators, stakers, engagement}]}` covering the retained history window.
 
-## JSON-RPC Endpoints
+## Node helpers
 
-Two endpoints provide machine-readable access.
-
-### `nhb_getRewardEpoch`
-
-**Parameters:**
-
-* Optional `epoch` (number or `{ "epoch": <uint64> }`). When omitted, the latest
-  settlement is returned.
-
-**Result fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `epoch` | `uint64` | Epoch number. |
-| `height` | `uint64` | Finalising block height. |
-| `closedAt` | `int64` | Finalising block timestamp (Unix seconds). |
-| `blocks` | `uint64` | Number of blocks accrued in the epoch. |
-| `plannedTotal` / `paidTotal` | `string` | Decimal ZNHB amounts. |
-| `validatorsPlanned` / `validatorsPaid` | `string` | Category totals. |
-| `stakersPlanned` / `stakersPaid` | `string` | Category totals. |
-| `engagementPlanned` / `engagementPaid` | `string` | Category totals. |
-| `unusedTotal`, `unusedValidators`, `unusedStakers`, `unusedEngagement` | `string` | Undistributed amounts per category. |
-| `payouts` | `[]object` | Detailed per-account breakdowns. |
-
-Each element of `payouts` contains `account` (0x-prefixed hex), `total`, and the
-category-specific amounts (`validators`, `stakers`, `engagement`).
-
-### `nhb_getRewardPayout`
-
-Retrieves a payout for a specific account.
-
-**Parameters:**
-
-* `account` (Bech32 or 0x-prefixed hex, required).
-* Optional `epoch` (number or field in an object).
-
-**Result fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `epoch` | `uint64` | Epoch number containing the payout. |
-| `payout` | `object` | Same shape as entries returned by `nhb_getRewardEpoch`. |
-
-If the account has no payout for the requested epoch, the endpoint returns a
-404 error.
-
-Authentication is not required for these read-only endpoints.
-
-## Storage & Persistence
-
-* Settlements are persisted to the state trie under the hashed key
-  `reward-history`. Retention obeys `Config.HistoryLength`.
-* Per-account payout breakdowns are stored alongside each settlement record and
-  are included in RPC responses.
-* The settlement structures are cloned when returned via API helpers to avoid
-  leaking mutable state.
-
-## Testing Strategy
-
-Unit tests in `core/rewards_logic_test.go` cover:
-
-* **Distribution sums:** Ensures the total paid matches the configured emission
-  and matches the sum of per-account payouts.
-* **Rounding:** Verifies deterministic handling of integer division remainders
-  across staker and engagement pools.
-* **Empty sets:** Confirms that epochs with no eligible validators do not panic
-  and record the full amount as unused.
-* **Idempotency:** Validates that rerunning epoch finalisation does not emit
-  duplicate payouts or mutate balances.
-
-Integration tests for epochs (`core/epoch_state_test.go`) continue to succeed,
-with reward persistence using RLP-friendly encodings (`ClosedAt` stored as
-`uint64`).
-
-## Audience Notes
-
-### Auditors
-
-* Every settlement is fully persisted with per-account breakdowns, enabling
-  deterministic recomputation from state.
-* Undistributed amounts are explicitly tracked, preventing silent supply drift.
-* Events provide a verifiable audit trail linking on-chain balances to emission
-  calculations.
-
-### Investors
-
-* Transparent reward budgets and split configuration ensure predictable token
-  economics.
-* Reward history (via RPC or state inspection) reveals validator performance and
-  engagement incentives over time.
-
-### Developers & Implementers
-
-* Use `Node.SetRewardConfig` (or `StateProcessor.SetRewardConfig`) to adjust
-  emission schedules and splits as part of governance flows. Validation prevents
-  misconfiguration (e.g., incorrect basis point totals).
-* Settlement helpers (`RewardEpochSettlement`, `LatestRewardEpochSettlement`)
-  return defensive copies suitable for UI or analytics backends.
-* JSON-RPC endpoints simplify integration for dashboards or indexers without
-  needing to parse raw state.
-
-### End-users
-
-* `rewards.paid` events allow wallets or explorers to notify users of earned
-  ZNHB, including the category contributions.
-* `nhb_getRewardPayout` exposes a simple API for verifying rewards credited to a
-  specific address.
-
-### Regulators
-
-* Deterministic distribution rules (stake- and engagement-based) and immutable
-  settlement history provide a clear compliance trail.
-* The emission schedule can be published alongside governance decisions to
-  demonstrate adherence to supply policies.
-
-## Function Reference
-
-Key functions added or modified to support rewards:
-
-* `StateProcessor.accrueEpochRewards(height uint64)` – internal helper invoked
-  each block to accumulate per-category totals.
-* `StateProcessor.settleEpochRewards(snapshot epoch.Snapshot)` – orchestrates
-  settlement, storage, and event emission at epoch boundaries.
-* `rewards.NewAccumulator` – maintains per-block accrual state including
-  remainder distribution.
-* `distributeValidatorRewards`, `distributeStakerRewards`,
-  `distributeEngagementRewards` – deterministic allocation helpers that ensure
-  conservation and reproducible rounding.
-
-Together these components ensure reward emissions are transparent, reproducible,
-and verifiable across all stakeholders.
+`Node.RewardConfig()`, `Node.SetRewardConfig(cfg)`, `Node.RewardEpochSettlement(epoch)`, `Node.LatestRewardEpochSettlement()` and `StateProcessor.SetRewardConfig` (validates, resets the accumulator, prunes history) are Go-level accessors, not RPC methods. A node that has an admin wallet resets the configuration to the halving configuration above when it starts.

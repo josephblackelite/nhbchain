@@ -1,64 +1,17 @@
-# POTSO Reward Notifications
+# POTSO Reward Events
 
-Settlement events are emitted by the node every time a reward becomes claimable or is paid. Operators typically forward these
-events to downstream systems (email, CRM, treasury bots) via webhooks.
+The state processor appends these events while applying a block (`core/events/potso.go`, appended with `AppendEvent`). All attribute values are strings.
 
-## Event Types
+| Event | When | Attributes |
+| --- | --- | --- |
+| `potso.reward.ready` | Claim mode, at epoch processing, for each winner with a positive amount. | `epoch`, `address`, `amount`, `mode` (`claim`) |
+| `potso.reward.paid` | Auto mode at epoch processing, for each winner with a positive amount when the epoch's total paid is positive; claim mode after a successful `potso_reward_claim`. | `epoch`, `address`, `amount`, `mode` (`auto` or `claim`) |
+| `potso.reward.epoch` | Once per processed epoch. | `epoch`, `totalPaid`, `winners`, plus `emission`, `budget`, `remainder` |
 
-| Event | Mode | Attributes |
-|-------|------|------------|
-| `potso.reward.ready` | claim mode only | `epoch`, `address`, `amount`, `mode` (always `claim`) |
-| `potso.reward.paid`  | both modes      | `epoch`, `address`, `amount`, `mode` (`auto` or `claim`) |
+`address` is a Bech32 `nhb1...` address; `amount`, `totalPaid`, `emission`, `budget` and `remainder` are decimal wei.
 
-Events are queued inside the state processor and accessible through the existing event streaming interfaces. Each attribute is
-encoded as a string. In claim mode the `ready` event is emitted at epoch close; the `potso_reward_claim` call that used to
-make `paid` fire is retired, so in claim mode `paid` does not fire today.
+Notes:
 
-## Webhook Envelope
-
-Downstream services commonly deliver events using an HTTP POST with the following envelope:
-
-```json
-{
-  "type": "potso.reward.ready",
-  "emittedAt": "2024-03-18T12:30:00Z",
-  "data": {
-    "epoch": 199,
-    "address": "nhb1examplewinner...",
-    "amount": "920000000000000000000",
-    "mode": "claim"
-  },
-  "signature": "sha256=..."
-}
-```
-
-* `type` mirrors the on-chain event type.
-* `emittedAt` should be populated by the webhook dispatcher using the node’s wall clock.
-* `signature` is an HMAC (recommended) or detached signature that allows receivers to verify authenticity.
-
-## Retry & Backoff
-
-1. Use exponential backoff with jitter. A starting delay of 5 seconds doubling up to 10 minutes works well.
-2. Keep a delivery log including the HTTP status and error body for each attempt.
-3. After a maximum number of attempts (e.g. 15) escalate to operators but retain the event in a dead-letter queue for manual
-   replay.
-
-## Implementing Signature Verification
-
-* Choose a shared secret (`POTSO_WEBHOOK_SECRET`).
-* The dispatcher signs `HMAC_SHA256(secret, type + "|" + emittedAt + "|" + base64(data_json))`.
-* Receivers recompute the HMAC and compare using a constant-time check.
-* Rotate the secret periodically and keep the previous secret available during the transition window to avoid losing events.
-
-## Operational Recommendations
-
-* **Idempotency:** include the tuple `(type, epoch, address)` in the webhook payload. Receivers should treat this as an
-  idempotency key to avoid double-processing.
-* **Alerting:** trigger alerts when ready events remain unclaimed past SLA thresholds. History pagination exposes which entries
-  are still pending.
-* **Auditing:** store webhook payloads (after signature verification) alongside the CSV exports to maintain a full audit trail.
-* **Testing:** use `potso_export_epoch` against a devnet to validate webhook consumers. `nhb-cli potso reward claim` is
-  retired, so claim mode cannot be exercised end to end today.
-
-These guidelines keep notification pipelines resilient and verifiable while delivering real-time visibility into reward
-settlement.
+- The `potso.reward.paid` event for a claim is appended by `Node.PotsoRewardClaim`, which mutates the node's live state directly rather than through a block transaction (see [rewards-modes.md](rewards-modes.md)).
+- The event names are `potso.reward.*`. The node does not deliver webhooks or any other push notification for them; consumers read events from the node, or poll `potso_rewards_history` and `potso_export_epoch` ([rewards-api.md](rewards-api.md)).
+- Other POTSO events: `potso.stake.locked` / `unbonded` / `withdrawn` ([stake.md](stake.md)), `potso.evidence.accepted` and `potso.penalty.applied` ([evidence-and-penalties.md](evidence-and-penalties.md)), `potso.heartbeat` (emitted only by `Node.PotsoHeartbeat`, which nothing calls, see [README](README.md)), and `potso.alert.invariant_violation` (type defined in `core/events/potso_alert.go`; nothing in the node emits it).

@@ -1,75 +1,48 @@
 # Direct Transfer Pause Runbook
 
-Operations can now halt point-to-point NHB or ZNHB sends without affecting other
-flows by setting the `global.pauses.transfer_nhb` or `global.pauses.transfer_znhb`
-flags. When either toggle is active the state processor rejects the matching
-transaction type and emits a dedicated `transfer.nhb.paused` or
-`transfer.znhb.paused` event so downstream systems can track the rejection
-reason.【F:core/state_transition.go†L1196-L1200】【F:core/state_transition.go†L1489-L1492】【F:core/events/transfer.go†L12-L78】
+The module pause map has two flags that stop point-to-point transfers without touching
+other modules: `transfer_nhb` (config field `TransferNHB`) and `transfer_znhb`
+(`TransferZNHB`). This runbook describes what the node does when they are set and how to
+observe them. How the pause map is stored and read is described in
+[Pause and quota operations](./pause-and-quotas.md).
 
-## Pause NHB transfers
+## What a set flag does
 
-1. Pull the current pause map before making changes:
-   ```bash
-   go run ./examples/docs/ops/read_pauses \
-     --db ./nhb-data \
-     --consensus localhost:9090
-   ```
-   Confirm `transfer_nhb` is present and record the existing value for the
-   incident log.【F:examples/docs/ops/read_pauses/main.go†L7-L54】
-2. Submit a governance proposal that toggles only the NHB transfer flag. The
-   helper CLI reads the current map, flips the requested module, and broadcasts
-   `gov.v1.MsgSetPauses` to `governd`.
-   ```bash
-   go run ./examples/docs/ops/pause_toggle \
-     --db ./nhb-data \
-     --consensus localhost:9090 \
-     --governance localhost:50061 \
-     --authority nhb1operatorauthority0000000000000000000000 \
-     --module transfer_nhb \
-     --state pause
-   ```
-   Capture the transaction hash in the incident channel.【F:examples/docs/ops/pause_toggle/main.go†L13-L135】
-3. Re-run the inspection command. The helper should now show
-   `transfer_nhb=true`. Watch for the `transfer.nhb.paused` event on your
-   telemetry pipeline to confirm the chain is actively rejecting direct NHB
-   sends.【F:core/events/transfer.go†L38-L78】
+* `transfer_nhb`: the state processor rejects `TxTypeTransfer` with the error
+  `nhb transfer: paused` and appends a `transfer.nhb.paused` event
+  (`core/state_transition.go`, `ErrTransferNHBPaused`).
+* `transfer_znhb`: the state processor rejects `TxTypeTransferZNHB` with the error
+  `znhb transfer: paused` and appends a `transfer.znhb.paused` event
+  (`ErrTransferZNHBPaused`).
+* Only the matching transaction type is affected. The two flags are independent.
+* The blocked-transfer events are kept when the transaction is rejected for this reason;
+  events of other rejected transactions are discarded (`core/state_transition.go`).
 
-## Resume NHB transfers
+Event attributes (`core/events/transfer.go`): `asset`, `from`, `to` (bech32 addresses),
+`reason` (the value `paused by governance`) and `txHash`, each present only when known.
 
-1. Repeat the inspection step to confirm the flag is still set. This prevents
-   unintentionally clearing other module pauses.
-2. Re-run the helper with `--state resume` to flip the flag back to `false`. The
-   state processor will accept `TxTypeTransfer` transactions again while ZNHB
-   transfers remain unaffected throughout the process.【F:core/state_transition.go†L1196-L1204】
-3. Notify downstream teams that the pause is lifted once the helper shows
-   `transfer_nhb=false` and the pause events stop appearing.
+## Inspect the current state
 
-## Pause ZNHB transfers
+The helper `examples/docs/ops/read_pauses` opens the node's data directory, takes the state
+root from the latest block (fetched over the consensus gRPC endpoint), and prints the
+`system/pauses` entry:
 
-1. Pull the current pause map before making changes and confirm
-   `transfer_znhb` is present.【F:examples/docs/ops/read_pauses/main.go†L7-L54】
-2. Submit a governance proposal that toggles only the ZNHB transfer flag:
-   ```bash
-   go run ./examples/docs/ops/pause_toggle \
-     --db ./nhb-data \
-     --consensus localhost:9090 \
-     --governance localhost:50061 \
-     --authority nhb1operatorauthority0000000000000000000000 \
-     --module transfer_znhb \
-     --state pause
-   ```
-   Capture the transaction hash in the incident channel.【F:examples/docs/ops/pause_toggle/main.go†L13-L135】
-3. Re-run the inspection command. The helper should now show
-   `transfer_znhb=true`. Watch for the `transfer.znhb.paused` event on your
-   telemetry pipeline to confirm the chain is actively rejecting direct ZNHB
-   sends.【F:core/events/transfer.go†L56-L78】
+```bash
+go run ./examples/docs/ops/read_pauses --db ./nhb-data --consensus localhost:9090
+```
 
-## Resume ZNHB transfers
+Both flags shown are its defaults. It prints `no pause overrides set (all modules
+active)` when the entry does not exist. Otherwise it lists `lending`, `swap`, `escrow`,
+`trade`, `loyalty`, `potso`, `transfer_nhb`, `transfer_znhb` and `staking`. It does not
+print the `Subscriptions`, `SwapRedeem` or `Market` flags that `config.Pauses` also has.
 
-1. Repeat the inspection step to confirm the flag is still set.
-2. Re-run the helper with `--state resume` to flip the flag back to `false`. The
-   state processor will accept `TxTypeTransferZNHB` transactions again while NHB
-   transfers remain unaffected throughout the process.【F:core/state_transition.go†L1489-L1528】
-3. Notify downstream teams that the pause is lifted once the helper shows
-   `transfer_znhb=false` and the pause events stop appearing.
+Watch for the `transfer.nhb.paused` and `transfer.znhb.paused` events in your event
+pipeline to confirm the chain is rejecting transfers.
+
+## Changing the flags
+
+The node enforces the value stored under `system/pauses` in chain state. Read the
+"Changing pauses" section of [Pause and quota operations](./pause-and-quotas.md) before
+relying on any helper to set it: the helper `examples/docs/ops/pause_toggle` builds a
+`gov.v1.MsgSetPauses` message whose payload carries only `lending`, `swap`, `escrow`,
+`trade`, `loyalty` and `potso`, and the node does not accept that message type.

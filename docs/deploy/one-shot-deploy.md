@@ -1,67 +1,92 @@
 # One-Shot Deployment Script
 
-NHBChain now includes a single production bootstrap script intended to be the
-public node-operator entrypoint:
+`scripts/run_nhbcoin_node.sh` is a one-line wrapper that `exec`s
+`scripts/bringup_production_stack.sh` with the same arguments. That script builds
+and installs a single node (`bin/nhb`, run by the `nhb.service` systemd unit) on
+a Linux host. It does not build or install `consensusd`, `p2pd`, the gateway or
+any other service.
 
-* [scripts/run_nhbcoin_node.sh](../../scripts/run_nhbcoin_node.sh)
+## What it does
 
-`run_nhbcoin_node.sh` delegates to the internal production bootstrap helper and is
-intended for the initial production deployment or a fresh-genesis relaunch. It
-performs the following in one flow:
+The script prints seven steps (`scripts/bringup_production_stack.sh`):
 
-1. prepares the runtime directories and service user
-2. syncs the repo into the runtime install root
-3. installs example server-side config templates
-4. validates the required production config
-5. stops old ad hoc processes
-6. builds the node and founder-grade backend services
-7. installs systemd units
-8. fixes ownership and runtime permissions
-9. optionally resets chain and service state
-10. enables and starts the runtime services
+1. Creates the service group and user (`nhb` by default, system account, shell
+   `/usr/sbin/nologin`) and the directories `INSTALL_ROOT`, `INSTALL_ROOT/bin`,
+   `ETC_DIR`, `ETC_DIR/examples` and `STATE_DIR`.
+2. `rsync -a --delete` of the repository into `INSTALL_ROOT`, excluding `.git/`,
+   `nhb-data/`, `nhb-data-local/`, `node.log`, `*.db`, `.svelte-kit/` and `build/`.
+3. Installs `deploy/env/node.env.example` to `ETC_DIR/examples/` if it is not
+   already there.
+4. Requires `ETC_DIR/config.toml` and `ETC_DIR/node.env` to exist, then runs
+   `scripts/verify_prod_config.sh -c ETC_DIR/config.toml`
+   ([checks](../ops/release-checklist.md)).
+5. Stops `nhb.service`, runs `pkill -f "/bin/nhb --config"`, then
+   `scripts/build.sh` in `INSTALL_ROOT`, which runs `go mod tidy` and builds
+   `bin/nhb` (`./cmd/nhb`) and `bin/nhb-cli` (`./cmd/nhb-cli`).
+6. Renders `deploy/systemd/nhb.service` into `SYSTEMD_DIR` (substituting the
+   paths, user and group), runs `systemctl daemon-reload`, and chowns
+   `INSTALL_ROOT` and `STATE_DIR` to the service user. If `--reset-state` was
+   given, it moves `INSTALL_ROOT/nhb-data` and `INSTALL_ROOT/nhb-data-local` (if
+   present) into `STATE_DIR/backup-<UTC timestamp>/`. State is moved, not deleted.
+7. `systemctl enable nhb.service`, then `systemctl restart nhb.service` unless
+   `--skip-start` was given.
 
-## Typical usage
+Required commands on the host: `go`, `python3`, `rsync`, `systemctl`, `install`
+(and `sudo` unless run as root).
 
-Fresh chain reset:
-
-```bash
-bash scripts/run_nhbcoin_node.sh --reset-state
-```
-
-Deploy without clearing state:
-
-```bash
-bash scripts/run_nhbcoin_node.sh
-```
-
-Deploy and skip service start:
-
-```bash
-bash scripts/run_nhbcoin_node.sh --skip-start
-```
-
-Enable OTC explicitly:
+## Usage
 
 ```bash
-bash scripts/run_nhbcoin_node.sh --enable-otc
+bash scripts/run_nhbcoin_node.sh --reset-state   # move existing chain state aside first
+bash scripts/run_nhbcoin_node.sh                 # keep existing state
+bash scripts/run_nhbcoin_node.sh --skip-start    # install and build only
 ```
+
+Options:
+
+| Option | Default |
+| ------ | ------- |
+| `--install-root <path>` | `/opt/nhbchain` |
+| `--etc-dir <path>` | `/etc/nhbchain` |
+| `--state-dir <path>` | `/var/lib/nhbchain` |
+| `--systemd-dir <path>` | `/etc/systemd/system` |
+| `--service-user <name>` | `nhb` |
+| `--service-group <name>` | `nhb` |
+| `--reset-state` | off |
+| `--skip-start` | off |
+| `-h`, `--help` | |
+
+The same values can be supplied as the environment variables `INSTALL_ROOT`,
+`ETC_DIR`, `STATE_DIR`, `SYSTEMD_DIR`, `SERVICE_USER` and `SERVICE_GROUP`. Any
+other option exits with `unknown option: <argument>` and a non-zero status.
 
 ## Required config
 
-These files must be prepared on the server first:
+Both files must exist before you run the script:
 
-* `/etc/nhbchain/config.toml`
-* `/etc/nhbchain/node.env`
-* `/etc/nhbchain/policies.yaml`
+- `/etc/nhbchain/config.toml`
+- `/etc/nhbchain/node.env`
 
-Any off-chain services this deployment integrates with (payout processing,
-reconciliation, oracle attestation, etc.) have their own env/config files and
-deployment lifecycle, outside the scope of this node's own bootstrap script.
+The systemd unit (`deploy/systemd/nhb.service`) runs
+`/opt/nhbchain/bin/nhb --config /etc/nhbchain/config.toml` with
+`WorkingDirectory=/opt/nhbchain`, `EnvironmentFile=/etc/nhbchain/node.env`,
+`Restart=on-failure`, `RestartSec=5` and `LimitNOFILE=65535`.
 
-Templates are installed automatically into `/etc/nhbchain/examples/`.
+`deploy/env/node.env.example` lists the variables the template sets:
+`NHB_ENV`, `NHB_VALIDATOR_PASS`, `NHB_RPC_JWT_SECRET` and the
+`OTEL_EXPORTER_OTLP_*` variables. `NHB_VALIDATOR_PASS` is the validator keystore
+passphrase read at startup, and the repository's `config.toml` reads the JWT
+secret for `[RPCJWT]` from `NHB_RPC_JWT_SECRET` (`HSSecretEnv`).
 
-## Important note
+The script does not generate secrets; it only checks that the two files exist.
 
-This script does not generate live secrets for you. API keys, JWT secrets, signer keys,
-and bearer tokens must already exist in the server-side env/config files before you run
-it.
+## Resetting state
+
+`--reset-state` only moves `nhb-data` and `nhb-data-local` under `INSTALL_ROOT`.
+If `DataDir` in your `config.toml` points elsewhere, that directory is not
+touched.
+
+## After the run
+
+The script ends by printing the checks `sudo systemctl status nhb.service` and
+`sudo ss -ltnp | egrep ':8545'` (the RPC port in the repository's `config.toml`).

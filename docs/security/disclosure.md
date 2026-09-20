@@ -12,7 +12,7 @@ The following assets are **out of scope**: third-party wallets, forked chains, l
 
 ## Reporting Process
 1. Gather detailed reproduction steps, logs, and proof-of-concept material.
-2. The checked-in [repository PGP key](./repository-pgp-key.asc) is currently a corrupted ASCII-armored block and cannot be imported or used to encrypt reports. It must be regenerated before this step can be followed; until then, email `security@nhbcoin.com` to arrange a secure channel.
+2. Encrypt the report to the [repository PGP key](./repository-pgp-key.asc) (fingerprint `8C12 7674 689A AB92 A4DE  4643 E847 50CA 0E2F 4459`; confirm the fingerprint of the key you import matches), then email it to `security@nhbcoin.com`.
 3. For time-sensitive issues, call or text the Signal hotline `+13234559568` after sending the report.
 4. Do not share vulnerability details publicly or with third parties until we finalize remediation and agree on a disclosure timeline.
 
@@ -38,5 +38,5 @@ If legal action is initiated by a third party against you for activities conduct
 ## Contacts & Encryption
 - **Primary Contact:** `security@nhbcoin.com`
 - **Emergency Contact:** Signal `+13234559568`
-- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc) is currently corrupted and unusable; it must be regenerated. No working fingerprint is published until then.
+- **PGP Key:** [`repository-pgp-key.asc`](./repository-pgp-key.asc), RSA 4096, UID `NHBCoin Security Team <security@nhbcoin.com>`, fingerprint `8C12 7674 689A AB92 A4DE  4643 E847 50CA 0E2F 4459`. The same address and key URL are published in `.well-known/security.txt`.
 

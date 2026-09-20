@@ -1,40 +1,79 @@
 # API Replay Protection
 
-The escrow and OTC gateways accept requests that are authenticated via an HMAC-SHA256 signature. Each request **must** include the following headers:
+Two components in this repository authenticate requests with an API key and an HMAC-SHA256 signature. Both use the same implementation, `gateway/auth/auth.go`:
+
+- the node's JSON-RPC server, for the swap methods listed in `isPublicSwapMethod` in `rpc/http.go` (`swap_submitVoucher`, `swap_voucher_get`, `swap_voucher_list`, `swap_voucher_export`, `nhb_requestSwapApproval`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus`, `nhb_getSwapQuote`, `nhb_checkSwapAllowance`, `nhb_getOraclePrice`, `swap_getRiskParams`, `swap_getRedemptionFeeParams`), enabled when `[RPCSwapAuth].Secrets` is non-empty;
+- the escrow gateway (`services/escrow-gateway`).
+
+The API gateway in `cmd/gateway` does not use this scheme. It validates bearer JWTs (`gateway/middleware/auth.go`).
+
+## Headers
+
+Each request must carry:
 
 | Header | Description |
 | --- | --- |
-| `X-Api-Key` | Identifies the client credential used to sign the request. |
-| `X-Timestamp` | Unix timestamp (seconds) at the time of signing. The gateway rejects requests older than ±120 seconds. |
-| `X-Nonce` | Unique, client-chosen string used once per timestamp. Nonces are tracked per API key for 10 minutes, rejecting any replay within that window. |
-| `X-Signature` | Hex-encoded HMAC-SHA256 signature computed with the shared secret. |
+| `X-Api-Key` | Identifies the credential. Must be a configured key with a non-empty secret. |
+| `X-Timestamp` | Unix time in seconds, as a base-10 integer. |
+| `X-Nonce` | Client-chosen string. |
+| `X-Signature` | Hex-encoded HMAC-SHA256 of the payload below, keyed with the shared secret. |
 
-The canonical payload used for signing is the newline-delimited concatenation of:
+## Signed payload
 
-1. The string value of `X-Timestamp`.
-2. The exact `X-Nonce` header value.
-3. The uppercase HTTP method.
-4. The canonical request path (path plus query parameters sorted lexicographically).
-5. The UTF-8 request body (empty string when there is no body).
+The payload is the five values joined with a newline (`"\n"`):
 
-```text
-payload = join([timestamp, nonce, strings.ToUpper(method), canonicalPath, body], "\n")
-signature = hex.EncodeToString(HMAC_SHA256(secret, payload))
-```
-
-Signatures are compared using constant-time `hmac.Equal` after decoding from hex, eliminating early-exit timing leaks. A per-key nonce cache prevents captured signatures from being replayed within the TTL window, while still permitting legitimate retries signed with a fresh nonce.
-
-Wallet co-signatures (`X-Sig` / `X-Sig-Addr`) are bound to the same timestamp and nonce. The signed payload is:
+1. the `X-Timestamp` header value (whitespace-trimmed);
+2. the `X-Nonce` header value (whitespace-trimmed);
+3. the upper-cased HTTP method;
+4. the canonical path: the URL path (`/` if empty), followed by `?` and the raw query string split on `&`, sorted as plain strings, and re-joined with `&` when a query is present (values are not decoded or re-encoded);
+5. the request body bytes (empty when there is no body).
 
 ```text
-payload = strings.Join([]string{
-    strings.ToUpper(method),
-    canonicalPath,
-    body,
-    timestamp,
-    nonce,
-    strings.ToLower(resourceID),
-}, "|")
+payload   = join([timestamp, nonce, upper(method), canonicalPath, body], "\n")
+signature = hex(HMAC_SHA256(secret, payload))
 ```
 
-Requests missing any header, using stale timestamps, reusing a nonce, or providing malformed signatures now fail with `401 Unauthorized` before hitting business logic. Replay caches are bounded per credential to prevent untrusted clients from exhausting memory.
+Source: `ComputeSignature` and `CanonicalRequestPath` in `gateway/auth/auth.go`. The signature is hex-decoded and compared with `hmac.Equal`. Header values are whitespace-trimmed before use.
+
+## Checks, in order
+
+`Authenticate` in `gateway/auth/auth.go` rejects a request when:
+
+1. the body is larger than 1 MiB (`MaxBodyForSignature`);
+2. `X-Api-Key` is missing, or the key is unknown or has an empty secret;
+3. `X-Timestamp` is missing or not an integer, or differs from the server clock by more than the allowed skew;
+4. `X-Nonce` or `X-Signature` is missing, the signature is not valid hex, or it does not match;
+5. the `timestamp|nonce` pair was already used by this key inside the nonce window (`nonce already used`);
+6. the timestamp is not strictly greater than the last accepted timestamp for this key while that earlier timestamp is still inside the skew window (`timestamp not increasing`). In practice a key can have at most one accepted request per second.
+
+The signature is verified before the nonce is recorded, so unsigned or badly signed requests do not consume nonces.
+
+### Limits
+
+| Setting | Default | Maximum | Configuration |
+| --- | --- | --- | --- |
+| Timestamp skew (either direction) | 120 s | 120 s | `[RPCSwapAuth].AllowedTimestampSkewSeconds` |
+| Nonce window | 10 min | 10 min | `[RPCSwapAuth].NonceTTLSeconds` |
+| Nonce cache entries per API key | 4096 | 65536 | `[RPCSwapAuth].NonceCapacity` |
+
+A value of zero or less selects the default and a larger value is clamped to the maximum (`NewAuthenticator` in `gateway/auth/auth.go`, and `swapDefault*`/`swapMax*` in `rpc/http.go`). When the cache is full the oldest entry is evicted.
+
+For the node RPC, when secrets are configured a nonce persistence backend is mandatory: `[RPCSwapAuth.Persistence] Backend = "leveldb"` with `LevelDBPath` (relative paths are resolved under `DataDir`); an empty backend or `none` stops the node at startup (`cmd/nhb/main.go`). Persisted nonces are loaded into memory at startup. The escrow gateway constructs its authenticator without persistence, so its nonces are held in memory only. `config.Load` refuses `NetworkName = "mainnet"` when `[RPCSwapAuth].Secrets` is empty (`config/config.go`).
+
+Optional per-key request quotas for the swap methods come from `[RPCSwapAuth].PartnerRateLimits` and `RateLimitWindowSeconds` (default window one minute); an exceeded quota returns HTTP 429.
+
+## Failure responses
+
+- Node JSON-RPC: HTTP 401 with the JSON-RPC error `codeUnauthorized` and the message from the failed check.
+- Escrow gateway: HTTP 401 with `{"error":"<message>"}`.
+
+## Wallet co-signatures (escrow gateway)
+
+The escrow gateway's `POST /p2p/offers` (signer must be the seller) and `POST /p2p/accept` (signer must be the buyer) additionally require a wallet signature in `X-Sig-Addr` (signer address) and `X-Sig` (65-byte hex signature). `verifyWalletSignature` in `services/escrow-gateway/server.go` requires the `X-Timestamp` and `X-Nonce` headers to be present and signs over them:
+
+```text
+payload = join([upper(method), canonicalPath, body, timestamp, nonce, lower(resourceID)], "|")
+digest  = EIP-191 personal-message hash of keccak256(payload)
+```
+
+The address recovered from the signature must equal `X-Sig-Addr`, and, when the route names allowed signers, must be one of them. A `27`/`28` recovery byte is accepted. `POST /escrow/create` and the release, refund and dispute routes use different signatures: the wallet signs the on-chain authorization envelope itself (`verifyEscrowCreateSignature`, `verifyEscrowActionSignature`).

@@ -1,64 +1,67 @@
 # NHBChain Lending Overview
 
-Welcome to the NHBChain lending protocol! This guide introduces the core
-concepts that developers and end-users need to understand before interacting
-with the on-chain money market.
+The native lending module is an NHB money market with ZNHB collateral. This
+page summarises what the code implements; [on-chain.md](on-chain.md) has the
+accounting details and [rpc-api.md](rpc-api.md) the wire interfaces.
 
-## Core Concepts
+## Core concepts
 
-### Supplying Liquidity
-When users supply supported assets into the protocol, they receive tokenized
-receipts that represent their deposit plus accrued interest. Suppliers earn
-variable yields that adjust automatically based on utilization of each market.
+### Supplying NHB
+A supplier sends NHB into a pool (`TxTypeLendingSupplyNHB`) and is credited
+**shares** (`SupplyShares`) in a ledger entry, not a token. Redeemable NHB is
+`shares * SupplyIndex`, and the supply index grows as borrowers pay interest.
+The supplier rate follows the utilisation curve described in
+[on-chain.md](on-chain.md#interest-rate-model).
 
-### Borrowing Assets
-Borrowers can take out over-collateralized loans against their supplied
-positions. Borrowed balances accrue interest continuously until they are
-repaid. To stay safe, borrowers should monitor their health factor and keep it
-above the liquidation threshold.
+### Borrowing NHB against ZNHB
+Borrowing is over-collateralised. A borrower deposits ZNHB as collateral
+(`TxTypeLendingDepositZNHB`) and then borrows NHB (`TxTypeLendingBorrowNHB`).
+Debt accrues interest through a borrow index. The borrow is refused if it would
+exceed the maximum loan-to-value, if pool liquidity is short, or if the price
+guard rejects the reference price.
 
-### Collateral Management
-Each asset in the market has its own Loan-to-Value (LTV) ratio and liquidation
-threshold. Users can enable specific deposits as collateral. The protocol uses
-oracle prices to compute the current value of every collateral asset and
-compare it against open borrows.
+### Collateral valuation
+ZNHB collateral is valued in NHB using a reference price submitted by signed
+`TxTypeLendingRefPrice` transactions. Until the first price is accepted,
+collateral is valued 1:1 with NHB. All collateral is ZNHB; there are no
+per-asset LTV settings and no per-asset enable/disable switch.
 
-### Liquidation Safety Net
-If a borrower\'s health factor falls below 1.0, their position becomes eligible
-for liquidation. Liquidators repay part of the borrower\'s debt and receive a
-portion of the collateral at a discount. This mechanism keeps the markets
-solvent even during periods of high volatility.
+### Liquidation
+A position is liquidatable when `collateralValue * LiquidationThreshold <
+debt * 10000` (see [on-chain.md](on-chain.md#health-and-borrow-limits)). Any
+other account can liquidate by signing a `TxTypeLendingLiquidate` transaction;
+the liquidator repays the borrower's whole flexible-rate debt and receives the
+seized ZNHB.
 
-## Key Terms
+### Fixed-term products
+Besides the flexible pool, the module has fixed-term loans (30 or 90 days by
+default) and fixed-term deposits with locked rates. See
+[on-chain.md](on-chain.md#fixed-term-products).
 
-- **Health Factor (HF):** A measure of how safe a borrowing position is. When
-  HF > 1.0 the position is healthy; when HF ≤ 1.0 it may be liquidated.
-- **Loan-to-Value (LTV):** The maximum borrowing power of a collateral asset,
-  expressed as a percentage of its value.
-- **Liquidation Threshold:** The collateral ratio at which a position becomes
-  liquidatable. This is always greater than or equal to the LTV.
-- **Utilization:** The share of supplied liquidity that is currently borrowed.
-  High utilization leads to higher interest rates for borrowers and suppliers.
-- **Reserve Factor:** The percentage of interest routed to the protocol
-  treasury instead of depositors.
+## Key terms
 
-## Lifecycle of a Lending Position
+* **LTV / `MaxLTV`**: borrow-time cap, in basis points. `config.toml`: `6000`.
+* **Liquidation threshold**: the health limit, in basis points. `config.toml`:
+  `8500`.
+* **Utilisation**: `TotalNHBBorrowed / TotalNHBSupplied`.
+* **Reserve factor**: share of interest routed to `FeeAccrual.ProtocolFeesWei`
+  rather than suppliers. `config.toml`: `ReserveFactorBps = 1000`.
+* **Pool**: an independent market identified by `poolId`; `default` is
+  implicit.
 
-1. **Supply:** A user deposits assets and enables them as collateral.
-2. **Borrow:** The user borrows against their collateral up to the maximum
-   allowed by the LTV.
-3. **Accrual:** Interest accumulates continuously on both deposits and borrows.
-4. **Health Monitoring:** The protocol recalculates health factors whenever
-   prices or balances change.
-5. **Repay or Adjust:** Borrowers can repay debt or add collateral to restore
-   safety margins.
-6. **Liquidation (if necessary):** If health falls below 1.0, liquidators can
-   repay debt and seize collateral according to protocol rules.
+## Lifecycle of a position
 
-## Next Steps
+1. **Supply / deposit collateral**: `0x13` supplies NHB; `0x15` deposits ZNHB.
+2. **Borrow**: `0x17` borrows NHB, subject to the checks above.
+3. **Accrual**: indexes advance per block whenever a pool action touches the
+   pool.
+4. **Repay or adjust**: `0x18` repays; `0x16` withdraws collateral while the
+   position stays healthy.
+5. **Liquidation**: `0x1D` by a third party once the position is unhealthy.
 
-- Dive into the [On-Chain Architecture](on-chain.md) to learn how the protocol
-  implements risk controls and accrues interest.
-- Explore the [RPC API reference](rpc-api.md) for endpoint details.
-- Follow the [Developer Guide](developer-guide.md) for a hands-on walkthrough of
-  building lending experiences on NHBChain.
+## Next steps
+
+* [On-Chain Architecture](on-chain.md)
+* [RPC and transaction reference](rpc-api.md)
+* [Developer Guide](developer-guide.md)
+* [State keys and query paths](state-indexes.md)

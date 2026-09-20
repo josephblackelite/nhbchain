@@ -1,433 +1,91 @@
-# NHBCHAIN EPIC — Escrow Gateway (REST) + Disputes/Arbitration + P2P Market Hooks
+# Escrow Gateway: configuration, signing and relay model
 
-## Goals
+This document describes how `services/escrow-gateway` is configured and how it turns REST calls into chain transactions. The endpoint list is in [`gateway-api.md`](./gateway-api.md); the on-chain rules are in [`escrow.md`](./escrow.md).
 
-- Expose escrow to external apps via REST/JSON while keeping on-chain funds and state authoritative.
-- Restrict funding and settlement to NHB/ZNHB tokens.
-- Provide deterministic dispute flows with mutual resolution or arbitrator decision.
-- Offer drop-in P2P market integration that auto-creates and settles escrows.
-- Deliver strong security: API keys with HMAC, participant wallet signatures for privileged actions, idempotency, rate limits, webhooks, and audit logging.
+## What the gateway does
 
-## Part A — Escrow Gateway Service (REST, Stateless, Idempotent)
+* Accepts REST requests authenticated with an API key + HMAC (all `POST`s) and, for escrow actions, a participant wallet signature.
+* Relays the action to the node as a signed transaction using its own **relayer key**: `TxTypeDelegatedCreateEscrow`, `TxTypeDelegatedReleaseEscrow`, `TxTypeDelegatedRefundEscrow`, `TxTypeDelegatedDisputeEscrow`, or `TxTypeArbitrateRelease` / `TxTypeArbitrateRefund` for resolve (`services/escrow-gateway/node_client.go`). The transaction is submitted with `nhb_sendTransaction`.
+* Reads the node with `escrow_get`, `escrow_getRealm`, `p2p_getTrade` and `nhb_getBalance`.
+* Stores idempotency records, an audit log, P2P offers and (unused, see below) trade and webhook tables in SQLite.
 
-### Service Skeleton
+The node's `escrow_create`, `escrow_release`, `escrow_refund`, `escrow_dispute` and `escrow_resolve` JSON-RPC methods are disabled, and the gateway does not call them.
 
-- **Location**: `services/escrow-gateway` (Go).
-- **Dependencies**: node JSON-RPC (E2), storage (Postgres/sqlite), signer (HMAC), address utilities (bech32), QR generator.
+The relayer only pays for and sequences the transaction. The chain authorizes the action from the participant signature embedded in the transaction data (`Engine.CreateWithSignature`, `ReleaseWithSignature`, `RefundWithSignature`, `DisputeWithSignature`, `ResolveWithSignatures` in `native/escrow/engine.go`), never from the relayer.
 
-### Configuration (Environment)
+## Configuration
 
-```text
-GATEWAY_PORT=8089
-GATEWAY_NODE_RPC_URL=http://localhost:8545
-GATEWAY_CHAIN_ID=14699254016670310680
-GATEWAY_API_RATE_RPS_PER_KEY=5
-GATEWAY_HMAC_ALG=HMAC_SHA256
-GATEWAY_WEBHOOK_MAX_RETRY=10
-```
+All values come from environment variables (`LoadConfigFromEnv`, `services/escrow-gateway/config.go`).
 
-The names above are illustrative of the original design; `LoadConfigFromEnv`
-(`services/escrow-gateway/config.go`) is the source of truth for what's
-actually read, and uses an `ESCROW_GATEWAY_` prefix throughout (e.g.
-`ESCROW_GATEWAY_NODE_URL`, `ESCROW_GATEWAY_API_KEYS`). One variable is new
-as of the meta-transaction rewrite above and **required** for the service to
-start: `ESCROW_GATEWAY_RELAYER_KMS_ENV` names another environment variable
-holding the gateway's own raw hex-encoded secp256k1 private key — an extra
-level of indirection so the actual secret value can live in a
-deployment-chosen variable name rather than a hardcoded one — this is the
-relayer key that signs and pays gas for every delegated transaction the gateway submits (see "Node
-Integration" below). It must hold enough NHB to cover gas for expected
-traffic. Two more optional variables (both have defaults, see "Production
-Deployment" below) control the relayer low-balance monitor:
-`ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` (default 1 NHB in wei) and
-`ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` (default `10m`).
+| Variable | Required | Default | Meaning |
+|----------|----------|---------|---------|
+| `ESCROW_GATEWAY_NODE_URL` | yes | | Node JSON-RPC URL. |
+| `ESCROW_GATEWAY_API_KEYS` | yes | | JSON array `[{"key":"...","secret":"...","merchant":{...}}]`. At least one entry; `key` and `secret` are required. |
+| `ESCROW_GATEWAY_RELAYER_KMS_ENV` | yes | | Name of another environment variable that holds the relayer's raw hex secp256k1 private key (`0x` prefix optional). Startup fails if it is empty or the named variable is unset or invalid. |
+| `ESCROW_GATEWAY_LISTEN` | no | `:8081` | HTTP listen address. |
+| `ESCROW_GATEWAY_NODE_TOKEN` | no | none | Bearer token sent as `Authorization: Bearer ...` on every node RPC call. |
+| `ESCROW_GATEWAY_DB_PATH` | no | `escrow-gateway.db` | SQLite file. |
+| `ESCROW_GATEWAY_TIMESTAMP_SKEW` | no | `2m` | Allowed request clock skew (Go duration). The authenticator caps it at 2 minutes. |
+| `ESCROW_GATEWAY_NONCE_TTL` | no | twice the skew | How long nonces are remembered; positive Go duration, never below the skew; capped at 10 minutes by the authenticator. |
+| `ESCROW_GATEWAY_NONCE_CAP` | no | `1024` | Nonce cache size per key; positive integer; capped at 65536. |
+| `ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` | no | `1000000000000000000` | Low-balance warning threshold (non-negative integer). |
+| `ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` | no | `10m` | Interval of the balance check. |
+| `ESCROW_GATEWAY_QUEUE_CAP` | no | `1024` | Webhook queue capacity. |
+| `ESCROW_GATEWAY_QUEUE_HISTORY` | no | `256` | Webhook history size. |
+| `ESCROW_GATEWAY_QUEUE_TTL` | no | `15m` | Webhook queue entry lifetime. |
+| `NHB_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_INSECURE` | no | | Logging environment label and OpenTelemetry export (`main.go`); insecure defaults to true. |
 
-### Authentication & Authorization
-
-- API key + HMAC per developer/app (e.g., “usedtown”), on every request.
-- **Create, release, refund, and dispute additionally require a participant wallet
-  signature** — as of the meta-transaction rewrite below, **create** now needs one
-  too, not just release/dispute/resolve as in the original design: the escrow's
-  `payer` is only ever set to whoever actually signed the create request, never
-  trusted from the API-key-authenticated caller's say-so alone.
-  - `X-Sig-Addr`: `nhb…`/`znhb…` — the participant's own address (payer for
-    create/refund, payee or mediator for release, payer or payee for dispute).
-  - `X-Sig`: `hex(ecdsa_sign(keccak256(canonical_json_envelope)))` — **not**
-    EIP-191-wrapped, and **not** a signature over the HTTP request (method/path/
-    body/timestamp/nonce) the way earlier drafts of this doc described. The
-    participant signs the exact on-chain authorization envelope the gateway will
-    relay in a real transaction:
-    - Create: `{"action":"create","payer":"<20-byte hex>","payee":"<20-byte hex>","token":"NHB|ZNHB","amount":"<decimal>","feeBps":<uint>,"deadline":<unix>,"nonce":<uint>,"mediator":"<hex, omitted if unset>","meta":"<hex, omitted if unset>","realm":"<id, omitted if unset>"}` — note `payer`/`payee`/`mediator` are lower-case hex of the raw 20 address bytes here, not the `nhb1…` bech32 string used everywhere else in this API; the gateway performs that conversion server-side before verifying.
-    - Release/Refund: `{"escrowId":"0x<64 hex>","action":"release"}` (or `"refund"`).
-    - Dispute: `{"escrowId":"0x<64 hex>","action":"dispute","reason":"<free text, omitted if empty>"}`.
-  - `X-Timestamp`/`X-Nonce`: still required for the outer HMAC-signed request
-    (API-key layer, replay protection on the REST transport itself), but no
-    longer part of what the wallet signature covers — the wallet signature's
-    own replay safety comes from the on-chain action being idempotent once
-    submitted (a captured signature can be resubmitted with zero additional
-    effect), not from a timestamp/nonce baked into the signed bytes.
-- The gateway verifies the signature server-side (fast, clear 403 on mismatch)
-  *and* the chain re-verifies it independently once the gateway relays the
-  action in a real transaction — the gateway's own key never authorizes
-  anything by itself, it only pays gas and owns that transaction's nonce. See
-  "Node Integration" below for why this changed.
-- **Resolve requires a realm arbitration-committee decision, not a wallet
-  signature header.** Unlike release/refund/dispute (a single participant's
-  signature), resolving a disputed escrow needs a quorum of signatures from
-  the escrow's *frozen* arbitrator committee (captured from its realm at
-  dispute time) over a signed decision envelope:
-  `{"escrowId":"0x<64 hex>","outcome":"release"|"refund","policyNonce":<uint>,"metadata":"<hex, omitted if unset>"}`
-  — `policyNonce` must match the escrow's current `FrozenArb.PolicyNonce`
-  (returned by `GET /escrow/{id}`). Each committee member signs
-  `keccak256(the exact envelope bytes)` independently (same non-EIP-191
-  scheme as the other actions); the gateway relays the raw envelope bytes
-  and the signature bundle on-chain verbatim (see `POST /escrow/resolve`
-  below) — it does not re-marshal or pre-verify the quorum itself, since
-  even a whitespace/key-order difference from re-encoding would hash
-  differently than what the committee actually signed. Only escrows created
-  against a registered realm (`realm` field on `POST /escrow/create`, a
-  `TxTypeEscrowCreateRealm` provisioned by a `RoleEscrowRealmAdmin` operator)
-  carry a `FrozenArb` at all — resolving one without a realm fails with a
-  clear on-chain error, not a gateway placeholder.
-
-### Production Deployment
-
-Runs as a standalone binary (`escrow-gateway`) under a process supervisor (systemd, PM2, or similar) with its own env file holding `ESCROW_GATEWAY_RELAYER_KMS_ENV` and friends — see Configuration above. Deploy it either co-located with the validator node or on its own host; nothing about it requires shared infrastructure.
-
-- Public routing: put it behind a reverse proxy (nginx, Caddy) that terminates TLS and proxies `/escrow/` and `/p2p/` to the gateway's local listen port. A single public API host serving both the chain's own JSON-RPC and this gateway's REST surface works fine — no dedicated subdomain is required.
-- Relayer address: a dedicated NHB account funded specifically to pay gas for every delegated transaction this service submits (see "Node Integration" below) — it does not custody user funds, only pays its own transaction fees. This balance still needs periodic top-up, but is no longer unmonitored: `main.go`'s `startRelayerBalanceMonitor` checks it via `nhb_getBalance` on startup and every `ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` (default 10m), logging a structured `WARN` (`"escrow gateway relayer balance is low"`) when it's at or below `ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` (default 1 NHB — a low bar meant only to catch the balance heading toward zero, e.g. an operator error, not "enough gas for N more transactions," since native transactions never actually charge gas). This is a log-line alert, matching the project's actual alerting maturity everywhere else (an external Prometheus/Alertmanager+PagerDuty pipeline scrapes structured logs/metrics, per `docs/runbooks/alerts.md`) — there is no in-repo Slack/PagerDuty/email integration anywhere in this codebase to plug into instead.
-- Quota: every delegated transaction this gateway submits lands on the recovered *transaction signer* (the relayer's own address, not the end user) for `native/common`'s per-sender request-rate quota (`moduleEscrow`, `config.toml`'s `[global.Quotas.Escrow]`, currently a generous `6000`/min) — worth knowing if the gateway is ever scaled to run genuinely high volume through a single relayer key, since all of that traffic shares one quota bucket.
-
-### Idempotency
-
-- `Idempotency-Key` header captured with `{appKey, route, key}` for all write endpoints.
-
-### Funding Model (NHB/ZNHB Only)
-
-1. Funds held by on-chain vault (E1).
-2. Gateway only creates on-chain escrow via node RPC and returns pay intent (address + memo/ID) plus optional QR.
-3. The gateway does not watch chain events (the node has no method that lists them); `GET /escrow/{id}` reads the escrow from the node on demand, and the only webhook it raises is `escrow.created`.
-
-### REST Endpoints
-
-```
-POST /escrow/create
-Headers: API key, HMAC, X-Sig-Addr (payer), X-Sig (see Authentication above), Idempotency-Key
-Body: {
-  "payer":   "nhb1...",
-  "payee":   "nhb1...",
-  "token":   "NHB" | "ZNHB",
-  "amount":  "100000000000000000000",
-  "feeBps":  0,
-  "deadline": 1730000000,
-  "mediator": "nhb1..." | null,
-  "meta":     "0x<hex, optional>"
-}
-→ 201 {
-  "escrowId": "0x…32bytes…",
-  "payIntent": {
-    "vault": "nhb1ESCROWVAULT…",
-    "memo":  "ESCROW:0x…",
-    "qr":    "znhb://pay?to=nhb1ESCROWVAULT…&token=NHB&amount=100e18&memo=ESCROW:0x…"
-  }
-}
-```
-
-```
-GET /escrow/{id}
-Headers: API key, HMAC, X-Timestamp, X-Nonce (reads are authenticated like writes)
-→ {
-  "status": "INIT|FUNDED|RELEASED|REFUNDED|EXPIRED|DISPUTED",
-  "payer":"nhb1…",
-  "payee":"nhb1…",
-  "token":"NHB",
-  "amount":"…",
-  "deadline":…,
-  "mediator":"nhb1…|null",
-  "events":[...]
-}
-```
-
-```
-POST /escrow/release
-Headers: API key, HMAC, X-Sig-Addr (payee or mediator), X-Sig, X-Timestamp, X-Nonce, Idempotency-Key
-Body: { "escrowId": "0x…" }
-→ 202 { "queued": true }
-```
-
-```
-POST /escrow/refund
-Headers: API key, HMAC, X-Sig-Addr (payer), X-Sig, X-Timestamp, X-Nonce, Idempotency-Key
-Body: { "escrowId": "0x…" }
-→ 202 { "queued": true }
-```
-
-```
-POST /escrow/dispute
-Headers: API key, HMAC, X-Sig-Addr (payer or payee), X-Sig, X-Timestamp, X-Nonce, Idempotency-Key
-Body: { "escrowId":"0x…", "reason":"item damaged" }
-→ 202 { "ok": true }
-```
-
-```
-POST /escrow/resolve
-Headers: API key, HMAC, Idempotency-Key
-Body: {
-  "escrowId":   "0x…",
-  "decision":   { "escrowId":"0x…", "outcome":"release"|"refund", "policyNonce":1, "metadata":"0x…optional" },
-  "signatures": ["0x…", "0x…"]
-}
-→ 202 { "queued": true }
-```
-`decision` is relayed on-chain exactly as received (see Authentication
-above) — construct it, then sign `keccak256` of its canonical JSON bytes
-with each arbitrator's key before submitting, rather than sending fields
-separately and letting the gateway reassemble them.
-
-### Webhooks
-
-- Only `escrow.created` is delivered. The gateway raises it itself when `POST /escrow/create` succeeds and delivers it to the
-  subscriptions an operator has put in the gateway's `webhooks` table. The other events this section used to list
-  (`escrow.funded`, `.released`, `.refunded`, `.expired`, `.disputed`, `.resolved`) are not delivered: they would come from a
-  watcher of chain events, and the node has no method that lists them.
-
-### Node Integration
-
-- **`escrow_create`/`release`/`refund`/`dispute`/`resolve` are permanently
-  disabled chain-side** (see `rpc/escrow_handlers.go`'s
-  `escrowRPCDisabledMessage`) — they used to mutate validator state directly
-  outside the block pipeline, which guaranteed a consensus fork on this
-  2-validator chain the moment any of them was ever called. The gateway no
-  longer calls them at all.
-- Mutating actions now go through real signed transactions
-  (`TxTypeDelegatedCreateEscrow`/`ReleaseEscrow`/`RefundEscrow`/
-  `DisputeEscrow`, `core/types/transaction.go`), submitted via
-  `nhb_sendTransaction` and signed with the gateway's own relayer key
-  (`ESCROW_GATEWAY_RELAYER_KMS_ENV`) — the relayer pays gas and owns each
-  transaction's nonce, but authorization for the underlying action comes
-  entirely from the participant's signature embedded in the transaction
-  payload (verified independently on-chain, not just by this gateway). See
-  `native/escrow/engine.go`'s `*WithSignature` methods and
-  `core/state_transition.go`'s `applyDelegated*Escrow` for the chain-side
-  verification this relies on.
-- `resolve` follows the same relayed-signature model via
-  `TxTypeArbitrateRelease`/`TxTypeArbitrateRefund`, except authorization is
-  a quorum of the escrow's frozen realm-committee signatures rather than a
-  single participant's — see `native/escrow/engine.go`'s
-  `ResolveWithSignatures` and `core/state_transition.go`'s `applyArbitrate`.
-  Which of the two tx types the gateway submits only affects on-chain
-  explorer/audit readability: `applyArbitrate` derives the real outcome
-  from the signed decision payload itself regardless of tx type.
-- `escrow_get`/`escrow_getRealm` remain live, read-only RPC calls — nothing
-  about reads changed.
-- Subscribes to block/events to sync status.
-
-### Security & Abuse Mitigation
-
-- Per-key rate limits; HMAC body integrity.
-- Wallet signature proves payer/payee/mediator control over the specific
-  on-chain action being authorized, verified both by this gateway (fast,
-  clear 403) and independently by the chain itself once relayed.
-- Idempotency on writes.
-- Append-only audit log (request hash, actor, escrowId, node RPC result, block/tx).
-
-### P2P Trade Creation — Retired
-
-`POST /p2p/accept`'s underlying trade-creation RPC (`p2p_createTrade`) is
-permanently disabled for the same guaranteed-fork reason as the escrow RPCs
-above, and — unlike escrow create/release/refund/dispute — has no
-signed-transaction replacement, because the bilateral OTC trade flow it
-fronted is superseded by the P2P ZNHB market (`native/market`, live since
-2026-08-24), which already does atomic seller-escrows/buyer-pays swaps
-through real signed transactions. `POST /p2p/accept` now always returns a
-502 with a clear "permanently retired" message. `POST /p2p/offers`,
-`GET /p2p/offers`, and `GET /p2p/trades/{id}` (which don't call the disabled
-RPC) are unaffected.
-
-### Acceptance Criteria
-
-- Unit tests: auth (HMAC + sig), idempotency, signature mismatch, invalid bech32, deadline checks.
-- Integration: create -> pay -> funded -> release -> settlement (the only webhook is `escrow.created`).
-
-## Part B — P2P Market Hooks (Auto-Escrow + Arbitration)
-
-### Offer Model
+Merchant settings (optional `merchant` object on an API key entry, `sanitizeMerchantConfig`):
 
 ```json
-{
-  "offerId":"OFF_...",
-  "seller":"nhb1...",
-  "token":"NHB|ZNHB",
-  "pricePerUnit":"...wei",
-  "minAmount":"...wei",
-  "maxAmount":"...wei",
-  "terms":"text",
-  "active": true
-}
+{"key":"acme","secret":"...","merchant":{"identity":"acme","realm":{"default":"acme","scope":"platform","type":"private","enforceIdentityMatch":true}}}
 ```
 
-### Endpoints
+`identity` defaults to the key (max 128 characters); `realm.default` is at most 64 characters; `scope` is `platform` or `marketplace`; `type` is `public` or `private`; `enforceIdentityMatch` forces type `private` and defaults the realm to the identity. On `POST /escrow/create`, the merchant's default realm is applied when the request has none, and a request without a realm is rejected (`realm selection required`) when any realm setting is configured.
 
-- `POST /p2p/offers` – seller creates offer (API key + seller signature).
-- `GET /p2p/offers` – list offers.
-- `POST /p2p/accept` – buyer accepts, gateway creates escrow and returns pay intent & QR.
+Note that the realm `type` check reads a `type` field from `escrow_getRealm`, which the node does not return (`rpc/modules/escrow.go`, `EscrowRealmMetadataResult` has `scope` but no `type`). With `type` or `enforceIdentityMatch` configured, `POST /escrow/create` with a realm therefore fails with `realm type metadata unavailable`.
 
-### Settlement Flow
+## Relayer
 
-- Buyer funds escrow; seller marks delivered.
-- Buyer releases via `/escrow/release` or mediator invoked.
-- Arbitrator addresses (`ROLE_ARBITRATOR`) can resolve via `/escrow/resolve`.
+* At startup the gateway derives the relayer address from the key, reads its account nonce once with `nhb_getBalance`, and logs the address (`main.go`, `InitRelayer`).
+* Each relayed transaction uses `types.NHBChainID()`, gas limit `30000`, gas price `1`, and the relayer's next nonce; the nonce is advanced only after the node accepts the submission. Submissions are serialized under a mutex.
+* A goroutine (`startRelayerBalanceMonitor`) checks the relayer's NHB balance at startup and every check interval and logs a warning (`escrow gateway relayer balance is low`) when the balance is at or below the threshold. It is a log line only.
+* If the relayer is not initialized, mutating endpoints fail with `ErrRelayerNotConfigured`.
 
-### Events & Acceptance
+## Signing envelopes
 
-- Events: none are emitted for offer creation or acceptance — `handleCreateOffer`/`handleAcceptOffer` only perform database writes.
-- Integration: seller creates offer → buyer accepts → funds → release → seller receives.
+All signatures are 65-byte secp256k1 signatures over `keccak256` of the exact JSON bytes, hex encoded, sent in `X-Sig` (create, release, refund, dispute) or in the body (resolve). There is no EIP-191 prefix. The gateway verifies each signature before relaying (403 on mismatch) and the chain verifies it again.
 
-## Part C — Escrow Pay Intent Specification
+* **Create** (signer must equal `payer`; `X-Sig-Addr` must equal the request's `payer`):
 
-- **Vault**: module vault bech32 per token.
-- **Memo/Data**: `ESCROW:<idhex>` or ABI call `depositEscrow(bytes32 id)`.
-- **QR URI**: `znhb://pay?to=<vault>&token=<NHB|ZNHB>&amount=<wei>&memo=ESCROW:<idhex>`.
+  ```json
+  {"action":"create","payer":"<40 hex>","payee":"<40 hex>","token":"NHB","amount":"<decimal>","feeBps":0,"deadline":1730000000,"nonce":1,"mediator":"<40 hex, omitted if unset>","meta":"<as supplied, omitted if empty>","realm":"<omitted if empty>"}
+  ```
 
----
+  `payer`, `payee` and `mediator` are lower-case hex of the 20 address bytes (the gateway converts from bech32). `meta` is the string exactly as sent in the request; the delegated-create path on the chain (`CreateWithSignature`) requires it to decode to exactly 32 bytes (a 64-character hex string, optional `0x`). The JSON key order is the order shown; sign the same bytes the gateway will build.
+* **Release / refund / dispute:**
 
-# NHBCHAIN Addendum — P2P Dual-Lock Escrow (Reverse Escrow for “Buy NHB”)
+  ```json
+  {"escrowId":"<escrowId exactly as sent in the request>","action":"release","reason":"<dispute only, omitted if empty>"}
+  ```
 
-## Intent
+  `action` is `release`, `refund` or `dispute`. The chain requires `escrowId` to decode to the escrow's 32-byte ID (hex, optional `0x`).
+* **Resolve** (no wallet headers): the body carries the decision object and the arbitrators' signatures over `keccak256(decision bytes)`:
 
-Enable “Buy NHB” offers where seller locks NHB and buyer locks quote asset (NHB or ZNHB) with atomic settlement when both confirm or arbitrator intervenes.
+  ```json
+  {"escrowId":"0x...","decision":{"escrowId":"<64 hex>","outcome":"release","policyNonce":1,"metadata":"<64 hex, optional>"},"signatures":["0x...","0x..."]}
+  ```
 
-## A) Core Model (On Chain)
+  The gateway relays the decision bytes without re-encoding them. The transaction type is chosen from the decision's `outcome` (`release` selects `TxTypeArbitrateRelease`, `refund` selects `TxTypeArbitrateRefund`); the chain takes the outcome from the signed decision either way. The escrow must have been created with a `realm` (which freezes the arbitrator policy) and the number of distinct valid arbitrator signatures must reach the frozen threshold. `policyNonce` comes from the escrow (`escrow_get` returns it for realm-bound escrows).
 
-```go
-type TradeStatus uint8
-const (
-  TradeInit TradeStatus = iota
-  TradePartialFunded
-  TradeFunded
-  TradeDisputed
-  TradeSettled
-  TradeCancelled
-  TradeExpired
-)
+Replay safety of these signatures comes from the chain's idempotent status transitions; envelopes contain no timestamp or nonce (except the create envelope's escrow `nonce`, which is part of the escrow's identity).
 
-type Trade struct {
-  ID           [32]byte
-  OfferID      string
-  Buyer        [20]byte
-  Seller       [20]byte
-  QuoteToken   string
-  QuoteAmount  *big.Int
-  EscrowQuote  [32]byte
-  BaseToken    string
-  BaseAmount   *big.Int
-  EscrowBase   [32]byte
-  Deadline     int64
-  CreatedAt    int64
-  Status       TradeStatus
-}
-```
+## Pay intents
 
-### Atomic Settlement
+`POST /escrow/create` returns a `payIntent` (`payintent.go`): the vault address for the token (`keccak256("module/escrow/vault/" + TOKEN)`, last 20 bytes, bech32; identical to the chain's `EscrowVaultAddress`), the amount, and a memo `ESCROW:<ID upper-cased>`. The memo is informational: the chain funds an escrow only when the payer sends `TxTypeLockEscrow`. See [`escrow.md`](./escrow.md).
 
-- Add `SettleTradeAtomic(tradeID [32]byte)` ensuring both legs release within one state transition.
-- Preconditions: both escrows funded, no unresolved disputes.
-- Abort entire operation if any transfer fails.
+## Not implemented or retired
 
-### State & Events
-
-- Store as `trade/<id> -> Trade`.
-- Emit `escrow.trade.*` events for lifecycle stages.
-
-### Timeouts
-
-- If one leg funds by deadline and the other does not, refund funded leg and mark `TradeExpired`.
-
-### Dispute/Resolve
-
-- `TradeDisputed` when either party disputes.
-- Arbitrators resolve with outcomes:
-  - `release_both`
-  - `refund_both`
-  - `release_base_refund_quote`
-  - `release_quote_refund_base`
-
-## B) Node JSON-RPC Augmentations
-
-- `p2p_createTrade(...) -> {tradeId, escrowBaseId, escrowQuoteId, payIntents}` creating dual escrows.
-- `p2p_getTrade(tradeId)` returns trade JSON.
-- `p2p_dispute`, `p2p_resolve`, `p2p_settle` orchestrate disputes and atomic release.
-
-## C) Gateway REST Additions
-
-```
-POST /p2p/accept
-Body: { "offerId":"OFF_123", "buyer":"nhb1...", "reference":"P2P-123" }
-→ 201 {
-  "tradeId":"0x…",
-  "escrowBaseId":"0x…",
-  "escrowQuoteId":"0x…",
-  "payIntents": {
-    "seller": { "to":"nhb1ESCROWVAULT…","token":"NHB","amount":"...","memo":"ESCROW:<escrowBaseId>","qr":"..." },
-    "buyer":  { "to":"nhb1ESCROWVAULT…","token":"ZNHB|NHB","amount":"...","memo":"ESCROW:<escrowQuoteId>","qr":"..." }
-  }
-}
-```
-
-- `GET /p2p/trades/{tradeId}` surfaces status (`INIT|PARTIAL_FUNDED|FUNDED|DISPUTED|SETTLED|EXPIRED|CANCELLED`). This is a
-  read-only lookup — there is no gateway REST endpoint to settle, dispute, or resolve a trade. Those actions go through the
-  node's `p2p_settle`, `p2p_dispute`, and `p2p_resolve` JSON-RPC methods directly (see Part B above).
-
-### Expiry
-
-- The gateway does not monitor the deadline, refund a funded leg or fire `escrow.trade.expired`: it has no watcher of chain events.
-
-### Webhooks
-
-- None are delivered. The `escrow.trade.*` events (`.created`, `.partial_funded`, `.funded`, `.disputed`, `.resolved`, `.settled`,
-  `.expired`) would come from a watcher of chain events, which the gateway does not have.
-
-### Security
-
-- Same API key + HMAC.
-- Wallet signatures: both parties for settle, disputing party for dispute, arbitrator for resolve.
-
-## D) P2P Offer Semantics
-
-- Offers specify `type` (`BUY`/`SELL`), `baseToken`, `quoteToken`, pricing, and limits.
-- Acceptance computes both base and quote amounts.
-
-## E) Loyalty Alignment
-
-- Default: loyalty off for token-for-token P2P trades.
-- Optional per-program flag `includeP2P=true` to include on release.
-
-## F) Tests & Acceptance
-
-### On-Chain
-
-- Validate creation, partial funding, expiry refunds, full funding with atomic settlement, and each dispute outcome.
-
-### Gateway
-
-- Ensure dual pay intents, funding flows, mutual settle, expiry refunds, dispute/resolve functionality.
-
----
-
-## Paste to NHBCHAIN (Delta)
-
-```
-Title: Add P2P dual-lock escrow (reverse escrow) with atomic settlement
-
-Scope:
-- Core escrow: Trade struct, atomic SettleTradeAtomic(tradeId), dispute/resolve outcomes for two-leg trades.
-- Node RPC: p2p_createTrade, p2p_getTrade, p2p_settle, p2p_dispute, p2p_resolve.
-- Gateway REST: POST /p2p/accept creates dual escrows & returns payIntents for buyer & seller; GET /p2p/trades/{id} for status (read-only — settle/dispute/resolve go through node RPC, not REST).
-- Events: escrow.trade.* (created/funded/partial_funded/settled/disputed/resolved/expired).
-- Timeouts: auto-refund funded leg if the other leg never funds by deadline.
-- Security: API key + HMAC; wallet signatures (buyer/seller/arbitrator); idempotency.
-
-Acceptance:
-- go test ./... green for escrow core.
-- Integration proves: Buy NHB (seller locks NHB; buyer locks ZNHB), both fund, mutual settle → atomic release; partial funding → expiry & refund; disputes resolved by arbitrator with all 4 outcome patterns.
-```
+* Webhook delivery is not started by `main.go`, and the `events_since` node method the watcher polls does not exist. See [`gateway-api.md`](./gateway-api.md) section 4.
+* `POST /p2p/accept` always fails: trade creation through the gateway is retired (`ErrP2PTradeRetired`).
+* The gateway exposes no endpoint to read its audit log, to register webhooks, or to settle, dispute or resolve P2P trades.

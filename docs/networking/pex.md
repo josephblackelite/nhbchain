@@ -1,72 +1,69 @@
 # Peer Exchange (PEX)
 
-The NET-2D release introduces address gossip so that nodes can discover peers
-beyond the configured seeds. Peer Exchange (PEX) reuses the authenticated TCP
-transport and adds two lightweight message types: `PEX_REQUEST` and
-`PEX_ADDRESSES`.
+Peer exchange lets a node share the peer addresses it knows about. It reuses the
+authenticated TCP connection and adds two message types, `PexRequest` (`0x0D`)
+and `PexAddresses` (`0x0E`). The implementation is `p2p/pex.go`; the payload
+types are in `p2p/messages.go`. PEX is on unless `[p2p] PEX = false`; when it is
+off, the node ignores both message types.
 
-## Message Schemas
+**What the node does today.** It answers `PexRequest` messages and it ingests
+`PexAddresses` messages it receives. Its own code never sends a `PexRequest`
+(`NewPexRequestMessage` is only called from tests), so a node only learns
+addresses through PEX if a peer sends it unsolicited `PexAddresses` frames.
+Addresses also enter the address book from handshakes and from the seed list.
 
-### `PEX_REQUEST`
+## Message payloads
 
-| Field | Type | Description |
-| ----- | ---- | ----------- |
-| `limit` | `int` | Upper bound on the number of addresses requested. Values are capped at `32`. |
-| `token` | `string` | Echo-suppression token supplied by the requester and reflected in the response. Empty values are replaced with a random 128-bit hex string. |
+Both are carried in the `Message` envelope described in
+[overview.md](overview.md#wire-format).
 
-### `PEX_ADDRESSES`
+### `PexRequest`
 
-| Field | Type | Description |
-| ----- | ---- | ----------- |
-| `token` | `string` | Echo token copied from the request. Peers drop frames that reuse a previously seen token. |
-| `addresses[].addr` | `string` | Dialable `host:port` endpoint observed for the peer. |
-| `addresses[].nodeID` | `string` | 0x-prefixed, normalized NodeID associated with the address. |
-| `addresses[].lastSeen` | `time.Time` | Wall-clock timestamp (UTC) when the sender last confirmed the address. |
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `limit` | int | Maximum addresses wanted. Values above 32, or zero or negative, become 32. |
+| `token` | string | Echo-suppression token. An empty token is replaced by a random 128-bit hex string. |
 
-## Selection, Deduplication & TTL
+### `PexAddresses`
 
-When answering a `PEX_REQUEST` the responder walks its address book and applies
-the following filters in order:
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `token` | string | Token copied from the request. |
+| `addresses[].addr` | string | Dialable `host:port`. |
+| `addresses[].nodeID` | string | Normalized `0x` node ID (note the JSON key is `nodeID`). |
+| `addresses[].lastSeen` | time | When the sender last recorded the address. |
 
-1. **Identity Deduplication** – the address book is keyed by `nodeID`, so a
-   peer can appear at most once in a response even if it was observed at multiple
-   endpoints. New observations replace the stored address.
-2. **Sanity Filtering** – the responder never returns its own identity, the
-   requester, or currently banned peers. Invalid `host:port` values are skipped
-   during ingestion.
-3. **TTL Window** – entries older than 60 minutes are expired. The check is a
-   simple `now - lastSeen > 60m` comparison performed whenever the address book
-   is pruned. Fresh observations reset the timestamp.
-4. **Limit Enforcement** – after filtering, the responder shuffles the working
-   set and truncates it to the caller's requested `limit` (defaulting to `32`).
+## Address book
 
-All addresses learned through PEX are persisted to the peerstore with
-`lastSeen` timestamps so the dialer can queue them even if the node restarts.
+Each node keeps an in-memory book keyed by node ID (one address per ID; a newer
+observation replaces the address). Entries come from:
 
-## Echo Suppression
+- the seed list, at start-up (`newPexManager`);
+- every successful handshake (`recordPeer`, using the peer's reported
+  `listenAddrs`);
+- `PexAddresses` messages (`handleAddresses`).
 
-Echo suppression prevents infinite gossip loops when peers request addresses
-from each other in quick succession. Each request carries a caller-supplied
-`token` that is mirrored back in the `PEX_ADDRESSES` response. The responder
-records the token and ignores any subsequent `PEX_ADDRESSES` frames from that
-peer that reuse the same token.
+Entries older than 60 minutes (`pexAddressTTL`) are dropped whenever the book is
+pruned. Addresses learned from `PexAddresses` are also written to the peerstore
+with their `lastSeen`.
 
-The following diagrams illustrate a typical interaction:
+## Answering a request
 
-```
-A ---- PEX_REQUEST(token=t1) ----> B
-B ---- PEX_ADDRESSES(token=t1, {C}) --> A
+`handleRequest` builds the response from the book:
 
-# Later, B receives an address gossip from C with token=t2 and forwards it.
-B ---- PEX_REQUEST(token=t2) ----> C
-C ---- PEX_ADDRESSES(token=t2, {D}) --> B
-B ---- PEX_ADDRESSES(token=t2, {D}) --> A  (allowed, new token)
+1. Skip the requester, the local node, banned peers and entries older than the
+   TTL.
+2. Shuffle the remaining entries and truncate to `limit` (at most 32).
+3. Record the token as seen and remember it as the token last sent to that peer.
+4. Send `PexAddresses` with that token.
 
-# Echo suppression example when a response loops back.
-A ---- PEX_REQUEST(token=t3) ----> B
-B ---- PEX_ADDRESSES(token=t3, {C}) --> A
-A ---- PEX_ADDRESSES(token=t3, {C}) --> B  (dropped: token already seen)
-```
+## Receiving addresses
 
-Tokens expire alongside address entries (60 minutes). Old tokens are pruned so
-genuine updates are accepted after the window elapses.
+`handleAddresses` drops the whole message if its token equals the token this node
+last sent to that peer (a reflection), or if the token was already seen within the
+last 60 minutes. Otherwise it records the token and, for each address, ignores it
+when: the node ID or `host:port` is empty or invalid, it is the local node or the
+sending peer, the node is banned, or its `lastSeen` is older than 60 minutes.
+Accepted entries update the book and the peerstore.
+
+Tokens are pruned after the same 60 minutes.

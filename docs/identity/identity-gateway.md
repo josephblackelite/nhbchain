@@ -1,194 +1,82 @@
 # Identity Gateway REST API
 
-> Base URL: `https://gateway.dev.nhbcoin.net` (replace with environment) • Version: v0
+`services/identity-gateway` is a small Go HTTP service (`services/identity-gateway/server.go`, `store.go`, `cmd/identity-gateway/main.go`) that verifies email addresses off-chain and records opt-in bindings between a verified email hash and an alias ID. It has three endpoints, all `POST`. It exposes no alias lookup or avatar upload endpoints; alias data comes from the node's `identity_resolve` / `identity_reverse` methods ([`identity-api.md`](./identity-api.md)).
 
-The identity gateway manages off-chain verification (email, avatar uploads) and provides public lookup endpoints for wallets. All
-mutating endpoints require HMAC-authenticated API keys issued to partner applications.
+The machine-readable schema is [`../openapi/identity.yaml`](../openapi/identity.yaml).
 
-## Authentication & Headers
+## Authentication and headers
 
-* **API Key**: `X-API-Key: <key>` issued per tenant. Use distinct keys for server-side and client-side integrations.
-* **HMAC Signature**: `X-API-Signature` header computed as `hex(HMAC_SHA256(secret, method + "\n" + path + "\n" + bodySha256 +
-  "\n" + timestamp))`.
-* **Timestamp**: `X-API-Timestamp` (unix seconds). Requests older than 300s are rejected (`IDN-401`).
-* **Idempotency**: `Idempotency-Key` header (UUID v4). Repeating the same key returns the initial response.
-* **Rate Limits**: Default 60 write requests/minute per API key, 600 public lookups/minute.
+Every endpoint requires:
 
-### Error Format
+* `X-API-Key`: a configured key.
+* `X-API-Timestamp`: Unix seconds; must be within the allowed skew (default 5 minutes, either direction) of the server clock.
+* `X-API-Signature`: hex `HMAC-SHA256(secret, method + "\n" + path + "\n" + hex(sha256(body)) + "\n" + timestamp)`, where `path` is the URL path without a query string.
+* `Idempotency-Key` (optional): if present, the first response for `(api key, method, path, key)` is stored and replayed (with header `X-Idempotency-Cache: hit`) for the idempotency TTL (default 24 hours). The stored response is returned even when the body differs.
 
-```json
-{
-  "error": {
-    "code": "IDN-4xx",
-    "message": "description",
-    "details": {}
-  }
-}
-```
+Request bodies are limited to 64 KiB.
 
-`IDN-400` (bad request), `IDN-401` (auth), `IDN-404` (not found), `IDN-409` (conflict/idempotent replay), `IDN-429` (rate limit).
+Errors are `{"error":{"code":"IDN-xxx","message":"...","details":{}}}` with these codes: `IDN-400` (bad request), `IDN-401` (authentication or proof failure), `IDN-404` (verification session not found), `IDN-409` (alias already linked to another email; also used for an expired verification code), `IDN-429` (too many verification requests, `details.retryAfter` in seconds), `IDN-500` (internal), `IDN-502` (verification message could not be dispatched).
 
-## Deployment & Configuration
-
-The production service lives under [`services/identity-gateway`](../../services/identity-gateway). It is a
-small Go HTTP binary backed by BoltDB for verification state, idempotency caches, and alias bindings. The
-process reads configuration exclusively from environment variables:
+## Configuration (environment variables)
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `IDENTITY_GATEWAY_LISTEN` | `:8095` | Address to bind the HTTP listener. |
-| `IDENTITY_GATEWAY_PORT` | _empty_ | Optional override for the listener port when running behind Compose/Helm. |
-| `IDENTITY_GATEWAY_DB` | `identity-gateway.db` | Path to the BoltDB file storing verification sessions and bindings. |
-| `IDENTITY_GATEWAY_API_KEYS` | _required_ | Comma-delimited list of `key:secret` pairs used for HMAC auth. |
-| `IDENTITY_EMAIL_SALT` | _required_ | Salt used for HMAC(email) derivation. Rotate per environment. |
-| `IDENTITY_GATEWAY_CODE_TTL` | `10m` | Validity window for verification codes. |
-| `IDENTITY_GATEWAY_REGISTER_WINDOW` | `1h` | Sliding window used for the 5-attempts-per-email rate limit. |
-| `IDENTITY_GATEWAY_REGISTER_ATTEMPTS` | `5` | Max register calls permitted per window for an email hash. |
-| `IDENTITY_GATEWAY_TIMESTAMP_SKEW` | `5m` | Allowed difference between request timestamp and server clock. |
-| `IDENTITY_GATEWAY_IDEMPOTENCY_TTL` | `24h` | Retention for cached responses keyed by `Idempotency-Key`. |
+| `IDENTITY_GATEWAY_API_KEYS` | required | Comma-separated `key:secret` pairs. |
+| `IDENTITY_EMAIL_SALT` | required | Salt used for the email hash and code digest. |
+| `IDENTITY_GATEWAY_NODE_URL` | required | Node JSON-RPC URL, used to call `identity_resolve` when binding an alias. |
+| `IDENTITY_GATEWAY_LISTEN` | `:8095` | Listen address. |
+| `IDENTITY_GATEWAY_PORT` | empty | If set, replaces the port of the listen address. |
+| `IDENTITY_GATEWAY_DB` | `identity-gateway.db` | BoltDB file. |
+| `IDENTITY_GATEWAY_CODE_TTL` | `10m` | Verification code lifetime. |
+| `IDENTITY_GATEWAY_REGISTER_WINDOW` | `1h` | Window for the register attempt limit. |
+| `IDENTITY_GATEWAY_REGISTER_ATTEMPTS` | `5` | Maximum register calls per email hash per window. |
+| `IDENTITY_GATEWAY_TIMESTAMP_SKEW` | `5m` | Allowed timestamp skew. |
+| `IDENTITY_GATEWAY_IDEMPOTENCY_TTL` | `24h` | Idempotency record lifetime. |
+| `NHB_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_INSECURE` | | Logging label and telemetry export. |
 
-Telemetry (`OTEL_EXPORTER_*`) and logging (`NHB_ENV`) follow the same conventions as the other services. A
-local instance can be launched via:
+The bind-token lifetime is 15 minutes (`defaultBindTokenTTL`). The binary uses a `LogEmailer`: verification codes are **written to the service log, not emailed** (`emailer.go`); a real mail sender has to replace it.
 
-```bash
-IDENTITY_GATEWAY_API_KEYS=demo:demo-secret \
-IDENTITY_EMAIL_SALT=demo-salt \
-go run ./services/identity-gateway/cmd/identity-gateway
-```
+Local run: `IDENTITY_GATEWAY_API_KEYS=demo:demo-secret IDENTITY_EMAIL_SALT=demo-salt IDENTITY_GATEWAY_NODE_URL=http://localhost:8080 go run ./services/identity-gateway/cmd/identity-gateway`. A service definition for it exists in `deploy/compose/docker-compose.yml`.
 
-The Docker Compose bundle now includes an `identity-gateway` service that exposes port `8095` and stores
-state under the `identity-gateway-data` volume. Update the API key secret before exposing the gateway outside
-trusted environments.
+## Email normalization and hashing
 
----
+`emailHash = "0x" + hex(HMAC-SHA256(salt, NFKC(lowercase(trimmed email))))`. The address must parse with `net/mail`. The verification code is a 6-digit random number; only a salted digest of it is stored.
 
-## Endpoints
+## `POST /identity/email/register`
 
-### POST `/identity/email/register`
+Body: `{"email": "...", "aliasHint": "..."}` (`aliasHint` optional; it is passed to the emailer). Starts verification: stores the code digest and expiry and dispatches the code. At most `IDENTITY_GATEWAY_REGISTER_ATTEMPTS` calls per email hash per window, otherwise `IDN-429`. Response `200`: `{"status":"pending","expiresIn":<seconds>}`.
 
-Initiates email verification by sending a one-time code.
+## `POST /identity/email/verify`
 
-**Headers**: `X-API-Key`, `X-API-Signature`, `X-API-Timestamp`, `Content-Type: application/json`, `Idempotency-Key` (optional).
-
-**Request Body**
+Body: `{"email": "...", "code": "..."}`. Checks the code. Response `200`:
 
 ```json
-{
-  "email": "frank@example.com",
-  "aliasHint": "frankrocks"
-}
+{"status":"verified","verifiedAt":"2026-01-01T00:00:00Z","emailHash":"0x...","bindToken":"<64 hex>"}
 ```
 
-**Response**
+`bindToken` is a random 256-bit single-use token valid for 15 minutes; only its digest is stored. Errors: `IDN-404` if no verification was started, `IDN-409` code expired, `IDN-400` wrong code.
+
+## `POST /identity/alias/bind-email`
+
+Binds a verified email hash to an alias for opt-in lookup. Body:
 
 ```json
-{
-  "status": "pending",
-  "expiresIn": 600
-}
+{"aliasId":"0x...","alias":"frankrocks","email":"frank@example.com","consent":true,"bindToken":"<from verify>","aliasSignature":"0x<65-byte signature>"}
 ```
 
-**Notes**
+Both proofs are required:
 
-* `aliasHint` is optional; when provided it is included in verification emails.
-* Rate limited to 5 attempts/hour per email hash.
+1. `bindToken` from `/identity/email/verify` (proves control of the inbox); missing or invalid tokens return `IDN-401`.
+2. `aliasSignature`: a secp256k1 signature (hex, 65 bytes) over `keccak256` of the JSON `{"aliasId":"<aliasId>","emailHash":"<emailHash>","bindToken":"<bindToken>"}` (fields in that order, no EIP-191 prefix). The recovered address must equal the alias's `primary` address returned by the node's `identity_resolve` (`IDN-401` otherwise, including when the alias is unknown).
 
-### POST `/identity/email/verify`
-
-Marks an email as verified using the code delivered out-of-band.
-
-**Request Body**
+`aliasId` must equal `0x` plus hex of `keccak256(normalized alias)` (`IDN-400` otherwise). The token is consumed by a successful bind. Response `200`:
 
 ```json
-{
-  "email": "frank@example.com",
-  "code": "483921"
-}
+{"status":"linked","aliasId":"0x...","emailHash":"0x...","publicLookup":true}
 ```
 
-**Response**
+`publicLookup` echoes `consent`. An alias already bound to a different email returns `IDN-409`.
 
-```json
-{
-  "status": "verified",
-  "verifiedAt": "2024-06-12T18:20:00Z",
-  "emailHash": "0xabcd..."
-}
-```
+## Storage
 
-On success, the gateway stores the salted hash and marks the email as eligible for alias binding.
-
-### POST `/identity/alias/bind-email`
-
-Binds a verified email to an alias ID for opt-in lookup.
-
-**Request Body**
-
-```json
-{
-  "aliasId": "0x5e2c...",
-  "email": "frank@example.com",
-  "consent": true
-}
-```
-
-**Response**
-
-```json
-{
-  "status": "linked",
-  "aliasId": "0x5e2c...",
-  "emailHash": "0xabcd...",
-  "publicLookup": true
-}
-```
-
-If the email was not previously verified, the endpoint returns `IDN-401`.
-
-### Alias resolution and avatars
-
-The gateway does not expose lookup or upload endpoints. Alias resolution (and
-reverse lookup by address) is done via the node's `identity_resolve` /
-`identity_reverse` JSON-RPC methods (see [JSON-RPC Reference](./identity-api.md)).
-Avatars are set via the `identity_setAvatar` JSON-RPC method, where the caller
-supplies an HTTPS URL or `blob://` reference string directly — there is no
-gateway upload endpoint.
-
----
-
-## Usage Examples
-
-### HMAC Signature Example (pseudo-code)
-
-```python
-import hashlib, hmac, time, json
-
-body = json.dumps({"email": "frank@example.com"})
-body_hash = hashlib.sha256(body.encode()).hexdigest()
-ts = str(int(time.time()))
-message = "POST\n/identity/email/register\n" + body_hash + "\n" + ts
-signature = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
-```
-
-### cURL – Start Email Verification
-
-```bash
-curl -X POST "$GATEWAY/identity/email/register" \
-  -H "X-API-Key: $API_KEY" \
-  -H "X-API-Timestamp: $(date +%s)" \
-  -H "Idempotency-Key: $(uuidgen)" \
-  -H "Content-Type: application/json" \
-  -d '{"email":"frank@example.com","aliasHint":"frankrocks"}'
-```
-
-## OpenAPI Specification
-
-A machine-readable schema for these endpoints is provided at [`../openapi/identity.yaml`](../openapi/identity.yaml). Use it with
-`redocly lint` or `swagger-cli validate` to ensure compatibility.
-
-## Related Docs
-
-* [Identity Concepts](./identity.md)
-* [JSON-RPC Reference](./identity-api.md)
-* [Avatar Specification](./avatars.md)
-* [Security & Compliance](./identity-security-compliance.md)
+BoltDB buckets `emails` (hash, code digest and expiry, register attempts, verification time, bind token digest and expiry, alias bindings), `aliases` (alias ID to email hash) and `idempotency`. The service does not expose bound data through any endpoint and has no `/privacy/export` or other privacy endpoints.

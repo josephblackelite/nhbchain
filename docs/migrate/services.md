@@ -1,47 +1,68 @@
 # Migration Guide: Service-Oriented Topology
 
-This guide walks through migrating from the legacy JSON-RPC node to the new
-service-oriented topology.
+This guide describes how the separate binaries in this repository fit together when you move
+from a single `nhb` node exposing JSON-RPC to the split topology. It lists only what the code
+requires. For each service's endpoints see the [service directory](../services/index.md).
 
-## 1. Prepare infrastructure
+## Components
 
-- Allocate separate compute for the gateway, consensus, lending, price oracle,
-  and state services. Each can be scaled independently after cutover.
-- Deploy a managed Postgres cluster and Redis instance to back the stateful
-  services.
+| Binary or service | Source | What it does |
+| --- | --- | --- |
+| `nhb` | `cmd/nhb` | Full node with JSON-RPC (`RPCAddress` in `config.toml`). |
+| `consensusd` | `cmd/consensusd` | Consensus node with a gRPC API. Talks to `p2pd` over gRPC. |
+| `p2pd` | `cmd/p2pd` | Peer-to-peer daemon serving `network.v1.NetworkService` to `consensusd`. |
+| `gateway` | `cmd/gateway` | HTTP front end: REST and gRPC route groups plus the optional `/rpc` compatibility route. |
+| `governd` | `services/governd` | Governance gRPC service. Builds, signs and submits transactions to the consensus node. |
+| `lendingd` | `services/lendingd` | Lending service. Reaches the node through `node_rpc_url`. |
 
-## 2. Bootstrap consensus + `p2pd`
+None of these services uses Postgres or Redis; the code has no client for either.
 
-- Promote a validator key and provision the consensus service container.
-- Launch `p2pd` next to every consensus node using the new `p2pd.toml` schema.
-- Allow gossip ports (`26656`) between validators and seeds.
+## 1. Consensus and `p2pd`
 
-## 3. Stand up gateways
+* Start `consensusd` with `--config` (default `./config.toml`), `--genesis`, `--grpc` (default
+  `127.0.0.1:9090`) and `--p2p` (the `p2pd` address, default `localhost:9091`).
+* Start `p2pd` next to it with the same `config.toml` and genesis. It serves its gRPC on
+  `--grpc` (default `127.0.0.1:9091`). There is no separate `p2pd.toml`: it reads `config.toml`,
+  including `ListenAddress` (the gossip listener), `Bootnodes`, `PersistentPeers` and the
+  `[network_security]` section that protects the `consensusd` link.
+* Open the gossip listener you configured in `ListenAddress` between validators. A peer address
+  without a port is dialled on `26656` (`p2p/connmanager.go`).
+* `consensusd` (like `nhb`) accepts `--allow-migrate`; see the
+  [migration runbook](../runbooks/migrations.md) for what the state schema guard does.
 
-- Deploy at least two gateway replicas behind your edge load balancer.
-- Configure JWT signing keys and consensus endpoints via environment variables.
-- Update DNS to point wallets and partner applications at the gateway tier.
+## 2. Domain services
 
-## 4. Bring up domain services
+* `governd`: `--config` (default `services/governd/config.yaml`). Keys include `listen`,
+  `consensus` (the consensus gRPC address), `chain_id`, the signer key (`signer_key`,
+  `signer_key_file` or `signer_key_env`), `nonce_store_path`, `fee`, `tls`, `auth` and
+  `consensus_client`.
+* `lendingd`: `--config` (default `services/lending/config.yaml`). Keys include `listen`,
+  `node_rpc_url`, `node_rpc_token`, `rate_limit_per_min`, `tls` and `auth`.
+* `lendingd` restricts plaintext mode to loopback listeners or a dev environment
+  (`services/lendingd/main.go`). `governd` refuses to dial the consensus node without TLS
+  material or a shared secret unless `consensus_client.allow_insecure` is true
+  (`services/governd/dial.go`).
 
-- Configure the lending service with oracle endpoints and market metadata.
-- Provision the price oracle service with publisher API keys and threshold
-  policies.
-- Connect both services to consensus using mTLS identities.
+## 3. Gateway
 
-## 5. Drain the legacy node
+* Start `gateway` with `--config <yaml>`. Without a file it listens on `:8080`. TLS is required
+  (`security.tlsCertFile`, `security.tlsKeyFile`) unless `NHB_ENV=dev` and `--allow-insecure` on
+  a loopback address.
+* Configure the upstream base URLs and authentication as described in
+  [monolith to gateway](./monolith-to-gateway.md) and
+  [gateway anonymous routes](./gateway-anonymous-routes.md). Set the HMAC secret
+  (`auth.hmacSecret`) for the tokens your clients present.
+* Decide whether to keep `/rpc` with `--compat-mode` (see the
+  [decommission timeline](./deprecation-timeline.md)).
+* `GET /healthz` on the gateway returns `ok`.
 
-- Freeze the legacy JSON-RPC node by rejecting external RPC requests.
-- Replay the last 1,000 blocks into the new consensus service to validate state
-  parity.
-- Switch traffic from the legacy node to the gateway using a weighted load
-  balancer change.
+## 4. Cut over
 
-## 6. Validate + monitor
-
-- Run the developer cookbooks (first transaction, position query, price oracle
-  publish) against production endpoints.
-- Monitor consensus, gateway, and oracle dashboards for error spikes.
-- Decommission the legacy node after 24 hours of stable metrics.
-
-For detailed service configuration, refer to the [service directory](../services/index.md).
+1. Bring up `consensusd` and `p2pd`, and confirm the chain height advances.
+2. Bring up `governd` and `lendingd`, then the gateway.
+3. Point clients at the gateway. Clients that still send JSON-RPC to the old node can use the
+   `/rpc` route (method table in [monolith to gateway](./monolith-to-gateway.md)).
+4. Exercise your integrations end to end. The cookbooks in `docs/cookbooks` and the samples in
+   `examples/` show first transactions and queries.
+5. Stop the old JSON-RPC node when you no longer need it. The repository defines no waiting
+   period.

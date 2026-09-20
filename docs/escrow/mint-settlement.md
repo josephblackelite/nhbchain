@@ -1,49 +1,50 @@
-# Mint Settlement RPC (`mint_with_sig`)
+# Mint Voucher RPC (`mint_with_sig`)
 
 ## Overview
-The `mint_with_sig` JSON-RPC method finalises invoice-backed mints for native assets. On founder mainnet this is used for
-**NHB** settlement mints, while **ZNHB** remains fixed-supply and mint-paused after genesis. The payments gateway
-obtains a signed voucher from an authorised minter (e.g. an external payment workflow) and submits it to the node. The node
-verifies the signature, packages the payload into a dedicated `TxTypeMint` transaction, and queues it in the mempool so block
-execution credits the recipient while emitting an auditable `mint.settled` event.
 
-This flow keeps mint authority centralised to wallets with the `MINTER_NHB` role on founder mainnet and provides a deterministic
-bridge between fiat settlements and on-chain supply adjustments.
+`mint_with_sig` submits a signed mint voucher for **NHB**. The node validates the voucher, wraps it in a `TxTypeMint` (`0x0E`) transaction and adds it to the mempool. When the transaction is executed in a block, the recipient is credited and a `mint.settled` event is emitted.
+
+The voucher is created and signed off-chain by an address that holds the on-chain `MINTER_NHB` role. How an off-chain submitter decides that a voucher should exist is outside this node's source. This document covers only the wire format and the on-chain rules.
+
+**ZNHB cannot be minted.** A voucher with token `ZNHB` is always rejected with `ErrMintZNHBNotMintable`, whatever roles exist (`core/state_transition.go`, `applyMintTransaction`; `core/node.go`, `MintWithSignature`).
+
+Code: `core/mint.go`, `core/node.go` (`MintWithSignature`), `core/state_transition.go` (`applyMintTransaction`), `rpc/mint_handlers.go`, `core/events/mint.go`.
 
 ## Voucher schema
-| Field       | Type   | Description |
-|-------------|--------|-------------|
-| `invoiceId` | string | Unique identifier for the fiat invoice. Replays are rejected once persisted. |
-| `recipient` | string | NHB bech32 address or username. Usernames resolve through the identity module; otherwise the value must be an address. |
-| `token`     | string | Token symbol being minted. Founder mainnet uses `NHB`; `ZNHB` remains mint-paused after genesis. |
-| `amount`    | string | Base unit amount (integer). Must be strictly positive. |
-| `chainId`   | number | Must equal `14699254016670310680` (`core.MintChainID`). Prevents cross-network replay. |
-| `expiry`    | number | UNIX timestamp (seconds). Must be greater than the node's current time when processed. |
 
-All string values are trimmed before processing and token symbols are normalised to upper-case.
+| Field | Type | Description |
+|-------|------|-------------|
+| `invoiceId` | string | Unique identifier. Trimmed; must not be empty. Reuse is rejected once a mint with this ID has executed. |
+| `recipient` | string | An NHB bech32 address, or an identity alias. The address is tried first; if it does not decode, the value is resolved through the identity registry (`IdentityResolve`, primary address). |
+| `token` | string | Trimmed and upper-cased. Only `NHB` is accepted. |
+| `amount` | string | Base-unit integer, strictly positive. |
+| `chainId` | number | Must equal `core.MintChainID` (`430060579445266314`). |
+| `expiry` | number | Unix seconds. Must be later than the current time (node time when submitting, block time when executing). |
+
+The mint transaction itself uses chain ID `types.NHBChainID()` (`0x4e4842`), gas limit 0 and gas price 0, and has no sender signature; the voucher signature is the authorization (`RequiresSignature(TxTypeMint)` is false).
 
 ## Canonical signing payload
-* Canonical JSON is generated from the voucher with the fields above in the order shown.
-* The JSON bytes are hashed with `keccak256` and signed using secp256k1 (`ethcrypto.Sign`).
-* The signature is provided to the RPC method as a hex string (optionally prefixed with `0x`).
-* The node recovers the signer with `SigToPub` and verifies the corresponding address holds the required role:
-  * `NHB` -> `MINTER_NHB`
-  * `ZNHB` -> `MINTER_ZNHB` only on networks where token minting is explicitly unpaused
 
-The payments gateway embeds this canonicalisation in `core.MintVoucher.CanonicalJSON`, ensuring every client signs the same
-payload auditors will verify.
+* Canonical JSON (`MintVoucher.CanonicalJSON`) is a JSON object with the keys in this order: `invoiceId`, `recipient`, `token`, `amount`, `chainId`, `expiry`. Strings are trimmed, `token` upper-cased, and `amount` re-rendered as a normalized decimal integer.
+* The digest is `keccak256(canonicalJSON)`.
+* The signature is a 65-byte secp256k1 signature over that digest (`ethcrypto.Sign`), passed as hex with an optional `0x`. The signer is recovered with `SigToPub`, which expects a recovery byte of 0 or 1.
+* The recovered address must hold `MINTER_NHB`. `MINTER_ZNHB` exists in the code but is unreachable because ZNHB mints are refused before the role check.
 
-## Replay protection and persistence
-* Every successful mint records the `invoiceId` inside the state trie via `state.MintInvoiceKey`.
-* Subsequent submissions with the same invoice are rejected with `ErrMintInvoiceUsed` and a `codeDuplicateTx` RPC error. The
-  mempool also rejects pending duplicates to avoid block construction failures.
-* Replays or attempts with expired vouchers (`ErrMintExpired`), wrong chain IDs (`ErrMintInvalidChainID`), or malformed payloads
-  (`ErrMintInvalidPayload`) are surfaced as `codeInvalidParams` errors.
+Go helpers: `core.MintVoucher.CanonicalJSON`, `Digest`, `core.MintVoucherHash`.
 
-## Event emission
-A successful mint appends a `mint.settled` event:
+## Execution rules
 
-```
+`applyMintTransaction` checks, in this order: decode payload; positive amount; `chainId`; expiry against block time; canonical JSON; 65-byte signature; token is not ZNHB and is NHB; non-empty `invoiceId` and `recipient`; the token's `MintPaused` metadata flag (`ErrMintPaused`); signer holds `MINTER_NHB` (`ErrMintInvalidSigner`); invoice not already used (`ErrMintInvoiceUsed`); recipient resolvable (`ErrMintRecipientUnresolved`); yearly emission cap.
+
+* **Replay protection.** A successful mint stores a flag under the invoice key (`MintInvoiceKey`) in state. The mempool also rejects a second pending mint transaction with the same invoice ID.
+* **Emission cap.** The governance parameter `mint.nhb.maxEmissionPerYearWei` sets the maximum NHB minted per calendar year (UTC, by block time). Unset, empty, or `0` means no cap. Exceeding it fails with `ErrMintEmissionCapExceeded`. The year-to-date total is tracked in state.
+* **Supply.** The recipient's NHB balance is credited, the tracked total NHB supply is increased by the amount, and a supply-change event is recorded.
+
+## Event
+
+A successful mint appends a `mint.settled` event with these attributes (`core/events/mint.go`):
+
+```json
 {
   "type": "mint.settled",
   "attributes": {
@@ -51,45 +52,19 @@ A successful mint appends a `mint.settled` event:
     "recipient": "nhb1...",
     "token": "NHB",
     "amount": "2500000000000000000",
-    "txHash": "0xabc123...",
-    "voucherHash": "0xdef456..."
+    "txHash": "0x...",
+    "voucherHash": "0x..."
   }
 }
 ```
 
-The `txHash` now reflects the canonical transaction hash computed by `types.Transaction.Hash()` (SHA-256 over the transaction
-fields). It uniquely identifies the mint transaction included on-chain. The legacy digest derived from the voucher payload and
-signature is still exposed as `voucherHash` to help downstream systems migrate without losing deterministic reconciliation
-anchors.
+`txHash` is `types.Transaction.Hash()` of the mint transaction. `voucherHash` is `keccak256(canonicalJSON || signature)`, hex with `0x` (`MintVoucherHash`).
 
-## Settlement flow
+## RPC
 
-An off-chain settlement service holding a `MINTER_*` role constructs a voucher, signs it, and submits it via
-`mint_with_sig`. When the resulting transaction executes, validators credit the recipient, record the invoice usage, and
-emit `mint.settled` with both the transaction hash and `voucherHash` digest, giving auditors and partners a full trail
-from settlement through to on-chain emission. The specific off-chain service(s) authorised to mint, and how they decide
-when a real-world payment is confirmed, are deployment details outside the scope of this node's public source.
+Method `mint_with_sig`, two positional params: the voucher (a JSON object, or a string containing the voucher JSON) and the signature hex string. The RPC layer does not require a bearer token for this method; authorization is the voucher signature and the `MINTER_NHB` role.
 
-## Audience notes
-### Auditors & Risk Teams
-* Replay-protected invoice ledger enables deterministic reconciliation.
-* Event payloads include recipient bech32 addresses and amounts for ledger matching.
-* Only addresses with explicit `MINTER_*` roles can authorise mints; role assignments live in the state trie.
-
-### Investors & Treasury
-* Chain ID guard rails prevent cross-network leakage of supply adjustments.
-* Expiring vouchers limit exposure to stale authorisations.
-* `mint.settled` events act as real-time notifications for treasury dashboards.
-
-### Customers & Support
-* Usernames are seamlessly resolved when the identity module is enabled; otherwise requests must provide a bech32 address.
-* Duplicate or expired vouchers return descriptive errors that can be surfaced to support tooling.
-
-### Developers & Integrators
-* Use `core.MintVoucher` helpers to build and sign vouchers to avoid subtle normalisation mismatches.
-* RPC request example:
-
-```
+```json
 {
   "jsonrpc": "2.0",
   "id": 7,
@@ -100,7 +75,7 @@ when a real-world payment is confirmed, are deployment details outside the scope
       "recipient": "nhb1alice...",
       "token": "NHB",
       "amount": "2500000000000000000",
-      "chainId": 14699254016670310680,
+      "chainId": 430060579445266314,
       "expiry": 1733070300
     },
     "0x...signature..."
@@ -108,11 +83,17 @@ when a real-world payment is confirmed, are deployment details outside the scope
 }
 ```
 
-* Response:
+Result: `{"txHash": "0x...", "voucherHash": "0x..."}`. The call returns as soon as the transaction is queued; it does not wait for a block.
 
-```
-{"jsonrpc":"2.0","id":7,"result":{"txHash":"0xdeadbeef...","voucherHash":"0xfeedface..."}}
-```
+Errors (`rpc/mint_handlers.go`):
 
-* On failure the node returns an `error` object with the mappings described above. If the node's mempool is full the RPC
-  responds with `codeMempoolFull`; clients should retry once capacity is available.
+| Condition | HTTP | Code |
+|-----------|------|------|
+| Wrong parameter count, bad JSON, signature missing or not valid hex | 400 | `-32602` |
+| Signer lacks `MINTER_NHB` (`ErrMintInvalidSigner`) | 401 | `-32001` |
+| Invoice already settled or pending (`ErrMintInvoiceUsed`) | 409 | `-32010` |
+| Expired (`ErrMintExpired`), wrong chain ID (`ErrMintInvalidChainID`), errors wrapping `ErrMintInvalidPayload` (ZNHB is one of these), emission cap exceeded (`ErrMintEmissionCapExceeded`) | 400 | `-32602` |
+| Mempool full | 503 | `-32030` |
+| Anything else | 500 | `-32000` (message `mint failed`) |
+
+`Node.MintWithSignature` (`core/node.go`) returns several validation failures as plain errors that do not wrap any of the sentinel errors the handler matches, so they fall into the last row and return HTTP 500 rather than 400. These are: an amount that is empty, not a base-10 integer or not positive; an empty `invoiceId`, `recipient` or `token` (`MintVoucher.CanonicalJSON`, `core/mint.go`); a token other than `NHB` or `ZNHB` (`unsupported token`); a signature whose decoded length is not 65 bytes (`invalid signature length`); and a signature from which no public key can be recovered (`recover signer: ...`). Only a signature that is empty or not valid hex is rejected with 400 by the RPC handler itself.

@@ -1,144 +1,137 @@
-# Escrow checkout widget + merchant demo
+# Escrow checkout widget and merchant demo
 
-This example bundles a drop-in React component (`<EscrowCheckout />`) with a Node.js merchant demo server that speaks to https://api.nhbcoin.net. The goal is to show how a merchant can spin up a full escrow checkout: buyers fund an escrow account via QR code, the merchant confirms delivery, the seller releases funds, and webhook notifications update the UI end-to-end.
+Two packages under `examples/escrow-checkout`, both workspace members:
 
-```
-/examples/escrow-checkout/widget          # React component package
-/examples/escrow-checkout/merchant-demo   # Express + Axios server
-```
+| Path | Package | What it is |
+| --- | --- | --- |
+| `widget/` | `@nhb/escrow-checkout-widget` | React component `<EscrowCheckout />`, built with `tsup` (`yarn build`, CJS + ESM + types). |
+| `merchant-demo/` | `@nhb/escrow-merchant-demo` | Express + Axios server that the widget talks to. |
 
-Both packages are wired into the `examples` Yarn workspaces and can be run with the standard scripts once dependencies are installed.
+## Important: the upstream API is not in this repository
 
-## Installing dependencies
+The merchant demo calls an HTTP API under `/v1/escrow/...` (listed below). No server in this repository implements those routes: `services/escrow-gateway/server.go` serves no `/v1/escrow/...` path, authenticates requests with the `gateway/auth` scheme (`X-Api-Key`, `X-Timestamp`, `X-Nonce`, `X-Signature`), and signs its webhooks with an `X-Webhook-Signature` header. The demo's paths, header names, signature format and webhook verification (below) differ from that. Treat the demo as a client written against a different API contract; it will not work against `services/escrow-gateway` unchanged. For the gateway that does exist, see [`docs/escrow/nhbchain-escrow-gateway.md`](../escrow/nhbchain-escrow-gateway.md).
+
+## Install and run
 
 ```bash
 cd examples
 yarn install
+cd escrow-checkout/merchant-demo
+yarn dev        # tsx watch src/server.ts
 ```
 
-- The widget is published as `@nhb/escrow-checkout-widget` and is compiled with `tsup`.
-- The merchant demo server (`@nhb/escrow-merchant-demo`) is a TypeScript Express application that signs API requests with HMAC, produces wallet signatures for escrow release, and verifies NHB webhooks.
+Other scripts: `yarn build` (`tsc -p tsconfig.json`), `yarn start` (`node dist/server.js`). `lint` and `test` are placeholders (`echo 'TODO...'`).
 
-## Using the `<EscrowCheckout />` widget
+## `<EscrowCheckout />`
 
 ```tsx
-import React from 'react';
 import { EscrowCheckout } from '@nhb/escrow-checkout-widget';
 
-export function CheckoutPage() {
-  return (
-    <EscrowCheckout
-      merchantBaseUrl="https://merchant-demo.example.com"
-      orderId="ORDER-12345"
-      customerWalletAddress="nhb1p3...buyer"
-      expectedAmount={{ currency: 'NHB', value: '125.00' }}
-      onStatusChange={(next) => console.log('escrow status changed to', next)}
-    />
-  );
-}
+<EscrowCheckout
+  merchantBaseUrl="http://localhost:4000"
+  orderId="ORDER-12345"
+  customerWalletAddress="<buyer address>"
+  expectedAmount={{ currency: 'NHB', value: '125.00' }}
+  onStatusChange={(next) => console.log('escrow status changed to', next)}
+/>
 ```
 
-### Props
+Props (`EscrowCheckoutProps` in `widget/src/EscrowCheckout.tsx`):
 
-| Prop | Type | Required | Description |
-| --- | --- | --- | --- |
-| `merchantBaseUrl` | `string` | ✅ | Base URL to the merchant server (the demo exposes `/api/...` routes). A trailing slash is automatically trimmed. |
-| `orderId` | `string` | ✅ | Stable identifier for the order or cart. The widget sends this to the merchant server, which forwards it as an idempotency key when creating the escrow checkout session. |
-| `customerWalletAddress` | `string` | – | Pre-fills the buyer wallet in the escrow session (if omitted the server can generate/lookup one). |
-| `expectedAmount` | `{ currency: string; value: string }` | – | Optional optimistic amount rendered while the session is being created. The real amount from the API overwrites it once the checkout session returns. |
-| `pollIntervalMs` | `number` | – | Polling cadence for session refreshes. Defaults to `5000` (5s). |
-| `autoCreate` | `boolean` | – | When `true` (default) the widget requests a session as soon as it mounts. Set to `false` if you want to manually call `createSession` via the controller. |
-| `onStatusChange` | `(status) => void` | – | Receives a callback every time the escrow status changes. |
-| `renderHistory` | `(history) => ReactNode` | – | Custom renderer for the session history timeline. |
-| `onController` | `(controller) => void` | – | Surfaces a controller with `createSession`, `refresh`, `markDelivered`, and `release` actions to the host application. |
-| `className` | `string` | – | Optional container className for styling overrides. |
+| Prop | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `merchantBaseUrl` | `string` | yes | | Base URL of the merchant server; one trailing `/` is trimmed. |
+| `orderId` | `string` | yes | | Sent to the merchant server, which uses it as the idempotency key when creating the session. |
+| `customerWalletAddress` | `string` | no | | Sent as `customerWalletAddress` in the create request. |
+| `expectedAmount` | `{ currency, value }` | no | | Shown until the session returns its own `amount`. |
+| `pollIntervalMs` | `number` | no | `5000` | Session refresh interval. |
+| `autoCreate` | `boolean` | no | `true` | Create the session on mount. With `false`, call `createSession` from the controller. |
+| `onStatusChange` | `(status) => void` | no | | Called when the status changes. |
+| `renderHistory` | `(history) => ReactNode` | no | | Replaces the built-in history list. |
+| `onController` | `(controller) => void` | no | | Receives `{createSession, refresh, markDelivered, release}`. |
+| `className` | `string` | no | | Added to the container. |
+| `enableMilestoneToggle` | `boolean` | no | `true` | Show the "Milestone mode" checkbox. |
+| `defaultMilestoneMode` | `boolean` | no | `false` | Initial state of that checkbox; sent as `milestoneMode` when creating the session. |
 
-The widget injects its own `<style>` block the first time it renders. You can override any of the `.nhb-escrow-*` classes to match your brand.
+Statuses (`EscrowSessionStatus`): `AWAITING_FUNDS`, `FUNDED`, `DELIVERED`, `RELEASED`, `CANCELLED`, `EXPIRED`. The "Mark as delivered" button is enabled at `FUNDED`, "Release funds" at `DELIVERED`, and the session is treated as complete at `RELEASED` or `CANCELLED`. The widget renders a QR code of the session's `paymentUri` and injects its own `<style>` element (id `nhb-escrow-checkout-styles`) with `.nhb-escrow-*` classes.
 
-### Session lifecycle
+Requests the widget makes to the merchant server:
 
-1. **Create session** – `POST /api/checkout/session` is called on the merchant server with `{ orderId, customerWalletAddress }`.
-2. **Fund escrow** – The buyer scans the QR code or sends funds to the provided deposit address. The widget polls `GET /api/checkout/session/:sessionId` to capture updates.
-3. **Delivery** – The merchant hits "Mark as delivered" which maps to `POST /api/escrow/:escrowId/deliver`.
-4. **Release** – After a wallet signature is produced the server calls `POST /api/escrow/:escrowId/release`. Once webhooks confirm the release, the UI shows the escrow as complete.
+1. `POST /api/checkout/session` with `{orderId, customerWalletAddress, milestoneMode}`.
+2. `GET /api/checkout/session/:sessionId`, repeated every `pollIntervalMs`.
+3. `POST /api/escrow/:escrowId/deliver`.
+4. `POST /api/escrow/:escrowId/release`.
 
 ## Merchant demo server
 
-The Express server exposes the endpoints consumed by the widget and translates them into NHB API calls at https://api.nhbcoin.net.
+Routes (`merchant-demo/src/server.ts`): `GET /healthz` (`{ok: true}`), `POST /webhooks/escrow`, and the four `/api/...` routes above. Sessions are kept in in-memory maps, so they are lost on restart. A failed upstream call returns HTTP 502 with a short `message`.
 
-### Environment variables
+### Configuration
 
-| Variable | Description |
+Read in `merchant-demo/src/config.ts`. `apiKey`, `apiSecret`, `webhookSecret` and `walletPrivateKey` must all end up set, or startup throws `Missing escrow merchant demo configuration values`.
+
+| Variable | Meaning |
 | --- | --- |
-| `NHB_API_BASE` | Override the NHB API base (defaults to `https://api.nhbcoin.net`). |
-| `NHB_API_KEY` | API key for authenticated calls. |
-| `NHB_API_SECRET` | API HMAC secret. |
-| `NHB_WEBHOOK_SECRET` | Shared secret used to verify webhook signatures. |
-| `NHB_WALLET_SECRET` | Base58 encoded ed25519 seed or 64-byte secret key used to sign release requests. |
-| `PORT` | Port for the Express server (defaults to `4000`). |
-| `ESCROW_SECRETS_ARN` | Optional AWS Secrets Manager ARN containing a JSON object with `apiKey`, `apiSecret`, `webhookSecret`, and/or `walletPrivateKey`. |
-| `ESCROW_SSM_PARAMETER` | Optional AWS Systems Manager Parameter Store name containing the same JSON structure as above. |
-| `AWS_REGION` | AWS region to use when reading secrets. |
+| `NHB_API_BASE` | Upstream API base. Default `https://gw.nhbcoin.net`. |
+| `NHB_API_KEY`, `NHB_API_SECRET` | Credentials for the request signature below. |
+| `NHB_WEBHOOK_SECRET` | Secret for verifying incoming webhooks. |
+| `NHB_WALLET_SECRET` | Base58-encoded ed25519 seed (32 bytes) or secret key (64 bytes) used to sign release requests. Any other length throws. |
+| `PORT` | Listen port, default `4000`. |
+| Two optional variables read in `config.ts` (a Secrets Manager secret identifier and an SSM parameter name) | Optional. Each names a stored JSON object with `apiKey`, `apiSecret`, `webhookSecret`, `walletPrivateKey`, fetched from AWS Secrets Manager or SSM Parameter Store. |
+| `AWS_REGION` / `AWS_DEFAULT_REGION` | Region for those lookups, default `us-east-1`. |
 
-Secrets are loaded in the following order: environment variables → Secrets Manager → SSM Parameter Store. The first source that provides a value wins, letting you keep production credentials in AWS while still supporting local `.env` files.
+Precedence is the reverse of "first source wins": the environment values are loaded first, then the Secrets Manager object is merged over them, then the SSM object is merged over that (`Object.assign` in `resolveConfig`), so a later source overrides an earlier one.
 
-### HMAC signing
+### Request signing
 
-Every outbound call to NHB uses the header trio produced in `EscrowClient`:
+Every upstream request carries (`EscrowClient.buildSignature` in `src/escrowClient.ts`):
 
 ```
-X-NHB-API-Key: <api key>
+X-NHB-API-Key: <apiKey>
 X-NHB-Timestamp: <ISO 8601 timestamp>
-X-NHB-Signature: HMAC_SHA256(secret, `${timestamp}.${method}.${path}.${jsonBody}`)
+X-NHB-Signature: hex(HMAC-SHA256(apiSecret, `${timestamp}.${METHOD}.${path}.${jsonBody}`))
+Idempotency-Key: <orderId>            (create-session only; `<orderId>-milestone` in milestone mode)
 ```
 
-Requests are JSON encoded and include an `Idempotency-Key` header set to the order ID when the checkout session is created.
+`path` is the request path (no base URL), `jsonBody` is the JSON string or an empty string when there is no body. Upstream calls, each returning `{ "data": ... }`:
 
-### Wallet signature for releases
+| Call | Request |
+| --- | --- |
+| Create session | `POST /v1/escrow/checkout/sessions` with `{order_id, customer_wallet_address, milestone_mode}` |
+| Get session | `GET /v1/escrow/checkout/sessions/{sessionId}` |
+| Mark delivered | `POST /v1/escrow/escrows/{escrowId}/deliver` |
+| Release | `POST /v1/escrow/escrows/{escrowId}/release` with `{wallet_address, signed_at, signature}` |
 
-To release funds the API requires a wallet signature. The demo decodes the merchant's ed25519 private key from base58, signs the string `${escrowId}.${signedAt}`, and sends the base58 signature together with the derived public key:
+For release, `signature` is the base58 ed25519 signature of the string `${escrowId}.${signedAt}` (`signedAt` is an ISO timestamp), and `wallet_address` is the base58 encoding of the ed25519 public key (`src/signing.ts`). This is not an `nhb1...` address, and it is a different key type from the secp256k1 keys the chain uses for transactions.
+
+Session responses are read as `session_id`, `escrow_id`, `deposit_address`, `payment_uri`, `status` (upper-cased), `expires_at`, `amount {currency, value}`, `customer.wallet_address`, `milestone_mode`, `history[]`, `milestones[]`.
+
+### Webhooks
+
+`POST /webhooks/escrow` is mounted with a raw body parser so the signature is computed over the exact bytes. The handler requires headers `x-nhb-signature` and `x-nhb-timestamp` and accepts the request only if the signature equals `hex(HMAC-SHA256(NHB_WEBHOOK_SECRET, `${timestamp}.${rawBody}`))` (constant-time compare, no freshness check on the timestamp). Responses: `401 invalid signature`, `400 invalid json`, `202 ignored` when `data.escrow_id` or `data.status` is missing, otherwise `200 ok`.
+
+The handler reads this shape and ignores the event `type`:
 
 ```json
 {
-  "wallet_address": "nhb1merchantpub...",
-  "signed_at": "2024-03-01T18:24:10.208Z",
-  "signature": "5Kf...signedpayload"
-}
-```
-
-### Webhook verification
-
-The ALB (or any HTTPS terminator) should forward NHB webhook calls to `/webhooks/escrow`. The route uses `X-NHB-Signature` and `X-NHB-Timestamp` to compute `HMAC_SHA256(secret, `${timestamp}.${rawBody}`)` before accepting the request.
-
-Sample webhook payload:
-
-```json
-{
-  "id": "evt_01HV8E7J7P7SQR34WS0F9YJ5QG",
-  "type": "escrow.status.changed",
-  "created_at": "2024-03-01T18:24:23.182Z",
+  "id": "<event id>",
+  "type": "<event type>",
+  "created_at": "<ISO 8601>",
   "data": {
-    "escrow_id": "esc_01HV8E6N1D0HB0ZWC7C32MA3P1",
+    "escrow_id": "<id>",
     "status": "RELEASED",
-    "note": "Seller wallet credited",
-    "amount": {
-      "currency": "NHB",
-      "value": "125.00"
-    }
+    "note": "optional",
+    "event_type": "status | milestone",
+    "milestone": { "title": "optional", "amount": { "currency": "NHB", "value": "125.00" } },
+    "amount": { "currency": "NHB", "value": "125.00" }
   }
 }
 ```
 
-The webhook handler merges events into the in-memory session store so the React widget shows a chronological history without polling every detail from the API.
+A `status` event upserts the session status and appends to its history. An event counts as a milestone event when `event_type` is `milestone` or the status starts with `MILESTONE`; it appends a milestone history entry and updates the milestone list. A webhook for an escrow the server has no session for is logged and acknowledged with `200`.
 
-## Local testing
+## Local test
 
-1. Start the merchant demo server:
-   ```bash
-   cd examples/escrow-checkout/merchant-demo
-   yarn dev
-   ```
-2. Run your React app (or storybook) that imports `@nhb/escrow-checkout-widget` and point `merchantBaseUrl` at `http://localhost:4000`.
-3. Use the QR code to fund escrow from a wallet, then trigger delivery and release. Webhooks hitting `/webhooks/escrow` will update the widget automatically.
-
-> **Deployment tip:** behind an AWS Application Load Balancer make sure `/webhooks/escrow` forwards the raw JSON body (no Lambda proxy that modifies payloads) so that the signature check succeeds. Provision the API/HMAC secrets in Secrets Manager or SSM and set `ESCROW_SECRETS_ARN` / `ESCROW_SSM_PARAMETER` accordingly.
+1. Start the merchant demo with the variables above set.
+2. Render `<EscrowCheckout merchantBaseUrl="http://localhost:4000" ... />` in any React app.
+3. Point `NHB_API_BASE` at an API that implements the `/v1/escrow/...` routes listed above.

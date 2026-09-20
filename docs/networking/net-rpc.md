@@ -1,193 +1,166 @@
 # Network RPC Endpoints
 
-The NET-2F API exposes operator-focused JSON-RPC methods under the existing
-HTTP listener. All examples assume the daemon is reachable at
-`http://127.0.0.1:8080` and that the `NHB_RPC_TOKEN` environment variable is set
-when authentication is required. Starting with this release the RPC server only
-trusts proxy forwarding headers from addresses explicitly allow-listed via
-`RPCTrustedProxies`, enforces the `RPCMaxTxPerWindow` / `RPCRateLimitWindow`
-quota across client IPs, identities, and chain nonces, and honours the tightened
-read/write/idle timeout values exposed in `config.toml`. Enable TLS by setting
-`RPCTLSCertFile`/`RPCTLSKeyFile` and
-propagate client IPs through a trusted reverse proxy before toggling
-`RPCTrustProxyHeaders`.
+Operator-facing JSON-RPC methods for the peer-to-peer layer. They are served by
+the node's normal JSON-RPC listener (`RPCAddress`, `127.0.0.1:8545` in the repo
+`config.toml`) as `POST` requests with a JSON body; handlers are in
+`rpc/net_handlers.go` and `rpc/p2p_query_handlers.go`. The examples below use
+`http://127.0.0.1:8545/`.
 
-> See the [Network Hardening Playbook](../security/network-hardening.md) for
-> guidance on fronting these endpoints with mutual TLS, logging, and proxy
-> topologies that satisfy the new safeguards.
+Methods that change state (`net_dial`, `net_ban`) require a bearer JWT
+(`Authorization: Bearer <token>`); the read methods do not. Proxy handling, rate
+limits, timeouts and TLS for the listener are described in
+[security.md](security.md#rpc-perimeter) and in the
+[Network hardening playbook](../security/network-hardening.md).
 
-### Deployment safeguards
-
-Operators migrating existing infrastructure should:
-
-1. Populate `RPCTrustedProxies` with the static addresses of load balancers or
-   ingress controllers that terminate TLS. Requests originating from other
-   sources will ignore `X-Forwarded-For` headers.
-2. Leave `RPCTrustProxyHeaders` disabled until the trusted proxy list is in
-   place; once enabled, ensure the proxy strips untrusted forwarding headers.
-3. Review the enforced quota (`RPCMaxTxPerWindow` requests per
-   `RPCRateLimitWindow`) and build exponential backoff into tooling to
-   gracefully handle HTTP 429 / `-32020` responses. Track enforcement via the
-   `nhb_rpc_limiter_hits_total` Prometheus counter when tuning.
-4. Set `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
-   `RPCIdleTimeout` to align with organisational SLAs. These defaults are
-   intentionally conservative and should mirror the perimeter’s timeout budget.
-5. Supply `RPCTLSCertFile`/`RPCTLSKeyFile` for end-to-end TLS or terminate TLS
-   at the proxy and use mTLS between the proxy and node.
+When the node runs without a P2P server the methods answer HTTP 503 with code
+`-32000` and message `unavailable`.
 
 ## `net_info`
 
-Returns high-level node and network metadata for observability dashboards.
-
-### Request
+Takes no parameters (any parameter returns HTTP 400, code `-32040`,
+`invalid_params`).
 
 ```bash
-curl -s \
-  -X POST \
-  -H "Content-Type: application/json" \
+curl -s -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"net_info","params":[]}' \
-  http://127.0.0.1:8080/
+  http://127.0.0.1:8545/
 ```
 
-### Response
+Result (`netInfoResult`):
 
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "nodeId": "0xabcdef...",
-    "peerCounts": {
-      "total": 8,
-      "inbound": 5,
-      "outbound": 3
-    },
-    "chainId": 14699254016670310680,
-    "genesisHash": "7bf4...",
-    "listenAddrs": [
-      "0.0.0.0:6001",
-      "[::]:6001"
-    ]
-  }
+  "nodeId": "0x...",
+  "peerCounts": { "total": 8, "inbound": 5, "outbound": 3 },
+  "chainId": 430060579445266314,
+  "genesisHash": "7bf4...",
+  "listenAddrs": ["0.0.0.0:6001"]
 }
 ```
 
+`chainId` is the P2P chain ID (first 8 bytes of the genesis hash, big-endian).
+`genesisHash` is the hex without a `0x` prefix. `listenAddrs` are the configured
+`ListenAddress`, `ExternalAddress` and the bound listener address.
+
 ## `net_peers`
 
-Returns enriched per-peer state combining live connections, peerstore metrics
-and reputation scores. This method requires authentication, like `net_dial` and
-`net_ban`: the list names every peer's address, score and ban state. `p2p_peers`
-returns the same list and takes the same credential.
+Takes no parameters. Returns an array of `PeerNetInfo` combining live
+connections, peerstore entries and reputation records:
 
-### Request
-
-```bash
-curl -s \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"net_peers","params":[]}' \
-  http://127.0.0.1:8080/
+```json
+[
+  {
+    "nodeId": "0xabc...",
+    "addr": "198.51.100.10:38766",
+    "direction": "outbound",
+    "state": "connected",
+    "score": 12,
+    "lastSeen": "2026-01-01T00:00:00Z",
+    "fails": 0
+  },
+  {
+    "nodeId": "0xdef...",
+    "addr": "203.0.113.44:6001",
+    "direction": "",
+    "state": "banned",
+    "score": -120,
+    "lastSeen": "2026-01-01T00:00:00Z",
+    "fails": 4,
+    "bannedUntil": "2026-01-01T01:00:00Z"
+  }
+]
 ```
 
-### Response
+`direction` is `inbound`, `outbound`, or empty for peers that are not connected.
+`state` is one of `connected`, `dialing`, `known`, `tracked` or `banned`
+(`Server.NetPeers`, `p2p/server.go`). `bannedUntil` appears only for banned peers.
+
+## `p2p_info` and `p2p_peers`
+
+`p2p_info` (no parameters) returns the full `NetworkView`:
 
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": [
-    {
-      "nodeId": "0xabc...",
-      "addr": "198.51.100.10:38766",
-      "direction": "outbound",
-      "state": "connected",
-      "score": 12,
-      "lastSeen": "2024-04-19T15:55:04Z",
-      "fails": 0
-    },
-    {
-      "nodeId": "0xdef...",
-      "addr": "203.0.113.44:38766",
-      "direction": "",
-      "state": "banned",
-      "score": -120,
-      "lastSeen": "2024-04-18T11:22:33Z",
-      "fails": 4,
-      "bannedUntil": "2024-04-19T16:00:00Z"
-    }
+  "networkId": 430060579445266314,
+  "genesisHash": "7bf4...",
+  "counts": { "total": 8, "inbound": 5, "outbound": 3 },
+  "limits": {
+    "maxPeers": 64, "maxInbound": 60, "maxOutbound": 30,
+    "rateMsgsPerSec": 50, "burst": 200, "banScore": 100, "greyScore": 50
+  },
+  "self": { "nodeId": "0x...", "protocolVersion": 1, "clientVersion": "nhbchain/node" },
+  "bootnodes": ["<bootnode-host>:6001"],
+  "persistentPeers": [],
+  "seeds": [
+    { "nodeId": "0x...", "address": "host:port", "source": "config" }
   ]
 }
 ```
 
-`state` is one of `connected`, `dialing`, `known`, `tracked`, or `banned`.
+`seeds` lists the merged seed catalogue with each entry's `source` (`config`,
+`registry.static`, or `dns:<domain>`) and optional `notBefore` / `notAfter`.
+`p2p_peers` (no parameters) returns exactly the same array as `net_peers`. Both
+return HTTP 400 with code `-32602` if given parameters.
 
 ## `net_dial`
 
-Queues a manual outbound dial to an address or known node ID. This method
-requires authentication.
-
-### Parameters
+Queues a manual outbound dial. Requires auth. One parameter object:
 
 ```json
-{
-  "target": "0xabc123..." // Node ID or host:port
-}
+{ "target": "0xNODEID" }
 ```
 
-### Example
+`target` is a node ID (resolved through the peerstore, then the seed list) or a
+`host:port` address. Example:
 
 ```bash
-curl -s \
-  -X POST \
-  -H "Content-Type: application/json" \
+curl -s -X POST -H "Content-Type: application/json" \
   -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":7,"method":"net_dial","params":[{"target":"203.0.113.44:38766"}]}' \
-  http://127.0.0.1:8080/
+  -d '{"jsonrpc":"2.0","id":7,"method":"net_dial","params":[{"target":"203.0.113.44:6001"}]}' \
+  http://127.0.0.1:8545/
 ```
 
-Successful responses return `{ "ok": true }`. The dial respects peerstore
-backoff windows and active bans, so it may complete asynchronously.
+A success returns `{"ok": true}`; the dial itself runs asynchronously and waits
+for the peerstore/backoff delay first. If the node is already connected to the
+target it also returns `{"ok": true}`.
 
-### Error Codes
+Parameter errors from the handler itself (not exactly one parameter object,
+malformed JSON in it) return HTTP 400, code `-32040`, message `invalid_params`.
 
-| Condition                | HTTP | Code              | Message        |
-| ------------------------ | ---- | ----------------- | -------------- |
-| Invalid target/address   | 400  | `-32040`          | `invalid_params` |
-| Unknown node ID          | 404  | `-32041`          | `unknown_peer` |
-| Target currently banned  | 409  | `-32042`          | `peer_banned`  |
+Errors from the dial itself depend on what the network service returns
+(`writeNetError`, `rpc/net_handlers.go`):
+
+- In the all-in-one `nhb` binary the service is a thin adapter over the P2P
+  server (`cmd/nhb/main.go`, `p2pNetworkAdapter`) and returns plain Go errors,
+  so they are reported as HTTP 500, code `-32000`, message `server_error`, with
+  the error text in `data`: `p2p: empty dial target`, `p2p: invalid dial address:
+  ...`, `p2p: unknown peer: <id>` (node ID not in the peerstore or seed list), or
+  `p2p: peer is banned: ...`.
+- When the service returns gRPC status errors (the gRPC network client in
+  `network/client.go`), they are mapped to: `InvalidArgument` to HTTP 400 /
+  `-32040` `invalid_params`; `NotFound` to HTTP 404 / `-32041` `unknown_peer`;
+  `FailedPrecondition` to HTTP 409 / `-32042` `peer_banned`; `Unavailable` to
+  HTTP 503 / `-32000` `unavailable`.
 
 ## `net_ban`
 
-Applies an immediate operator ban to a peer. The peer is disconnected if it is
-currently online and prevented from reconnecting until the ban expires. This
-method requires authentication.
-
-### Parameters
+Bans a peer and disconnects it if connected. Requires auth. One parameter object:
 
 ```json
-{
-  "nodeId": "0xabc123...",
-  "secs": 7200 // optional, defaults to BanDurationSeconds
-}
+{ "nodeId": "0xabc123...", "secs": 7200 }
 ```
 
-### Example
+`secs` is optional; `0` or omitted uses `PeerBanDuration` (`[p2p]
+BanDurationSeconds`); a negative value returns HTTP 400 / `-32040`. The node ID
+must be a connected peer, a peerstore entry or a seed, otherwise the call fails
+with `p2p: unknown peer: <id>` (reported as described under `net_dial`). A
+success returns `{"ok": true}`.
 
-```bash
-curl -s \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":8,"method":"net_ban","params":[{"nodeId":"0xabc123...","secs":7200}]}' \
-  http://127.0.0.1:8080/
-```
+Malformed requests can also produce the standard JSON-RPC errors (`-32600`,
+`-32601`, and so on).
 
-### Error Codes
+## `sync_status`
 
-| Condition       | HTTP | Code     | Message        |
-| --------------- | ---- | -------- | -------------- |
-| Unknown node ID | 404  | `-32041` | `unknown_peer` |
-
-All methods MAY return standard JSON-RPC errors (`-32600`, `-32601`, etc.) for
-malformed requests.
+Takes no parameters. Returns
+`{"chainHeight": n, "snapshotHeight": n, "managerReady": bool}`; see
+[sync.md](sync.md).

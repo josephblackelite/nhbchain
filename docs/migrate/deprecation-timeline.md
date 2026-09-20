@@ -1,30 +1,47 @@
 # JSON-RPC Compatibility Decommission Timeline
 
-> [!WARNING]
-> The legacy JSON-RPC surface is in its sunset window. Monitor the phase schedule below and migrate to the REST and gRPC APIs before the final removal milestone.
+The gateway's `/rpc` endpoint is a compatibility dispatcher that accepts JSON-RPC requests and
+forwards them to the REST surfaces of the upstream services (see
+[Migrating from the legacy JSON-RPC node](./monolith-to-gateway.md) for the method table).
+`gateway/compat/deprecations.yaml`, embedded in the gateway binary, defines a four-phase
+shutdown plan for it. This page describes that plan and what the gateway does with it today.
 
-The compatibility dispatcher that backs the `/rpc` endpoint is being retired in four phases over ninety days. Each stage tightens the defaults and culminates in the complete removal of the monolithic surface.
+## Where the gateway is now
 
-| Phase | Offset | Default behaviour | Operator flag | Key actions |
-| ----- | ------ | ----------------- | ------------- | ----------- |
-| Phase A – Compatibility warning window | T+0 | Compatibility **enabled** by default | `--compat-mode=disabled` (optional opt-out) | Emit HTTP warnings, publish docs banner, capture support feedback. |
-| Phase B – Staging opt-out | T+30d | Compatibility **enabled** by default | `--compat-mode=disabled` in staging | Exercise the REST APIs, harden SDKs, update staging pipelines. |
-| Phase C – Compatibility disabled by default | T+60d | Compatibility **disabled** by default | `--compat-mode=enabled` (temporary opt-in) | Production workloads must migrate; only stragglers use the flag. |
-| Phase D – Compatibility removal | T+90d | Compatibility **removed** | Flag removed | Remove dispatcher, tag final release, and announce completion. |
+The embedded plan sets `currentPhase: phase-a`. The gateway does not compute the phase from a
+date: it uses whichever phase the file names as current. With `phase-a` the default
+compatibility mode is `enabled`. Moving to a later phase means changing that file and
+rebuilding.
 
-## Operator guidance
+## The phases
 
-- The gateway now accepts a CLI flag (`--compat-mode`) or environment override (`NHB_COMPAT_MODE`) with the values `enabled`, `disabled`, or `auto`.
-- During Phase A and B the default remains `enabled`. Use `--compat-mode=disabled` in staging to verify that workloads are not tied to JSON-RPC.
-- In Phase C the default flips to `disabled`. Opt in explicitly with `--compat-mode=enabled` for short-lived migrations.
-- Phase D eliminates the dispatcher entirely; upgrade before this milestone.
+| Phase | Offset | Default | Flag behaviour |
+| ----- | ------ | ------- | -------------- |
+| `phase-a` Compatibility warning window | T+0 | enabled | Flag available to opt out (disable compat in staging environments). |
+| `phase-b` Staging opt-out | T+30d | enabled | Opt-in flag (`--compat-mode=disabled`) to turn off compat in non-production environments. |
+| `phase-c` Compatibility disabled by default | T+60d | disabled | Opt-in flag (`--compat-mode=enabled`) required to keep compat for straggler integrations. |
+| `phase-d` Compatibility removal | T+90d | removed | Compatibility flag removed; legacy dispatcher deleted and final release tagged. |
+
+The offsets are labels in the plan file. The code contains no timer. Only `phase-a` has a
+banner text. For `phase-d` the code treats the default as disabled (`DefaultMode` in
+`gateway/compat/deprecation.go`); the removal itself is not implemented.
+
+## Operator controls
+
+* The gateway accepts `--compat-mode` or the environment variable `NHB_COMPAT_MODE`, with the
+  values `enabled`, `disabled` or `auto`. The flag wins over the variable. An empty value or
+  `auto` follows the current phase's default. Any other value stops the gateway at startup.
+* `enabled` registers the `/rpc` route; `disabled` does not register it. At startup the
+  gateway logs `compatibility mode: requested=<mode> effective=<mode> enabled=<bool>`.
 
 ## Client impact
 
-All compatibility responses include the following headers to ensure automated clients see the warning:
+Every response from `/rpc`, including error responses, carries these headers
+(`writeJSON` in `gateway/compat/compat.go`, text from the current phase):
 
-- `Warning: 299 - "Monolithic JSON-RPC compatibility will be sunset in 90 days. Migrate to the service APIs and monitor the deprecation timeline."`
-- `Link: <https://docs.nhbchain.net/migrate/deprecation-timeline>; rel="deprecation"; type="text/html"`
-- `X-NHB-Compat-Phase: Phase A – Compatibility warning window`
+* `Warning: 299 - "Monolithic JSON-RPC compatibility will be sunset in 90 days. Migrate to the service APIs and monitor the deprecation timeline."`
+  (any double quote inside the banner is replaced by a single quote)
+* `Link: <https://docs.nhbchain.net/migrate/deprecation-timeline>; rel="deprecation"; type="text/html"`
+* `X-NHB-Compat-Phase: Phase A – Compatibility warning window`
 
-SDKs, API clients, and Postman collections should surface these headers to downstream teams. If you operate shared tooling, coordinate the migration timeline with your stakeholders and raise support tickets early.
+If a client keeps tooling that talks to `/rpc`, surface these headers to the teams that own it.

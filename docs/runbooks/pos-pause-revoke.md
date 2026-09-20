@@ -1,19 +1,36 @@
 # POS Pause & Revoke Runbook
 
-Use this runbook to pause merchant sponsorship or revoke compromised POS devices without interrupting raw transfers. The runtime checks the POS registry before quota enforcement, so registry updates take effect immediately for sponsored requests while the sender-funded path remains available.【F:core/sponsorship.go†L231-L247】 The administrative surface mirrors the onboarding API and exposes explicit RPCs for pausing or restoring merchants and devices.【F:proto/pos/registry.proto†L37-L82】
+Use this runbook to pause merchant sponsorship or revoke compromised POS devices without interrupting raw transfers. The runtime checks the POS registry before quota enforcement, so registry updates take effect immediately for sponsored requests while the sender-funded path remains available.【F:core/sponsorship.go†L231-L247】 The proto definitions in `proto/pos/registry.proto` describe pause/resume and revoke/restore messages, but the gRPC service is retired (see the status note below).【F:proto/pos/registry.proto†L37-L82】
+
+> **Status note (verified against the code):** the `pos.v1.Registry` gRPC service is retired and not registered on the node (`rpc/http.go` `Serve`, NHB-AUDIT-S3). The registry messages are carried by `TxTypePOSRegistry` (`0x23`) transactions, and `applyPOSRegistry` (`core/state_pos.go`) currently applies only `MsgRegisterMerchant`, `MsgRegisterDevice` and `MsgPauseMerchant`; `MsgResumeMerchant`, `MsgRevokeDevice` and `MsgRestoreDevice` are accepted but change nothing. Steps below that mention `pos.v1.Msg*` refer to those transaction payloads, not to a gRPC endpoint.
 
 ## Pause or resume a merchant
 
-1. Submit `pos.v1.MsgPauseMerchant` (or `MsgResumeMerchant`) as a `TxTypePOSRegistry` transaction signed by the merchant's own account or by a key holding `ROLE_POS_REGISTRY_ADMIN` (any other signer is refused). The registry creates the merchant record on demand, flips the `Paused` flag, and persists the change idempotently.【F:native/pos/registry.go†L101-L133】
-2. Confirm the pause landed by querying the merchant record via the state manager. The helper normalises the address the same way the runtime does, so a paused merchant always round-trips with `Paused=true`.【F:core/state/pos_registry.go†L22-L67】
-3. Broadcast a sponsored transaction referencing the merchant and verify that `EvaluateSponsorship` returns `Status=throttled` with a pause reason while the unsigned path still executes.【F:core/tx/checks.go†L9-L45】【F:core/sponsorship_test.go†L203-L270】
+* `native/pos/registry.go` implements `PauseMerchant` and `ResumeMerchant`. Both create the
+  merchant record when it is missing, and setting the same value again changes nothing except
+  the stored nonce, expiry and chain ID.
+* The messages are `pos.v1.MsgPauseMerchant` and `pos.v1.MsgResumeMerchant`, sent as a
+  `TxTypePOSRegistry` transaction. As described in the onboarding runbook, the transaction
+  handler `applyPOSRegistry` does not currently route these messages to the registry methods:
+  a pause message is decoded as a merchant registration and fails with `pos: stale nonce`, and
+  there is no handler branch for resume. Do not treat a submitted pause or resume as effective
+  until you have read the flag back.
+* Verify by reading `pos/merchant/<address>` (`Manager.POSGetMerchant`) and by running
+  `tx_previewSponsorship` for a sponsored transaction that names the merchant: the result must
+  show `throttled` with `merchant sponsorship paused` while the flag is set.
 
 ## Revoke or restore a device
 
-1. Submit `pos.v1.MsgRevokeDevice` (or `MsgRestoreDevice`) for the affected terminal, signed by the owner of the merchant the terminal is bound to or by a key holding `ROLE_POS_REGISTRY_ADMIN`. The registry enforces deterministic normalisation, preserves the merchant association, and toggles the `Revoked` flag in place.【F:native/pos/registry.go†L155-L220】
-2. Read the device snapshot via the state helper to verify the revocation status and associated merchant. Missing devices return `(nil, false)` so operators can detect stale identifiers before rolling back changes.【F:core/state/pos_registry.go†L69-L106】
-3. Re-run the sponsored transaction from the device to ensure the runtime rejects the paymaster path with a revocation reason while allowing unsigned transfers to succeed.【F:core/tx/checks.go†L27-L45】【F:core/sponsorship_test.go†L273-L330】
+* `RevokeDevice` and `RestoreDevice` require an existing device record (`pos: device <id> not
+  registered` otherwise), keep the merchant binding and only flip `Revoked`.
+* The messages are `pos.v1.MsgRevokeDevice` and `pos.v1.MsgRestoreDevice`. Neither has a
+  branch in `applyPOSRegistry`, so as the code stands a submitted transaction with either
+  message does not change the flag.
+* Verify by reading `pos/device/<device id>` (`Manager.POSGetDevice`; a missing device returns
+  "not found") and with `tx_previewSponsorship`, which must show `throttled` with
+  `device sponsorship revoked`.
 
-## Clean up unused records
+## Clean up records
 
-If a merchant or device has been decommissioned, remove the registry entry via governance to keep the dataset tidy. The manager helpers expose `POSDeleteMerchant` and `POSDeleteDevice`, which normalise identifiers before deleting the underlying key.【F:core/state/pos_registry.go†L57-L116】
+`Manager.POSDeleteMerchant` and `Manager.POSDeleteDevice` exist in `core/state/pos_registry.go`.
+No transaction type calls them.

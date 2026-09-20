@@ -1,94 +1,79 @@
-# P2P Mini-Market Walkthrough
+# P2P Mini-Market
 
-The P2P mini-market demo pairs a lightweight marketplace UI with the dual-lock
-escrow RPCs introduced for peer-to-peer NHB ⇄ ZNHB trades. This document outlines
-the trade lifecycle, the pay intents returned to each counterparty, dispute
-resolution outcomes, and the gateway endpoints exposed at
-`https://api.nhbcoin.net`.
+`examples/p2p-mini-market` is a Next.js 14 app (workspace member `@nhb/p2p-mini-market`, started by `yarn dev`) built around the two-escrow ("dual-lock") trade engine in `native/escrow/trade_engine.go`. This page describes that engine's states and outcomes, and which parts of the demo work against the current node.
 
-## Trade lifecycle
+## Current status
 
-Dual-lock trades progress through the following aggregate states:
+The RPC methods that create and move a dual-lock trade are retired. The node answers `p2p_createTrade`, `p2p_settle`, `p2p_dispute`, `p2p_resolve` (`rpc/p2p_handlers.go`, `p2pRPCDisabledMessage`) and `escrow_fund` (`rpc/escrow_handlers.go`) with HTTP `410`. The demo's own API routes for those actions (`app/api/p2p/create-trade`, `settle`, `dispute`, `resolve`, and `app/api/escrow/fund`) do not call the chain; they return `410` with `retired: true` after validating the request body. What still works:
 
-| State | Description |
-|-------|-------------|
-| `init` | Trade created. Both escrows exist but are unfunded. |
-| `partial_funded` | Exactly one leg has been funded (`escrow_fund`). |
-| `funded` | Both escrows funded. Trade is ready to settle. |
-| `disputed` | Buyer or seller opened a dispute (`p2p_dispute`). Escrows are frozen. |
-| `settled` | Atomic release executed (`p2p_settle` or arbitrator `release_both`). |
-| `cancelled` | Trade cancelled voluntarily or via arbitrator refund outcome. |
-| `expired` | Funding deadline elapsed and at least one leg refunded. |
+| Route | Calls |
+| --- | --- |
+| `GET /api/account?address=` | `nhb_getBalance` |
+| `GET /api/p2p/trade?tradeId=` | `p2p_getTrade({tradeId})` |
+| `GET /api/escrow/get?escrowId=` | `escrow_get({id})` |
+| `GET /api/config` | Client config (`chainId`, `wsUrl`) |
 
-Each escrow leg tracks its own status (`init`, `funded`, `released`, `refunded`,
-`disputed`, `expired`). The UI polls `escrow_get` to surface both legs alongside
-the aggregated trade status.
+So the UI can load balances and display trades or escrows that already exist, but it cannot create or fund a trade. The chain's live peer-to-peer market is a different model: signed `TxTypeMarketCreateListing` (`0x35`), `TxTypeMarketFillListing` (`0x36`) and `TxTypeMarketCancelListing` (`0x37`) transactions submitted with `nhb_sendTransaction`, read through `market_listOpenListings`, `market_getListing`, `market_getMyListings`, `market_getMyFills` and `market_getFlatFee`.
+
+## Trade model
+
+`CreateTrade` creates two escrows and one trade record:
+
+- The **quote** escrow: payer is the buyer, payee is the seller, holds the quote token.
+- The **base** escrow: payer is the seller, payee is the buyer, holds the base token.
+
+The demo's "SELL_NHB" direction sets base = NHB and quote = ZNHB; "SELL_ZNHB" is the reverse (`mini-market-app.tsx`). The funding deadline in the UI defaults to 6 hours. The trade ID is a Keccak-256 hash of the offer ID, buyer, seller and a nonce, so re-creating the same definition is idempotent, and reusing an ID with a different definition is an error (`trade: identifier already exists with different definition`). Amounts must be positive; the deadline must not be in the past.
+
+### Trade states
+
+`p2p_getTrade` reports `status` as one of these strings (`tradeStatusString` in `rpc/p2p_handlers.go`):
+
+| State | How the engine reaches it |
+| --- | --- |
+| `init` | Created; neither escrow funded. |
+| `partial_funded` | Exactly one escrow is funded (`OnFundingProgress`). |
+| `funded` | Both escrows funded; `fundedAt` is set. |
+| `disputed` | The buyer or the seller opened a dispute while the trade was `funded` or `partial_funded` (`TradeDispute`; any other caller: `trade: unauthorized dispute caller`). |
+| `settled` | Both legs released atomically (`SettleAtomic`, which requires both escrows funded and rejects a disputed trade or one past its deadline), or a dispute was resolved successfully (`TradeResolve`; see the unfunded-leg caveat under Dispute outcomes). |
+| `cancelled` | The deadline passed with neither escrow funded (`TradeTryExpire`). |
+| `expired` | The deadline passed with one funded leg, which is refunded; or a fully funded trade sat unsettled for 900 seconds (`autoRefundSecs`) and both legs were refunded. |
+
+If the deadline has passed while both legs are funded and fewer than 900 seconds have passed since `fundedAt`, `TradeTryExpire` returns `trade: cannot auto-expire fully funded trade` instead of expiring the trade.
+
+### Escrow leg states
+
+`init`, `funded`, `released`, `refunded`, `expired`, `disputed` (`escrowStatusString` in `rpc/escrow_handlers.go`).
+
+### Dispute outcomes
+
+`TradeResolve` accepts exactly these outcomes (case-insensitive) on a `disputed` trade. When it succeeds the trade ends `settled` (resolving an already `settled` trade is a no-op that returns success). Any other value fails with `trade: invalid resolution outcome`.
+
+| Outcome | Base escrow (seller's asset) | Quote escrow (buyer's asset) | Net effect |
+| --- | --- | --- | --- |
+| `release_both` | Released to the buyer | Released to the seller | The swap completes. |
+| `refund_both` | Refunded to the seller | Refunded to the buyer | Everyone gets their own asset back. |
+| `release_base_refund_quote` | Released to the buyer | Refunded to the buyer | The buyer ends with both assets. |
+| `release_quote_refund_base` | Refunded to the seller | Released to the seller | The seller ends with both assets. |
+
+(`releaseBaseLeg` releases to `trade.Buyer`, `releaseQuoteLeg` to `trade.Seller`; refunds go to each escrow's payer.)
+
+Edge case: a trade can be disputed from `partial_funded`, where one escrow is still unfunded. Each of `releaseBaseLeg`, `releaseQuoteLeg`, `refundBaseLeg` and `refundQuoteLeg` (`native/escrow/trade_engine.go`) returns an error (`trade: base leg not releasable`, `trade: quote leg not releasable`, `trade: base leg not refundable`, `trade: quote leg not refundable`) when its escrow is neither funded nor disputed, so any outcome that touches the unfunded leg fails and `TradeResolve` returns that error before it sets the trade to `settled`. A leg that is already released (for the release legs) or already refunded or expired (for the refund legs) is skipped without error.
+
+Who is allowed to call resolve is decided by the node method behind `p2p_resolve`, which is currently disabled, so this page does not state it.
+
+## Running the demo
+
+```bash
+cd examples
+yarn install
+cd p2p-mini-market
+yarn dev
+```
+
+Required environment (`app/lib/config.ts`): `NHB_RPC_URL`, `NHB_RPC_TOKEN`, `NHB_CHAIN_ID`. Optional: `NHB_WS_URL` (parsed and exposed at `/api/config`, but the app opens no WebSocket) and `APP_PUBLIC_BASE`. The token is used only in server routes and is sent only on the `escrow_get` and `p2p_getTrade` calls.
+
+In the browser the app keeps its offers and trades in `localStorage` and re-polls every trade every 8 seconds. Seller and buyer private keys are entered or generated in the page.
 
 ## Pay intents
 
-`p2p_createTrade` returns two pay intents that encode where each party must send
-funds:
-
-```json
-{
-  "tradeId": "0x…",
-  "escrowBaseId": "0x…",
-  "escrowQuoteId": "0x…",
-  "payIntents": {
-    "seller": {
-      "to": "nhb1escrowvault…",
-      "token": "NHB",
-      "amount": "1000000000000000000",
-      "memo": "ESCROW:0xbase"
-    },
-    "buyer": {
-      "to": "nhb1escrowvault…",
-      "token": "ZNHB",
-      "amount": "500000000000000000",
-      "memo": "ESCROW:0xquote"
-    }
-  }
-}
-```
-
-The mini-market renders each intent as a `znhb://pay` QR code and copies the raw
-fields so test accounts can fund the escrow vaults manually. The memo is mandatory
-and lets the module reconcile deposits with the pending escrow record.
-
-## Dispute outcomes
-
-Arbitrators resolve disputes using `p2p_resolve` with one of four outcomes:
-
-| Outcome | Result |
-|---------|--------|
-| `release_both` | Releases both escrows to their payees (equivalent to mutual settle). |
-| `refund_both` | Refunds both escrows to their original payers (trade cancels). |
-| `release_base_refund_quote` | Releases the base leg to the buyer and refunds the quote leg to the buyer (seller loses). |
-| `release_quote_refund_base` | Releases the quote leg to the seller and refunds the base leg to the seller (buyer loses). |
-
-The UI provides controls to open a dispute and then exercise each resolution path.
-Settlement and refunds remain atomic—either both legs execute or neither leg
-moves.
-
-## Gateway endpoints
-
-The production gateway exposes REST endpoints at `https://api.nhbcoin.net`:
-
-| Method & Path | Purpose |
-|---------------|---------|
-| `POST /p2p/offers` | (Optional) Persist an offer with idempotency guarantees. |
-| `GET /p2p/offers` | Enumerate active offers for discovery. |
-| `POST /p2p/accept` | Accept an offer, invoke `p2p_createTrade`, and return the dual pay intents. |
-| `GET /p2p/trades/{id}` | Fetch trade status including escrow snapshots. |
-| `POST /p2p/trades/{id}/settle` | Mutual settlement once both legs are funded. |
-| `POST /p2p/trades/{id}/dispute` | Flag a dispute from either counterparty. |
-| `POST /p2p/trades/{id}/resolve` | Arbitrator resolution using the outcomes above. |
-
-All endpoints require the standard API key + HMAC headers. Mutating calls also
-include the wallet signature of the buyer, seller, or arbitrator so the gateway
-can assert on-chain authority.
-
-The mini-market demo talks to the public RPC (`https://rpc.testnet.nhbcoin.net`) to keep
-credentials client-side for self-hosted QA, but production operators integrate
-with `api.nhbcoin.net` to leverage persistent offer storage, idempotency, and
-webhook delivery of trade events.
+The UI renders each pay intent as a QR code of `znhb://pay?to=<to>&token=<token>&amount=<amount>&memo=<memo>` (`app/components/pay-intent-card.tsx`). That URI is a convention of this example; the chain code does not parse it. The intents came from the `p2p_createTrade` result (`payIntents.seller` and `payIntents.buyer`, each `{to, token, amount, memo}` in `p2pCreateResult`), which is retired.

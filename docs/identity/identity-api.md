@@ -1,320 +1,70 @@
 # Identity JSON-RPC Reference
 
-> Endpoint: `POST /rpc` (same port as the core node RPC) • Namespace: `identity_*`
+Handlers: `rpc/identity_handlers.go`, `rpc/claimable_handlers.go`. Requests use the node's JSON-RPC envelope: `{"jsonrpc":"2.0","id":1,"method":"...","params":[...]}`.
 
-The identity module exposes JSON-RPC endpoints for registering aliases, updating
-avatar references, resolving alias metadata, and managing pay-by-email
-claimables. This guide documents the request/response schemas, authentication
-requirements, and sample payloads for each method.
+## Method status
 
-## Authentication
-
-* **Bearer token** – Mutating methods require the `Authorization: Bearer <token>`
-  header. The token is a JWT validated per the node's `[RPCJWT]` TOML config
-  section (algorithm, issuer, audience, and clock-skew tolerance are all
-  configured there); verification happens in `requireAuth` in `rpc/http.go`.
-  Requests without the header (or with an invalid/expired token) return HTTP 401.
-* **Public reads** – `identity_resolve` and `identity_reverse` do not require
-  authentication and may be used by wallets or public gateways to look up alias
-  data.
-* **Idempotency** – Only `identity_claim` is idempotent; replays return the
-  cached result with no additional transfer. `identity_createClaimable` is
-  **not** idempotent — every call mints a new claim and debits the payer, so
-  retrying it after a network error risks creating a duplicate claimable and
-  double-debiting the payer. Only retry `identity_claim` safely.
-
-## Common Error Shapes
-
-Errors follow the JSON-RPC 2.0 structure `{code, message, data}`. Identity
-handlers reuse standard node error codes:
-
-| HTTP Status | `code` | `message` | Typical Cause |
-| --- | --- | --- | --- |
-| `400` | `-32602` | `invalid_params` | Invalid Bech32 address, alias format, or malformed payload. |
-| `401` | `-32001` | `missing Authorization header` (or similar) | Missing/invalid bearer token. |
-| `403` | `-32001` | `caller not alias owner` | Alias mutation attempted by a non-owner address. Uses the same code as 401. |
-| `404` | `-32602` | `alias not found` / `not_found` | Alias does not exist. |
-| `500` | `-32000` | `internal_error` | Unexpected server error (check `data`). |
-
-`identity_createClaimable` and `identity_claim` use a separate error-code
-family (defined in `rpc/claimable_handlers.go`), not the codes above:
-
-| HTTP Status | `code` | `message` |
+| Method | Status | Authentication |
 | --- | --- | --- |
-| `400` | `-32041` | `invalid_params` |
-| `404` | `-32042` | `not_found` |
-| `403` | `-32043` | `forbidden` |
-| `409` | `-32044` | `conflict` |
-| `500` | `-32045` | `internal_error` |
+| `identity_resolve` | Live | none |
+| `identity_reverse` | Live | none |
+| `claimable_get` | Live | none |
+| `identity_setAlias`, `identity_setAvatar`, `identity_addAddress`, `identity_removeAddress`, `identity_setPrimary`, `identity_rename`, `identity_createClaimable`, `identity_claim` | Disabled | n/a |
+| `claimable_create`, `claimable_claim`, `claimable_cancel` | Disabled | n/a |
 
----
+Disabled methods answer HTTP 410 with error code `-32060` and the message `identityRPCDisabledMessage` / `claimableRPCDisabledMessage`; they used to change the receiving node's state outside block execution. To claim a username use the `TxTypeRegisterIdentity` transaction (`nhb-cli claim-username`); see [`identity.md`](./identity.md). No `identity_claimableExpire` method exists.
 
-## Method Reference
+## `identity_resolve`
 
-Each method uses JSON-RPC 2.0. Examples below omit the surrounding HTTP headers
-for brevity.
-
-### `identity_setAlias`
-
-Registers or updates the alias controlled by an address. Re-registering with a
-new alias automatically emits rename events and updates timestamps.
-
-**Parameters**
-
-Positional array with two items:
-
-1. `address` (`string`) – Bech32-encoded owner address (`nhb1...`).
-2. `alias` (`string`) – Desired alias. The node normalises to lower-case and
-   validates length/charset.
-
-**Returns**
+Params: one string, the alias (any case; trimmed and lower-cased by the node).
 
 ```json
-{"ok": true}
+{"jsonrpc":"2.0","id":1,"method":"identity_resolve","params":["frankrocks"]}
 ```
 
-**Example Request**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "identity_setAlias",
-  "params": [
-    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgp9p6hd",
-    "frankrocks"
-  ]
-}
-```
-
-### `identity_setAvatar`
-
-Updates the avatar reference for the alias owned by the address. Accepts HTTPS
-URLs or `blob://` references that have been provisioned by the identity gateway.
-
-**Parameters**
-
-1. `address` (`string`) – Owner address.
-2. `avatarRef` (`string`) – HTTPS or `blob://` reference.
-
-**Returns**
-
-```json
-{
-  "ok": true,
-  "alias": "frankrocks",
-  "aliasId": "0x5e2c...",
-  "avatarRef": "https://cdn.nhb/avatars/frank.png",
-  "updatedAt": 1718132211
-}
-```
-
-### `identity_addAddress`
-
-Associates an additional address with an existing alias. The caller must supply
-the primary alias owner address.
-
-**Request Object**
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `owner` | string | ✓ | Primary address that controls the alias. |
-| `alias` | string | ✓ | Alias being updated. |
-| `address` | string | ✓ | Bech32 address to link to the alias. |
-
-**Returns**
-
-Same schema as `identity_resolve` with the updated address list.
-
-**Example Request**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "identity_addAddress",
-  "params": [
-    {
-      "owner": "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgp9p6hd",
-      "alias": "frankrocks",
-      "address": "nhb1alt4vrc6j9j9r4w0l5z7p3yyd86x8k6qfsu8y"
-    }
-  ]
-}
-```
-
-### `identity_removeAddress`
-
-Detaches an address from an alias. The primary address cannot be removed.
-
-**Request Object**
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `owner` | string | ✓ | Primary alias owner address. |
-| `alias` | string | ✓ | Alias being updated. |
-| `address` | string | ✓ | Bech32 address to unlink. |
-
-**Returns**
-
-Updated alias record as per `identity_resolve`.
-
-### `identity_setPrimary`
-
-Promotes the supplied address to become the primary address for the alias. If
-the address was not previously linked it will be added automatically after
-validation.
-
-**Request Object**
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `owner` | string | ✓ | Primary alias owner address. |
-| `alias` | string | ✓ | Alias being updated. |
-| `address` | string | ✓ | Bech32 address to promote. |
-
-**Returns**
-
-Updated alias record as per `identity_resolve`.
-
-### `identity_rename`
-
-Renames an alias while keeping the existing metadata and address bindings. The
-new alias must not already be registered.
-
-**Request Object**
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `owner` | string | ✓ | Primary alias owner address. |
-| `alias` | string | ✓ | Current alias value. |
-| `newAlias` | string | ✓ | Desired new alias. |
-
-**Returns**
-
-Updated alias record as per `identity_resolve`.
-
-### `identity_resolve`
-
-Fetches the latest metadata for an alias. Public and cache-friendly.
-
-**Parameters**
-
-* `alias` (`string`) – Alias to resolve. Case-insensitive; the node applies
-  canonical normalisation.
-
-**Returns**
+Result (`identityResolveResult`):
 
 ```json
 {
   "alias": "frankrocks",
-  "aliasId": "0x5e2c...",
-  "primary": "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgp9p6hd",
-  "addresses": [
-    "nhb1qyqszqgpqyqszqgpqyqszqgpqyqszqgp9p6hd"
-  ],
-  "avatarRef": "https://cdn.nhb/avatars/frank.png",
+  "aliasId": "0x<keccak256 of the alias>",
+  "primary": "nhb1...",
+  "addresses": ["nhb1..."],
+  "avatarRef": "https://...",
   "createdAt": 1718131200,
   "updatedAt": 1718132211
 }
 ```
 
-### `identity_reverse`
+`avatarRef` is omitted when unset. Errors: HTTP 400 code `-32602` for a missing or malformed parameter or an invalid alias (`invalid alias`, with the rule violated in `data`); HTTP 404 code `-32602` with message `alias not found`.
 
-Reverse lookup for an address. Returns the alias string and deterministic
-`aliasId` derived from the alias.
+## `identity_reverse`
 
-**Parameters**
-
-* `address` (`string`) – Bech32 address to reverse lookup.
-
-**Returns**
+Params: one string, a bech32 address.
 
 ```json
-{
-  "alias": "frankrocks",
-  "aliasId": "0x5e2c..."
-}
+{"jsonrpc":"2.0","id":1,"method":"identity_reverse","params":["nhb1..."]}
 ```
 
-### `identity_createClaimable`
+Result: `{"alias": "frankrocks", "aliasId": "0x..."}`. Errors: HTTP 400 `-32602` (`invalid address`), HTTP 404 `-32602` with message `address has no alias`.
 
-Escrows funds for a recipient identified by an alias or salted email hash.
-Clients **must** send a single JSON object as the first positional parameter.
+## `claimable_get`
 
-**Request Object**
+Params: `{"id": "0x<64 hex>"}`.
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `payer` | string | ✓ | Bech32 address funding the claimable. |
-| `recipient` | string | ✓ | 32-byte hex salted email hash or alias string. |
-| `token` | string | ✓ | `NHB` or `ZNHB`. Case-insensitive. |
-| `amount` | string | ✓ | Decimal string amount (in token base units). |
-| `deadline` | int | ✓ | Unix timestamp (seconds) when the claim expires. Must be in the future. |
+Result (`claimableJSON`): `id`, `payer` (bech32), `token`, `amount` (decimal string), `hashLock` (`0x` plus 64 hex), `deadline`, `createdAt`, `expiresAt`, `nonce`, `chainId` (string), `status` (`init`, `claimed`, `cancelled`, `expired`).
 
-**Returns**
+Errors use their own code family: `-32041` invalid params (HTTP 400), `-32042` not found (404), `-32043` forbidden (403), `-32044` conflict (409), `-32045` internal (500). An unknown ID returns HTTP 404 with `-32042` and message `not_found`.
 
-```json
-{
-  "claimId": "0x92fd...",
-  "recipientHint": "0x3a4b...",
-  "token": "NHB",
-  "amount": "25",
-  "expiresAt": 1718822400,
-  "createdAt": 1718736000
-}
-```
+## Errors shared by all node methods
 
-### `identity_claim`
+| HTTP | Code | Meaning |
+| --- | --- | --- |
+| 400 | `-32602` | Invalid parameters. |
+| 404 | `-32602` | Alias not found (identity methods reuse the invalid-params code). |
+| 410 | `-32060` | Method disabled. |
+| 500 | `-32000` | Internal error. |
 
-Releases a claimable to the verified recipient. Requires the preimage supplied
-by the identity gateway or derived from the alias ID.
+## CLI
 
-**Request Object**
-
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `claimId` | string | ✓ | Hex-encoded claimable ID returned by `identity_createClaimable`. |
-| `payee` | string | ✓ | Bech32 address receiving the funds. |
-| `preimage` | string | ✓ | 32-byte hex string matching the stored `recipientHint`. |
-
-> **Alias recipients:** When the `recipientHint` encodes an alias ID, the
-> `payee` must be one of the addresses currently bound to that alias. The node
-> rejects claims from unrelated accounts, while the preimage requirement
-> continues to protect email-hash claimables.
-
-**Returns**
-
-```json
-{
-  "ok": true,
-  "token": "NHB",
-  "amount": "25"
-}
-```
-
-On replay or duplicate submissions the method still returns `{ "ok": true }`
-without transferring additional funds.
-
----
-
-## CLI Helpers
-
-The `nhb-cli` binary wraps the RPCs above. Every command in the table that calls a retired method (all but `resolve` and
-`reverse`) says so and exits non-zero without contacting the node:
-
-| Command | Description |
-| --- | --- |
-| `nhb-cli id set-alias --addr <bech32> --alias <name>` | Calls `identity_setAlias`. |
-| `nhb-cli id set-avatar --addr <bech32> --avatar <ref>` | Calls `identity_setAvatar`. |
-| `nhb-cli id add-address --owner <bech32> --alias <name> --addr <bech32>` | Calls `identity_addAddress`. |
-| `nhb-cli id remove-address --owner <bech32> --alias <name> --addr <bech32>` | Calls `identity_removeAddress`. |
-| `nhb-cli id set-primary --owner <bech32> --alias <name> --addr <bech32>` | Calls `identity_setPrimary`. |
-| `nhb-cli id rename --owner <bech32> --alias <name> --new-alias <name>` | Calls `identity_rename`. |
-| `nhb-cli id resolve --alias <name>` | Calls `identity_resolve`. |
-| `nhb-cli id reverse --addr <bech32>` | Calls `identity_reverse`. |
-| `nhb-cli id create-claimable ...` | Calls `identity_createClaimable`. |
-| `nhb-cli id claim ...` | Calls `identity_claim`. |
-
-Refer to the CLI help output (`nhb-cli id --help`) for full flag listings and
-examples.
+`nhb-cli id resolve --alias <name>` and `nhb-cli id reverse --addr <bech32>` call the live methods. The other `nhb-cli id` subcommands call disabled methods; see [`identity-cli.md`](./identity-cli.md).

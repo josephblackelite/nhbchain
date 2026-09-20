@@ -1,19 +1,14 @@
 # Governance Devnet Runbook
 
-> Goal: spin a single-node devnet, walk a governance proposal from creation to execution, and capture the resulting parameter change.
+Goal: take one `param.update` proposal through propose, vote, finalize, queue
+and execute on a node you control, using `nhb-cli`. Every command and flag
+below is taken from `cmd/nhb-cli` and `cmd/nhb`; the node-side setup (genesis,
+keystore, RPC auth, POTSO epochs) depends on your configuration and is
+described only where the governance code depends on it.
 
-## 1. Prerequisites
+## 1. Build
 
-- Go 1.24.x on your PATH
-- `curl`, `jq`, and `tmux` (recommended for long running node sessions)
-- Two terminal windows/tabs: one for the node, one for CLI calls
-
-```bash
-sudo apt update
-sudo apt install build-essential jq tmux -y
-```
-
-Clone and build the binaries once:
+Go 1.24 or newer (`go.mod`).
 
 ```bash
 git clone https://github.com/josephblackelite/nhbchain.git
@@ -22,258 +17,155 @@ go build -o bin/nhb-node ./cmd/nhb/
 go build -o bin/nhb-cli ./cmd/nhb-cli/
 ```
 
-## 2. One-node devnet
+## 2. Node configuration
 
-Create a fresh config that enables governance parameter updates and fast POTSO snapshots.
-`rpc.NewServer()` refuses to start unless `[RPCJWT]` is enabled (or a TLS client
-CA is configured), so the sample below includes the `[RPCJWT]` block required
-for the node to boot:
+Start from the repository's `config.toml` and replace the `[governance]` block
+with short timings so the lifecycle finishes in minutes. `AllowedParams` must
+contain the key you will change, and its keys need validators (see
+[params](./params.md)); this example uses `staking.aprBps`.
 
-```bash
-cat > devnet.toml <<'TOML'
-ListenAddress = "0.0.0.0:6002"
-RPCAddress = "0.0.0.0:8081"
-DataDir = "./nhb-data-devnet"
-GenesisFile = ""
-ValidatorKeystorePath = "./validator-devnet.keystore"
-NetworkName = "nhb-devnet"
-
-[RPCJWT]
-Enable = true
-Alg = "HS256"
-HSSecretEnv = "NHB_RPC_JWT_SECRET"
-Issuer = "nhb-rpc"
-Audience = ["wallets"]
-MaxSkewSeconds = 120
-
-[p2p]
-NetworkId = 187001
-MaxPeers = 32
-MaxInbound = 32
-MaxOutbound = 16
-Bootnodes = []
-PersistentPeers = []
-BanScore = 100
-GreyScore = 50
-RateMsgsPerSec = 50
-Burst = 200
-HandshakeTimeoutMs = 5000
-
+```toml
 [governance]
-MinDepositWei = "100000000000000000"
-VotingPeriodSeconds = 120
-TimelockSeconds = 60
-QuorumBps = 3000
-PassThresholdBps = 5000
-AllowedParams = [
-  "fees.baseFee",
-  "staking.minimumValidatorStake",
-  "staking.aprBps",
-  "staking.payoutPeriodDays",
-  "staking.unbondingDays",
-  "staking.minStakeWei",
-  "staking.maxEmissionPerYearWei",
-  "staking.rewardAsset",
-  "staking.compoundDefault",
-  "loyalty.dynamic.targetBps",
-  "loyalty.dynamic.minBps",
-  "loyalty.dynamic.maxBps",
-  "loyalty.dynamic.smoothingStepBps",
-  "loyalty.dynamic.coverageMax",
-  "loyalty.dynamic.coverageLookbackDays",
-  "loyalty.dynamic.dailyCapPctOf7dFees",
-  "loyalty.dynamic.dailyCapUsd",
-  "loyalty.dynamic.yearlyCapPctOfInitialSupply",
-  "loyalty.dynamic.priceGuard.pricePair",
-  "loyalty.dynamic.priceGuard.twapWindowSeconds",
-  "loyalty.dynamic.priceGuard.priceMaxAgeSeconds",
-  "loyalty.dynamic.priceGuard.maxDeviationBps",
-  "loyalty.dynamic.priceGuard.enabled",
-  "network.seeds",
-  "potso.abuse.MaxUserShareBps",
-  "potso.abuse.MinStakeToEarnWei",
-  "potso.abuse.QuadraticTxDampenAfter",
-  "potso.abuse.QuadraticTxDampenPower",
-  "potso.rewards.EmissionPerEpochWei",
-  "potso.weights.AlphaStakeBps",
-]
-
-[potso.rewards]
-EpochLengthBlocks = 1
-AlphaStakeBps = 5000
-MinPayoutWei = "0"
-EmissionPerEpoch = "1000000000000000000"
-TreasuryAddress = "0x0101010101010101010101010101010101010101"
-MaxWinnersPerEpoch = 16
-CarryRemainder = true
-PayoutMode = "claim"
-
-[potso.weights]
-AlphaStakeBps = 7000
-TxWeightBps = 2000
-EscrowWeightBps = 500
-UptimeWeightBps = 500
-MaxEngagementPerEpoch = 1000
-MinStakeToWinWei = "0"
-MinEngagementToWin = 0
-DecayHalfLifeEpochs = 1
-TopKWinners = 16
-TieBreak = "stake"
-TOML
+  MinDepositWei = "1000000000000000000"   # 1 ZNHB
+  VotingPeriodSeconds = 120
+  TimelockSeconds = 60
+  QuorumBps = 1000
+  PassThresholdBps = 5000
+  AllowedParams = ["staking.aprBps"]
 ```
 
-Start the node (keep this terminal running):
+Notes from the code:
+
+- These values are read from the local file by each validator
+  (`GovConfig.Policy()`); every validator must run the same block.
+- `cmd/nhb` does not enforce a minimum voting period on `[governance]`
+  (`cmd/consensusd` validates `[global.Governance]`, which is a separate block,
+  see [policy invariants](../gov/policy-invariants.md)).
+- `cmd/nhb` flags: `--config <path>` (default `./config.toml`), `--genesis
+  <path>`, `--allow-autogenesis` (development only, also `NHB_ALLOW_AUTOGENESIS`),
+  `--allow-migrate`. Without a genesis file the node refuses to start unless
+  autogenesis is enabled.
 
 ```bash
-export NHB_VALIDATOR_PASS="devnet-passphrase"
-export NHB_RPC_JWT_SECRET="devnet-jwt-secret-change-me"
-RPC_URL="http://127.0.0.1:8081"
-# Explicitly opt into autogenesis for this throwaway devnet instance.
-GOFLAGS=-buildvcs=false bin/nhb-node --config ./devnet.toml --allow-autogenesis
+bin/nhb-node --config ./devnet.toml --allow-autogenesis
 ```
 
-The first boot creates `validator-devnet.keystore`, autogenerates a genesis block, and logs the validator address. You can also
-set `NHB_ALLOW_AUTOGENESIS=1` or `AllowAutogenesis = true` in `devnet.toml` if you prefer environment or config-based overrides.
+## 3. CLI setup
 
-## 3. Bootstrap accounts & voting power
-
-In a second terminal, export the RPC details for the CLI. `NHB_RPC_JWT_SECRET`
-must match the value the node was started with, so the CLI can mint a bearer
-token that validates against the node's `[RPCJWT]` config:
+`nhb-cli` talks to `http://localhost:8080` unless `RPC_URL` is set or `--rpc
+<url>` is passed before the command. Write methods (`nhb_sendTransaction`)
+send `Authorization: Bearer $NHB_RPC_TOKEN`; the CLI refuses to send a
+transaction without that variable set.
 
 ```bash
 export RPC_URL="http://127.0.0.1:8081"
-export NHB_RPC_JWT_SECRET="devnet-jwt-secret-change-me"
-export NHB_RPC_TOKEN=$(go run generate_jwt.go)
+export NHB_RPC_TOKEN="<token accepted by the node's RPC auth>"
 ```
 
-1. Generate three operator keys (one proposer + two voters) and capture their addresses.
-   `generate-key` always writes to `./wallet.key` and prints the address to stdout
-   (there is no way to redirect the key material itself), so move the file after
-   each run and read the address back with the `address` subcommand:
+Create keys. `generate-key` always writes `./wallet.key` and prints the
+address; rename the file after each run, and read an address back with
+`address`:
 
-   ```bash
-   bin/nhb-cli generate-key
-   mv wallet.key proposer.key
-   bin/nhb-cli generate-key
-   mv wallet.key voter1.key
-   bin/nhb-cli generate-key
-   mv wallet.key voter2.key
-   proposer=$(bin/nhb-cli address proposer.key)
-   voter1=$(bin/nhb-cli address voter1.key)
-   voter2=$(bin/nhb-cli address voter2.key)
-   ```
+```bash
+bin/nhb-cli generate-key && mv wallet.key proposer.key
+bin/nhb-cli generate-key && mv wallet.key voter.key
+proposer=$(bin/nhb-cli address proposer.key)
+voter=$(bin/nhb-cli address voter.key)
+```
 
-2. Seed the three accounts from the validator (replace `VALIDATOR_ADDR` with the address printed on node start):
+Preconditions for the governance transactions:
 
-   ```bash
-   validator="VALIDATOR_ADDR"
-   bin/nhb-cli send-nhb --rpc "$RPC_URL" "$proposer" 500000000000000000 proposer.key
-   bin/nhb-cli send-nhb --rpc "$RPC_URL" "$voter1" 500000000000000000 proposer.key
-   bin/nhb-cli send-nhb --rpc "$RPC_URL" "$voter2" 500000000000000000 proposer.key
-   ```
-
-3. Give the voters stake so they appear in the next POTSO snapshot:
-
-   ```bash
-   bin/nhb-cli stake 100 proposer.key
-   bin/nhb-cli stake 100 voter1.key
-   bin/nhb-cli stake 100 voter2.key
-   # Trigger a heartbeat to accrue engagement
-   bin/nhb-cli heartbeat proposer.key
-   bin/nhb-cli heartbeat voter1.key
-   bin/nhb-cli heartbeat voter2.key
-   ```
-
-Wait ~1 minute for the 1-block POTSO epoch to close; the node log prints `potso.reward.ready` when the snapshot is committed.
+- The proposer needs at least `MinDepositWei` in **ZNHB** (the deposit is
+  debited from `BalanceZNHB`). Send ZNHB from a funded key with
+  `bin/nhb-cli send-znhb <recipient> <amount_wei> <key_file>`.
+- Every voter needs non-zero POTSO weight in the snapshot of the last processed
+  POTSO reward epoch. Check with the `potso_getWeight` RPC, params
+  `[{"address": "<bech32>"}]`, result `{epoch, address, weightBps}`. If no
+  epoch has been processed, votes fail with `governance: potso snapshot
+  unavailable`; a voter not in the snapshot fails with `governance: voter has
+  zero voting power`.
 
 ## 4. Proposal lifecycle
 
-### 4.1 Craft payload
-
-`payload.json` defines the desired parameter delta:
+### 4.1 Payload
 
 ```bash
 cat > payload.json <<'JSON'
-{
-  "fees.baseFee": "2000000000"
-}
+{"staking.aprBps": 1000}
 JSON
 ```
 
-### 4.2 Propose
+Use an unquoted number (see [params](./params.md#how-a-parameter-proposal-is-checked)).
 
-Lock a 0.2 ZNHB deposit and submit:
+### 4.2 Propose
 
 ```bash
 bin/nhb-cli gov propose \
   --kind param.update \
   --payload @payload.json \
-  --from "$proposer" \
-  --deposit 200000000000000000
+  --key proposer.key \
+  --deposit 1000000000000000000
 ```
 
-The CLI prints `{"proposalId":1,...}`. Confirm the record:
+Prints `Broadcasted governance proposal: <tx hash>`. `--deposit` is in wei and
+accepts forms such as `1e18`. Find the proposal id:
 
 ```bash
-bin/nhb-cli gov show --id 1 | jq
+bin/nhb-cli gov list
+bin/nhb-cli gov show --id 1
 ```
+
+`status` is `2` (voting_period) until finalized
+([API](./api.md#gov_proposal)).
 
 ### 4.3 Vote
 
-Cast ballots from each voter (choices are case-insensitive):
-
 ```bash
-bin/nhb-cli gov vote --id 1 --from "$proposer" --choice yes
-bin/nhb-cli gov vote --id 1 --from "$voter1" --choice yes
-bin/nhb-cli gov vote --id 1 --from "$voter2" --choice abstain
+bin/nhb-cli gov vote --id 1 --key voter.key --choice yes
 ```
 
-### 4.4 Finalize after the voting window
+`--choice` is `yes`, `no` or `abstain` (case-insensitive). A second vote from
+the same key replaces the first.
 
-The vote period is 120 seconds. Once elapsed:
+### 4.4 Finalize
 
-```bash
-sleep 130
-bin/nhb-cli gov finalize --id 1 | jq
-```
-
-The response includes a tally (`yes_ratio_bps`, `turnout_bps`) and the proposal status should read `"passed"`.
-
-### 4.5 Queue & execute
-
-Queue the proposal (this records `queued=true` and sets the timelock):
+Voting ends at the proposal's `voting_end` (submission time plus
+`VotingPeriodSeconds`). After that:
 
 ```bash
-bin/nhb-cli gov queue --id 1
+bin/nhb-cli gov finalize --id 1 --key proposer.key
+bin/nhb-cli gov show --id 1
 ```
 
-After the 60 second timelock, execute and apply the parameter update:
+`status` becomes `3` (passed) when `turnout_bps >= quorum_bps` and
+`yes_ratio_bps >= pass_threshold_bps`, otherwise `4` (rejected). Finalizing
+earlier fails with `governance: voting still in progress`. A passed proposal's
+deposit is returned to the proposer.
+
+### 4.5 Queue and execute
 
 ```bash
-sleep 65
-bin/nhb-cli gov execute --id 1
+bin/nhb-cli gov queue --id 1 --key proposer.key
+# wait until timelock_end
+bin/nhb-cli gov execute --id 1 --key proposer.key
 ```
 
-### 4.6 Verify the parameter diff
+`timelock_end` is fixed at submission (`voting_end + TimelockSeconds`). Execute
+before then fails with `governance: timelock not yet elapsed`. Finalize, queue
+and execute may be sent by any funded key.
 
-Confirm the proposal executed:
+### 4.6 Verify
 
 ```bash
-curl -s "$RPC_URL" -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"gov_proposal","params":[{"id":1}]}' | jq '.result.status'
+bin/nhb-cli gov show --id 1      # status 7 = executed
 ```
 
-The command shows `"executed"`. There is currently no dedicated RPC method for
-reading back an individual live parameter value (`gov/params` prefix queries
-only expose `staking.minimumValidatorStake`; see
-[state-indexes.md](./state-indexes.md)), so confirm `fees.baseFee` changed by
-inspecting node logs or state directly.
+The applied value is stored under `params/staking.aprBps` in state. To read it
+back through the consensus query API use `QueryState("gov", "params")`, which
+returns the stored values for keys in `AllowedParams` (see
+[state indexes](./state-indexes.md)). The `gov.executed` event and the audit
+record at `gov/audit/<n>` list the changed keys.
 
-## 5. Cleanup / rerun
+## 5. Cleanup
 
-Stop the node (`Ctrl+C`), remove state (`rm -rf nhb-data-devnet validator-devnet.keystore payload.json *.key`), and restart from step 2 for another demo.
-
----
-
-Following the commands above—without modification—spins a deterministic governance devnet, completes a vote with multiple participants, and validates the resulting on-chain parameter change.
+Stop the node and delete its data directory and the `*.key` files you created.

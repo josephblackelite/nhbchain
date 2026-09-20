@@ -1,93 +1,69 @@
 # POTSO Weighting and Abuse Controls
 
-This specification outlines the deterministic math used by the POTSO weighting
-pipeline and the additional anti-abuse controls introduced for the rewards
-module. It supplements the high level overview in `weights.md` with exact
-formulas that implementers can reproduce in analytics or off-chain validation
-systems.
+This page gives the exact formulas implemented in `native/potso/metrics.go` (`ComputeWeightSnapshot`) and `native/potso/rewards.go` (`ComputeRewards`). It supplements [weights.md](weights.md), which describes the same pipeline step by step.
 
-## Eligibility Gates
+## Per-participant filters (in code order)
 
-Each participant `i` is described by a bonded stake `s_i`, a raw engagement
-meter `(tx_i, escrow_i, uptime_i)`, and the exponentially decayed engagement
-value from the prior epoch `e_{i,t-1}`. The following thresholds are applied
-before weights are computed:
+For each participant `i`, `ComputeWeightSnapshot` receives the bonded stake `s_i`, the epoch meter `(tx_i, escrow_i, uptime_i)` and the previous epoch's stored engagement `e_{i,t-1}`. It applies these steps in this order:
 
-1. **Minimum stake to win**: If `s_i < MinStakeToWinWei` the participant is
-   removed from the candidate set entirely.
-2. **Minimum stake to earn**: If `s_i < MinStakeToEarnWei` the participant stays
-   in the candidate set (so their bonded stake can still contribute to the
-   staking share) but their raw composite engagement is forced to zero. This
-   immediately drives the decayed engagement `e_{i,t}` to zero as well.
-3. **Zero-value filter**: Addresses with `s_i = 0` *and* `e_{i,t} = 0` are
-   removed to prevent zero-weight entries from polluting snapshots or tie-breaks.
+1. **Earning gate.** If `s_i < MinStakeToEarnWei`, the raw composite is set to 0 and, after the EMA step, `e_{i,t}` is forced to 0. The participant stays in the candidate set at this point, so its stake still counts.
+2. **Engagement cap.** If `MaxEngagementPerEpoch > 0`, `e_{i,t}` is clamped to it.
+3. **Win-stake filter.** If `s_i < MinStakeToWinWei`, the participant is removed.
+4. **Win-engagement filter.** If `e_{i,t} < MinEngagementToWin`, the participant is removed.
+5. **Zero-value filter.** If `s_i = 0` and `e_{i,t} = 0`, the participant is removed.
 
-The new `MinStakeToEarnWei` guard ensures large botnets cannot harvest
-engagement while staking only dust amounts. Once the account posts the minimum
-stake, engagement accrues normally on the next epoch.
+Removed participants do not contribute to `Σ s_j` or `Σ e_j`. `MinStakeToEarnWei` (read from `[potso.abuse]`) and `MinStakeToWinWei` (read from `[potso.weights]`) both default to 0.
 
-## Engagement Composite and Dampening
-
-Raw engagement prior to decay is defined as a weighted sum of the meter inputs:
+## Engagement composite and dampening
 
 ```
-raw_i = tx_i * TxWeightBps + escrow_i * EscrowWeightBps + uptime_i * UptimeWeightBps
+raw_i = tx_i' * TxWeightBps + escrow_i * EscrowWeightBps + uptime_i * UptimeWeightBps
 ```
 
-To reduce the marginal value of spammed transactions we apply quadratic
-suppression after a configured knee point. Let `T_after` be
-`QuadraticTxDampenAfter` and `p` be `QuadraticTxDampenPower`.
+`tx_i'` is `tx_i` after transaction dampening. With `T = QuadraticTxDampenAfter` and `p = QuadraticTxDampenPower` (`computeComposite`):
 
 ```
-if tx_i > T_after and p > 1:
-    excess = tx_i - T_after
-    dampened_excess = round(excess^(1/p))
-    dampened_tx = T_after + max(1, dampened_excess)
+if T > 0 and tx_i > T and p > 1:
+    excess = tx_i - T
+    dampened = round(excess^(1/p))       # exact integer root, rounded half up
+    if dampened == 0: dampened = 1
+    tx_i' = T + dampened                 # saturates at MaxUint64
 else:
-    dampened_tx = tx_i
+    tx_i' = tx_i
 ```
 
-The `dampened_tx` value replaces `tx_i` inside `raw_i`. Large spikes in
-transaction count therefore contribute proportionally less once the knee point
-is exceeded while still rewarding moderate growth. Setting `QuadraticTxDampenAfter`
-to zero disables the curve, and `QuadraticTxDampenPower = 2` yields a square-root
-response.
+`QuadraticTxDampenAfter = 0` disables the curve. The sum is computed with `math/big` and clamped to `MaxUint64` if it exceeds 64 bits.
 
-The exponentially weighted moving average from the previous epoch is applied as
-before using the configured half-life. When `MinStakeToEarnWei` suppresses the
-raw composite, the post-EMA engagement is pinned to zero.
+The EMA and cap are applied to `raw_i` exactly as described in [weights.md](weights.md) (step 2).
 
-## Composite Weight
-
-Stake and engagement shares are combined with the familiar convex blend:
+## Composite weight
 
 ```
-alpha = AlphaStakeBps / WeightBpsDenominator
-stake_share_i = s_i / Σ s_j
-engagement_share_i = e_{i,t} / Σ e_{j,t}
-weight_i = alpha * stake_share_i + (1 - alpha) * engagement_share_i
+alpha             = AlphaStakeBps / 10000
+stake_share_i     = s_i / Σ s_j            (0 if the sum is 0)
+engagement_share_i = e_{i,t} / Σ e_j       (0 if the sum is 0)
+weight_i          = alpha * stake_share_i + (1 - alpha) * engagement_share_i
 ```
 
-The tie-breaker semantics described in `weights.md` remain unchanged.
+Entries are sorted by `weight_i` descending with exact rational comparison. Ties are broken by the tie-break key (`addrHash` = SHA-256 of the address, or `addrLex` = raw address bytes, both ascending; an empty mode behaves as `addrLex`). The list is then truncated to `TopKWinners` when that is greater than 0.
 
-## Reward Share Cap
+## Reward share cap and payouts
 
-During reward settlement each candidate’s ideal payout is `weight_i * budget`.
-`MaxUserShareBps` introduces a hard ceiling on the proportion of the epoch
-budget that any single winner can receive:
+`ComputeRewards` takes the sorted entries with `weight > 0`, truncates to `MaxWinnersPerEpoch` when that is greater than 0, and then:
 
 ```
-max_share = MaxUserShareBps / RewardBpsDenominator
-cap_i = max_share * budget
-amount_i = min(weight_i * budget, cap_i)
+base_i = floor(weight_i * budget)
+if MaxUserShareBps > 0:
+    cap    = floor(MaxUserShareBps / 10000 * budget)
+    amount_i = min(base_i, cap)
+else:
+    amount_i = base_i
 ```
 
-If clipping occurs the excess budget is redistributed deterministically across
-participants that still have headroom. Redistribution is proportional to the
-original weights within the uncapped subset and continues until either the
-excess pool is exhausted or every participant has reached their cap. Any
-residual amount that cannot be distributed without breaking the constraints
-returns to the remainder bucket.
+When `MaxUserShareBps > 0`, the amount clipped from each capped winner forms a pool. The pool is distributed over winners that still have headroom, in proportion to their weights, repeating until the pool is empty or no winner has headroom. Any pool left over stays in the remainder. If the cap resolves to 0 wei (for example `MaxUserShareBps = 1` with a budget of 500), no winner is paid and the whole budget is the remainder (`TestComputeRewardsMaxUserShareAllClipped`).
 
-These mechanics keep rewards predictable while allowing governance to ratchet
-caps up or down as abuse patterns emerge.
+Finally, amounts that are `<= 0` or below `MinPayoutWei` are dropped. `TotalPaid` is the sum of the remaining amounts and `Remainder = budget - TotalPaid`. Nothing in this code carries the remainder to a later epoch. Each epoch's budget is computed afresh (see [epoch rewards](../potso_rewards.md)).
+
+## Where the parameters are used
+
+`AlphaStakeBps` in the reward computation is `RewardConfig.AlphaStakeBps`, which `Config.PotsoRewardConfig` sets from `[potso.weights].AlphaStakeBps` when that is greater than 0 (`core/state_transition.go` overwrites the weight parameters' alpha with it). See [config.md](config.md).

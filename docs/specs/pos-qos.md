@@ -1,64 +1,44 @@
-# POS-QOS-3: Priority Mempool and Proposer Quotas
+# POS quality of service: priority lane and block quota
 
-## Overview
-
-This change introduces a dual-lane mempool that guarantees dedicated block
-capacity for POS-tagged transactions. Transactions that carry an
-`intent_ref` are routed into a priority lane and scheduled ahead of normal
-traffic whenever block space is scarce. Validators reserve a configurable
-fraction of each block (default 15%) for the priority lane while allowing any
-unused reservation to spill over to the normal lane so overall throughput is
-unchanged.
+When a proposer assembles a block it splits the mempool into a POS lane and a
+normal lane and reserves a share of the block for the POS lane. Code:
+`mempool/priority.go`, `consensus/proposer.go`, `Node.GetMempool` in
+`core/node.go`, metrics in `observability/metrics.go`.
 
 ## Lane classification
 
-* Incoming transactions are classified at enqueue time by inspecting
-  `transaction.IntentRef`.
-* POS-tagged NHB and ZNHB transfers populate the priority lane; all others
-  remain in the normal lane.
-* When a transaction with an `intent_ref` is admitted, the node records an
-  enqueue timestamp so that finality latency can be measured when the
-  transaction is committed.
-* If a transaction ages out (for example, an expired mint) or is evicted, the
-  priority-lane bookkeeping is cleared to prevent stale latency samples.
+A transaction is in the POS lane when it has a non-empty `intentRef` and its type
+is `TxTypeTransfer` (NHB) or `TxTypeTransferZNHB` (`IsPOSLaneEligible`). Every
+other transaction is in the normal lane. On admission of a POS-lane transaction
+the node records its arrival time (used for the finality histogram below) and
+publishes a `pending` finality update ([POS realtime](../api/pos-realtime.md)).
 
-## Scheduling and quotas
+## Scheduling
 
-* During block proposal the mempool snapshot is partitioned into the priority
-  and normal lanes.
-* Let `max_txs` be the configured block cap and `reservation_bps` the POS lane
-  reservation expressed in basis points (default 1,500 = 15%).
-* The proposer reserves `ceil(max_txs * reservation_bps / 10_000)` slots for
-  the priority lane. If fewer POS transactions are pending, the unused share is
-  immediately released to the normal lane.
-* When the normal lane cannot fill its allocation, remaining block space is
-  returned to the priority lane, ensuring the reservation never reduces total
-  throughput.
-* All transactions are presented to the consensus engine in the computed order
-  so that the first `max_txs` positions inside a proposal adhere to the quota.
+`mempool.Schedule(lanes, maxTxs, quota)`:
 
 ## Metrics
 
-New Prometheus metrics are exported under the `nhb_mempool` subsystem:
+New Prometheus metrics are exported with the `nhb_mempool_` prefix:
 
 | Metric | Type | Description |
 | --- | --- | --- |
-| `pos_lane_fill` | Gauge | POS backlog divided by reserved capacity (>1 = saturation; 0 reservation -> backlog). |
-| `pos_lane_backlog{asset="…"}` | Gauge | Count of POS-tagged transfers segmented by asset (e.g. `nhb`, `znhb`). |
-| `pos_tx_enqueued_total` | Counter | Number of POS-tagged transactions accepted into the mempool. |
-| `pos_p95_finality_ms` | Histogram | POS enqueue-to-finality latency samples in milliseconds (dashboards compute p95). |
+| `nhb_mempool_pos_lane_fill` | Gauge | POS backlog divided by reserved capacity (>1 = saturation; 0 reservation -> backlog). |
+| `nhb_mempool_pos_lane_backlog{asset="…"}` | Gauge | Count of POS-tagged transfers segmented by asset (e.g. `nhb`, `znhb`). |
+| `nhb_mempool_pos_tx_enqueued_total` | Counter | Number of POS-tagged transactions accepted into the mempool. |
+| `nhb_mempool_pos_p95_finality_ms` | Histogram | POS enqueue-to-finality latency samples in milliseconds (dashboards compute p95). |
 
 ## Configuration
 
 * `global.mempool.POSReservationBPS` defines the reserved percentage in basis
   points (0–10,000). The default is 1,500 (15%).
-* Setting the value to zero disables the reservation and causes `pos_lane_fill`
+* Setting the value to zero disables the reservation and causes `nhb_mempool_pos_lane_fill`
   to report the raw POS backlog count.
 
-## Expected performance
+## Metrics
 
 * Under sustained congestion the priority lane receives at least 15% of each
   block, ensuring POS-tagged transactions reach finality without waiting behind
   normal traffic.
-* Operators should monitor `pos_p95_finality_ms` and adjust the reservation if
+* Operators should monitor `nhb_mempool_pos_p95_finality_ms` and adjust the reservation if
   the priority lane regularly saturates (`pos_lane_fill` ≫ 1).

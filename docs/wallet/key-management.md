@@ -1,117 +1,37 @@
-# Wallet Key Management UX Patterns
+# Wallet Key Handling
 
-Wallet builders must pair ergonomic flows with controls that respect NHBChain's
-identity and custody requirements. Mutating identity APIs already enforce
-secp256k1 signatures and HMAC-authenticated gateway calls, while off-chain PII
-(such as email hashes) stays inside the gateway boundary with rotation and audit
-logging requirements.【F:docs/identity/identity-security-compliance.md†L20-L31】
-Key reveal and recovery screens therefore need to reinforce that private keys
-never leave the client's trust zone, and that operators maintain strong custody
-processes for any mirrored infrastructure such as hardware signing bridges or
-KMS backends.【F:docs/p2p/security-and-compliance.md†L34-L36】
+How keys are created, stored and used by the tools in this repository (`cmd/nhb-cli`, `crypto/keystore.go`). Wallet applications outside this repository make their own choices; the node only sees signed transactions.
 
-## Shared guardrails
+## Signing model
 
-Wallets should surface security posture cues alongside every sensitive action:
+* Accounts are secp256k1 keys. An address is derived from the public key (`PrivateKey.PubKey().Address()`) and printed as bech32 with the `nhb` prefix.
+* Every state-changing action a user takes is a transaction signed with the account key (`Transaction.Sign`). The chain identifies the sender by recovering the signer; there is no username/password or bearer-token authorization for account actions. Bearer tokens (JWT) are used only to authenticate calls to selected RPC methods.
+* Some flows use additional signatures over JSON envelopes (for example delegated escrow actions, milestone actions, arbitration decisions, mint vouchers). Those envelopes are documented with their features, for example [`../escrow/escrow.md`](../escrow/escrow.md).
 
-- Explain why the user must complete multi-factor authentication (MFA), and map
-  the challenge type to the organisation's WebAuthn policy so the behaviour
-  matches the rest of the custody tooling.【F:docs/otc/security.md†L5-L8】
-- Highlight that plaintext keys and seed phrases are never transmitted to the
-  NHB gateway or identity APIs; the client only sends signatures, consistent with
-  the platform's on-chain custody boundary.【F:docs/identity/identity-security-compliance.md†L20-L31】
-- Provide an audit trail export (`.csv` or `.json`) that records who initiated a
-  reveal, import, or recovery event and whether the MFA challenge succeeded. This
-  log should mirror the gateway's audit trails so compliance reviews can match
-  client UI actions with backend events.【F:docs/identity/identity-security-compliance.md†L47-L56】
+## `nhb-cli` key files
 
-## 2FA-gated key reveal
+* `nhb-cli generate-key` creates a new key and writes the raw private-key bytes to `wallet.key` in the current directory with file mode `0600`, then prints the address. Transaction commands take the key file path as an argument (for example `claim-username <username> <key_file>`).
+* `loadPrivateKey` (`cmd/nhb-cli/main.go`) accepts either:
+  * a plaintext key file (raw key bytes), or
+  * an encrypted Ethereum V3 keystore JSON file. For a keystore the passphrase is read from the environment variable `NHB_KEYSTORE_PASSPHRASE`; if it is unset the command fails.
+* A file that is empty, missing, or contains the deprecated placeholder material is rejected with an instruction to run `generate-key`.
 
-Expose private keys only after a fresh MFA assertion and make the UI friction
-obvious. Recommended state machine:
+## Importing an existing key into a keystore
 
-| State | UI treatment | Example API flow |
-| --- | --- | --- |
-| `locked` | Key area blurred/disabled with "Reveal key" button. | `POST /session/mfa/challenges` → returns challenge ID and WebAuthn options. |
-| `challenge_in-flight` | Modal prompts hardware key or authenticator app, "Cancel" aborts. | `navigator.credentials.get()` → `POST /session/mfa/challenges/{id}/verify`. |
-| `revealed` | Key rendered inside copy-to-clipboard component; auto-hides on blur. | `PATCH /session/key-reveal` with verified challenge token → logs event. |
-
-Additional UX recommendations:
-
-1. Show a countdown timer (e.g., 30 seconds) after reveal. When the timer
-   expires, wipe the rendered key and return to `locked`.
-2. Gate download/export behind a secondary "Hold to confirm" control to prevent
-   accidental clipboard copies.
-3. Display the account alias, last verified email, and last sign-in timestamp so
-   operators can verify the user context before confirming the reveal. These
-   fields should be fetched via `identity_resolve` using server-side bearer
-   tokens, keeping PII checks inside the custody perimeter.【F:docs/identity/identity-security-compliance.md†L25-L36】
-
-## Private-key import and export
-
-Wallets that support bring-your-own keys must keep serialization purely
-client-side and validate inputs before any signing attempt:
-
-1. **Import flow**
-   - `idle`: Accepts pasted hex or uploaded keystore. Immediately derive and show
-     the NHB bech32 address so users can confirm the target account before
-     storage.
-   - `validating`: Run checksum validation (e.g., `keccak256` comparison for
-     keystores) and prompt for a passphrase if the format requires it. During
-     this state, disable network requests to avoid leaking encrypted blobs.
-   - `ready`: Persist in ephemeral memory only (e.g., React state or secure
-     worker). Provide a CTA to connect hardware wallets or register the key with
-     a server-side signing bridge if the organisation uses shared custody.
-
-2. **Export flow**
-   - Offer "Download encrypted keystore" and "Copy seed phrase" separately. Both
-     must remain disabled until a verified MFA challenge token is present.
-   - Attach warnings that exported files fall outside the NHB gateway's custody
-     guarantees and must be stored in an approved vault or HSM, matching the
-     organisation's custody playbook.【F:docs/p2p/security-and-compliance.md†L34-L36】
-   - Emit structured audit events describing which format was exported and where
-     the user indicated the secret will be stored.
-
-API example for export:
-
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant W as Wallet UI
-  participant A as Auth Service
-  participant L as Logging Sink
-  U->>W: Click "Download keystore"
-  W->>A: POST /session/mfa/challenges
-  A-->>W: challenge_id, webauthn_options
-  W->>U: Prompt for authenticator
-  U->>W: WebAuthn assertion
-  W->>A: POST /session/mfa/challenges/{id}/verify
-  A-->>W: challenge_token
-  W->>L: POST /audit/key-export {token, format}
-  W-->>U: Trigger keystore download (client-side encryption)
+```bash
+NHB_KEYSTORE_IMPORT_PRIVATE_KEY=<hex private key> \
+NHB_KEYSTORE_IMPORT_PASSPHRASE=<passphrase> \
+nhb-cli keystore import --out <path>
 ```
 
-## Recovery safeguards
+`nhb-cli keystore import` (`cmd/nhb-cli/keystore_cmd.go`):
 
-Design recovery to encourage redundancy without weakening custody posture:
+* Reads the hex key (with or without `0x`) and the passphrase from the two environment variables above. They are read from the environment on purpose, not from arguments, so they do not appear in shell history or process listings.
+* Writes an encrypted Ethereum V3 keystore (`crypto.SaveToKeystore`, scrypt with the standard parameters, parent directory created with mode `0700`).
+* Reads the file back, decrypts it with the same passphrase, checks that the recovered address equals the imported key's address, and prints the address so you can confirm it is the wallet you meant to import. The command cannot know whether the key you supplied is the intended one.
 
-- Offer recovery phrase confirmation with spaced repetition (e.g., select words
-  3, 12, and 20) and require the user to acknowledge that the phrase must be
-  stored offline. This echoes the platform's guarantee that plaintext recovery
-  data never leaves the client boundary.【F:docs/identity/identity-security-compliance.md†L25-L31】
-- Let administrators register hardware factors or custody bridges as secondary
-  signers so emergency rotations can be triggered without exposing seeds to
-  shared infrastructure.【F:docs/p2p/security-and-compliance.md†L34-L36】
-- Provide a "view-only" recovery mode that restores account history via
-  `nhb_getBalance` and `identity_resolve` while keeping signing disabled. This
-  allows support staff to assist users without inheriting signing authority.
-- Include break-glass instructions referencing where off-chain proofs and audit
-  logs live so the organisation can document the rotation in downstream systems
-  that already track WebAuthn and gateway events.【F:docs/identity/identity-security-compliance.md†L47-L56】
+## What the node and gateways do with keys
 
-## Further reading
+The node, the escrow gateway and the identity gateway never receive private keys through their APIs; they receive signatures. Services that sign on their own behalf (for example the escrow gateway's relayer) load a key from an environment variable at start-up; see [`../escrow/nhbchain-escrow-gateway.md`](../escrow/nhbchain-escrow-gateway.md).
 
-- [Wallet builder guide](../sdk/wallets.md)
-- [Identity security, privacy & compliance brief](../identity/identity-security-compliance.md)
-- [OTC security model](../otc/security.md)
-- [P2P security & compliance guidance](../p2p/security-and-compliance.md)
+For wallet SDK material see [`../sdk/wallets.md`](../sdk/wallets.md).

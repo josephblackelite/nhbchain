@@ -1,54 +1,98 @@
-# Snapshot distribution format
+# Snapshot format
 
-The `core/sync` package defines a state snapshot format that lets a fresh node start without replaying the full chain. A
-snapshot is a directory containing binary chunk files and a JSON manifest. The node itself does not publish or install
-snapshots: nothing in it signs a manifest, and the `sync_snapshot_export` and `sync_snapshot_import` RPC methods are retired
-(HTTP 410, error `-32060`; see [Fast sync workflow](sync.md)). What follows describes the format and the checks the package
-applies when a tool drives it.
+A node can export its state trie to a directory of chunk files plus a manifest,
+and can import such a set (`core/sync/`). This page describes the format and the
+two JSON-RPC methods that use it. The related range-sync code is described in
+[sync.md](sync.md).
 
 ## Manifest
 
-The manifest is versioned (`version: 1`) and contains:
+`SnapshotManifest` (`core/sync/manifest.go`), JSON:
 
-* `chainId`, `height`, and `stateRoot` for the captured state.
-* `checkpoint` – the block header hash that should be used as the starting point for range sync.
-* `chunks` – the ordered list of chunk files with their SHA-256 digests, sizes, and entry counts.
-* `signatures` – validator signatures over the manifest digest. At least 2/3 of the voting power must sign the manifest for it
-to be considered valid. A governance anchor can be supplied as a fallback if a super-majority is unavailable.
-* Metadata bag for diagnostics (creation time, checkpoint hash/height, state root hex).
+| Field | Meaning |
+| --- | --- |
+| `version` | `1` (`ManifestVersion`). |
+| `chainId` | Chain ID (first 8 bytes of the genesis hash). Import fails if it is non-zero and differs from the node's. |
+| `height` | Block height of the exported state. |
+| `stateRoot` | State root the chunks must rebuild. |
+| `checkpoint` | Header hash of the block at that height (set by `Node.SnapshotExport`). |
+| `chunkSize` | Target chunk size in bytes (16 MiB by default). |
+| `totalEntries`, `totalBytes` | Sums over all chunks. |
+| `chunks` | Ordered list of `{index, path, entries, bytes, hash}`; `hash` is the SHA-256 of the chunk file. |
+| `signatures` | List of `{address, signature, weight}`: validator signatures over the manifest digest. |
+| `governance` | Optional `{payload, signature}` anchor used instead of validator signatures. |
+| `metadata` | Map: `createdAt`, `stateRootHex`, and, from `Node.SnapshotExport`, `checkpointHeight` and `checkpointHash`. |
 
-The manifest digest is the SHA-256 hash of the manifest JSON with the signatures removed. Validators sign this digest using the
-same secp256k1 keys used for consensus.
+The manifest digest is the SHA-256 of the manifest's JSON encoding with
+`signatures` set to null (`Manifest.Digest`). Validators sign that digest with
+their consensus secp256k1 key; signatures are 65 bytes and are verified by
+public-key recovery.
 
-## Chunk layout
+## Chunk files
 
-Chunk files are simple concatenations of length-prefixed key/value pairs:
+Chunks are named `chunk-0000.bin`, `chunk-0001.bin`, ... and contain records back
+to back (`snapshot_writer.go`, `writeRecord`):
 
 ```
-uint32 keyLen | key bytes | uint32 valueLen | value bytes
+uint32 keyLen (big-endian) | key bytes | uint32 valueLen (big-endian) | value bytes
 ```
 
-Keys are hashed trie keys (keccak pre-images) and values are raw RLP nodes from the state trie. The writer walks the canonical
-trie and flushes a chunk once the target size (default 16 MiB) is reached. Each chunk is hashed with SHA-256 and the digest is
-stored in the manifest.
+The writer walks the state trie with a trie iterator and stores each leaf's key
+and value as the iterator returns them. It starts a new chunk once the written
+size reaches `chunkSize`. It hashes each file with SHA-256 for the manifest.
 
-## Verification & import
+## Verification and import
 
-During import the loader verifies each chunk digest, rewinds the trie to an empty root, and replays the chunk records. The new
-state root is committed to the local triedb and compared against the manifest root. Imports are atomic – data is written to a
-fresh database path which atomically replaces the live database on success. Existing databases are preserved under a `.bak`
-folder.
+`Manager.ImportSnapshot` (`core/sync/manager.go`):
 
-If a manifest fails signature validation or any chunk hash mismatches, the snapshot is rejected. Downloads are resumable: the
-client verifies existing chunk files before fetching them and only downloads missing/invalid chunks.
+1. If the manifest's `chainId` is non-zero it must equal the node's chain ID.
+2. `VerifyManifest`: if the manifest has signatures, the combined voting power of
+   the signers, taken from the node's current validator set (the `weight` field
+   in the manifest is not used), must be at least two thirds of the total
+   (`signed * 3 >= total * 2`), every signer must be in that set, and every
+   signature must recover to the signer's address. If it has no signatures, a
+   governance verifier is required and must accept `governance`; the node does not
+   install a governance verifier (`SetGovernanceVerifier` has no caller outside
+   tests), so an unsigned manifest is rejected with
+   `snapshot manifest missing validator signatures`.
+3. `SnapshotLoader.Apply`: for each chunk in index order, check the SHA-256 of
+   the file against the manifest, replay its records into an empty trie, and
+   check the entry count when the manifest gives one. After all chunks it commits
+   the trie and compares the root to `stateRoot` (`state root mismatch` on
+   failure).
+
+## JSON-RPC
+
+Both methods require a bearer JWT (`rpc/sync_handlers.go`).
+
+- `sync_snapshot_export` with one parameter object `{"outDir": "<dir>"}` writes
+  the chunks under `outDir` and returns the manifest, with `checkpoint` and
+  `metadata` filled in and **no signatures**. Nothing in this repository signs the
+  manifest, so signatures must be added by other tooling before it can pass
+  verification on import.
+- `sync_snapshot_import` with `{"chunkDir": "<dir>", "manifest": {...}}` runs the
+  import above against the node's live trie database, then resets the node's
+  state processor to the imported root, reloads module pauses, records the
+  manifest height and refreshes the sync validator set. It returns
+  `{"stateRoot": "0x..."}`. Errors are HTTP 500, code `-32061`, message
+  `snapshot_error`; missing or malformed parameters are HTTP 400, code `-32060`.
+- `sync_status` (no auth, no parameters) returns `chainHeight`, `snapshotHeight`
+  and `managerReady`.
+
+## Library helpers that are not wired to a node command
+
+`core/sync/snapshot_loader.go` also contains `HTTPFetcher` (downloads with an
+optional SHA-256 TLS-certificate pin), `EnsureChunks` (re-downloads only missing
+or hash-mismatched chunks) and `InstallSnapshot` (imports into a fresh database
+directory `<target>.tmp`, then renames the existing directory to `<target>.bak`
+and the new one into place). No node, CLI or RPC code calls them; they are
+exercised by tests only.
 
 ## Failure modes
 
-* Missing signatures or an undersigned manifest.
-* Chain ID mismatch.
-* Chunk hash mismatch or truncated files.
-* State root mismatch after replay.
-* Governance anchor signature mismatch.
-
-Operators should verify the manifest and chunk hashes before import and retain the backup copy until the node has successfully
-synced past the checkpoint.
+- Chain ID mismatch.
+- No signatures and no governance verifier, or signed power below two thirds, or a
+  signer outside the validator set, or a signature that does not recover to its
+  address.
+- A chunk file whose hash does not match, or a wrong entry count.
+- State root mismatch after replay.
