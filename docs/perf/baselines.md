@@ -10,6 +10,11 @@ Use this document to record the throughput and latency expectations for nhbchain
 | Transactions per second | 300 TPS sustained | `consensus.tx_applied_total` rate |
 | Finality lag | < 5s | Difference between block time and `consensus.finalized_height` timestamps |
 
+The block time above is not something the engine enforces: it is set by
+`[consensus] MinBlockInterval` (one second by default) plus the rounds that fail.
+A block time of 2.5s needs `MinBlockInterval = "2500ms"` with `CommitTimeout` of at
+least 5s. See [Block cadence](../consensus/block-cadence.md).
+
 ## Gateway
 
 | Metric | Target | Measurement |

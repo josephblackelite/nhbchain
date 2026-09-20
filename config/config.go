@@ -314,12 +314,20 @@ func defaultGlobalConfig() Global {
 	}
 }
 
+// defaultMinBlockInterval is one block a second: the pace the lending interest is
+// written for (native/lending blocksPerYear counts a block as a second) and about the
+// average an idle pair of validators has kept, over hours, while it lost rounds to
+// itself (0.6 to 1 blocks a second). A config that leaves the key out keeps it; "0s"
+// turns the wait off, and the blocks then come as fast as the validators can make them.
+const defaultMinBlockInterval = time.Second
+
 func defaultConsensusConfig() Consensus {
 	return Consensus{
 		ProposalTimeout:  2 * time.Second,
 		PrevoteTimeout:   2 * time.Second,
 		PrecommitTimeout: 2 * time.Second,
 		CommitTimeout:    4 * time.Second,
+		MinBlockInterval: defaultMinBlockInterval,
 	}
 }
 
@@ -929,6 +937,9 @@ func (cfg *Config) ensureConsensusDefaults(meta toml.MetaData) {
 	}
 	if !meta.IsDefined("consensus", "CommitTimeout") {
 		cfg.Consensus.CommitTimeout = defaults.CommitTimeout
+	}
+	if !meta.IsDefined("consensus", "MinBlockInterval") {
+		cfg.Consensus.MinBlockInterval = defaults.MinBlockInterval
 	}
 }
 

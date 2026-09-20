@@ -58,10 +58,17 @@ ProposalTimeout = "2s"
 PrevoteTimeout = "2s"
 PrecommitTimeout = "2s"
 CommitTimeout = "4s"
+MinBlockInterval = "1s"
 ```
 
 Operators can adjust the timers at runtime with CLI flags or the environment
 variables listed above to better match their network latency profile.
+
+`MinBlockInterval` is not a timer of a round: it is the least time the validator
+lets pass between seeing a block commit and starting the round of the next
+height, and so the pace of an idle chain (at most one block per interval). The
+default is one second, `0s` turns the wait off, and a value above half the commit
+timeout is refused at start-up. See [Block cadence](../consensus/block-cadence.md).
 
 ## Ports and Connectivity
 
