@@ -56,13 +56,13 @@ Public address:      nhb1...
 Verified: decrypting the written file recovers the same address.
 
 CONFIRM the address above matches the wallet you intended to import
-before pointing anything (e.g. <name of an off-chain service and its signer>)
-at this file.
+before pointing anything (...) at this file.
 ```
 
-The last two lines are printed by `runKeystoreImport` (`cmd/nhb-cli/keystore_cmd.go`).
-The parenthetical in the real output names an off-chain service that is not
-part of this repository; it is shown here as a placeholder.
+The last two lines are a reminder printed by `runKeystoreImport`
+(`cmd/nhb-cli/keystore_cmd.go`) to check the address before you use the file
+with anything else; the parenthetical in the real output is an example of a
+consumer of the file and is elided here.
 
 Compare the printed address with the wallet you meant to import. The command
 cannot tell whether the key you supplied is the right one; it only confirms
