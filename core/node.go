@@ -3440,6 +3440,11 @@ const (
 //     become valid.
 //   - ErrPOSInvalidAuthorizationID: a capture or void whose authorization id
 //     is not 64 hex characters is decided by the payload alone.
+//   - ErrPOSRegistryInvalidPayload, pos.ErrInvalidRequest, pos.ErrStaleNonce: a
+//     registry transaction that does not decode, names no registry message,
+//     claims an authority other than its signer or breaks a rule of the
+//     request itself is decided by its own bytes, and an authority's registry
+//     nonce only grows.
 //   - swap.ErrVoucherNotReconcilable: a TxTypeSwapMarkReconciled naming a
 //     reversed voucher; a voucher's status only moves forward, so it can never
 //     become reconcilable (the same one-way rule as ErrSwapVoucherNotMinted).
@@ -3534,6 +3539,10 @@ const (
 //   - swap.ErrVoucherNotFound: a TxTypeSwapMarkReconciled naming a provider
 //     transaction id the ledger does not know yet; the voucher can still be
 //     minted by a later transaction (ErrSwapVoucherReversalNotFound's reasoning).
+//   - ErrPOSRegistryUnauthorized, pos.ErrDeviceNotRegistered: a registry change
+//     whose signer is neither the merchant's owner nor a holder of
+//     RolePOSRegistryAdmin (the role can be granted later), and a change to a
+//     device that can still be registered.
 //   - loyalty.ErrPaymasterConsent: a loyalty admin naming a wallet that has
 //     not yet recorded its own opt-in; the opt-in is a later transaction from
 //     the named wallet, after which the same assignment succeeds.
@@ -3730,6 +3739,14 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// it can never become valid. See ErrPOSInvalidAuthorizationID
 		// (core/state_pos.go).
 		errors.Is(err, ErrPOSInvalidAuthorizationID),
+		// A registry transaction that does not decode, names no registry
+		// message, claims an authority other than its signer, or breaks a
+		// rule of the request itself (a zero nonce, a missing id) is decided
+		// by its own bytes; a nonce at or below the authority's last one can
+		// never be valid again, since that nonce only grows.
+		errors.Is(err, ErrPOSRegistryInvalidPayload),
+		errors.Is(err, pos.ErrInvalidRequest),
+		errors.Is(err, pos.ErrStaleNonce),
 		// An owner naming a wallet other than its own as the loyalty paymaster
 		// is refused as a pure function of the transaction's own sender and
 		// payload and the business's owner, which never changes, so it can
@@ -3780,6 +3797,11 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrSwapVoucherReversalNotFound),
 		// The same for a reconciliation naming a voucher not minted yet.
 		errors.Is(err, swap.ErrVoucherNotFound),
+		// A registry change by a signer that is neither the merchant's owner
+		// nor a registry admin: the role can be granted later. And a change to
+		// a device that is not registered yet, which can still be registered.
+		errors.Is(err, ErrPOSRegistryUnauthorized),
+		errors.Is(err, pos.ErrDeviceNotRegistered),
 		// A same-block-or-later credit to the voucher's recipient could
 		// make a currently-insufficient reversal succeed on a later
 		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning
