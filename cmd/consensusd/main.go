@@ -392,10 +392,12 @@ func main() {
 		Prevote:   cfg.Consensus.PrevoteTimeout,
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
-	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
+	}), bft.WithMinBlockInterval(cfg.Consensus.MinBlockInterval),
+		bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
 		// What this validator has voted, so a restart cannot make it sign a
 		// different vote for a round it already voted in (see cmd/nhb/main.go).
 		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")))
+	slog.Info("consensus: minimum block interval", slog.Duration("interval", bftEngine.MinBlockInterval()))
 	node.SetBftEngine(bftEngine)
 	// Bound one block build to half the proposal timeout (see cmd/nhb/main.go)
 	// and start the optional Prometheus listener (NHB_METRICS_ADDR); a failure

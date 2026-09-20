@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"nhbchain/crypto"
 	"nhbchain/native/subscriptions"
@@ -753,6 +754,53 @@ ValidatorKeystorePath = %s
 	want := defaultConsensusConfig()
 	if cfg.Consensus != want {
 		t.Fatalf("unexpected consensus defaults: %+v", cfg.Consensus)
+	}
+}
+
+// The minimum block interval is one block a second when the config leaves it out -- as
+// the config of a running node does, which has a [consensus] section with the four
+// timeouts and nothing else -- and is taken as written when it is there, "0s" included:
+// that is how the wait is turned off.
+func TestLoadKeepsTheDefaultMinBlockIntervalUnlessTheConfigSetsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		consensus string
+		want      time.Duration
+	}{
+		{"no consensus section", "", time.Second},
+		{"the four timeouts and nothing else", `[consensus]
+ProposalTimeout = "0s"
+PrevoteTimeout = "0s"
+PrecommitTimeout = "0s"
+CommitTimeout = "0s"
+`, time.Second},
+		{"set", `[consensus]
+MinBlockInterval = "1500ms"
+`, 1500 * time.Millisecond},
+		{"turned off", `[consensus]
+MinBlockInterval = "0s"
+`, 0},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			keystorePath := filepath.Join(dir, "validator.keystore")
+			contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+%s`, tomlQuoted(keystorePath), tc.consensus)
+			if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if got := cfg.Consensus.MinBlockInterval; got != tc.want {
+				t.Fatalf("MinBlockInterval %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

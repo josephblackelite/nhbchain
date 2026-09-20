@@ -40,6 +40,16 @@ var e2eTimeouts = TimeoutConfig{
 	Commit:    40 * time.Millisecond,
 }
 
+// e2eMinInterval, when a test sets it (withE2EMinInterval), is the minimum block interval
+// of the engines of these tests, and the running validator starts as if it had just
+// committed a block, so that its first round has the interval to wait out.
+var e2eMinInterval time.Duration
+
+// e2eOptions are the options of the engines of these tests that run rounds.
+func e2eOptions(extra ...Option) []Option {
+	return append([]Option{WithTimeouts(e2eTimeouts), WithMinBlockInterval(e2eMinInterval)}, extra...)
+}
+
 const (
 	// e2eRound is how long a round that does not commit lasts in these tests.
 	e2eRound = 40 * time.Millisecond
@@ -189,7 +199,7 @@ func newScenario(t *testing.T, tv *testValidators, shape shapedNode, aRound int)
 		return shaped
 	}
 	s.brA = &meshBroadcaster{}
-	s.engA = NewEngine(nodeFor(s.nodeA), tv.keys[0], s.brA, WithTimeouts(e2eTimeouts))
+	s.engA = NewEngine(nodeFor(s.nodeA), tv.keys[0], s.brA, e2eOptions()...)
 	s.engA.mu.Lock()
 	s.engA.currentState = State{Height: 1, Round: aRound - 1}
 	s.engA.mu.Unlock()
@@ -222,19 +232,25 @@ func newScenario(t *testing.T, tv *testValidators, shape shapedNode, aRound int)
 // as a round of these scaled-down tests, where it takes a small fraction of a live
 // round.
 func restartedEngine(node NodeInterface, tv *testValidators, br *meshBroadcaster, record string) *Engine {
-	engine := NewEngine(node, tv.keys[1], br, WithSignStatePath(record), WithTimeouts(e2eTimeouts))
+	engine := NewEngine(node, tv.keys[1], br, e2eOptions(WithSignStatePath(record))...)
 	engine.signStatePath = ""
 	return engine
 }
 
 // startA starts the running validator's rounds.
-func (s *scenario) startA() { s.doneA = runLoop(s.engA, s.nodeA, &s.stop) }
+func (s *scenario) startA() {
+	if e2eMinInterval > 0 {
+		s.engA.noteCommitSeen()
+	}
+	s.doneA = runLoop(s.engA, s.nodeA, &s.stop)
+}
 
 // bootB lets B listen for e2eBootRounds rounds, then starts its rounds, and
 // returns the round A was in at that moment.
 func (s *scenario) bootB() int {
 	time.Sleep(e2eBootRounds * e2eRound)
 	aRound := roundOf(s.engA)
+	s.armB()
 	s.doneB = runLoop(s.engB, s.nodeB, &s.stop)
 	return aRound
 }
@@ -242,8 +258,17 @@ func (s *scenario) bootB() int {
 // startB starts B's rounds at once, and returns the round A was in at that moment.
 func (s *scenario) startB() int {
 	aRound := roundOf(s.engA)
+	s.armB()
 	s.doneB = runLoop(s.engB, s.nodeB, &s.stop)
 	return aRound
+}
+
+// armB, when the test has a minimum block interval, starts B as if it had just taken the
+// last block from its peer, so that its first round has the interval to wait out too.
+func (s *scenario) armB() {
+	if e2eMinInterval > 0 {
+		s.engB.noteCommitSeen()
+	}
 }
 
 // wait blocks until both nodes have committed height 1, or the deadline, and

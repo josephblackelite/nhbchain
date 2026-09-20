@@ -156,7 +156,9 @@ func ValidateConfig(g Global) error {
 	return nil
 }
 
-// ValidateConsensus ensures consensus timeouts are positive durations.
+// ValidateConsensus ensures consensus timeouts are positive durations and the
+// minimum block interval is not negative nor longer than half the commit timeout
+// (zero turns the wait off; the engine lowers a longer one to that bound).
 func ValidateConsensus(c Consensus) error {
 	if c.ProposalTimeout <= 0 {
 		return fmt.Errorf("consensus: proposal timeout must be positive")
@@ -169,6 +171,12 @@ func ValidateConsensus(c Consensus) error {
 	}
 	if c.CommitTimeout <= 0 {
 		return fmt.Errorf("consensus: commit timeout must be positive")
+	}
+	if c.MinBlockInterval < 0 {
+		return fmt.Errorf("consensus: minimum block interval must not be negative")
+	}
+	if c.MinBlockInterval > c.CommitTimeout/2 {
+		return fmt.Errorf("consensus: minimum block interval %s must not exceed half the commit timeout (%s)", c.MinBlockInterval, c.CommitTimeout/2)
 	}
 	return nil
 }

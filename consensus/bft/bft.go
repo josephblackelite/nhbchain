@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhbchain/core/engagement"
@@ -161,6 +162,17 @@ type Engine struct {
 	prevoteTimeout   time.Duration
 	precommitTimeout time.Duration
 	commitTimeout    time.Duration
+
+	// minBlockInterval is the shortest time this validator lets pass between seeing
+	// one block commit and starting the round of the next height (WithMinBlockInterval;
+	// zero starts it at once). lastCommitNanos is when it last saw a block commit --
+	// its own, or one that reached the node from a peer (NotifyExternalCommit) -- in
+	// nanoseconds on the monotonic clock since started, plus one, so that zero means
+	// none yet. It is atomic rather than guarded by mu because NotifyExternalCommit
+	// never waits for the engine.
+	minBlockInterval time.Duration
+	started          time.Time
+	lastCommitNanos  atomic.Int64
 
 	prevoteSent   bool
 	precommitSent bool
@@ -325,6 +337,45 @@ func WithTimeouts(cfg TimeoutConfig) Option {
 	}
 }
 
+// WithMinBlockInterval makes this validator wait, after it sees a block commit --
+// its own commit, or a block that reached the node from a peer -- until d has passed
+// (on the monotonic clock) before it starts the round of the next height: before it
+// proposes, votes or starts that round's timers. Zero, which is what an engine built
+// without the option does, starts the next round at once.
+//
+// Nothing else in the engine spaces one block from the next, so without it the
+// pace of a chain is whatever the messages, the block build and the commit allow --
+// tens of milliseconds a block while the validators are in step -- less the time
+// lost to rounds that fail and are waited out, which on a two-validator chain takes
+// most of the time and makes the pace a matter of how often they fail (about 0.6 to
+// 1 blocks a second over hours, and 2.5 in a stretch where fewer rounds failed, with
+// the engine at the same speed throughout). An interval makes it a number the
+// operator chooses: at most one block per interval, less the rounds that fail. Every
+// per-block quantity of the chain (epoch length, emission per epoch, interest per
+// block) follows the pace, so it is the operator's to set (config [consensus]
+// MinBlockInterval; see docs/consensus/block-cadence.md).
+//
+// The wait is local. It is not a rule a block is checked against, it puts nothing in
+// a message and changes nothing a validator signs or commits; a validator with a
+// different value, or none, takes part in the same rounds, which is why it needs no
+// coordination beyond the values not being so far apart that a round times out
+// before its proposal comes: an interval of more than half the commit timer is
+// lowered to half of it. The wait is only ever the rest of d since the last commit
+// this validator saw, so it does not delay a round that follows a failed one, or the
+// first round of a validator that has just started and has seen none; one that has
+// just taken the last blocks from its peer waits at most d after the last of them.
+func WithMinBlockInterval(d time.Duration) Option {
+	return func(e *Engine) {
+		if e == nil {
+			return
+		}
+		if d < 0 {
+			d = 0
+		}
+		e.minBlockInterval = d
+	}
+}
+
 // WithLockSnapshotPath enables crash-safe persistence of the
 // Proof-of-Lock-Change lock (see the Engine struct's lockedBlockHash doc
 // comment). NewEngine will attempt to restore the lock from this path if
@@ -378,6 +429,7 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		commitTimeout:    defaultCommitTimeout,
 		ownFailed:        make(map[uint64]int),
 		emptyAfter:       emptyAfterFromEnv(),
+		started:          time.Now(),
 	}
 	if key != nil {
 		engine.selfAddr = key.PubKey().Address().Bytes()
@@ -387,6 +439,13 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		if opt != nil {
 			opt(engine)
 		}
+	}
+	if limit := engine.commitTimeout / 2; engine.minBlockInterval > limit {
+		slog.Warn("BFT: lowering the minimum block interval to half the commit timeout",
+			slog.String("event", "min_block_interval_lowered"),
+			slog.Duration("configured", engine.minBlockInterval),
+			slog.Duration("used", limit))
+		engine.minBlockInterval = limit
 	}
 
 	// NHB-AUDIT-C2: restore the lock from disk, if this engine was
@@ -472,6 +531,14 @@ func (e *Engine) runRound() {
 	e.mu.RUnlock()
 	proposer := e.proposerFor(height, round)
 	e.replayBufferedMessages(height, round)
+
+	// The block just committed has its interval to run before this round proposes or
+	// votes. The height and the round are already this validator's own (startNewRound
+	// above), so what the peer sends in the meantime is queued for the round, not
+	// taken for a message from the past, and is here when the wait ends.
+	if e.waitMinBlockInterval() {
+		return
+	}
 
 	myAddr := e.privKey.PubKey().Address().Bytes()
 	if bytes.Equal(proposer, myAddr) {
@@ -581,6 +648,43 @@ func (e *Engine) runRound() {
 		if committed {
 			return
 		}
+	}
+}
+
+// noteCommitSeen records that a block has just committed, for waitMinBlockInterval.
+func (e *Engine) noteCommitSeen() {
+	e.lastCommitNanos.Store(int64(time.Since(e.started)) + 1)
+}
+
+// waitMinBlockInterval waits out what is left of the minimum block interval, counted
+// from the last commit this validator saw, and reports whether the round was given up
+// instead: a block committed outside this engine's rounds, or a later round the
+// others are in, means the round just started is not the one to propose or vote in,
+// and the round loop starts another (the same two events end a round in progress).
+// It waits for nothing when there is no interval, no commit yet -- a validator that
+// has just started -- or the interval has already passed, as it has after a round
+// that failed.
+func (e *Engine) waitMinBlockInterval() bool {
+	if e.minBlockInterval <= 0 {
+		return false
+	}
+	seen := e.lastCommitNanos.Load()
+	if seen == 0 {
+		return false
+	}
+	remaining := e.minBlockInterval - (time.Since(e.started) - time.Duration(seen-1))
+	if remaining <= 0 {
+		return false
+	}
+	timer := time.NewTimer(remaining)
+	defer stopTimer(timer)
+	select {
+	case <-timer.C:
+		return false
+	case <-e.externalCommitCh:
+		return true
+	case <-e.roundSkipCh:
+		return true
 	}
 }
 
@@ -1137,6 +1241,7 @@ func (e *Engine) commit() bool {
 		e.resetProposalStateLocked()                                          // reset for next round; lock/valid state deliberately untouched, see resetLockStateLocked
 		return false
 	}
+	e.noteCommitSeen()
 	fmt.Printf("COMMIT: Successfully committed block %d.\n", block.Header.Height)
 
 	e.committedBlocks[e.currentState.Height] = true
@@ -1239,6 +1344,9 @@ func (e *Engine) NotifyExternalCommit() {
 	if e == nil {
 		return
 	}
+	// A block committed here counts for the minimum block interval as one this
+	// engine committed itself.
+	e.noteCommitSeen()
 	select {
 	case e.externalCommitCh <- struct{}{}:
 	default:
@@ -1882,6 +1990,15 @@ func (vt VoteType) String() string {
 		return "Prevote"
 	}
 	return "Precommit"
+}
+
+// MinBlockInterval returns the minimum block interval in force (WithMinBlockInterval,
+// after it has been lowered to half the commit timeout if it was longer than that).
+func (e *Engine) MinBlockInterval() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.minBlockInterval
 }
 
 // Status returns the engine's current height, round and locked round (-1 when

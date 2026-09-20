@@ -300,6 +300,57 @@ func TestValidateConsensus(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "minimum block interval of a second",
+			cfg: config.Consensus{
+				ProposalTimeout:  2 * time.Second,
+				PrevoteTimeout:   2 * time.Second,
+				PrecommitTimeout: 2 * time.Second,
+				CommitTimeout:    4 * time.Second,
+				MinBlockInterval: time.Second,
+			},
+		},
+		{
+			name: "minimum block interval turned off",
+			cfg: config.Consensus{
+				ProposalTimeout:  2 * time.Second,
+				PrevoteTimeout:   2 * time.Second,
+				PrecommitTimeout: 2 * time.Second,
+				CommitTimeout:    4 * time.Second,
+			},
+		},
+		{
+			name: "minimum block interval at half the commit timeout",
+			cfg: config.Consensus{
+				ProposalTimeout:  2 * time.Second,
+				PrevoteTimeout:   2 * time.Second,
+				PrecommitTimeout: 2 * time.Second,
+				CommitTimeout:    4 * time.Second,
+				MinBlockInterval: 2 * time.Second,
+			},
+		},
+		{
+			name: "minimum block interval negative",
+			cfg: config.Consensus{
+				ProposalTimeout:  2 * time.Second,
+				PrevoteTimeout:   2 * time.Second,
+				PrecommitTimeout: 2 * time.Second,
+				CommitTimeout:    4 * time.Second,
+				MinBlockInterval: -time.Second,
+			},
+			wantErr: true,
+		},
+		{
+			name: "minimum block interval above half the commit timeout",
+			cfg: config.Consensus{
+				ProposalTimeout:  2 * time.Second,
+				PrevoteTimeout:   2 * time.Second,
+				PrecommitTimeout: 2 * time.Second,
+				CommitTimeout:    4 * time.Second,
+				MinBlockInterval: 2*time.Second + time.Millisecond,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
