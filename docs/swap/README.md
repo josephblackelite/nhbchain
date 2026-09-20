@@ -1,6 +1,6 @@
 # Swap and Mint Rail
 
-Founder mainnet treats swaps as a custody-backed payment rail:
+Founder mainnet treats swaps as a payment rail:
 
 * users can pay with supported external crypto such as `BTC`, `USDT`, or
   `USDC`

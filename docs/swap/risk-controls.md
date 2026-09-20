@@ -32,7 +32,7 @@ PriceProofMaxDeviationBps = 100
     MonthlyCapWei = "750000e18"
 
 [swap.providers]
-Allow = ["nowpayments"]
+Allow = ["example-provider"]
 ```
 
 | Setting | Description |

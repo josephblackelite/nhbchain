@@ -301,10 +301,8 @@ func doSignedStableRPCRequest(t *testing.T, srv *Server, ctx context.Context, pa
 }
 
 // fakeStableEngine is a small, deterministic stablequote.Engine test
-// double standing in for the real stable.Engine, which moved to the
-// private nhbchain-services repo (2026-09-17) along with the rest of
-// this repo's off-chain money-orchestration code -- this repo's own
-// tests can no longer depend on it. Its job is exercising
+// double standing in for the real engine, which is not part of this
+// repo -- this repo's own tests cannot depend on it. Its job is exercising
 // rpc/swap_stable_handlers.go's actual HTTP/JSON-RPC plumbing (auth,
 // param parsing, response wiring) with realistic-shaped data, not
 // reproducing the real engine's pricing/slippage/inventory math.

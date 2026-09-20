@@ -725,15 +725,11 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 
 // configureStableTradingEngine wires the RPC server's stable-quote surface
 // (rpc/swap_stable_handlers.go) to whatever implements stablequote.Engine
-// -- since 2026-09-17 that's an HTTP client talking to a separate
-// stable-quote-service process (see nhbchain-services' cmd/stable-quote-
-// service), not an in-process engine. The engine's actual reservation/
-// ledger/cash-out logic, and the price-refresh loop that used to run
-// right here, moved there along with the rest of this repo's off-chain
-// money-orchestration code -- see nhbchain/stablequote's package doc for
-// the full boundary this exists to enforce. This function now only
-// builds the wire-shape asset list and points the client at that
-// service; nothing here touches money-movement logic directly anymore.
+// -- an HTTP client talking to a separate quote service, not an
+// in-process engine (see nhbchain/stablequote's package doc for the
+// boundary). This function only builds the wire-shape asset list and
+// points the client at that service; nothing here touches
+// money-movement logic.
 func configureStableTradingEngine(rpcServer *rpc.Server, logger *slog.Logger) error {
 	if rpcServer == nil {
 		return nil
@@ -765,7 +761,7 @@ func configureStableTradingEngine(rpcServer *rpc.Server, logger *slog.Logger) er
 	client := stablequote.NewHTTPClient(baseURL, 10*time.Second)
 	rpcServer.ConfigureStableEngine(client, limits, assets, time.Now)
 	if logger != nil {
-		logger.Info("stable trading engine configured via stable-quote-service", slog.String("url", baseURL))
+		logger.Info("stable trading engine configured", slog.String("url", baseURL))
 	}
 	return nil
 }

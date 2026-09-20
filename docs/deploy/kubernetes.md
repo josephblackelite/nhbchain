@@ -78,7 +78,7 @@ covers:
 - `nhb-validator` – validator keystore password
 - `nhb-governance` – hex-encoded private key for governd signing
 - `nhb-gateway-auth` – optional gateway HMAC secret
-- `nhb-swapd-apis` – external oracle API tokens
+- `nhb-swap-service-apis` – external oracle API tokens
 
 ## Chart releases & CI
 

@@ -826,10 +826,9 @@ func (v *jwtVerifier) Verify(token string) (*jwt.RegisteredClaims, error) {
 }
 
 // ConfigureStableEngine wires a stable-quote engine into the RPC surface --
-// either the real engine directly (if ever run in-process again) or, since
-// 2026-09-17, an stablequote.HTTPClient calling out to the standalone
-// stable-quote-service (see stablequote package doc comment for why the
-// real engine no longer runs inside this binary). engine must never be a
+// a stablequote.HTTPClient calling out to a standalone quote service, or any
+// other stablequote.Engine (see the stablequote package doc comment).
+// engine must never be a
 // typed nil (e.g. a nil *stablequote.HTTPClient) -- pass a genuinely
 // nil interface value (don't call this at all) if there's no engine to
 // wire up, or the nil checks in swap_stable_handlers.go will see a

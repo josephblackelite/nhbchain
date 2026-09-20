@@ -256,8 +256,8 @@ func TestMintWithSignatureExecutesInBlock(t *testing.T) {
 // TestMintWithSignatureReplayInvoice above (which only proves the
 // mempool-scan check catches a replay while the original is still
 // pending). Confirms the system's whole safety assumption for a same-
-// invoiceId retry -- "the chain's own on-chain InvoiceID uniqueness check
-// makes it a safe no-op" (see nhb-custody's mint.ts doc comment) -- still
+// invoiceId retry -- that the chain's own on-chain InvoiceID uniqueness check
+// makes it a safe no-op -- still
 // holds once the original is durably committed: addTransaction's
 // admission-time simulation (validateTransaction -> ExecuteTransaction ->
 // applyMintTransaction, run against a copy of committed state) rejects
