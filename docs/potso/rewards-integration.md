@@ -9,7 +9,7 @@ export methods that actually exist on the node today.
 Each reward entry is paid out in one of two modes:
 
 * `auto` — the reward is credited automatically; no further action is required.
-* `claim` — the reward is reserved for the winner until it is settled. The
+* `claim` -- the reward is reserved for the winner until it is settled. The
   `potso_reward_claim` method that settled it is retired (see below), so a
   `claim`-mode reward has no way to be paid today; deployments use `auto`.
 

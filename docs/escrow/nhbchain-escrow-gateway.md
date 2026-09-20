@@ -247,7 +247,7 @@ RPC) are unaffected.
 ### Acceptance Criteria
 
 - Unit tests: auth (HMAC + sig), idempotency, signature mismatch, invalid bech32, deadline checks.
-- Integration: create → pay → funded → release → settlement (the only webhook is `escrow.created`).
+- Integration: create -> pay -> funded -> release -> settlement (the only webhook is `escrow.created`).
 
 ## Part B — P2P Market Hooks (Auto-Escrow + Arbitration)
 
