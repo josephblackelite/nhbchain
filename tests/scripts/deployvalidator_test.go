@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -11,8 +12,11 @@ const (
 	helpersBegin = "# --- begin validator CLI helpers (exercised by tests/scripts) ---\n"
 	helpersEnd   = "# --- end validator CLI helpers ---\n"
 
-	// fakeSudo runs the command the way sudo would for the service user.
+	// fakeSudo runs the command the way sudo would for the service user. Like the
+	// real one, which stays in the process list for as long as it waits for the
+	// command, it keeps the command line it was given: the test reads it back.
 	fakeSudo = `#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKE_SUDO_LOG"
 if [ "$1" = "-u" ]; then shift 2; fi
 exec "$@"
 `
@@ -85,10 +89,11 @@ func validatorHelpers(t *testing.T) string {
 }
 
 type harnessRun struct {
-	output string
-	code   int
-	status int
-	log    string
+	output  string
+	code    int
+	status  int
+	log     string
+	sudoLog string
 }
 
 func runHarness(t *testing.T, failCmd, nodeSecret string) harnessRun {
@@ -115,7 +120,9 @@ func runHarness(t *testing.T, failCmd, nodeSecret string) harnessRun {
 		}
 	}
 	logPath := filepath.Join(dir, "cli.log")
+	sudoLogPath := filepath.Join(dir, "sudo.log")
 	env := []string{
+		"FAKE_SUDO_LOG=" + bashArg(sudoLogPath),
 		"FAKE_BIN=" + bashArg(bin),
 		"FAKE_INSTALL=" + bashArg(install),
 		"HELPERS=" + bashArg(filepath.Join(dir, "helpers.sh")),
@@ -125,13 +132,14 @@ func runHarness(t *testing.T, failCmd, nodeSecret string) harnessRun {
 	}
 	out, code := runBash(t, bash, dir, env, bashArg(filepath.Join(dir, "harness.sh")))
 	logBytes, _ := os.ReadFile(logPath)
+	sudoBytes, _ := os.ReadFile(sudoLogPath)
 	status := -1
 	for _, line := range strings.Split(out, "\n") {
 		if strings.HasPrefix(line, "STATUS=") {
 			status = int(line[len("STATUS=")] - '0')
 		}
 	}
-	return harnessRun{output: out, code: code, status: status, log: string(logBytes)}
+	return harnessRun{output: out, code: code, status: status, log: string(logBytes), sudoLog: string(sudoBytes)}
 }
 
 // DC-17: the registration steps used to run nhb-cli without NHB_RPC_TOKEN,
@@ -158,6 +166,15 @@ func TestValidatorStepsPassTheLocalRPCToken(t *testing.T) {
 	}
 	if strings.Contains(run.log, "the-node-secret") {
 		t.Fatalf("the secret reached a command line:\n%s", run.log)
+	}
+	// Neither the secret nor the token is on a command line, where any user can read
+	// it in the process list for as long as sudo waits for the command: the token
+	// used to be given to sudo as NHB_RPC_TOKEN=<token> in front of nhb-cli.
+	if !strings.Contains(run.sudoLog, "nhb-cli") {
+		t.Fatalf("the test does not see the commands given to sudo:\n%s", run.sudoLog)
+	}
+	if strings.Contains(run.sudoLog, "fake.jwt.token") || regexp.MustCompile(`NHB_RPC_TOKEN=[^$\s]`).MatchString(run.sudoLog) || strings.Contains(run.sudoLog, "the-node-secret") {
+		t.Fatalf("the token or the secret is on the command line of sudo:\n%s", run.sudoLog)
 	}
 }
 
@@ -189,6 +206,31 @@ func TestValidatorStepFailureIsReportedNotHidden(t *testing.T) {
 	}
 	if strings.Contains(run.output, "the-node-secret") || strings.Contains(run.output, "fake.jwt.token") {
 		t.Fatalf("the secret or the token was printed:\n%s", run.output)
+	}
+}
+
+// What the script prints for the operator to run a step again reads the node's RPC
+// secret out of node.env as data. The file is in /etc/nhbchain, a directory the
+// service user owns, so that user can replace it; a root shell that ran it ("sudo sh
+// -c '. node.env'") would run whatever it found there.
+func TestPrintedRetryCommandsReadTheNodeSecretAsData(t *testing.T) {
+	run := runHarness(t, "register-validator", "the-node-secret")
+	if run.status != 1 {
+		t.Fatalf("expected the failing step to be reported, status %d:\n%s", run.status, run.output)
+	}
+	var recipe string
+	for _, line := range strings.Split(run.output, "\n") {
+		if strings.Contains(line, "TOKEN=$(") {
+			recipe = strings.TrimSpace(line)
+		}
+	}
+	if !strings.HasPrefix(recipe, `TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb `) || !strings.HasSuffix(recipe, ` rpc-token --secret-stdin)`) {
+		t.Fatalf("the printed command that makes a token does not read node.env as data:\n%s", run.output)
+	}
+	for _, line := range strings.Split(run.output, "\n") {
+		if strings.Contains(line, ". /etc/nhbchain/node.env") || strings.Contains(line, "sh -c") {
+			t.Fatalf("the script tells the operator to run node.env as a script: %s", line)
+		}
 	}
 }
 

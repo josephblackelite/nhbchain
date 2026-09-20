@@ -1,460 +1,1141 @@
 #!/usr/bin/env bash
+# deployvalidator.sh -- bring up a new node of the live network from a snapshot.
+#
+# Block sync from genesis does NOT work on this network (see
+# docs/validators/snapshot-onboarding.md), so this script never starts a node
+# from an empty data directory. It installs the node, puts a verified snapshot
+# of the chain database in its data directory, starts the node as a NON-voting
+# follower (a fresh key that is not registered anywhere never counts toward
+# consensus), waits until the follower is at the network tip, and only then
+# submits the registration steps and prints what to do next.
+#
+# Every step stops the script with an error when it fails; nothing is skipped
+# quietly. It is safe to run again: what is already in place is left alone, and
+# a node that is already running is not restarted unless something changed. A
+# node whose data directory already holds this network's chain is never given a
+# snapshot, so a run that installs none does not fetch a manifest at all: what
+# the snapshot host publishes, or whether it answers, cannot change that run.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 
-INSTALL_ROOT=/opt/nhbchain
-CONFIG_DIR=/etc/nhbchain
-STATE_DIR=/var/lib/nhbchain
+INSTALL_ROOT="${NHB_INSTALL_ROOT:-/opt/nhbchain}"
+CONFIG_DIR="${NHB_CONFIG_DIR:-/etc/nhbchain}"
+STATE_DIR="${NHB_STATE_DIR:-/var/lib/nhbchain}"
 SERVICE_USER=nhb
 VALIDATOR_KEY_FILE="${CONFIG_DIR}/validator.key"
-ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://nhbcoin.com/api/v1/validators/onboarding-email'
+DATA_DIR="${STATE_DIR}/nhb-data"
+DOWNLOAD_DIR="${STATE_DIR}/.snapshot-download"
 
-# p2p.Server.Connect dials this string directly via net.Dial("tcp", addr)
-# -- it never parses an "enode://nodeid@host:port" URI scheme (confirmed
-# by grepping the whole repo: nothing handles that scheme anywhere), so
-# this MUST be plain host:port, not an enode URI. An earlier version of
-# this script and the README used the enode:// form, which live-tested
-# as a real bug: "dial tcp: address enode://...: too many colons in
-# address" -- the node never dialed its bootnode at all.
-BOOTNODE_DEFAULT='198.51.100.10:6001'
+# Where root builds, and the tools this script runs itself. INSTALL_ROOT, STATE_DIR
+# and CONFIG_DIR are handed to the service user (nhb.service runs as it, and it is
+# the network-facing part of the host), so it can rewrite anything in them: a tool
+# it replaced would run as root, and a Go build cache it planted would be compiled
+# into the binaries root builds next. Nothing root or the operator runs, installs
+# or builds with therefore comes from those three. BUILD_DIR holds the Go caches
+# and the tools (check-config and wait-synced of nhb-snapshot, generate-key of
+# nhb-cli): a directory only root can write, on the real disk. INSTALL_ROOT/bin
+# holds copies, which the service user runs, as itself.
+BUILD_DIR="${NHB_BUILD_DIR:-/var/cache/nhbchain-build}"
+TOOL_DIR="${BUILD_DIR}/bin"
+
+# The network this release is pinned to. The chain id is the first 8 bytes of
+# the genesis block hash, and the genesis hash follows from the genesis file, so
+# the three values below agree with each other and with the live network.
+# tests/config/shipped_genesis_test.go checks every one of them.
 NETWORK_ID_DEFAULT='18346390202490284624'
+GENESIS_HASH_DEFAULT='0xfe9b78af9223ea50f456f63c41084dd99bac4aaa3a790a10fcc26d1dc63210a2'
 # The live network's genesis file. Its hash is the chain id, so the copy this
-# script runs from must match byte for byte (the node then reports NETWORK_ID_DEFAULT).
+# script runs from must match byte for byte.
 GENESIS_FILE_REL='config/genesis.relaunch.json'
 GENESIS_SHA256='10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
-BOOTNODE="${BOOTNODE_DEFAULT}"
+# Where this script remembers, between runs, that it installed a snapshot and how
+# high it was: the node has not been seen past that height until a run has waited
+# for it (see wait_until_synced), and an interrupted run must not forget it.
+SNAPSHOT_MARKER="${STATE_DIR}/.snapshot-height"
+
+BOOTNODE="${NHB_BOOTNODE:-}"
+SNAPSHOT_URL="${NHB_SNAPSHOT_URL:-}"
+TIP_RPC="${NHB_TIP_RPC_URL:-}"
+MIN_RELEASE_COMMIT="${NHB_MIN_RELEASE_COMMIT:-}"
 NETWORK_ID="${NETWORK_ID_DEFAULT}"
 LISTEN_ADDR="${LISTEN_ADDR_DEFAULT}"
 RPC_ADDR="${RPC_ADDR_DEFAULT}"
 RESET_STATE=0
 BENEFICIARY=''
-OPERATOR_EMAIL=''
-ONBOARDING_EMAIL_ENDPOINT="${ONBOARDING_EMAIL_ENDPOINT_DEFAULT}"
 EXTERNAL_ADDRESS=''
 EXTERNAL_ADDRESS_HOSTPORT=''
+ALLOW_INSECURE_HTTP=0
+ALLOW_BINARY_MISMATCH=0
+ALLOW_EXISTING_KEY=0
+MAX_SNAPSHOT_AGE=''
+TIP_HASH=''
+STATE_ROOT=''
+MAX_SNAPSHOT_GIB=16
+# The height of the snapshot this run installed; empty when it installed none.
+SNAPSHOT_HEIGHT=''
+MAX_LAG_BLOCKS=3
+SYNC_INTERVAL="${NHB_SYNC_INTERVAL:-5s}"
+SYNC_TIMEOUT_SECS=7200
+# How long the node's RPC may stay silent after the service starts. A node that
+# starts normally answers within a minute or two; one that has not answered by
+# then is not running or is crash-looping.
+RPC_UP_TIMEOUT_SECS=180
+CLI_RETRY_DELAY="${CLI_RETRY_DELAY:-5}"
 
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/deployvalidator.sh [options]
+  bash scripts/deployvalidator.sh --beneficiary <nhb1...> --snapshot-url <url> --bootnode <host:port> [options]
+
+Required:
+  --beneficiary <nhb1...>  Wallet to receive this validator's epoch reward
+                           payouts. Without it they would accumulate at this
+                           validator's own address, whose key never leaves this
+                           server. MUST differ from this validator's own node
+                           address (printed at the end): the chain rejects a
+                           beneficiary that matches the validator's own address.
+  --snapshot-url <url>     Where the snapshot is published: a directory URL that
+                           holds manifest.json and the archive it names.
+                           https only (see --allow-insecure-http). There is no
+                           default: which snapshots to trust is your decision.
+                           May be given as NHB_SNAPSHOT_URL instead.
+  --bootnode <host:port>   A peer of the network to sync new blocks from. Plain
+                           host:port, not an enode:// URI. There is no default.
+                           May be given as NHB_BOOTNODE instead.
 
 Options:
-  --beneficiary <nhb1...>  REQUIRED. Wallet to receive this validator's
-                           future reward payouts (see "Getting paid" below).
-                           Without it, rewards accumulate at this validator's
-                           own address, whose key never leaves this server.
-                           MUST be different from this validator's own node
-                           address (printed at the end of this script) -- the
-                           chain rejects a beneficiary that matches the
-                           validator's own address, so don't re-paste that
-                           address here.
-  --email <address>        Email to receive setup instructions (optional;
-                           best-effort, does not fail the script if it can't
-                           be sent).
-  --bootnode <host:port>   Bootnode address to join (plain host:port, not
-                           an enode:// URI). Default: NHBCoin mainnet bootnode.
-  --network-id <id>        P2P network ID. Default: 18346390202490284624 (the live
-                           network). The node must report this chain id once it
-                           starts, or this script stops with an error.
+  --min-release-commit <c> The full commit id (40 hex digits) of the oldest release
+                           you accept. The snapshot's manifest is not signed and
+                           names the commit the node is built from; with this the
+                           script refuses a manifest whose commit is not this
+                           commit or a descendant of it, so a snapshot host cannot
+                           steer you to old consensus code. Needs that commit and
+                           the manifest's in this checkout (git fetch first). May
+                           be given as NHB_MIN_RELEASE_COMMIT. Strongly advised.
+  --tip-rpc <url>          RPC URL of a node you trust. Used to decide when this
+                           node has caught up: its newest blocks are compared
+                           with that node's, and a node whose blocks differ from
+                           that node's is refused. Without it the age of the
+                           newest block is used. May be given as NHB_TIP_RPC_URL.
+  --max-lag-blocks <n>     How far from the network tip (either side) still
+                           counts as caught up (default 3, at most 15; needs
+                           --tip-rpc).
+  --sync-timeout <secs>    Give up waiting for the catch-up after this long
+                           (default 7200).
+  --rpc-timeout <secs>     Give up when the node's RPC has not answered once
+                           after this long (default 180). A node that never
+                           answers is not running or is crash-looping; the
+                           script says so and shows how to see why.
+  --max-snapshot-age <d>   Refuse a snapshot whose newest block is older than
+                           this; 72h is advised (without it a snapshot of any
+                           age is accepted and a stale one fails only later,
+                           with a stall). The limit rests on the block's
+                           date, which is checked against the unpacked database;
+                           the creation time the manifest states is not signed
+                           by anyone. A follower can catch up only so many
+                           blocks; see the documentation for the measured limit.
+  --tip-hash <hex>         The tip hash the snapshot must have (32 bytes of hex),
+                           as read from nodes you trust. A snapshot with another
+                           tip is refused before it is downloaded.
+  --state-root <hex>       The state root the snapshot must have, likewise.
+  --max-snapshot-gib <n>   Refuse a snapshot whose archive, or whose unpacked
+                           database, is larger than this many GiB (default 16),
+                           or that the disk has no room for.
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
   --external-address <ip>  This node's own publicly-dialable IP (the address
-                           peers should use to reconnect to it). Needed
-                           because --listen-addr normally binds to 0.0.0.0,
-                           which a peer can't dial back to. Default:
+                           peers should use to reconnect to it). Default:
                            auto-detected from this machine's public IP.
-  --reset-state            Remove existing local chain state before first start.
+  --reset-state            Replace the existing data directory with a snapshot.
+                           The snapshot is downloaded, verified and unpacked
+                           first, next to the old directory, which is not
+                           touched until then; only after that is the node
+                           stopped and the old directory moved aside (it is
+                           never deleted). The node's p2p identity and its
+                           consensus vote/lock state are carried over, so a
+                           validator never forgets what it voted; it works on
+                           a node that is already a validator. Use it only
+                           when the data directory is broken.
+  --allow-insecure-http    Accept an http:// or file:// snapshot URL.
+  --allow-existing-key     Run with a validator key that is already in
+                           /etc/nhbchain/validator.key although this script did
+                           not create it. Only if you are sure no other node in
+                           the world runs that key: two nodes with one key
+                           double-sign and are slashed.
+  --allow-binary-mismatch  Continue although the node built here is not the
+                           binary the snapshot was taken with (see below).
   --help                   Show this help message.
 
-This bootstrap installs a validator-only NHBCoin node. It generates a fresh
-validator key ON THIS MACHINE (never pass a key in -- one is created for
-you the first time this runs, and reused on later runs), builds the node
-from the checked-out repo, and starts the validator. The node itself will
-auto-submit validator heartbeats after startup so it can become quorum-ready
-by the next epoch.
+What it does, in order (each step stops the script if it fails):
+  1. installs Go and the build tools, builds nhb, nhb-cli and nhb-snapshot from
+     this checkout as root, in /var/cache/nhbchain-build (only root can write it),
+     and copies them to /opt/nhbchain/bin for the service user. It runs this
+     script's own tools from the first place and never from the second, which
+     belongs to the service user, and installs nhb.service from this checkout too;
+  2. when it will install a snapshot (an empty data directory, or
+     --reset-state; a node that already holds the chain needs none, and then
+     nothing is fetched): fetches the snapshot manifest and checks it is for
+     the pinned network (chain id 18346390202490284624, the genesis of
+     config/genesis.relaunch.json), that the commit it names is the release
+     given with --min-release-commit or built on it (if one was given), and
+     that it is for the same node binary as the one built here;
+  3. creates this validator's key ON THIS MACHINE (never pass a key in) and
+     refuses to go on if that key could already be running elsewhere;
+  4. downloads the snapshot (within the size limits above), verifies its sha256
+     and structure, checks the unpacked database opens and matches the
+     manifest, and puts it in the data directory (never over data that is
+     already there, except through --reset-state);
+  5. writes the node's config from the shipped config.toml (only paths, ports
+     and peers change) and checks the values consensus depends on;
+  6. starts nhb.service as a follower and waits until it is at the network tip:
+     connected to a peer, and (after a snapshot) past the snapshot's height;
+  7. only then registers the validator and prints the next steps.
 
 Getting paid:
-  Your validator's stake and its ordinary staking yield are handled by
-  delegating to it from an nhbcoin.com wallet (Validator Hub -> paste this
-  validator's node address -> delegate >= 10,000 ZNHB). That part happens in
-  your own wallet, not on this server.
-
-  Separately, this validator also earns a smaller epoch reward for actively
-  participating in consensus, credited by default to this validator's own
-  address -- which you cannot conveniently spend from, since its key must
-  stay on this server. Passing --beneficiary redirects that reward to your
-  own wallet automatically, signed locally with the key this script just
-  generated, before it's ever used for anything else.
+  Your validator's stake is delegated to it from a wallet (delegate at least
+  the minimum to the node address printed at the end) or staked by the node's
+  own key. Separately it earns an epoch reward for taking part in consensus,
+  credited to the address passed as --beneficiary.
 EOF
 }
+
+log() { echo "[INFO] $*"; }
+warn() { echo "[WARN] $*" >&2; }
+die() { echo "[ERROR] $*" >&2; exit 1; }
 
 require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "[ERROR] required command not found: $1" >&2
-    exit 1
-  }
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --beneficiary)
-      BENEFICIARY="${2:-}"
-      shift 2
+as_root() { sudo "$@"; }
+as_service() { sudo -u "${SERVICE_USER}" "$@"; }
+
+parse_args() {
+  local network_id_arg=''
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --beneficiary) BENEFICIARY="${2:-}"; shift 2 ;;
+      --snapshot-url) SNAPSHOT_URL="${2:-}"; shift 2 ;;
+      --bootnode) BOOTNODE="${2:-}"; shift 2 ;;
+      --tip-rpc) TIP_RPC="${2:-}"; shift 2 ;;
+      --min-release-commit) MIN_RELEASE_COMMIT="${2:-}"; shift 2 ;;
+      --max-lag-blocks) MAX_LAG_BLOCKS="${2:-}"; shift 2 ;;
+      --sync-timeout) SYNC_TIMEOUT_SECS="${2:-}"; shift 2 ;;
+      --rpc-timeout) RPC_UP_TIMEOUT_SECS="${2:-}"; shift 2 ;;
+      --max-snapshot-age) MAX_SNAPSHOT_AGE="${2:-}"; shift 2 ;;
+      --tip-hash) TIP_HASH="${2:-}"; shift 2 ;;
+      --state-root) STATE_ROOT="${2:-}"; shift 2 ;;
+      --max-snapshot-gib) MAX_SNAPSHOT_GIB="${2:-}"; shift 2 ;;
+      --network-id) network_id_arg="${2:-}"; shift 2 ;;
+      --listen-addr) LISTEN_ADDR="${2:-}"; shift 2 ;;
+      --rpc-addr) RPC_ADDR="${2:-}"; shift 2 ;;
+      --external-address) EXTERNAL_ADDRESS="${2:-}"; shift 2 ;;
+      --reset-state) RESET_STATE=1; shift ;;
+      --allow-insecure-http) ALLOW_INSECURE_HTTP=1; shift ;;
+      --allow-existing-key) ALLOW_EXISTING_KEY=1; shift ;;
+      --allow-binary-mismatch) ALLOW_BINARY_MISMATCH=1; shift ;;
+      --help|-h) usage; exit 0 ;;
+      *) echo "[ERROR] unknown argument: $1" >&2; usage >&2; exit 1 ;;
+    esac
+  done
+  if [[ -n "${network_id_arg}" && "${network_id_arg}" != "${NETWORK_ID_DEFAULT}" ]]; then
+    die "--network-id ${network_id_arg} is not the network this release is pinned to (${NETWORK_ID_DEFAULT}); check out the release that matches the network you want to join"
+  fi
+}
+
+# validate_inputs stops before anything is installed when an argument is
+# missing or wrong.
+validate_inputs() {
+  if [[ -z "${BENEFICIARY}" ]]; then
+    echo "[ERROR] --beneficiary <nhb1...> is required." >&2
+    echo >&2
+    echo "This validator will earn epoch rewards. Without a beneficiary wallet," >&2
+    echo "those rewards accumulate at this validator's own server-only address," >&2
+    echo "which you cannot conveniently spend from. Pass --beneficiary with a" >&2
+    echo "wallet you actually use." >&2
+    echo >&2
+    usage >&2
+    exit 1
+  fi
+  [[ "${BENEFICIARY}" =~ ^nhb1[a-z0-9]{20,80}$ ]] || die "--beneficiary '${BENEFICIARY}' is not an nhb1... address"
+
+  [[ -n "${SNAPSHOT_URL}" ]] || die "--snapshot-url (or NHB_SNAPSHOT_URL) is required: this script starts from a snapshot and has no default location for one"
+  case "${SNAPSHOT_URL}" in
+    https://*) CURL_PROTO='=https' ;;
+    http://*|file://*)
+      [[ "${ALLOW_INSECURE_HTTP}" == "1" ]] || die "the snapshot URL is not https; pass --allow-insecure-http only if you know the path to it is trusted"
+      CURL_PROTO='=https,http,file'
       ;;
-    --email)
-      OPERATOR_EMAIL="${2:-}"
-      shift 2
-      ;;
-    --onboarding-email-endpoint)
-      ONBOARDING_EMAIL_ENDPOINT="${2:-}"
-      shift 2
-      ;;
-    --bootnode)
-      BOOTNODE="${2:-}"
-      shift 2
-      ;;
-    --network-id)
-      NETWORK_ID="${2:-}"
-      shift 2
-      ;;
-    --listen-addr)
-      LISTEN_ADDR="${2:-}"
-      shift 2
-      ;;
-    --rpc-addr)
-      RPC_ADDR="${2:-}"
-      shift 2
-      ;;
-    --external-address)
-      EXTERNAL_ADDRESS="${2:-}"
-      shift 2
-      ;;
-    --reset-state)
-      RESET_STATE=1
-      shift
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "[ERROR] unknown argument: $1" >&2
-      usage
-      exit 1
-      ;;
+    *) die "the snapshot URL must start with https://" ;;
   esac
-done
+  [[ "${SNAPSHOT_URL}" =~ ^[A-Za-z0-9:/._~%@+=,-]+$ ]] || die "the snapshot URL holds characters that are not allowed"
 
-# Corrected 2026-08-13: --beneficiary used to be optional, which meant a
-# validator could go live with its reward income landing at an address whose
-# key never leaves this server -- not spendable, not visible in any wallet,
-# recoverable only via a manual `nhb-cli set-reward-beneficiary` CLI step run
-# directly on the box later. Requiring it up front makes "reward income lands
-# in a wallet you actually use, from the first epoch" the guaranteed default
-# for every new validator, not something an operator has to remember to fix
-# after the fact. Deliberately NOT auto-defaulting to any address here --
-# a hardcoded or shared fallback would silently misroute a stranger's
-# validator rewards to a wallet they don't control, which is worse than
-# just requiring the operator to say where their own money goes.
-if [[ -z "${BENEFICIARY}" ]]; then
-  echo "[ERROR] --beneficiary <nhb1...> is required." >&2
-  echo >&2
-  echo "This validator will earn epoch rewards. Without a beneficiary wallet," >&2
-  echo "those rewards accumulate at this validator's own server-only address," >&2
-  echo "which you cannot conveniently spend from. Pass --beneficiary with a" >&2
-  echo "wallet you actually use (see \"Getting paid\" below for details)." >&2
-  echo >&2
-  usage
-  exit 1
-fi
+  [[ -n "${BOOTNODE}" ]] || die "--bootnode (or NHB_BOOTNODE) is required: a peer of the network to sync new blocks from"
+  case "${BOOTNODE}" in
+    enode://*) die "the bootnode must be plain host:port, not an enode:// URI (the node dials it directly)" ;;
+  esac
+  [[ "${BOOTNODE}" =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] || die "the bootnode '${BOOTNODE}' is not host:port"
 
-require_cmd sudo
-require_cmd systemctl
-
-# "Open a fresh EC2 Ubuntu server, git pull, run this script" is the whole
-# promise -- a stock Ubuntu AMI has neither Go, rsync, nor perl installed, so
-# failing here with "command not found" instead of just installing them
-# would break that promise on literally the first run. Install what's
-# missing instead of demanding the operator do it by hand first.
-GO_VERSION="1.24.3"
-GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
-
-APT_MISSING=()
-command -v rsync >/dev/null 2>&1 || APT_MISSING+=(rsync)
-command -v perl >/dev/null 2>&1 || APT_MISSING+=(perl)
-command -v curl >/dev/null 2>&1 || APT_MISSING+=(curl)
-if [[ ${#APT_MISSING[@]} -gt 0 ]]; then
-  echo "[INFO] installing missing packages: ${APT_MISSING[*]}"
-  sudo apt-get update -y
-  sudo apt-get install -y "${APT_MISSING[@]}"
-fi
-
-if [[ ! -x /usr/local/go/bin/go ]]; then
-  echo "[INFO] Go not found at /usr/local/go/bin/go -- installing Go ${GO_VERSION}"
-  TMP_GO_DIR=$(mktemp -d)
-  curl -fsSL "https://go.dev/dl/${GO_TARBALL}" -o "${TMP_GO_DIR}/${GO_TARBALL}"
-  sudo rm -rf /usr/local/go
-  sudo tar -C /usr/local -xzf "${TMP_GO_DIR}/${GO_TARBALL}"
-  rm -rf "${TMP_GO_DIR}"
-fi
-
-require_cmd rsync
-require_cmd perl
-require_cmd /usr/local/go/bin/go
-
-# Confirmed by running this exact script on a real t3.micro-class instance
-# (908MB RAM, no swap -- a common free-tier/cheap default): compiling this
-# dependency tree's CGo-free SQLite implementation (modernc.org/libc) got
-# OOM-killed mid-build ("signal: killed"), even though disk space was
-# plentiful. Add a swap file when there's little to no RAM and no existing
-# swap, so the build has somewhere to page out to instead of getting killed
-# -- cheap and safe on the plentiful disk space confirmed available above,
-# and left in place afterward since the running validator benefits from the
-# same headroom.
-if [[ ! -f /swapfile ]] && [[ "$(swapon --show=SIZE --noheadings 2>/dev/null | wc -l)" -eq 0 ]]; then
-  TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
-  if [[ -n "${TOTAL_MEM_KB}" ]] && [[ "${TOTAL_MEM_KB}" -lt 4194304 ]]; then
-    echo "[INFO] low memory ($((TOTAL_MEM_KB / 1024))MB) and no swap configured -- adding a 4G swap file"
-    sudo fallocate -l 4G /swapfile
-    sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
-    grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+  if [[ -n "${TIP_RPC}" ]]; then
+    [[ "${TIP_RPC}" =~ ^https?://[A-Za-z0-9._:/-]+$ ]] || die "--tip-rpc '${TIP_RPC}' is not an http(s) URL"
   fi
-fi
-
-sudo useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
-sudo mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}/bin"
-# Confirmed by running this exact script end-to-end: nhb.service (which runs
-# as User=nhb, not root) crash-looped forever with "panic: Failed to load
-# config: open /etc/nhbchain/config.toml: permission denied" -- mkdir here
-# runs under sudo, so the directory was owned by root, and mode 700 denies
-# *every* non-owner, including the nhb user, from even traversing into it
-# to read config.toml/node.env/validator.key -- regardless of those
-# individual files' own (correct) nhb:nhb ownership. The service silently
-# never actually started; only the crash-loop's own restart backoff kept
-# systemd from reporting it as immediately failed. Own the directory as the
-# service user so it can read what's already correctly chowned to it.
-sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
-sudo chmod 700 "${CONFIG_DIR}"
-
-sudo rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
-
-# A node started from a modified or different genesis file writes it into its
-# database and can never peer with the live network, so stop before anything
-# starts if the file differs from the one the live network was started from.
-if ! echo "${GENESIS_SHA256}  ${INSTALL_ROOT}/${GENESIS_FILE_REL}" | sha256sum -c --status; then
-  echo "[ERROR] ${INSTALL_ROOT}/${GENESIS_FILE_REL} is not the live network's genesis file" >&2
-  echo "        (expected sha256 ${GENESIS_SHA256}). Restore it from the repository." >&2
-  exit 1
-fi
-
-echo "[INFO] building NHB validator binaries"
-cd "${INSTALL_ROOT}"
-# Go's module cache for this dependency tree (go-ethereum, protobuf, sqlite,
-# opentelemetry, etc.) needs well over a gigabyte -- confirmed by running
-# this exact script on a stock Ubuntu AMI, which builds cleanly, /tmp filled
-# up mid-download ("no space left on device") because /tmp there is a
-# tmpfs mount capped at a few hundred MB (RAM-backed, common EC2 default),
-# while the real disk had 90+ GB free and untouched. Build under
-# INSTALL_ROOT instead, which is already on that real disk.
-GOCACHE_DIR="${INSTALL_ROOT}/.gocache"
-GOPATH_DIR="${INSTALL_ROOT}/.gopath"
-# go build also stages per-package scratch files under a $WORK dir, which
-# defaults to $TMPDIR (usually /tmp). On small instances /tmp is a tiny
-# tmpfs -- confirmed via a live build filling it and failing with "no
-# space left on device" even with GOCACHE/GOPATH already disk-backed.
-# Give it its own disk-backed scratch dir too.
-GOTMP_DIR="${INSTALL_ROOT}/.gotmp"
-sudo mkdir -p "${GOCACHE_DIR}" "${GOPATH_DIR}" "${GOTMP_DIR}"
-sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" GOTMPDIR="${GOTMP_DIR}" TMPDIR="${GOTMP_DIR}" HOME=/root \
-  /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/nhb" ./cmd/nhb
-sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${GOCACHE_DIR}" GOPATH="${GOPATH_DIR}" GOTMPDIR="${GOTMP_DIR}" TMPDIR="${GOTMP_DIR}" HOME=/root \
-  /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/nhb-cli" ./cmd/nhb-cli
-
-# Generate the validator key ON THIS MACHINE the first time this script
-# runs. Never pass a key in via a flag or environment variable set from
-# outside this box -- that puts it in shell history and makes it visible to
-# any other user via `ps aux` while this script runs. Re-running this
-# script reuses the existing key rather than silently generating a new one
-# and orphaning the old identity.
-if [[ ! -f "${VALIDATOR_KEY_FILE}" ]]; then
-  echo "[INFO] generating a fresh validator key on this machine"
-  TMP_KEY_DIR=$(mktemp -d)
-  trap 'rm -rf "${TMP_KEY_DIR}"' EXIT
-  (cd "${TMP_KEY_DIR}" && "${INSTALL_ROOT}/bin/nhb-cli" generate-key >"${TMP_KEY_DIR}/generate-key.out")
-  sudo install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${TMP_KEY_DIR}/wallet.key" "${VALIDATOR_KEY_FILE}"
-  VALIDATOR_ADDRESS=$(grep -o 'nhb1[a-z0-9]*' "${TMP_KEY_DIR}/generate-key.out" | head -1)
-  rm -rf "${TMP_KEY_DIR}"
-  trap - EXIT
-else
-  echo "[INFO] reusing existing validator key at ${VALIDATOR_KEY_FILE}"
-  VALIDATOR_ADDRESS=""
-fi
-sudo chown "${SERVICE_USER}:${SERVICE_USER}" "${VALIDATOR_KEY_FILE}"
-sudo chmod 600 "${VALIDATOR_KEY_FILE}"
-
-if [[ -z "${VALIDATOR_ADDRESS}" ]]; then
-  # Deriving the address from an existing key file requires reading it, so
-  # only the CLI (running as the service user) does this -- never dump the
-  # raw key itself to stdout/logs.
-  VALIDATOR_ADDRESS=$(sudo -u "${SERVICE_USER}" "${INSTALL_ROOT}/bin/nhb-cli" address "${VALIDATOR_KEY_FILE}" 2>/dev/null || true)
-  if [[ -z "${VALIDATOR_ADDRESS}" ]]; then
-    echo "[WARN] could not determine validator address for display -- check ${VALIDATOR_KEY_FILE} manually"
+  if [[ -n "${MIN_RELEASE_COMMIT}" ]]; then
+    [[ "${MIN_RELEASE_COMMIT}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || die "--min-release-commit must be a full commit id (40 lower-case hex digits, as git rev-parse HEAD prints it)"
   fi
-fi
-
-VALIDATOR_KEY_HEX=$(sudo od -An -tx1 "${VALIDATOR_KEY_FILE}" | tr -d ' \n')
-
-JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-sudo tee "${CONFIG_DIR}/node.env" >/dev/null <<EOF
-NHB_ENV=prod
-NHB_RPC_JWT_SECRET=${JWT_SECRET}
-NHB_VALIDATOR_RAW_KEY=${VALIDATOR_KEY_HEX}
-EOF
-sudo chmod 600 "${CONFIG_DIR}/node.env"
-sudo chown root:root "${CONFIG_DIR}/node.env"
-unset VALIDATOR_KEY_HEX
-
-if [[ -z "${EXTERNAL_ADDRESS}" ]]; then
-  echo "[INFO] --external-address not provided -- attempting to auto-detect this server's public IP"
-  # Try the EC2 instance metadata service (IMDSv2) first, since the OOM/tmpfs
-  # workarounds earlier in this script already assume this commonly targets
-  # an EC2 instance; fall back to a public echo service for non-EC2 hosts.
-  # Best-effort only: if neither responds, ExternalAddress is left blank in
-  # config.toml, which is the same as this script's behavior before this
-  # flag existed -- peers that only ever reach this node inbound still won't
-  # get a reconnectable address for it.
-  IMDS_TOKEN=$(curl -fsS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
-    -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)
-  if [[ -n "${IMDS_TOKEN}" ]]; then
-    EXTERNAL_ADDRESS=$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: ${IMDS_TOKEN}" \
-      "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  [[ "${LISTEN_ADDR}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "--listen-addr '${LISTEN_ADDR}' is not host:port"
+  [[ "${RPC_ADDR}" =~ ^[A-Za-z0-9._:-]+:[0-9]{1,5}$ ]] || die "--rpc-addr '${RPC_ADDR}' is not host:port"
+  [[ "${MAX_LAG_BLOCKS}" =~ ^[0-9]+$ ]] || die "--max-lag-blocks must be a number"
+  if [[ -n "${TIP_RPC}" ]] && (( 10#${MAX_LAG_BLOCKS} > 15 )); then
+    die "--max-lag-blocks ${MAX_LAG_BLOCKS} is more than the 15 blocks that can be compared with --tip-rpc's"
   fi
+  [[ "${SYNC_TIMEOUT_SECS}" =~ ^[0-9]+$ ]] || die "--sync-timeout must be a number of seconds"
+  [[ "${RPC_UP_TIMEOUT_SECS}" =~ ^[1-9][0-9]{0,5}$ ]] || die "--rpc-timeout must be a number of seconds, at least 1"
+  if [[ -n "${MAX_SNAPSHOT_AGE}" ]]; then
+    [[ "${MAX_SNAPSHOT_AGE}" =~ ^[0-9]+(h|m|s)$ ]] || die "--max-snapshot-age must look like 48h"
+  fi
+  [[ "${MAX_SNAPSHOT_GIB}" =~ ^[1-9][0-9]{0,3}$ ]] || die "--max-snapshot-gib must be a whole number of GiB, at least 1"
+  if [[ -n "${TIP_HASH}" ]]; then
+    [[ "${TIP_HASH}" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "--tip-hash must be 32 bytes of hex (64 digits, 0x optional)"
+    TIP_HASH="0x$(printf '%s' "${TIP_HASH#0x}" | tr 'A-F' 'a-f')"
+  fi
+  if [[ -n "${STATE_ROOT}" ]]; then
+    [[ "${STATE_ROOT}" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "--state-root must be 32 bytes of hex (64 digits, 0x optional)"
+    STATE_ROOT="0x$(printf '%s' "${STATE_ROOT#0x}" | tr 'A-F' 'a-f')"
+  fi
+  if [[ -n "${NHB_MASTER_TREASURY:-}" ]]; then
+    die "NHB_MASTER_TREASURY is set in this environment; a node that overrides the treasury computes different state from the network. Unset it."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Snapshot helpers
+# ---------------------------------------------------------------------------
+
+# A transfer slower than FETCH_SPEED_LIMIT bytes a second for FETCH_SPEED_TIME
+# seconds is given up: a host that trickles bytes cannot hold a download for the
+# whole of --max-time (and, with the retries, for hours).
+FETCH_SPEED_LIMIT=10240
+FETCH_SPEED_TIME=60
+
+# fetch_file <url> <destination> <max bytes>
+# curl stops at <max bytes> whatever the server sends, gives up on a host that
+# sends too slowly, and what it wrote is removed when the download fails.
+fetch_file() {
+  local url=$1 dest=$2 max=$3
+  as_service curl --fail --silent --show-error --location \
+    --proto "${CURL_PROTO}" --proto-redir "${CURL_PROTO}" \
+    --retry 3 --retry-delay 3 --connect-timeout 30 --max-time 7200 \
+    --speed-limit "${FETCH_SPEED_LIMIT}" --speed-time "${FETCH_SPEED_TIME}" \
+    --max-filesize "${max}" --output "${dest}" "${url}" \
+    || { as_service rm -f "${dest}"; die "could not download ${url} (at most ${max} bytes are accepted, and the host has to send at least ${FETCH_SPEED_LIMIT} bytes a second)"; }
+}
+
+# manifest_field <manifest> <field>
+manifest_field() { as_service "${INSTALL_ROOT}/bin/nhb-snapshot" manifest show --manifest "$1" --field "$2"; }
+
+# check_binary_identity <manifest sha256> <manifest commit> <local sha256> <local commit>
+# The follower runs every later block through its own build of the node, so it
+# must be the code that made the snapshot: the same binary, or the same commit.
+check_binary_identity() {
+  local m_sha=$1 m_commit=$2 l_sha=$3 l_commit=$4
+  if [[ -n "${m_sha}" && "${m_sha}" == "${l_sha}" ]]; then
+    log "the node built here is byte for byte the binary the snapshot was taken with"
+    return 0
+  fi
+  if [[ -n "${m_commit}" && "${m_commit}" != "unknown" && "${m_commit}" == "${l_commit}" ]]; then
+    log "the node was built from commit ${l_commit}, the commit the snapshot was taken with"
+    return 0
+  fi
+  echo "[ERROR] the node built here is not the one the snapshot was taken with." >&2
+  echo "        snapshot: commit ${m_commit:-unknown}, binary sha256 ${m_sha:-unknown}" >&2
+  echo "        here:     commit ${l_commit:-unknown}, binary sha256 ${l_sha:-unknown}" >&2
+  if [[ "${l_commit}" == "unknown" && -n "${LOCAL_COMMIT_WHY:-}" ]]; then
+    echo "        This checkout's commit could not be read: ${LOCAL_COMMIT_WHY}" >&2
+  fi
+  echo "        A node that executes blocks with different consensus code forks off the network." >&2
+  if [[ -n "${m_commit}" && "${m_commit}" != "unknown" ]]; then
+    if [[ "${l_commit}" == "unknown" ]]; then
+      echo "        The commit of this checkout is not known, so the script cannot tell whether it is ${m_commit}." >&2
+      echo "        Fix what git says above (for a checkout another user owns: git config --global --add safe.directory ${REPO_ROOT})," >&2
+      echo "        or check out ${m_commit} with a git that can read it, and run this script again." >&2
+    elif [[ "${m_commit}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+      echo "        Check out the commit above (git checkout ${m_commit}) and run this script again." >&2
+    else
+      # The manifest is unsigned: what it names as a commit is printed as data, never as a
+      # command to type.
+      echo "        The snapshot names its commit as '${m_commit}', which is not a full commit id, so no checkout" >&2
+      echo "        command is suggested: ask whoever published it which release it was made with." >&2
+    fi
+    echo "        But first check that ${m_commit} is a release you recognise, from the people who run the" >&2
+    echo "        network: the manifest is not signed, and whoever hosts it chooses this commit. An old commit" >&2
+    echo "        is old consensus code. --min-release-commit makes the script refuse a commit older than the" >&2
+    echo "        release you name." >&2
+  else
+    echo "        The snapshot does not say which commit it was made with, so there is nothing to check out." >&2
+    echo "        Ask whoever published it for a snapshot that does (make-snapshot.sh refuses to make one that does not)." >&2
+  fi
+  if [[ "${ALLOW_BINARY_MISMATCH}" == "1" ]]; then
+    warn "continuing because --allow-binary-mismatch was given: only do this if the two builds differ in nothing that consensus executes"
+    return 0
+  fi
+  return 1
+}
+
+# checkout_git runs git in the checkout this script runs from. That checkout may
+# belong to another user than the one running the script (as root after "sudo -i",
+# from a checkout the operator owns): git refuses such a directory ("dubious
+# ownership") and the commit would read as unknown. It is the checkout this script
+# itself is running from, so git is told it may read it, for this one path and
+# this one command.
+checkout_git() { git -c "safe.directory=${REPO_ROOT}" -C "${REPO_ROOT}" "$@"; }
+
+# detect_local_commit sets LOCAL_COMMIT to the commit of this checkout ("<id>-dirty"
+# when tracked files have changes, which is not that commit: only an identical
+# binary then matches) or "unknown", and, when it is unknown, LOCAL_COMMIT_WHY to
+# what git said.
+LOCAL_COMMIT=unknown
+LOCAL_COMMIT_WHY=''
+detect_local_commit() {
+  local out
+  LOCAL_COMMIT=unknown
+  LOCAL_COMMIT_WHY=''
+  if ! command -v git >/dev/null 2>&1; then
+    LOCAL_COMMIT_WHY='git is not installed'
+    return 0
+  fi
+  if ! out=$(checkout_git rev-parse HEAD 2>&1); then
+    LOCAL_COMMIT_WHY="git said: $(printf '%s' "${out}" | head -n 1)"
+    return 0
+  fi
+  LOCAL_COMMIT=${out}
+  if [[ -n "$(checkout_git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    LOCAL_COMMIT="${LOCAL_COMMIT}-dirty"
+  fi
+}
+
+# check_release_commit <manifest commit> stops the script when --min-release-commit
+# was given and the commit the manifest names is not that commit or one built on
+# it. The manifest is not signed: the commit it names is only as good as whoever
+# hosts it, and an old commit is old consensus code.
+check_release_commit() {
+  local m_commit=$1 rc=0
+  [[ -n "${MIN_RELEASE_COMMIT}" ]] || return 0
+  if [[ ! "${m_commit}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    die "the snapshot's manifest names no commit (${m_commit:-none}), so it cannot be checked against --min-release-commit ${MIN_RELEASE_COMMIT}"
+  fi
+  checkout_git cat-file -e "${MIN_RELEASE_COMMIT}^{commit}" 2>/dev/null \
+    || die "the release you pinned (${MIN_RELEASE_COMMIT}) is not in this checkout: run 'git fetch' in ${REPO_ROOT}, and check that you copied the id right"
+  checkout_git cat-file -e "${m_commit}^{commit}" 2>/dev/null \
+    || die "the commit the manifest names (${m_commit}) is not in this checkout, so it cannot be compared with the release you pinned: run 'git fetch' in ${REPO_ROOT}; if it is still not there, the snapshot's host names a commit that is not part of the project's history: do not use it"
+  checkout_git merge-base --is-ancestor "${MIN_RELEASE_COMMIT}" "${m_commit}" || rc=$?
+  case "${rc}" in
+    0) log "the commit the snapshot names (${m_commit}) is the release you pinned or built on it" ;;
+    1) die "the commit the snapshot's manifest names (${m_commit}) is neither the release you pinned (${MIN_RELEASE_COMMIT}) nor built on it: it is older, or on another branch. The manifest is not signed; do not use a snapshot that sends you there." ;;
+    *) die "git could not tell whether ${m_commit} is built on ${MIN_RELEASE_COMMIT} (exit ${rc})" ;;
+  esac
+}
+
+# fetch_manifest downloads the manifest and stops unless it is for the pinned
+# network. It sets MANIFEST_FILE.
+fetch_manifest() {
+  # As the service user, which owns the state directory: root does not touch a
+  # path that user can replace.
+  as_service mkdir -p -- "${DOWNLOAD_DIR}" || die "cannot create ${DOWNLOAD_DIR}"
+  as_service chmod 0700 -- "${DOWNLOAD_DIR}" || die "cannot use ${DOWNLOAD_DIR}: it is not the service user's"
+  MANIFEST_FILE="${DOWNLOAD_DIR}/manifest.json"
+  as_service rm -f "${MANIFEST_FILE}"
+  fetch_file "${SNAPSHOT_URL%/}/manifest.json" "${MANIFEST_FILE}" 4194304
+  local chain genesis
+  chain=$(manifest_field "${MANIFEST_FILE}" chainId) || die "the manifest at ${SNAPSHOT_URL%/}/manifest.json is not a valid snapshot manifest"
+  genesis=$(manifest_field "${MANIFEST_FILE}" genesisHash) || die "the manifest is not valid"
+  if [[ "${chain}" != "${NETWORK_ID_DEFAULT}" || "${genesis}" != "${GENESIS_HASH_DEFAULT}" ]]; then
+    die "the snapshot is for chain ${chain} (genesis ${genesis}), not the pinned network ${NETWORK_ID_DEFAULT} (genesis ${GENESIS_HASH_DEFAULT})"
+  fi
+  # What the operator pinned to nodes they trust is checked here, before the
+  # archive is downloaded; verify and extract check it again.
+  local tip root
+  if [[ -n "${TIP_HASH}" ]]; then
+    tip=$(manifest_field "${MANIFEST_FILE}" tipHash) || die "the manifest is not valid"
+    [[ "${tip}" == "${TIP_HASH}" ]] || die "the snapshot's tip hash is ${tip}, not the ${TIP_HASH} pinned with --tip-hash"
+  fi
+  if [[ -n "${STATE_ROOT}" ]]; then
+    root=$(manifest_field "${MANIFEST_FILE}" stateRoot) || die "the manifest is not valid"
+    [[ "${root}" == "${STATE_ROOT}" ]] || die "the snapshot's state root is ${root}, not the ${STATE_ROOT} pinned with --state-root"
+  fi
+  log "snapshot manifest: chain ${chain}, height $(manifest_field "${MANIFEST_FILE}" height), created $(manifest_field "${MANIFEST_FILE}" createdAt)"
+}
+
+# free_kib prints how much room is left, in KiB, on the disk the node's data
+# lives on.
+free_kib() { df -Pk "${STATE_DIR}" 2>/dev/null | awk 'NR==2 {print $4}'; }
+
+# check_snapshot_size <archive bytes> <unpacked bytes> stops the script, before
+# anything is downloaded, when the snapshot is larger than this run accepts or
+# than the disk has room for. The manifest's sizes are nobody's signed word, so
+# the bound is the operator's (--max-snapshot-gib), never the manifest's own.
+check_snapshot_size() {
+  local size=$1 unpacked=$2 limit free need
+  [[ "${size}" =~ ^[0-9]+$ && "${unpacked}" =~ ^[0-9]+$ ]] || die "the manifest's archive sizes are not numbers"
+  limit=$((MAX_SNAPSHOT_GIB * 1073741824))
+  if (( size > limit )); then
+    die "the snapshot archive is ${size} bytes, more than the ${MAX_SNAPSHOT_GIB} GiB this run accepts (--max-snapshot-gib); nothing was downloaded"
+  fi
+  if (( unpacked > limit )); then
+    die "the snapshot unpacks to ${unpacked} bytes, more than the ${MAX_SNAPSHOT_GIB} GiB this run accepts (--max-snapshot-gib); nothing was downloaded"
+  fi
+  free=$(free_kib || true)
+  [[ "${free}" =~ ^[0-9]+$ ]] || die "could not tell how much disk space is free in ${STATE_DIR}"
+  # The archive and the copy unpacked from it exist side by side, and the node
+  # needs room to grow afterwards.
+  need=$(( (size + unpacked) / 1024 + 1048576 ))
+  if (( free < need )); then
+    die "not enough free disk space in ${STATE_DIR}: ${need} KiB are needed (the ${size} byte archive, the ${unpacked} bytes it unpacks to, and 1 GiB for the node) and ${free} KiB are free; nothing was downloaded"
+  fi
+}
+
+# install_snapshot <target> <refuse own key> downloads the archive the manifest
+# names, verifies it and unpacks it into <target>, a directory that does not
+# exist yet (or is empty). Nothing else on the host is touched. With <refuse own
+# key> set to 1, a snapshot in which this host's own key is already a validator
+# is refused: a new node must never start with a key that is validating.
+install_snapshot() {
+  local target=$1 refuse_own_key=$2 name size unpacked limit
+  [[ -n "${MANIFEST_FILE:-}" ]] || die "internal error: a snapshot is to be installed but no manifest was fetched"
+  name=$(manifest_field "${MANIFEST_FILE}" archive.name) || die "the manifest is not valid"
+  size=$(manifest_field "${MANIFEST_FILE}" archive.size) || die "the manifest is not valid"
+  unpacked=$(manifest_field "${MANIFEST_FILE}" archive.uncompressedSize) || die "the manifest is not valid"
+  [[ "${name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz$ ]] || die "the manifest names an archive '${name}' that is not a plain file name"
+  local archive="${DOWNLOAD_DIR}/${name}"
+  as_service rm -f "${archive}"
+  check_snapshot_size "${size}" "${unpacked}"
+  limit=$((MAX_SNAPSHOT_GIB * 1073741824))
+  log "downloading ${name} (${size} bytes)"
+  fetch_file "${SNAPSHOT_URL%/}/${name}" "${archive}" "${size}"
+  local age=() pins=() own=()
+  if [[ -n "${MAX_SNAPSHOT_AGE}" ]]; then age=(--max-age "${MAX_SNAPSHOT_AGE}"); fi
+  if [[ -n "${TIP_HASH}" ]]; then pins+=(--tip-hash "${TIP_HASH}"); fi
+  if [[ -n "${STATE_ROOT}" ]]; then pins+=(--state-root "${STATE_ROOT}"); fi
+  if [[ "${refuse_own_key}" == "1" ]]; then own=(--reject-validator "${VALIDATOR_ADDRESS}"); fi
+  log "verifying the archive and unpacking it into ${target}"
+  as_service "${INSTALL_ROOT}/bin/nhb-snapshot" verify --manifest "${MANIFEST_FILE}" --archive "${archive}" \
+    --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}" --max-bytes "${limit}" \
+    ${pins[@]+"${pins[@]}"} ${age[@]+"${age[@]}"} \
+    || { as_service rm -f "${archive}"; die "the snapshot did not verify; nothing was installed"; }
+  as_service "${INSTALL_ROOT}/bin/nhb-snapshot" extract --manifest "${MANIFEST_FILE}" --archive "${archive}" \
+    --target "${target}" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}" --max-bytes "${limit}" \
+    ${own[@]+"${own[@]}"} ${pins[@]+"${pins[@]}"} ${age[@]+"${age[@]}"} \
+    || { as_service rm -f "${archive}"; die "the snapshot could not be installed; nothing was changed (${DATA_DIR} and nhb.service are as they were)"; }
+  as_service rm -f "${archive}"
+  # The service user made ${target} and owns it: it sets its mode itself. (Root
+  # would follow a link the service user put there in the meantime.)
+  as_service chmod 0700 -- "${target}" || die "could not close ${target} to other users"
+  SNAPSHOT_HEIGHT=$(manifest_field "${MANIFEST_FILE}" height) || die "the manifest is not valid"
+  remember_snapshot_height "${SNAPSHOT_HEIGHT}"
+}
+
+# remember_snapshot_height records that a snapshot of this height was installed and
+# that the node has not been seen past it yet. An interrupted run would otherwise
+# forget it, and the next run, which fetches no manifest for a node that has data,
+# would not require the node to get past the snapshot's height: the one thing a
+# snapshot that is not part of the network's chain cannot do.
+remember_snapshot_height() {
+  printf '%s\n' "$1" | as_service tee "${SNAPSHOT_MARKER}" >/dev/null || die "could not record the snapshot height in ${SNAPSHOT_MARKER}"
+}
+
+# forget_snapshot_height is for a run that has seen the node past that height.
+forget_snapshot_height() { as_service rm -f -- "${SNAPSHOT_MARKER}"; }
+
+# recover_snapshot_height sets SNAPSHOT_HEIGHT from the record of an earlier run
+# that installed a snapshot and did not finish waiting for the node, and does
+# nothing when there is none. A record that does not hold a height stops the run.
+recover_snapshot_height() {
+  local raw
+  as_service test -e "${SNAPSHOT_MARKER}" || return 0
+  raw=$(as_service cat -- "${SNAPSHOT_MARKER}" 2>/dev/null) || die "could not read ${SNAPSHOT_MARKER}, which an earlier run left: it says that run installed a snapshot and did not see the node get past its height. Remove it only if you know that node is at the network tip, or run again with --reset-state"
+  raw=${raw//[[:space:]]/}
+  [[ "${raw}" =~ ^[0-9]{1,18}$ ]] || die "${SNAPSHOT_MARKER} does not hold a block height, so the script cannot tell which height the node has to get past. Remove it only if you know that node is at the network tip, or run again with --reset-state"
+  SNAPSHOT_HEIGHT=${raw}
+  log "an earlier run installed a snapshot at height ${raw} and did not finish waiting for the node: it has to get past that height this time"
+}
+
+# ---------------------------------------------------------------------------
+# Refusals
+# ---------------------------------------------------------------------------
+
+# refuse_second_node stops the script when another nhb process, other than the
+# one nhb.service manages, is running on this host: two nodes started from one
+# key double-sign.
+refuse_second_node() {
+  local main_pid pid args other=()
+  main_pid=$(systemctl show -p MainPID --value nhb.service 2>/dev/null || echo 0)
+  while read -r pid args; do
+    [[ -n "${pid}" ]] || continue
+    case "$(basename "${args%% *}")" in
+      nhb|consensusd) ;;
+      *) continue ;;
+    esac
+    [[ "${pid}" == "${main_pid}" ]] && continue
+    other+=("${pid}: ${args}")
+  done < <(ps -eo pid=,args= 2>/dev/null || true)
+  if [[ ${#other[@]} -gt 0 ]]; then
+    echo "[ERROR] another node process is running on this host, outside nhb.service:" >&2
+    printf '        %s\n' "${other[@]}" >&2
+    echo "        Two nodes must never run with one validator key. Stop it first." >&2
+    return 1
+  fi
+  return 0
+}
+
+# physical_dir <dir> prints the directory with every link in its path resolved, and
+# nothing when it is not there. (One function for the question, so that a test can
+# answer it for a link it has no privilege to make.)
+physical_dir() { ( cd "$1" 2>/dev/null && pwd -P ); }
+
+# refuse_service_owned_checkout stops the script when it is running from inside a
+# directory that belongs to the service user: INSTALL_ROOT (the copy an earlier run
+# made, run again from there) or the state or config directory. As root it would
+# then build, install a systemd unit from and run files that user can rewrite, this
+# script included. It runs from a checkout of the operator's own, which it copies to
+# INSTALL_ROOT.
+refuse_service_owned_checkout() {
+  local here place resolved
+  here=$(physical_dir "${REPO_ROOT}") || here=''
+  [[ -n "${here}" ]] || { echo "[ERROR] cannot read ${REPO_ROOT}" >&2; return 1; }
+  for place in "${INSTALL_ROOT}" "${STATE_DIR}" "${CONFIG_DIR}"; do
+    resolved=$(physical_dir "${place}") || resolved=''
+    [[ -n "${resolved}" ]] || resolved=${place}
+    case "${here}/" in
+      "${resolved}/"*|"${place}/"*)
+        echo "[ERROR] this script is running from ${here}, which is inside ${place}." >&2
+        echo "        ${place} belongs to the service user (${SERVICE_USER}), who can rewrite anything in it, this script" >&2
+        echo "        included: run as root it would build, install a systemd unit from and run what that user chose." >&2
+        echo "        Run it from a checkout of your own outside ${INSTALL_ROOT}, ${STATE_DIR} and ${CONFIG_DIR}" >&2
+        echo "        (git clone into your home directory); it copies that checkout to ${INSTALL_ROOT}." >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
+# refuse_foreign_key stops the script when the key file was not made by this
+# script and nothing on this host shows it belongs to this node.
+refuse_foreign_key() {
+  local marker="${CONFIG_DIR}/.validator.key.created-here"
+  # As root: /etc/nhbchain belongs to the service user and is closed to the
+  # user who runs this script, who would otherwise see no key there.
+  if ! as_root test -f "${VALIDATOR_KEY_FILE}"; then return 0; fi
+  if as_root test -f "${marker}"; then return 0; fi
+  if data_dir_has_data; then return 0; fi   # a node of this host already used it
+  if [[ "${ALLOW_EXISTING_KEY}" == "1" ]]; then
+    warn "using the validator key that was already at ${VALIDATOR_KEY_FILE} because --allow-existing-key was given"
+    return 0
+  fi
+  echo "[ERROR] ${VALIDATOR_KEY_FILE} exists but this script did not create it and this host has no node data." >&2
+  echo "        A key that was made or used elsewhere must not start a second node: two nodes with one key" >&2
+  echo "        double-sign and are slashed. Remove the file to have a fresh key made here, or pass" >&2
+  echo "        --allow-existing-key if you are sure that key runs nowhere else." >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+# render_config <template> <output>: the template with only this node's own
+# values changed. It stops when the template lacks one of the lines it changes.
+render_config() {
+  local template=$1 out=$2
+  NHB_R_LISTEN="${LISTEN_ADDR}" NHB_R_RPC="${RPC_ADDR}" NHB_R_DATA="${DATA_DIR}" \
+  NHB_R_GENESIS="${INSTALL_ROOT}/${GENESIS_FILE_REL}" NHB_R_NETID="${NETWORK_ID}" \
+  NHB_R_EXTERNAL="${EXTERNAL_ADDRESS_HOSTPORT}" NHB_R_BOOT="${BOOTNODE}" \
+  perl -0777 -e '
+    use strict; use warnings;
+    my $c = <STDIN>;
+    sub top { my ($k, $v) = @_; $c =~ s/^\Q$k\E = .*$/$k = $v/m or die "the config template has no line for $k\n"; }
+    sub p2p { my ($k, $v) = @_; $c =~ s/^  \Q$k\E = .*$/  $k = $v/m or die "the config template has no [p2p] line for $k\n"; }
+    top("ListenAddress", qq{"$ENV{NHB_R_LISTEN}"});
+    top("RPCAddress", qq{"$ENV{NHB_R_RPC}"});
+    top("DataDir", qq{"$ENV{NHB_R_DATA}"});
+    top("GenesisFile", qq{"$ENV{NHB_R_GENESIS}"});
+    top("ValidatorKeystorePath", q{""});
+    top("ValidatorKMSEnv", q{"NHB_VALIDATOR_RAW_KEY"});
+    top("NetworkName", q{"nhb-mainnet-validator"});
+    p2p("NetworkId", $ENV{NHB_R_NETID});
+    p2p("Bootnodes", qq{["$ENV{NHB_R_BOOT}"]});
+    p2p("PersistentPeers", qq{["$ENV{NHB_R_BOOT}"]});
+    p2p("ExternalAddress", qq{"$ENV{NHB_R_EXTERNAL}"}) if length $ENV{NHB_R_EXTERNAL};
+    print $c;
+  ' < "${template}" > "${out}" || return 1
+}
+
+# check_config <config>: the values consensus depends on are the network's. It is
+# what decides whether the config is installed, so it runs the tool root built (see
+# TOOL_DIR), never the copy in the service user's tree.
+check_config() {
+  "${TOOL_DIR}/nhb-snapshot" check-config --config "$1" --genesis "${INSTALL_ROOT}/${GENESIS_FILE_REL}"
+}
+
+install_config() {
+  local tmp
+  tmp=$(mktemp)
+  render_config "${INSTALL_ROOT}/config.toml" "${tmp}" || { rm -f "${tmp}"; die "could not render the node config from ${INSTALL_ROOT}/config.toml"; }
+  if ! check_config "${tmp}"; then rm -f "${tmp}"; die "the node config does not carry the values consensus depends on"; fi
+  if [[ -f "${CONFIG_DIR}/config.toml" ]] && cmp -s "${tmp}" "${CONFIG_DIR}/config.toml"; then
+    CONFIG_CHANGED=0
+  else
+    as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp}" "${CONFIG_DIR}/config.toml" || { rm -f "${tmp}"; die "could not install ${CONFIG_DIR}/config.toml"; }
+    CONFIG_CHANGED=1
+  fi
+  rm -f "${tmp}"
+}
+
+# write_env keeps the RPC secret of an earlier run, so running the script again
+# does not change what the node reads.
+write_env() {
+  local secret key_hex tmp
+  # The secret is taken from the file an earlier run wrote, in a directory the
+  # service user owns: a link put there would make root read another file.
+  if as_root test -L "${CONFIG_DIR}/node.env"; then
+    die "${CONFIG_DIR}/node.env is a symbolic link, not the environment file this script wrote: refusing to read the RPC secret from it or to install over it. Remove it (and, if you did not make it, find out who did)."
+  fi
+  secret=$(as_root grep '^NHB_RPC_JWT_SECRET=' "${CONFIG_DIR}/node.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  if [[ -z "${secret}" ]]; then
+    secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  fi
+  JWT_SECRET="${secret}"
+  # Read as the service user, who owns the key: root would read whatever a link in
+  # its place led to, and the node (which reads node.env) would then hold it.
+  key_hex=$(as_service od -An -tx1 "${VALIDATOR_KEY_FILE}" | tr -d ' \n')
+  tmp=$(mktemp)
+  chmod 600 "${tmp}"
+  {
+    echo "NHB_ENV=prod"
+    echo "NHB_RPC_JWT_SECRET=${JWT_SECRET}"
+    echo "NHB_VALIDATOR_RAW_KEY=${key_hex}"
+  } > "${tmp}"
+  unset key_hex
+  if as_root test -f "${CONFIG_DIR}/node.env" && as_root cmp -s "${tmp}" "${CONFIG_DIR}/node.env"; then
+    ENV_CHANGED=0
+  else
+    # The file holds the validator key: a failed install must not leave it behind.
+    as_root install -m 0600 -o root -g root "${tmp}" "${CONFIG_DIR}/node.env" || { rm -f "${tmp}"; die "could not install ${CONFIG_DIR}/node.env"; }
+    ENV_CHANGED=1
+  fi
+  rm -f "${tmp}"
+}
+
+# ---------------------------------------------------------------------------
+# Data directory
+# ---------------------------------------------------------------------------
+
+service_active() { systemctl is-active --quiet nhb.service 2>/dev/null; }
+
+# data_dir_has_data asks as root: the data directory belongs to the service user
+# and is closed to the user who runs this script, which would otherwise see a
+# directory full of chain data as an empty one.
+data_dir_has_data() { as_root test -d "${DATA_DIR}" && [[ -n "$(as_root ls -A "${DATA_DIR}" 2>/dev/null)" ]]; }
+
+# snapshot_needed succeeds when this run will install a snapshot: the data
+# directory holds nothing, or --reset-state asked for a fresh one. A node that
+# already holds this network's chain needs none, so nothing the snapshot host
+# publishes, or whether it answers at all, can matter to that run.
+snapshot_needed() { [[ "${RESET_STATE}" == "1" ]] || ! data_dir_has_data; }
+
+# restore_identity <from> <to> copies the files that make the node the node it
+# was, its p2p identity and what it has voted, from the data directory <from>
+# into <to>.
+#
+# Both directories belong to the service user, who can put anything in them, so
+# the copy is made AS that user: root would follow a link the user had planted
+# (a "bft_sign_state.json" that points at a file only root can read) and hand
+# the target's content to the node in its own data directory. A file that is a
+# link is refused, not followed, and so is a p2p directory that is one, in
+# either place.
+restore_identity() {
+  local from=$1 to=$2 f
+  for f in p2p/node_key.json bft_sign_state.json polc_lock.json; do
+    if [[ "${f}" == p2p/* ]]; then
+      if as_service test -L "${from}/p2p" || as_service test -L "${to}/p2p"; then
+        echo "[ERROR] p2p in ${from} or in ${to} is a symbolic link, not the directory the node wrote: refusing to copy through it." >&2
+        return 1
+      fi
+    fi
+    if as_service test -L "${from}/${f}"; then
+      echo "[ERROR] ${from}/${f} is a symbolic link, not the file the node wrote: refusing to copy it (the node's identity and vote state are regular files)." >&2
+      return 1
+    fi
+    if as_service test -f "${from}/${f}"; then
+      as_service mkdir -p -- "$(dirname "${to}/${f}")" || return 1
+      as_service cp -p -P -- "${from}/${f}" "${to}/${f}" || return 1
+      log "kept ${f} from the previous data directory"
+    fi
+  done
+}
+
+# replace_data_dir puts a fresh snapshot in place of this node's own data
+# directory. The snapshot is downloaded, verified and unpacked next to the old
+# directory first, while the node runs on the old one, so a snapshot that does
+# not check out changes nothing. Only then is the node stopped, what it has
+# voted copied over (it can no longer change), the old directory moved aside
+# (it is never deleted) and the new one moved into its place.
+#
+# It is the node's own data directory, so the node's own key may well be a
+# validator in the snapshot (a registered validator is one): the check that
+# refuses a new node's key is not made here.
+replace_data_dir() {
+  local stamp staged aside stopped=0 why='' rc=0
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  staged="${DATA_DIR}.new-${stamp}"
+  aside="${DATA_DIR}.replaced-${stamp}"
+  install_snapshot "${staged}" 0
+  # The node is stopped whatever state it is in. One whose data directory is
+  # broken is often not "active" but restarting every few seconds
+  # (Restart=on-failure), and a restart in the middle of the swap would start it
+  # on whatever the data directory holds at that moment. (Exit status 5 is a unit
+  # systemd does not know: there is no service to stop.)
+  log "stopping nhb.service"
+  as_root systemctl stop nhb.service || rc=$?
+  if [[ "${rc}" == "0" ]]; then
+    stopped=1
+  elif [[ "${rc}" != "5" ]]; then
+    die "could not stop nhb.service: ${DATA_DIR} is as it was, and the unpacked snapshot is at ${staged}"
+  fi
+  if ! restore_identity "${DATA_DIR}" "${staged}"; then
+    why="could not copy the node's identity and vote state into the new data directory"
+  elif ! as_root mv "${DATA_DIR}" "${aside}"; then
+    why="could not move ${DATA_DIR} aside"
+  elif ! as_root mv "${staged}" "${DATA_DIR}"; then
+    if as_root mv "${aside}" "${DATA_DIR}"; then
+      why="could not move the new data directory into place (the old one was put back)"
+    else
+      echo "[ERROR] could not move the new data directory into place, and could not put the old one back." >&2
+      echo "        The old data directory is at ${aside} and the new one at ${staged}." >&2
+      echo "        Put the old one back with: sudo mv ${aside} ${DATA_DIR}" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "${why}" ]]; then
+    echo "[ERROR] ${why}." >&2
+    echo "        ${DATA_DIR} is as it was, and the unpacked snapshot is at ${staged}." >&2
+    if [[ "${stopped}" == "1" ]]; then echo "        nhb.service is stopped; start it again with: sudo systemctl start nhb.service" >&2; fi
+    exit 1
+  fi
+  log "the old data directory is at ${aside}; delete it yourself when you no longer need it"
+}
+
+# prepare_data_dir leaves DATA_DIR holding this network's chain database, and
+# never overwrites one that is there except when --reset-state says to.
+prepare_data_dir() {
+  if [[ "${RESET_STATE}" == "1" ]]; then
+    if data_dir_has_data; then
+      replace_data_dir
+      return 0
+    fi
+    log "--reset-state: there is no data to move aside"
+  fi
+  if data_dir_has_data; then
+    if service_active; then
+      log "the data directory already holds data and nhb.service is running; not installing a snapshot"
+      return 0
+    fi
+    local info
+    info=$(as_service "${INSTALL_ROOT}/bin/nhb-snapshot" info --data-dir "${DATA_DIR}" --format json --header-window 1 --no-state-check) \
+      || die "${DATA_DIR} holds data that does not open as a chain database; move it aside or run with --reset-state"
+    if ! grep -q "\"chainId\": \"${NETWORK_ID_DEFAULT}\"" <<< "${info}" || ! grep -q "\"genesisHash\": \"${GENESIS_HASH_DEFAULT}\"" <<< "${info}"; then
+      die "${DATA_DIR} holds another chain than the pinned network ${NETWORK_ID_DEFAULT}; move it aside or run with --reset-state"
+    fi
+    log "the data directory already holds this network's chain; not installing a snapshot"
+    return 0
+  fi
+  # A new node: its key must not already be validating.
+  install_snapshot "${DATA_DIR}" 1
+}
+
+# ---------------------------------------------------------------------------
+# Installation
+# ---------------------------------------------------------------------------
+
+# The Go toolchain this script installs when the host has none, and the sha256 of
+# that exact tarball as go.dev publishes it (https://go.dev/dl/, and
+# https://dl.google.com/go/go1.24.3.linux-amd64.tar.gz.sha256). A download that
+# does not match is never unpacked, and it is unpacked as root. Change the two
+# together.
+GO_VERSION='1.24.3'
+GO_TARBALL_SHA256='3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8'
+
+# verify_go_tarball <file> succeeds only for the tarball GO_TARBALL_SHA256 names.
+verify_go_tarball() {
+  local file=$1 got
+  got=$(sha256sum "${file}" | cut -d' ' -f1)
+  if [[ "${got}" != "${GO_TARBALL_SHA256}" ]]; then
+    echo "[ERROR] the Go ${GO_VERSION} tarball has sha256 ${got}, not the ${GO_TARBALL_SHA256} go.dev publishes: it is not being unpacked." >&2
+    echo "        A damaged or replaced download. Run this script again; if it happens again, do not go on." >&2
+    return 1
+  fi
+}
+
+# install_go_toolchain downloads Go, checks it against the pinned sha256, and only
+# then unpacks it into /usr/local/go.
+install_go_toolchain() {
+  local go_tarball="go${GO_VERSION}.linux-amd64.tar.gz" tmp_go
+  tmp_go=$(mktemp -d)
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 30 --max-time 1800 \
+    --speed-limit "${FETCH_SPEED_LIMIT}" --speed-time "${FETCH_SPEED_TIME}" --max-filesize 209715200 \
+    "https://go.dev/dl/${go_tarball}" -o "${tmp_go}/${go_tarball}"; then
+    rm -rf "${tmp_go}"
+    die "could not download https://go.dev/dl/${go_tarball}"
+  fi
+  if ! verify_go_tarball "${tmp_go}/${go_tarball}"; then
+    rm -rf "${tmp_go}"
+    exit 1
+  fi
+  as_root rm -rf /usr/local/go
+  as_root tar -C /usr/local -xzf "${tmp_go}/${go_tarball}"
+  rm -rf "${tmp_go}"
+}
+
+install_prerequisites() {
+  # "Open a fresh EC2 Ubuntu server, git pull, run this script" is the whole
+  # promise -- a stock Ubuntu AMI has neither Go, rsync, nor perl installed, so
+  # failing here with "command not found" instead of just installing them
+  # would break that promise on literally the first run.
+  local apt_missing=()
+  command -v rsync >/dev/null 2>&1 || apt_missing+=(rsync)
+  command -v perl >/dev/null 2>&1 || apt_missing+=(perl)
+  command -v curl >/dev/null 2>&1 || apt_missing+=(curl)
+  if [[ ${#apt_missing[@]} -gt 0 ]]; then
+    log "installing missing packages: ${apt_missing[*]}"
+    as_root apt-get update -y
+    as_root apt-get install -y "${apt_missing[@]}"
+  fi
+
+  if [[ ! -x /usr/local/go/bin/go ]]; then
+    log "Go not found at /usr/local/go/bin/go -- installing Go ${GO_VERSION}"
+    install_go_toolchain
+  fi
+
+  require_cmd rsync
+  require_cmd perl
+  require_cmd /usr/local/go/bin/go
+
+  # Compiling this dependency tree needs real memory: a 908MB host with no
+  # swap gets the compiler killed. Add a swap file when there is little RAM
+  # and no swap, and leave it in place for the running node.
+  if [[ ! -f /swapfile ]] && [[ "$(swapon --show=SIZE --noheadings 2>/dev/null | wc -l)" -eq 0 ]]; then
+    local total_mem_kb
+    total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+    if [[ -n "${total_mem_kb}" ]] && [[ "${total_mem_kb}" -lt 4194304 ]]; then
+      log "low memory ($((total_mem_kb / 1024))MB) and no swap configured -- adding a 4G swap file"
+      as_root fallocate -l 4G /swapfile
+      as_root chmod 600 /swapfile
+      as_root mkswap /swapfile
+      as_root swapon /swapfile
+      grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | as_root tee -a /etc/fstab >/dev/null
+    fi
+  fi
+}
+
+install_tree_and_build() {
+  as_root useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
+  as_root mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}"
+  # The service runs as ${SERVICE_USER}: the config directory must be its own,
+  # or it cannot even traverse into it to read config.toml.
+  as_root chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
+  as_root chmod 700 "${CONFIG_DIR}"
+
+  # No build cache is excluded from the copy: an earlier version of this script
+  # built inside INSTALL_ROOT, and what is left of that is the service user's to
+  # write and nobody's to use. It is removed here.
+  as_root rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
+
+  # A node started from a modified or different genesis file writes it into its
+  # database and can never peer with the live network, so stop before anything
+  # starts if the file differs from the one the live network was started from.
+  if ! echo "${GENESIS_SHA256}  ${INSTALL_ROOT}/${GENESIS_FILE_REL}" | sha256sum -c --status; then
+    die "${INSTALL_ROOT}/${GENESIS_FILE_REL} is not the live network's genesis file (expected sha256 ${GENESIS_SHA256}). Restore it from the repository."
+  fi
+
+  log "building nhb, nhb-cli and nhb-snapshot"
+  # Root builds from the checkout this script runs from, not from the copy in
+  # INSTALL_ROOT (which the service user can rewrite while a build that takes
+  # minutes reads it), and keeps everything the build reads and writes, and what it
+  # produces, in BUILD_DIR, where only root can write (see there). Go's module
+  # cache for this dependency tree needs well over a gigabyte, and /tmp is a small
+  # RAM-backed tmpfs on many hosts: BUILD_DIR is on the real disk.
+  local gocache="${BUILD_DIR}/go-cache" gopath="${BUILD_DIR}/go-path" gotmp="${BUILD_DIR}/go-tmp"
+  as_root install -d -m 0755 -o root -g root "${BUILD_DIR}" "${TOOL_DIR}"
+  as_root install -d -m 0700 -o root -g root "${gocache}" "${gopath}" "${gotmp}"
+  local pkg
+  for pkg in nhb nhb-cli nhb-snapshot; do
+    ( cd "${REPO_ROOT}" && as_root env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${gocache}" GOPATH="${gopath}" GOTMPDIR="${gotmp}" TMPDIR="${gotmp}" HOME=/root \
+      /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${TOOL_DIR}/${pkg}" "./cmd/${pkg}" ) \
+      || die "building ${pkg} failed"
+  done
+  # The copies the service user runs: nhb.service starts bin/nhb, and the commands
+  # the operator is told to run as that user (sudo -u nhb .../bin/nhb-cli ...) and
+  # the steps below that this script runs as it (as_service) use the other two.
+  as_root mkdir -p "${INSTALL_ROOT}/bin"
+  for pkg in nhb nhb-cli nhb-snapshot; do
+    as_root install -m 0755 "${TOOL_DIR}/${pkg}" "${INSTALL_ROOT}/bin/${pkg}" || die "could not install ${pkg} into ${INSTALL_ROOT}/bin"
+  done
+  as_root chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
+  as_root chown "${SERVICE_USER}:${SERVICE_USER}" "${STATE_DIR}"
+}
+
+# ensure_key makes the validator key on this machine the first time and reuses
+# it afterwards. Never pass a key in: it would end up in shell history.
+ensure_key() {
+  # The key file is in a directory the service user owns, so that user can replace
+  # it by a link to any file. Root takes ownership of nothing a link points at,
+  # and reads none of it: a link is refused; the ownership is set on the name, not
+  # on what it leads to (chown -h), and the mode by the service user itself.
+  if as_root test -L "${VALIDATOR_KEY_FILE}"; then
+    die "${VALIDATOR_KEY_FILE} is a symbolic link, not a key file: refusing to go on. Remove it (and, if you did not make it, find out who did)."
+  fi
+  if ! as_root test -f "${VALIDATOR_KEY_FILE}"; then
+    log "generating a fresh validator key on this machine"
+    local tmp_key_dir
+    tmp_key_dir=$(mktemp -d)
+    # Run by this script's own user, who then gives the key to root's install: with
+    # the tool root built, never the copy the service user can replace (it would
+    # write the key that then becomes the validator's).
+    ( cd "${tmp_key_dir}" && "${TOOL_DIR}/nhb-cli" generate-key > "${tmp_key_dir}/generate-key.out" )
+    as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp_key_dir}/wallet.key" "${VALIDATOR_KEY_FILE}"
+    # install replaces what is at the name (a link included), where touch would
+    # write to what a link at that name leads to.
+    as_root install -m 0600 -o root -g root /dev/null "${CONFIG_DIR}/.validator.key.created-here"
+    rm -rf "${tmp_key_dir}"
+  else
+    log "reusing existing validator key at ${VALIDATOR_KEY_FILE}"
+  fi
+  as_root chown -h "${SERVICE_USER}:${SERVICE_USER}" "${VALIDATOR_KEY_FILE}"
+  as_service chmod 600 "${VALIDATOR_KEY_FILE}"
+  # Deriving the address from the key file needs to read it: only the CLI, as
+  # the service user, does that. The raw key is never printed.
+  VALIDATOR_ADDRESS=$(as_service "${INSTALL_ROOT}/bin/nhb-cli" address "${VALIDATOR_KEY_FILE}" 2>/dev/null | grep -o 'nhb1[a-z0-9]*' | head -1 || true)
+  [[ -n "${VALIDATOR_ADDRESS}" ]] || die "could not determine the validator address from ${VALIDATOR_KEY_FILE}"
+}
+
+detect_external_address() {
   if [[ -z "${EXTERNAL_ADDRESS}" ]]; then
-    EXTERNAL_ADDRESS=$(curl -fsS -m 3 https://ifconfig.me 2>/dev/null || true)
+    log "--external-address not provided -- attempting to auto-detect this server's public IP"
+    # Try the EC2 instance metadata service (IMDSv2) first, then a public echo
+    # service. Best-effort: peers that only ever reach this node inbound will
+    # not get a reconnectable address for it if neither answers.
+    local token
+    token=$(curl -fsS -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
+      -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)
+    if [[ -n "${token}" ]]; then
+      EXTERNAL_ADDRESS=$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: ${token}" \
+        "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+    fi
+    if [[ -z "${EXTERNAL_ADDRESS}" ]]; then
+      EXTERNAL_ADDRESS=$(curl -fsS -m 3 https://ifconfig.me 2>/dev/null || true)
+    fi
+    if [[ -n "${EXTERNAL_ADDRESS}" ]]; then
+      log "auto-detected public IP: ${EXTERNAL_ADDRESS}"
+    else
+      warn "could not auto-detect a public IP -- peers that only ever connect to this node inbound will not be able to reconnect to it later. Re-run with --external-address <ip> to fix this."
+    fi
   fi
   if [[ -n "${EXTERNAL_ADDRESS}" ]]; then
-    echo "[INFO] auto-detected public IP: ${EXTERNAL_ADDRESS}"
+    [[ "${EXTERNAL_ADDRESS}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "the external address '${EXTERNAL_ADDRESS}' is not an IP or host:port"
+    # ExternalAddress is host:port, like ListenAddress.
+    case "${EXTERNAL_ADDRESS}" in
+      *:*) EXTERNAL_ADDRESS_HOSTPORT="${EXTERNAL_ADDRESS}" ;;
+      *) EXTERNAL_ADDRESS_HOSTPORT="${EXTERNAL_ADDRESS}:${LISTEN_ADDR##*:}" ;;
+    esac
+  fi
+}
+
+install_service() {
+  # The unit runs as root's systemd, so it comes from the checkout this script runs
+  # from: the copy in INSTALL_ROOT is the service user's, and by the time this step
+  # runs (after the download, the verification and the key) it could have been
+  # rewritten (User=root, ExecStartPre=...) and would then be started as root.
+  local unit="${REPO_ROOT}/deploy/systemd/nhb.service"
+  UNIT_CHANGED=1
+  if [[ -f /etc/systemd/system/nhb.service ]] && cmp -s "${unit}" /etc/systemd/system/nhb.service; then UNIT_CHANGED=0; fi
+  if [[ "${UNIT_CHANGED}" == "1" ]]; then
+    as_root install -m 0644 "${unit}" /etc/systemd/system/nhb.service
+    as_root systemctl daemon-reload
+  fi
+  as_root systemctl enable nhb.service
+  start_or_leave_running "${unit}"
+}
+
+# start_or_leave_running (re)starts nhb.service unless it is running with the
+# binary, config, environment and unit that were last started. What was last
+# started is a fingerprint kept in the state directory, which belongs to the
+# service user: it is read and written as that user, never by root, who would
+# follow a link put in its place.
+start_or_leave_running() {
+  local unit=$1 fingerprint_file="${STATE_DIR}/.deploy-fingerprint" now old
+  now=$( { sha256sum "${INSTALL_ROOT}/bin/nhb"; as_root cat "${CONFIG_DIR}/config.toml"; as_root cat "${CONFIG_DIR}/node.env"; cat "${unit}"; } | sha256sum | cut -d' ' -f1)
+  old=$(as_service head -c 128 -- "${fingerprint_file}" 2>/dev/null | tr -d '[:space:]' || true)
+  if service_active && [[ "${old}" == "${now}" ]]; then
+    log "nhb.service is running with the current binary and configuration; leaving it as it is"
   else
-    echo "[WARN] could not auto-detect a public IP -- peers that only ever connect to this node inbound will not be able to reconnect to it later. Re-run with --external-address <ip> to fix this."
+    log "starting nhb.service"
+    as_root systemctl restart nhb.service
+    printf '%s\n' "${now}" | as_service tee "${fingerprint_file}" >/dev/null
   fi
-fi
+}
 
-if [[ -n "${EXTERNAL_ADDRESS}" ]]; then
-  # ExternalAddress must be host:port, matching ListenAddress's format (see
-  # config/config.go's P2PSection.ExternalAddress doc comment) -- combine the
-  # detected/provided host with the P2P port from --listen-addr, unless the
-  # caller already passed a host:port pair via --external-address themselves.
-  case "${EXTERNAL_ADDRESS}" in
-    *:*) EXTERNAL_ADDRESS_HOSTPORT="${EXTERNAL_ADDRESS}" ;;
-    *) EXTERNAL_ADDRESS_HOSTPORT="${EXTERNAL_ADDRESS}:${LISTEN_ADDR##*:}" ;;
-  esac
-fi
-
-sudo cp "${REPO_ROOT}/config.toml" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^ListenAddress = \".*\"#ListenAddress = \"${LISTEN_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^RPCAddress = \".*\"#RPCAddress = \"${RPC_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^DataDir = \".*\"#DataDir = \"${STATE_DIR}/nhb-data\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^GenesisFile = \".*\"#GenesisFile = \"${INSTALL_ROOT}/${GENESIS_FILE_REL}\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^ValidatorKeystorePath = \".*\"#ValidatorKeystorePath = \"\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^ValidatorKMSEnv = \".*\"#ValidatorKMSEnv = \"NHB_VALIDATOR_RAW_KEY\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^NetworkName = \".*\"#NetworkName = \"nhb-mainnet-validator\"#;" "${CONFIG_DIR}/config.toml"
-sudo perl -0pi -e "s#(?m)^  NetworkId = .*#  NetworkId = ${NETWORK_ID}#;" "${CONFIG_DIR}/config.toml"
-if [[ -n "${EXTERNAL_ADDRESS_HOSTPORT}" ]]; then
-  sudo perl -0pi -e "s#(?m)^  ExternalAddress = \".*\"#  ExternalAddress = \"${EXTERNAL_ADDRESS_HOSTPORT}\"#;" "${CONFIG_DIR}/config.toml"
-fi
-# BOOTNODE is expected to be plain host:port (see the note above its
-# default definition -- an enode://nodeid@host:port URI was tried here
-# once and doesn't work with this codebase's dialer). Still splice it in
-# via $ENV{} rather than string-interpolating it into the Perl program
-# text: a custom --bootnode value is user-supplied, and any value
-# containing "@" would hit Perl's array-interpolation footgun (confirmed
-# live: an unescaped "@52" in replacement text silently vanishes, and
-# escaping it beforehand turned out to be shell/sed-dialect-dependent
-# and broke differently on the real target than in local testing).
-# $ENV{} is read as data at runtime and never parsed as program text, so
-# it's correct regardless of what characters the value contains.
-sudo env BOOTNODE="${BOOTNODE}" perl -0pi -e '
-  my $bn = $ENV{"BOOTNODE"};
-  s/^  Bootnodes = \[.*\]$/  Bootnodes = ["$bn"]/m;
-  s/^  PersistentPeers = \[.*\]$/  PersistentPeers = ["$bn"]/m;
-' "${CONFIG_DIR}/config.toml"
-
-sudo chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}" "${STATE_DIR}"
-
-if [[ "${RESET_STATE}" == "1" ]]; then
-  echo "[INFO] resetting validator state under ${STATE_DIR}/nhb-data"
-  sudo rm -rf "${STATE_DIR}/nhb-data"
-fi
-
-sudo install -m 0644 "${INSTALL_ROOT}/deploy/systemd/nhb.service" /etc/systemd/system/nhb.service
-sudo systemctl daemon-reload
-sudo systemctl enable nhb.service
-sudo systemctl restart nhb.service
-
-# Confirmed by running this exact script end-to-end: the service can
-# silently crash-loop forever (e.g. a config it can't read) while this
-# script barrels ahead and prints a false "[OK] Validator node started" at
-# the end regardless -- the RPC-wait loop below previously only ran when
-# --beneficiary was given, and even then it just moved on after timing out
-# rather than treating that as a real failure. Always wait for the RPC to
-# actually come up, and stop with clear diagnostics if it never does.
-echo "[INFO] waiting for the node's RPC to come up"
-NODE_HEALTHY=0
-for _ in $(seq 1 30); do
-  # This is a JSON-RPC endpoint: it only accepts POST with a JSON body and
-  # correctly returns 400 to a bare GET, which curl -f treats as failure
-  # regardless of whether the node is healthy. Confirmed live: a real,
-  # already-syncing validator (height 60+, producing blocks) failed this
-  # exact check every time because it only ever sent a bare GET. POST a
-  # trivial, unauthenticated, side-effect-free read instead so the check
-  # reflects whether the node can actually answer requests.
-  if curl -fsS -m 2 "http://${RPC_ADDR}/" \
-      -X POST -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"nhb_getNetworkStats","params":[]}' \
-      >/dev/null 2>&1; then
-    NODE_HEALTHY=1
-    break
+# wait_until_synced waits for the node's RPC (for at most RPC_UP_TIMEOUT_SECS: a
+# service that is not running, or that crash-loops, never answers, and must not
+# hold the script for the whole sync timeout), checks it reports the pinned
+# network, and waits until it is at the network tip: connected to a peer and, when
+# this run installed a snapshot, past that snapshot's height, which a snapshot that
+# is not part of the network's chain can never be. With --tip-rpc the node's newest
+# blocks must also be the ones that node has.
+wait_until_synced() {
+  local args=(wait-synced --rpc "http://${RPC_ADDR}/" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}"
+    --interval "${SYNC_INTERVAL}" --timeout "${SYNC_TIMEOUT_SECS}s" --rpc-timeout "${RPC_UP_TIMEOUT_SECS}s" --stall-timeout 15m --max-lag-blocks "${MAX_LAG_BLOCKS}")
+  if [[ -n "${TIP_RPC}" ]]; then args+=(--tip-rpc "${TIP_RPC}"); fi
+  if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then args+=(--min-height "${SNAPSHOT_HEIGHT}"); fi
+  log "waiting for the node to reach the network tip (this follows its progress; a few minutes to a few hours depending on the snapshot's age)"
+  local rc=0
+  # Its verdict is what lets the registration go ahead: the tool root built, not the
+  # copy the service user (the node) could have replaced by one that always says yes.
+  "${TOOL_DIR}/nhb-snapshot" "${args[@]}" || rc=$?
+  if [[ "${rc}" != "0" ]]; then
+    echo
+    echo "=================================================================="
+    case "${rc}" in
+      3) echo "[ERROR] the node did not reach the network tip within ${SYNC_TIMEOUT_SECS} seconds." ;;
+      4) echo "[ERROR] the node has stopped making progress." ;;
+      5) echo "[ERROR] the node is not on the pinned network (chain id ${NETWORK_ID_DEFAULT})." ;;
+      6) echo "[ERROR] the node's newest blocks are not the ones the --tip-rpc node has: the snapshot it started from is not part of the network's chain." ;;
+      7) echo "[ERROR] the node's RPC did not come up within ${RPC_UP_TIMEOUT_SECS} seconds: nhb.service is not running, or it is crash-looping." ;;
+      *) echo "[ERROR] the node could not be checked (exit ${rc})." ;;
+    esac
+    echo
+    echo "Check what is actually wrong with:"
+    echo "  sudo systemctl status nhb.service"
+    echo "  sudo journalctl -u nhb.service -n 80 --no-pager"
+    if [[ "${rc}" == "7" ]]; then
+      echo "A node that never answers usually cannot read its config (the owner and mode"
+      echo "of ${CONFIG_DIR}), cannot open its data directory, or was killed for lack of"
+      echo "memory: the journal says which. Fix that and run this script again."
+    else
+      echo "A node that is at the tip has a peer and has applied blocks past its snapshot:"
+      echo "check the --bootnode address, and that the snapshot is one of the network's."
+      echo "A snapshot that is too old for the node to catch up is the usual cause of a"
+      echo "stall; fetch a newer one and run this script again with --reset-state."
+    fi
+    echo "=================================================================="
+    exit 1
   fi
-  sleep 2
-done
-
-if [[ "${NODE_HEALTHY}" != "1" ]]; then
-  echo
-  echo "=================================================================="
-  echo "[ERROR] nhb.service did not come up after 60 seconds."
-  echo
-  echo "Check what's actually wrong with:"
-  echo "  sudo systemctl status nhb.service"
-  echo "  sudo journalctl -u nhb.service -n 50 --no-pager"
-  echo "=================================================================="
-  exit 1
-fi
-
-# A node started from any other genesis has a different chain id and can never
-# peer with the live network, so confirm the identity the running node reports
-# before doing anything else. net_info is public and has no side effects.
-NET_INFO=$(curl -fsS -m 5 "http://${RPC_ADDR}/" \
-  -X POST -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"net_info","params":[]}' 2>/dev/null || true)
-NODE_CHAIN_ID=$(printf '%s' "${NET_INFO}" | grep -o '"chainId":[0-9]*' | head -1 | cut -d: -f2 || true)
-if [[ "${NODE_CHAIN_ID}" != "${NETWORK_ID}" ]]; then
-  echo
-  echo "=================================================================="
-  echo "[ERROR] this node reports chain id '${NODE_CHAIN_ID:-unknown}', expected ${NETWORK_ID}."
-  echo "It was not started from the live network's genesis, so it cannot join that network."
-  echo "  Genesis file: ${INSTALL_ROOT}/${GENESIS_FILE_REL}"
-  echo "  If this host holds state from another chain, run this script again with --reset-state."
-  echo "=================================================================="
-  exit 1
-fi
-echo "[INFO] node reports chain id ${NODE_CHAIN_ID}"
+  # The node has been seen at the network tip, past the snapshot's height: what a
+  # snapshot has to prove is proven, and a later run need not prove it again.
+  forget_snapshot_height
+}
 
 # --- begin validator CLI helpers (exercised by tests/scripts) ---
 # nhb-cli submits the transactions below through the node's privileged RPC,
@@ -462,20 +1143,28 @@ echo "[INFO] node reports chain id ${NODE_CHAIN_ID}"
 # JWT secret this run wrote to node.env. The secret reaches nhb-cli on stdin,
 # not on a command line, and neither it nor the token is ever printed.
 mint_rpc_token() {
-  printf '%s' "${JWT_SECRET}" | sudo -u "${SERVICE_USER}" \
-    "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
+  printf '%s' "${JWT_SECRET}" | sudo -u "${SERVICE_USER}" "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
 }
 
+# run_cli runs nhb-cli as the service user with the token in its environment. The
+# token goes to the child on a pipe and is put into the environment there: a
+# command line ("sudo -u nhb env NHB_RPC_TOKEN=... nhb-cli", which stays in the
+# process list, where any user can read it, for as long as sudo waits for the
+# command) never holds it.
 run_cli() {
-  sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" NHB_RPC_TOKEN="${RPC_TOKEN}" \
-    "${INSTALL_ROOT}/bin/nhb-cli" "$@"
+  local wrapper='NHB_RPC_TOKEN=$(cat); RPC_URL=$1; shift; export NHB_RPC_TOKEN RPC_URL; exec "$@"'
+  printf '%s' "${RPC_TOKEN}" | sudo -u "${SERVICE_USER}" sh -c "${wrapper}" nhb-cli-token-wrapper "http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" "$@"
 }
 
 # How an operator runs a signing command later (the messages below print
 # these): the command needs a fresh token exactly like the steps in this script.
-TOKEN_RECIPE="TOKEN=\$(sudo sh -c '. ${CONFIG_DIR}/node.env && printf %s \"\$NHB_RPC_JWT_SECRET\"' | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
+# Root reads the node's secret as data (sed prints the value of one line) and never
+# runs the file: node.env is in /etc/nhbchain, a directory the service user owns,
+# so the user can replace the file, and a shell that sourced it as root would run
+# whatever it found there.
+TOKEN_RECIPE="TOKEN=\$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' ${CONFIG_DIR}/node.env | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
 cli_recipe() {
-  echo "sudo -u ${SERVICE_USER} env RPC_URL=http://${RPC_ADDR} NHB_RPC_TOKEN=\"\$TOKEN\" ${INSTALL_ROOT}/bin/nhb-cli $*"
+  echo "NHB_RPC_TOKEN=\"\$TOKEN\" RPC_URL=http://${RPC_ADDR} sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli $*"
 }
 
 # The node may still be finishing its own startup, so try a few times.
@@ -537,65 +1226,137 @@ submit_validator_steps() {
 }
 # --- end validator CLI helpers ---
 
-if ! RPC_TOKEN=$(mint_rpc_token); then
-  echo "[ERROR] could not create an RPC token for the local node" >&2
-  exit 1
-fi
-submit_validator_steps || exit 1
-
-if [[ -n "${OPERATOR_EMAIL}" ]]; then
-  echo "[INFO] requesting onboarding instructions be emailed to ${OPERATOR_EMAIL}"
-  curl -fsS -m 5 -X POST "${ONBOARDING_EMAIL_ENDPOINT}" \
-    -H 'Content-Type: application/json' \
-    -d "{\"nodeAddress\":\"${VALIDATOR_ADDRESS}\",\"email\":\"${OPERATOR_EMAIL}\"}" \
-    >/dev/null 2>&1 \
-    && echo "[OK] onboarding email requested" \
-    || echo "[WARN] could not reach the onboarding email endpoint -- follow the instructions printed below instead"
-fi
-
-echo
-echo "=================================================================="
-echo "[OK] Validator node started."
-echo
-if [[ -n "${VALIDATOR_ADDRESS}" ]]; then
+print_next_steps() {
+  echo
+  echo "=================================================================="
+  echo "[OK] Validator node is running and at the network tip."
+  echo
+  echo "It follows the network as a NON-voting node: its key is not registered with"
+  echo "stake, so its votes are ignored, until the steps below have taken effect."
+  echo
   echo "Your validator's node address is:"
   echo "  ${VALIDATOR_ADDRESS}"
   echo
-fi
-if [[ -n "${EXTERNAL_ADDRESS_HOSTPORT}" ]]; then
-  echo "This node advertises itself to peers as: ${EXTERNAL_ADDRESS_HOSTPORT}"
-else
-  echo "[WARN] no external address is set -- peers that only connect to this node inbound will not be able to reconnect. Re-run with --external-address <ip> to fix this."
-fi
-echo
-echo "To make this node a validator candidate, its address needs at least"
-echo "10,000 ZNHB of total stake (staking.minimumValidatorStake, adjustable by"
-echo "governance). Delegated stake and the validator's own stake add together,"
-echo "so either route works:"
-echo "  A. Delegate: from any wallet, delegate at least 10,000 ZNHB to this"
-echo "     validator's node address (printed above), for example with the"
-echo "     Delegate form in the Validator Hub of the NHBCoin portal."
-echo "  B. Self-stake: send at least 10,000 ZNHB to this validator's node"
-echo "     address, and once it has arrived, stake it from this server:"
-echo "     ${TOKEN_RECIPE}"
-echo "     $(cli_recipe register-validator 10000000000000000000000 "${VALIDATOR_KEY_FILE}")"
-echo "  (the registration transaction was submitted above and takes effect once a"
-echo "   block includes it; this node's own address must not itself be delegating"
-echo "   its stake to a different validator.)"
-if [[ -z "${BENEFICIARY}" ]]; then
+  if [[ -n "${EXTERNAL_ADDRESS_HOSTPORT}" ]]; then
+    echo "This node advertises itself to peers as: ${EXTERNAL_ADDRESS_HOSTPORT}"
+  else
+    warn "no external address is set -- peers that only connect to this node inbound will not be able to reconnect. Re-run with --external-address <ip> to fix this."
+  fi
   echo
-  echo "You did not pass --beneficiary, so this validator's epoch consensus"
-  echo "reward (separate from the staking yield above) will accumulate at its"
-  echo "own address, which this server's key controls. To redirect it to a"
-  echo "wallet you can actually spend from, run:"
-  echo "  ${TOKEN_RECIPE}"
-  echo "  $(cli_recipe set-reward-beneficiary "<your-wallet-address>" "${VALIDATOR_KEY_FILE}")"
+  echo "To make this node a validator candidate, its address needs at least"
+  echo "10,000 ZNHB of total stake (staking.minimumValidatorStake, adjustable by"
+  echo "governance). Delegated stake and the validator's own stake add together,"
+  echo "so either route works:"
+  echo "  A. Delegate: from any wallet, delegate at least 10,000 ZNHB to this"
+  echo "     validator's node address (printed above)."
+  echo "  B. Self-stake: send at least 10,000 ZNHB to this validator's node"
+  echo "     address, and once it has arrived, stake it from this server:"
+  echo "     ${TOKEN_RECIPE}"
+  echo "     $(cli_recipe register-validator 10000000000000000000000 "${VALIDATOR_KEY_FILE}")"
+  echo "  (the registration transaction was submitted above and takes effect once a"
+  echo "   block includes it; this node's own address must not itself be delegating"
+  echo "   its stake to a different validator.)"
+  echo
+  echo "It joins the active validator set at the next epoch boundary once it has stake,"
+  echo "is registered and keeps its heartbeat current. Until then do not expect rewards."
+  echo
+  echo "Check status with:"
+  echo "  sudo systemctl status nhb.service"
+  echo "  sudo journalctl -u nhb.service -f"
+  echo
+  echo "Never copy this server's key (${VALIDATOR_KEY_FILE}) or the node's data directory to"
+  echo "another machine to run a second node: a key that runs twice double-signs, and a"
+  echo "copy of the node's p2p identity makes two nodes indistinguishable to their peers."
+  echo "=================================================================="
+}
+
+# take_lock allows one run of this script at a time. The lock is a directory
+# (mkdir is atomic) in a state directory that belongs to the user who runs the
+# script and that nobody else can write. It used to be a fixed name in /tmp, which
+# any local user could make first: that either stopped every run for good or,
+# because a user cannot signal another user's process, made a lock that was still
+# held look stale and be taken over. Here only the user who runs the script can
+# make it, and the process that holds it is one that user can signal, so kill -0
+# says whether it is still there.
+LOCK_STATE_DIR="${XDG_STATE_HOME:-${HOME:-}/.local/state}/nhbchain"
+LOCK_DIR="${LOCK_STATE_DIR}/deploy.lock.d"
+take_lock() {
+  [[ -n "${XDG_STATE_HOME:-}" || -n "${HOME:-}" ]] || die "cannot tell where to keep the lock that keeps two runs of this script apart: neither XDG_STATE_HOME nor HOME is set"
+  ( umask 077; mkdir -p -- "${LOCK_STATE_DIR}" ) || die "cannot create ${LOCK_STATE_DIR}"
+  if [[ -L "${LOCK_STATE_DIR}" || ! -d "${LOCK_STATE_DIR}" || ! -O "${LOCK_STATE_DIR}" ]]; then
+    die "${LOCK_STATE_DIR} has to be a directory of the user who runs this script (not a link, not another user's): it holds the lock that keeps two runs apart"
+  fi
+  if ! ( umask 077; mkdir -- "${LOCK_DIR}" ) 2>/dev/null; then
+    local holder
+    holder=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
+    if [[ "${holder}" =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2>/dev/null; then
+      die "another run of this script (pid ${holder}) is in progress"
+    fi
+    warn "removing a stale lock left by pid ${holder:-unknown}"
+    rm -rf -- "${LOCK_DIR}"
+    ( umask 077; mkdir -- "${LOCK_DIR}" ) || die "cannot take the lock ${LOCK_DIR}"
+  fi
+  echo "$$" > "${LOCK_DIR}/pid"
+  trap 'rm -rf -- "${LOCK_DIR}"' EXIT
+}
+
+main() {
+  parse_args "$@"
+  validate_inputs
+
+  require_cmd sudo
+  require_cmd systemctl
+  require_cmd sha256sum
+
+  refuse_service_owned_checkout || exit 1
+  take_lock
+  refuse_second_node || exit 1
+  install_prerequisites
+  require_cmd curl
+  refuse_foreign_key || exit 1
+  install_tree_and_build
+
+  # Only a run that installs a snapshot has any use for a manifest, or for the
+  # question whether the node built here is the one that made the snapshot. A
+  # node that already holds this network's chain (the ordinary re-run) is not
+  # given one, so it never depends on the snapshot host: not on what it now
+  # publishes, and not on its answering at all.
+  if snapshot_needed; then
+    local local_sha manifest_commit
+    local_sha=$(sha256sum "${INSTALL_ROOT}/bin/nhb" | cut -d' ' -f1)
+    # The commit of the checkout this script runs from. A checkout with local
+    # changes to tracked files is not that commit: only an identical binary matches.
+    detect_local_commit
+
+    fetch_manifest
+    manifest_commit=$(manifest_field "${MANIFEST_FILE}" producer.binaryCommit)
+    check_release_commit "${manifest_commit}"
+    check_binary_identity "$(manifest_field "${MANIFEST_FILE}" producer.binarySha256)" "${manifest_commit}" \
+      "${local_sha}" "${LOCAL_COMMIT}" || exit 1
+  else
+    log "the data directory already holds data: no snapshot is needed, so none is fetched"
+    # A run that installed a snapshot and was interrupted before it saw the node
+    # get past the snapshot's height must still require that of this run.
+    recover_snapshot_height
+  fi
+
+  ensure_key
+  detect_external_address
+  as_root install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${CONFIG_DIR}"
+  prepare_data_dir
+  install_config
+  write_env
+  install_service
+
+  wait_until_synced
+
+  if ! RPC_TOKEN=$(mint_rpc_token); then
+    die "could not create an RPC token for the local node"
+  fi
+  submit_validator_steps || exit 1
+  print_next_steps
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
 fi
-echo
-echo "Check status with:"
-echo "  sudo systemctl status nhb.service"
-echo "  sudo journalctl -u nhb.service -f"
-echo
-echo "This node will auto-submit validator heartbeats after startup and can enter"
-echo "the active validator set at the next epoch once it remains online and synced."
-echo "=================================================================="
