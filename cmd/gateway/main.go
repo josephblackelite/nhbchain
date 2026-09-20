@@ -161,6 +161,16 @@ func main() {
 	var compatHandler http.Handler
 	if enableCompat {
 		dispatcher := compat.NewDispatcher(services, compat.DefaultMappings)
+		// A call through /rpc needs the scopes of the route it stands in for:
+		// the ones the /v1/lending, /v1/swap and /v1/gov routes below require.
+		dispatcher.SetScopeGuard(compat.ScopeGuard{
+			Required: map[string][]string{
+				"lendingd": {"lending"},
+				"swapd":    {"swap"},
+				"governd":  {"gov"},
+			},
+			FromContext: middleware.ScopesFromContext,
+		})
 		compatHandler = dispatcher.Handler()
 	} else {
 		logger.Println("JSON-RPC compatibility dispatcher disabled")
@@ -203,6 +213,10 @@ func main() {
 		rateLimits["swap"] = middleware.RateLimit{RatePerSecond: 1, Burst: 10}
 		rateLimits["gov"] = middleware.RateLimit{RatePerSecond: 1, Burst: 10}
 		rateLimits["consensus"] = middleware.RateLimit{RatePerSecond: 4, Burst: 40}
+	}
+
+	if _, ok := rateLimits[routes.CompatRateLimitKey]; !ok {
+		rateLimits[routes.CompatRateLimitKey] = middleware.RateLimit{RatePerSecond: 2, Burst: 20}
 	}
 
 	router, err := routes.New(routes.Config{
