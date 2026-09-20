@@ -1,46 +1,103 @@
-# Swap Oracle Operations
+# Swap Oracle Aggregator
 
-The swap oracle aggregates price updates from the authority feeders and derives a time-weighted average price (TWAP) that anchors mint quotes and audit exports.
+`native/swap/oracle.go` contains an in-process `OracleAggregator`. This page
+describes what it does and, just as important, where it is and is not used in
+the current code.
 
-## Feeder roles
+## Where it is used
 
-- **Primary feeders** push signed samples from custody pricing systems. They are onboarded via the operator allow-list and appear under the `Allow` array in `swap.ProviderStatus`.
-- **Fallback feeders** (e.g. CoinGecko) provide redundancy. They remain configured but only surface when primary feeds deviate or go dark.
-- **Manual feed** is a circuit-breaker used during incidents. It can be injected via `SetSwapManualQuote` and is always the lowest priority.
+* `cmd/nhb/main.go` and `cmd/consensusd/main.go` each build one aggregator
+  from the `[swap]` config, register three sources (`manual`, `nowpayments`,
+  `coingecko`), and hand it to the node with `node.SetSwapOracle` (and the
+  manual source with `node.SetSwapManualOracle`).
+* Only `cmd/nhb/main.go` seeds the manual source (`SetDecimal` calls, see the
+  table below). `cmd/consensusd/main.go` does not seed it and does not read
+  `NHB_ZNHB_ORACLE_PRICE_USD`, so under `consensusd` the manual source is
+  empty until quotes are set through `swap_setManualQuote`.
+* The only consumers of that aggregator in non-test code are
+  `Node.SwapProviderStatus` (which calls its `Health()` method) and the
+  unused `core/pricing` package (see
+  [`docs/oracle/pricing-guards.md`](../oracle/pricing-guards.md)). No code path
+  calls `OracleAggregator.GetRate` during block execution or RPC handling.
+* Voucher mints do not use it. They are priced from the signed price proof
+  ([oracle-verification.md](oracle-verification.md)).
 
-### Signer rotation
+## Aggregation behaviour
 
-1. Provision the replacement KMS keypair and record the address. There is no dedicated
-   tooling for recording rotated signer addresses today; track it manually (e.g. the
-   rotation runbook or compliance log).
-2. Update the payments gateway configuration (`MinterKMSEnv`) and reload the service.
-3. Call `swap_provider_status` and confirm the `oracleFeeds` metadata contains fresh observations from the new signer.
-4. Remove access to the previous signer and archive the rotation runbook in the security vault.
+`GetRate(base, quote)` (`native/swap/oracle.go`):
 
-### Liveness & health reporting
+1. Iterates the configured sources in `[swap].OraclePriority` order. Sources
+   that are unregistered, return an error, return a non-positive rate, or
+   return a quote older than `MaxQuoteAgeSeconds` are skipped.
+2. Returns the **first** fresh quote. It is a priority fallback, not a median.
+3. Records the returned quote in an in-memory per-pair history.
 
-- Every accepted quote updates the in-memory observation history. `swap_provider_status` exposes the last observation timestamp and sample count per `BASE/QUOTE` pair.
-- `LastOracleHealthCheck` reflects the timestamp of the most recent on-chain mint quote that passed freshness validation.
-- Health monitors should alarm when:
-  - A feed reports zero observations for longer than the configured TTL (`MaxQuoteAgeSeconds`).
-  - `oracleFeeds[n].observations` stops increasing while mints continue.
-  - The TWAP window contains fewer than three samples.
+`ErrNoFreshQuote` (`swap: no fresh oracle quote available`) is returned when
+nothing qualifies.
 
-## TWAP persistence
+Registered sources (`cmd/nhb/main.go`; `cmd/consensusd/main.go` registers the
+same three but seeds nothing):
 
-- The aggregator maintains a rolling window defined by `swap.TwapWindowSeconds` (default 300s) and stores up to `swap.TwapSampleCap` samples per pair.
-- Every mint ledger entry now includes:
-  - `twapRate` – TWAP rendered to 18 decimal places.
-  - `twapWindowSeconds`, `twapObservations`, `twapStart`, `twapEnd` – the audit metadata for the window.
-- RPC responses (`swap_voucher_get` / `swap_voucher_list`) include the same TWAP fields, enabling downstream risk engines to cross-check quotes.
+| Name | Behaviour |
+| --- | --- |
+| `manual` | In-memory quotes set by `swap_setManualQuote`. Seeded at startup with `USD/NHB = 1.0` and `USD/ZNHB` from `NHB_ZNHB_ORACLE_PRICE_USD` (default `0.05`). |
+| `nowpayments` | HTTP adapter for an external exchange-rate endpoint (`NewNowPaymentsOracle`). |
+| `coingecko` | HTTP adapter with an **empty** asset-ID map, so `NHB` and `ZNHB` quotes fail as unmapped and the aggregator falls through to the next source (comment in `cmd/nhb/main.go`). |
 
-## Freshness & deviation controls
+A fourth HTTP adapter constructor exists in `native/swap/oracle.go` but is not
+registered by either binary.
 
-- `MaxQuoteAgeSeconds` caps quote staleness. Quotes older than the cap are rejected before minting.
-- The payments gateway median oracle enforces per-feed TTLs, maximum deviation percentages, and a rate-of-change circuit breaker before forwarding samples to the chain aggregator.
+## TWAP
 
-## Operational checklist
+`TWAP(base, quote, window)` returns the **arithmetic mean** of the samples in
+the window (it is not weighted by time between samples), plus the median, the
+sample count, start and end times, the contributing sources, and a SHA-256
+proof ID. The window and sample cap come from `[swap].TwapWindowSeconds`
+(`config.toml`: `300`) and `[swap].TwapSampleCap` (default `128`). The history
+lives in memory and is lost on restart.
 
-- Monitor `swap_provider_status` for `oracleFeeds` drift and stale `LastOracleHealthCheck` values.
-- Rotate signer keys quarterly or after any suspected compromise following the steps above.
-- Persist feeder health dashboards and include TWAP statistics in treasury audit packages.
+## Configuration
+
+| Key | Default in `Config.Normalise` | `config.toml` |
+| --- | --- | --- |
+| `AllowedFiat` | `["USD"]` | `["USD", "EUR", "GBP"]` |
+| `MaxQuoteAgeSeconds` | `120` | `120` |
+| `SlippageBps` | `50` | `50` |
+| `OraclePriority` | `["manual"]` | `["nowpayments", "coingecko", "manual"]` |
+| `TwapWindowSeconds` | `0` (a negative value becomes `0`) | `300` |
+| `TwapSampleCap` | `128` | `128` |
+| `PriceProofMaxDeviationBps` | `100` | `0` (resolves to `100`) |
+| `PayoutAuthorities` | `["treasury"]` | `["treasury"]` |
+
+## Provider status
+
+`swap_provider_status` (JWT required, no parameters) returns:
+
+```json
+{
+  "allow": ["provider-id"],
+  "lastOracleHealthCheck": 0,
+  "oracleFeeds": [
+    {"Pair": "USD/ZNHB", "Base": "USD", "Quote": "ZNHB", "LastObservation": 1734000000, "Observations": 3}
+  ]
+}
+```
+
+* `allow` is `[swap.providers].Allow`, lower-cased and de-duplicated.
+* `oracleFeeds` is included only when the aggregator has recorded samples. The
+  field names are capitalised because `swap.OracleFeedStatus` has no JSON tags.
+  Since nothing calls `GetRate`, the list is empty in practice.
+* `lastOracleHealthCheck` is read from `Node.swapOracleLast`, which is only
+  written by `Node.recordSwapOracleHealth`. That function has no callers, so
+  the value stays `0`.
+
+## Manual quote
+
+`swap_setManualQuote` (JWT required) sets a quote on the manual source. See
+[admin.md](admin.md). It affects only the in-process aggregator.
+
+## Signer rotation
+
+Price-proof signers live on-chain, not in this aggregator. Rotate them with a
+`policy.swapPriceSigner` governance proposal
+([oracle-verification.md](oracle-verification.md#signer-management)).

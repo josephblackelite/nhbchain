@@ -1,31 +1,38 @@
-# Performance Tuning Guide
+# Tuning levers
 
-This guide captures tuning levers that help operators meet or exceed the performance baselines for nhbchain services.
+Settings in this repository that bound node throughput and resource use. Values
+are defaults from `config/config.go`; the repository `config.toml` overrides some
+of them.
 
-## Consensus nodes
+## Mempool and blocks
 
-- **Database tuning.**
-  - Enable `GODEBUG=memprofilerate=0` when profiling to reduce allocation overhead during benchmarking.
-  - Configure RocksDB or the underlying KV store with high-compaction trigger thresholds to avoid background stalls.
-  - Place state and WAL directories on separate NVMe volumes where possible.
-- **Mempool sizing.** Set `global.mempool.MaxBytes` to at least 64 MB on high-throughput validators. Monitor eviction rates (`mempool_evicted_total`).
-- **P2P networking.** Increase the inbound/outbound peer limits in `config.toml` for data centers with sufficient bandwidth, but keep them symmetric to prevent gossip imbalances.
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `[mempool] MaxTransactions` | 4000 (`DefaultMempoolMaxTransactions`; `config.toml` sets 5000) | Maximum pending transactions; further admissions fail with `mempool full` (`-32030`). `AllowUnlimited = true` allows 0 (no limit). |
+| `[global.Mempool] MaxBytes` | 16 MiB (`16 << 20`) | Byte cap on pending transactions. |
+| `[global.Mempool] POSReservationBPS` | 1500 | Share of each block reserved for POS-tagged transfers ([QoS](../specs/pos-qos.md)). |
+| `[global.Blocks] MaxTxs` | 500 | Maximum transactions per block; enforced when proposing and when validating a block. |
 
-## Gateway services
+## RPC
 
-- **Connection pools.** Tune database and RPC client pools based on p95 latency. Start at 2× CPU cores and adjust after load testing.
-- **Caching.** Configure HTTP response caching for idempotent endpoints (account lookups, rate tables). Validate cache TTLs against compliance requirements.
-- **Async processing.** Offload blocking operations (file exports, invoicing) to background workers to keep API latency predictable.
+`RPCMaxTxPerWindow` and the `RPCMaxTxPer*` limits (default 5 per
+`RPCRateLimitWindow` = 60 s), `RPCRouteRateLimits` per method, and the RPC
+timeouts (`RPCReadHeaderTimeout` 10 s, `RPCReadTimeout` 15 s, `RPCWriteTimeout`
+15 s, `RPCIdleTimeout` 120 s by default) are described in
+[rpc.md](../api/rpc.md#rate-limits).
 
-## Observability-driven tuning
+## P2P
 
-1. **Profile hotspots.** Use `pprof` or `go tool trace` during load tests to identify CPU or lock contention.
-2. **Adjust parameters.** Modify relevant configuration (mempool size, worker counts, queue depths) and document the change.
-3. **Measure impact.** Re-run the benchmark and compare to the baselines recorded in `docs/perf/baselines.md`.
-4. **Roll out carefully.** Apply changes to staging first, monitor for 24 hours, then promote to production with a rollback plan.
+`MaxPeers` (64), `MaxInbound`, `MaxOutbound`, `MinPeers`, `OutboundPeers`,
+`MaxMsgsPerSecond` (32, per peer), `[p2p] Burst` (200), `MaxMsgBytes` (1 MiB),
+`ReadTimeout` (90 s), `WriteTimeout` (5 s). See [P2P](../overview/p2p.md).
 
-## Capacity planning
+## Storage
 
-- Run quarterly load tests using the `tests/load/` scenarios.
-- Capture TPS, latency, and resource usage across consensus, gateway, and database layers.
-- Update the operations runbooks with new resource requirements (CPU, RAM, storage) when sustained usage approaches 70% of capacity.
+Node state is stored in LevelDB (`storage/db.go` uses go-ethereum's
+`ethdb/leveldb`); the data directory is `DataDir` (default `./nhb-data`).
+
+## Measuring a change
+
+Use the benchmarks and metrics in [baselines](./baselines.md): run the benchmark
+or load generator before and after the change and compare the same metrics.

@@ -1,110 +1,102 @@
 # Governance Security and Audit Notes
 
-> Include function-level documentation for developer integrations and technical specs; docs must be generated into /docs/governance/* for auditors, investors, regulators, and consumers.
+Facts about governance behavior that matter for review, each tied to code.
+Lifecycle details are in [overview](./overview.md).
 
-## Snapshot Integrity and Immutability
+## Who is acting
 
-Governance voting power references the POTSO composite weight snapshot from the
-previous epoch (`E-1`). The epoch module persists each snapshot under
-`snapshots/potso/<epoch>/weights`, allowing auditors to verify that governance
-ballots reflect the exact leaderboard finalised before the voting window
-opened. Because the snapshot is taken prior to voting, sudden stake movements or
-sybil addresses created after epoch finalisation cannot influence the weight
-used for ballots.
+Every governance action is a signed native transaction
+(`TxTypeGovPropose`..`TxTypeGovExecute`, `core/governance_tx.go`). The
+proposer and voter are the recovered transaction signer, never a payload field.
+The transactions carry the chain id and account nonce like other native
+transactions (`sendGovTx` in `cmd/nhb-cli/gov.go` sets `ChainID`, `Nonce` and
+signs); the handlers increment the signer's nonce. Finalize, queue and execute
+have no role or identity check: any funded account can send them.
 
-Each snapshot is written once and addressed by epoch number plus the block hash
-at which the epoch closed. The governance service validates the block hash
-against the canonical chain head before accepting the snapshot ID, preventing a
-malicious proposer from supplying alternate data. Storage writes are additionally
-covered by consensus state proofs; replaying a divergent snapshot would be
-rejected as the Merkle root would not match the signed block header.
+## Voting power source
 
-Operators should monitor snapshot retention and integrity as part of routine
-state audits to ensure voting power remains tamper-evident. When reconstructing
-a vote, auditors must reference the immutable epoch archive and cross-check the
-snapshot commitment embedded in the `gov.proposed` event.
+`Engine.CastVote` reads the weight of the voter from the POTSO weight snapshot
+of the most recently processed reward epoch. `processPotsoRewardEpoch`
+(`core/state_transition.go`) writes that snapshot to
+`snapshots/potso/<epoch>/weights`, but only when `potso.ComputeRewards` returns
+a weight snapshot (`outcome.WeightSnapshot != nil`; it can return none, for
+example when the epoch's budget is zero or less, `native/potso/rewards.go`). The caller,
+`maybeProcessPotsoRewards`, records the epoch as the last processed one
+separately, after `processPotsoRewardEpoch` returns. If the snapshot was not
+written, or no epoch has been processed yet, every vote fails with
+`governance: potso snapshot unavailable` (`native/governance/engine.go`,
+`Engine.CastVote`). The lookup happens when each vote is cast, so a vote uses
+the latest processed epoch at that moment, not a snapshot fixed when the
+proposal was created.
 
-## Timelock Review
+## State machine
 
-Passed proposals must be explicitly queued before they can execute. Once
-queued, the governance engine enforces the configured timelock by refusing to
-apply the payload until `now >= TimelockEnd`. Operators should monitor for
-`gov.queued` events to confirm that a passed proposal has entered the timelock
-queue, and alert if an execution attempt occurs before the unlock timestamp
-(`gov.executed` will not be emitted in that case). This ensures downstream
-systems have a deterministic grace period to audit the queued change.
+`voting_period` -> (`Finalize`) `passed` or `rejected`; `passed` -> (`Queue`,
+then `Execute` after `TimelockEnd`) `executed`. Requests that do not match the
+current state fail with plain errors, for example `governance: proposal <id>
+not accepting votes`, `... not in voting period`, `... not passed`,
+`... already queued`, `... not queued`, `... already executed`. There is no
+dedicated error type.
 
-Execution is idempotent: after a proposal is applied the engine transitions it
-to `executed` status and future calls are rejected. Auditors can therefore rely
-on `gov.executed` as a single-source-of-truth signal that the param store
-modifications were committed exactly once. Attempted replays or duplicate
-messages will fail with an explicit error, preserving change-control logs and
-reducing the risk of multi-apply bugs.
+The statuses `deposit_period`, `failed` and `expired` exist in the enum but are
+never assigned. A proposal that is never queued or executed stays `passed`
+indefinitely; nothing expires it.
 
-## Emergency Overrides
+## Timelock
 
-`param.emergency_override` proposals follow the exact same quorum, deposit, and
-timelock requirements as standard parameter updates. The only difference is
-auditing: when the override executes the runtime appends an audit record with
-`{"kind":"param.emergency_override"}` and the affected keys so regulators can
-distinguish routine adjustments from emergency responses. Operators should use
-the `memo` and proposal metadata to document the reason for the override and the
-planned rollback path.
+`TimelockEnd` is `VotingEnd + TimelockSeconds`, computed at submission from the
+node's `[governance]` policy and stored on the proposal. `Execute` refuses to
+run while `now < TimelockEnd`. `param.emergency_override` uses the same
+`Execute` path, so it has the same timelock (`Engine.Execute`,
+`native/governance/engine.go`). `Queue` does not delay execution any further
+than `TimelockEnd`.
 
-## Immutable Audit Log
+Execution is applied once: the status becomes `executed` and a second
+`Execute` fails.
 
-Every governance milestone—proposal creation, votes, finalization, queueing, and
-execution—now writes an append-only record to the on-chain audit log. Each entry
-captures the event type, proposal ID, timestamp, optional actor address, and a
-JSON detail blob summarising the effect (e.g. updated parameters, granted roles,
-treasury transfer memo). The log is keyed by a monotonically increasing
-sequence number, allowing auditors to reconstruct the full history without
-replaying RPC events. Emergency overrides and treasury directives emit detailed
-records so internal control teams can reconcile approvals against downstream
-ledger systems.
+## Deposits
 
-## Replay and Idempotency Controls
+The deposit is debited from the proposer's ZNHB balance at submission and held
+in `gov/escrow/<address>`. On finalize it is returned if the proposal passed,
+and forfeited to the admin wallet (with a matching Reward Pool ledger credit
+when the submitter is not the admin wallet) if it was rejected and the node has
+an admin wallet. Without an admin wallet a rejected deposit stays in escrow.
+There is no withdrawal, veto or slashing path in `native/governance`.
 
-The governance router enforces a strict proposal state machine. Each proposal ID
-advances linearly: `draft -> voting -> finalized -> queued -> executed`.
-Requests that do not match the expected next state are rejected with a plain
-error (for example `"governance: proposal %d not accepting votes"`) rather than
-a dedicated error type.
+## Audit log and events
 
-Votes are submitted to the RPC as a plain `{id, from, choice}` JSON object and
-authenticated only by the caller's bearer JWT — `CastVote` does not verify a
-cryptographic signature over the vote, and there is no per-vote nonce or
-`chain_id` binding today. This means a vote is not cryptographically bound to
-the voter's private key; anyone holding a valid bearer token for the `from`
-address's session can cast or observe votes on its behalf.
+Audit records are appended for proposed, vote, finalized, queued and executed
+(`Engine.appendAudit`) and stored at `gov/audit/<sequence>`. The `details` JSON
+carries the applied effect, for example changed keys, granted roles, or
+treasury transfers. There is no RPC method that reads the audit log. Events
+emitted by the engine are listed in [overview](./overview.md#events).
 
-## Tally Reproducibility
+## Tally reproducibility
 
-Auditors can independently recompute vote tallies by iterating the
-`gov/vote-index/<proposal>` bucket. Each entry contains the voter address,
-choice, and voting power in basis points. Summing the weights per choice and
-deriving the following quantities reproduces the `gov.finalized` event
-attributes:
+The ballots for a proposal are stored at `gov/vote-index/<id>` and per voter at
+`gov/votes/<id>/<voter hex>`. From those, with `yes`, `no`, `abstain` the sums
+of `PowerBps` per choice:
 
-- `total_active = yes_weight + no_weight`
-- `yes_ratio_bps = floor((yes_weight * 10_000) / total_active)`
-- `turnout_ratio_bps = floor(((yes_weight + no_weight + abstain_weight) * 10_000) / total_snapshot_power)`
+- `turnoutBps = yes + no + abstain`
+- `yesRatioBps = floor(yes * 10000 / (yes + no))`, `0` if `yes + no = 0`
+- passed when `turnoutBps >= quorumBps` and `yesRatioBps >= passThresholdBps`
 
-Where `total_snapshot_power` is the aggregate power recorded in the referenced
-snapshot. Abstentions do not affect the approval threshold but do count toward
-turnout calculations. Verifying these ratios against the stored snapshot ensures
-the governance engine did not mis-apply quorum or threshold logic when
-finalising a proposal.
+`quorumBps` and `passThresholdBps` are the values in the node's `[governance]`
+policy at the time of the tally and are recorded in the finalized tally
+(`quorum_bps`, `pass_threshold_bps`). The persisted tally on a finalized
+proposal is the record of the outcome.
 
-## Event Log Map
+## Behaviors to be aware of
 
-Auditors can observe governance lifecycle milestones through the following
-events:
-
-| Event | Trigger | Key Attributes |
-| --- | --- | --- |
-| `gov.proposed` | Proposal created and deposit escrowed. | `id`, `proposer`, `kind`, `deposit`, `votingStart`, `votingEnd`, `timelockEnd` |
-| `gov.vote` | Ballot accepted during voting window. | `id`, `voter`, `choice`, `powerBps` |
-| `gov.finalized` | Voting window closed and tally computed. | `id`, `status`, `turnoutBps`, `quorumBps`, `yesPowerBps`, `noPowerBps`, `abstainPowerBps`, `yesRatioBps`, `passThresholdBps`, `totalBallots` |
-| `gov.queued` | Proposal enqueued into timelock. | `id`, `timelockEnd` |
-| `gov.executed` | Timelock satisfied and payload applied. | `id`, `status` |
+- The quorum-versus-threshold and minimum-voting-period cross-checks in
+  `native/gov` are not registered on the engine that applies governance
+  transactions; see [policy invariants](../gov/policy-invariants.md).
+- Param values are stored as the raw JSON text submitted, and readers parse
+  them as bare integers, so integer values must be submitted unquoted; see
+  [params](./params.md#how-a-parameter-proposal-is-checked).
+- `treasury.directive` debits and credits ZNHB account balances
+  (`applyTreasuryDirective`) and does not touch the Sale Pool or Reward Pool
+  ledgers.
+- Governance policy (voting period, timelock, quorum, threshold, allow-lists)
+  is read from each node's local config file. Validators need identical
+  `[governance]` blocks.

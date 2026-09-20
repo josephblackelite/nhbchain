@@ -1,104 +1,99 @@
 # Lending Developer Guide
 
-This guide outlines the recommended flow for building a lending experience on
-NHBChain using the JSON-RPC endpoints exposed by the node.
+Recommended flow for building on the native lending module with JSON-RPC.
+Reads use RPC methods; every state change is a signed transaction submitted
+with `nhb_sendTransaction` ([rpc-api.md](rpc-api.md)).
 
-## 1. Discover Risk Configuration
+## 1. Discover pools and risk configuration
 
-- Call [`lend_getPools`](rpc-api.md#lend_getpools) during startup to discover
-  available lending pools. For each active pool invoke
-  [`lending_getMarket`](rpc-api.md#lending_getmarket) with the pool’s `poolId` to
-  cache totals and risk parameters. Surface values such as `maxLTV`,
-  `liquidationThreshold`, and `liquidationBonus` in tooltips so users understand
-  protocol limits.
-- Repeat the calls periodically to refresh supply and borrow totals displayed in
-  the UI.
-- Provision new pools with [`lend_createPool`](rpc-api.md#lend_createpool) when
-  onboarding additional markets. The developer owner becomes the default
-  recipient of per-pool fee streams.
+* Call [`lend_getPools`](rpc-api.md#lend_getpools) to list pools, or
+  [`lending_getMarket`](rpc-api.md#lending_getmarket) with a `poolId` for one
+  pool. Both return `riskParameters`; the fields the node actually sets are
+  `MaxLTV`, `LiquidationThreshold`, `DeveloperFeeCapBps` and `Oracle`
+  ([on-chain.md](on-chain.md#risk-parameters)).
+* `depositApyBps`, `borrowApyBps` and `availableLiquidityWei` on each market are
+  computed per call; use `availableLiquidityWei` rather than `TotalNHBSupplied`
+  to see what can be borrowed or withdrawn.
+* Read `lending_getRefPriceStatus` to see whether a reference price exists.
+  Without one, collateral is valued 1:1 with NHB, and with the shipped
+  `OracleMaxAgeBlocks = 1000` borrows are refused until one is accepted.
+* Create additional pools with a signed `TxTypeLendingCreatePool` (`0x2C`); the
+  transaction signer becomes the pool's developer owner. The `default` pool
+  cannot be created explicitly.
 
-## 2. Authenticate the User
+## 2. Authenticate
 
-- Prompt the user to connect their NHBChain wallet.
-- Retrieve the bearer token required by the node operator and attach it to every
-  state-changing request:
+* Reads need no credential.
+* `nhb_sendTransaction` requires the RPC credential: a JWT sent as
+  `Authorization: Bearer <jwt>`, or a verified client certificate when the
+  server requires one.
+* Each transaction is authorised by the sender's own signature and nonce. There
+  is no address field to spoof.
 
-  ```http
-  Authorization: Bearer <token>
-  ```
+## 3. Load the account snapshot
 
-  Omit the header when invoking read-only methods such as
-  `lending_getMarket`.
+* [`lending_getUserAccount`](rpc-api.md#lending_getuseraccount) for the pool. A
+  `404` `account not found` means the address has no record in that pool: show
+  zero balances.
+* `collateralZnhbWei` is the withdrawable collateral figure. `collateralValueUsd`
+  is `""` when no reference price exists.
+* `lending_getFixedTermLoan` and `lending_getFixedTermDeposit` return the
+  fixed-term positions; `borrowedValueUsd` on the account already includes an
+  active fixed-term loan.
 
-## 3. Load the Account Snapshot
+## 4. Supply and manage collateral
 
-- Fetch the lending position with [`lending_getUserAccount`](rpc-api.md#lending_getuseraccount)
-  for the selected `poolId`. Use the returned balances to pre-fill collateral
-  toggles and outstanding debt amounts.
-- If the endpoint returns a `404`, initialise the UI with zero balances and hide
-  repayment controls until the user supplies or borrows for the first time.
+1. Supply NHB with `TxTypeLendingSupplyNHB` (`value` = NHB in wei). A pool with
+   no shares needs at least 1 NHB for the first supply.
+2. Deposit ZNHB collateral with `TxTypeLendingDepositZNHB`.
+3. Withdraw collateral with `TxTypeLendingWithdrawZNHB` (refused if the position
+   would become unhealthy). Withdraw supply with `TxTypeLendingWithdrawNHB`,
+   where `value` is the amount of **shares** to burn (compute it from
+   `supplied[].amountWei` and the market's `SupplyIndex`); a withdrawal in the
+   same block as the account's supply is refused.
 
-## 4. Supply and Manage Collateral
+## 5. Borrow
 
-1. Send a `lending_supplyNHB` request when the user deposits NHB liquidity.
-   Include `poolId` with every transaction payload to target the correct market.
-2. Encourage the user to immediately lock funds with `lending_depositZNHB` so
-   the position can back future borrows.
-3. Allow partial withdrawals by combining `lending_withdrawZNHB` (to reduce
-   collateral) and `lending_withdrawNHB` (to redeem LP shares) while keeping the
-   projected health factor above 1.0.
+* Pre-check the borrow client-side with the rules in
+  [on-chain.md](on-chain.md#health-and-borrow-limits): after the borrow,
+  `collateralValue * MaxLTV >= debt * 10000`.
+* Send `TxTypeLendingBorrowNHB` (`value` = NHB to borrow). If the pool has a
+  developer fee configured, it is applied to every borrow (the borrower still
+  receives `value`; the fee is added to the debt). Set `useDeveloperFee: true`
+  only if you want the transaction to fail when no fee is configured.
+* For a locked-rate loan use `TxTypeLendingBorrowFixedTerm` with
+  `tenureDays` from `lending_getRateSchedule`.
 
-## 5. Borrowing Workflow
+## 6. Repay
 
-- Compute projected health factors client-side before calling
-  [`lending_borrowNHB`](rpc-api.md#lending_borrownhb). Block requests that would
-  drive HF below 1.0 and warn users when the buffer is thin.
-- If your application charges a fee, coordinate with the node operator to set
-  `DeveloperFeeBps` and `DeveloperFeeCollector` in `config.toml` before creating
-  pools. Each pool inherits these values at creation and `lending_borrowNHBWithFee`
-  automatically applies them while rejecting caller-supplied fee parameters.
-  Surface the configured fee rate in your UI so borrowers understand the total
-  obligation.
+* `TxTypeLendingRepayNHB`: any `value` is accepted and the engine repays at most
+  the current debt. Fixed-term loans are repaid with
+  `TxTypeLendingRepayFixedTerm`.
+* Refresh the account snapshot after the transaction is included in a block.
 
-## 6. Repayment and Upkeep
+## 7. Liquidation monitoring
 
-- Offer a one-click repay option using `lending_repayNHB` with the outstanding
-  debt value. The engine automatically caps the amount to the borrower’s current
-  debt.
-- Refresh the account snapshot after each state change to keep the UI in sync.
+* Poll `lending_getUserAccount` and compare `collateralValueUsd` and
+  `borrowedValueUsd` against the liquidation threshold from `riskParameters`.
+* A liquidator signs `TxTypeLendingLiquidate` with the borrower's address in the
+  payload. It repays the borrower's entire flexible debt, so the liquidator's
+  NHB balance must cover it.
 
-## 7. Liquidation Monitoring
+## Operational checks
 
-- Background services can poll `lending_getUserAccount` and alert borrowers when
-  their collateral approaches the liquidation threshold.
-- Liquidators can automate [`lending_liquidate`](rpc-api.md#lending_liquidate)
-  calls. Ensure the liquidator wallet holds enough NHB to repay the targeted
-  debt.
+* The `lending` module pause appears in the on-chain pause map. Inspect it with
+  `go run ./examples/docs/ops/read_pauses` (flags `--db`, `--consensus`); the
+  pause-toggle example (`examples/docs/ops/pause_toggle`) submits a governance
+  change.
+* Engine errors carry the `lending engine:` prefix and are listed in
+  [rpc-api.md](rpc-api.md#errors).
 
-## Operational Readiness
+## Best practices
 
-- Confirm with your operator that the lending entry in `system/pauses` remains
-  `false`. The helper scripts under `examples/docs/ops` provide ready-made
-  commands for on-call rotations:
-
-  ```bash
-  go run ./examples/docs/ops/read_pauses
-  go run ./examples/docs/ops/pause_toggle --module lending --state pause
-  ```
-
-- Track `riskParameters.BorrowCaps` to understand the live throughput limits.
-  Spikes in utilisation that approach the cap will cause the engine to return
-  `lending engine: borrow exceeds ... cap` errors until utilisation falls back
-  under the threshold.
-
-## Best Practices
-
-- Treat the `txHash` returned by each action as an acknowledgement only. It is
-  not persisted on-chain but can be logged for audit purposes.
-- Clamp user-provided amounts to positive integers and validate input client
-  side before hitting the node.
-- Display the current supply and borrow indexes from `lending_getMarket` if you
-  show yield metrics so users can understand accrual trends.
-- Cache risk parameters but expose a manual refresh so advanced users can verify
-  configuration after governance updates.
-
+* A transaction hash returned by `nhb_sendTransaction` is a mempool
+  acknowledgement only; confirm the effect by reading state after inclusion.
+* Validate amounts as positive integers before signing.
+* `lending_getMarket` returns `SupplyIndex` and `BorrowIndex` (1e27 scale) if
+  you show yield or debt growth.
+* Reference-price and risk values come from node config and signed submissions,
+  so re-read them rather than caching them across restarts.

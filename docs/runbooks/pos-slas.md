@@ -1,46 +1,55 @@
 # POS SLA & Troubleshooting Runbook
 
-This runbook enumerates the service-level objectives for POS sponsorship, associated observability signals, and remediation steps when quality-of-service degrades. The real-time metrics exported by the consensus node underpin the dashboards and alerts described below.【F:observability/metrics.go†L185-L236】【F:docs/specs/pos-qos.md†L16-L63】
+This runbook lists the POS signals the node exports and how to use them when POS traffic is
+slow or being rejected. The code defines no numeric SLO targets for POS; targets are yours to
+set on the metrics below. The lane design is in [POS quality of service](../specs/pos-qos.md).
 
-## 1. Service level objectives
+## Signals
 
-| KPI | Target | Data source |
+Prometheus metrics registered by the node (`observability/metrics.go`):
+
+| Metric | Type | Meaning |
 | --- | --- | --- |
-| Finality latency (p95) | ≤ 3.5s enqueue → finality | `pos_p95_finality_ms` histogram on the consensus metrics endpoint.【F:observability/metrics.go†L189-L197】 |
-| Gateway acceptance rate | ≥ 99.5% | Gateway ingestion logs and `pos_gateway_rejections_total` counter. |
+| Finality latency (p95) | ≤ 3.5s enqueue → finality | `nhb_mempool_pos_p95_finality_ms` histogram on the consensus metrics endpoint.【F:observability/metrics.go†L425-L450】 |
+| Gateway acceptance rate | ≥ 99.5% | Gateway ingestion logs (no `pos_gateway_rejections_total` metric exists in the code). |
 | Sponsored throughput headroom | ≥ 20% above rolling 7d average | Paymaster burn-rate panel in Grafana. |
 
-Failure to meet any KPI for 10 consecutive minutes should trigger on-call escalation.
+Events: `pos.auth_auto_voided` (expiry sweep), `tx.sponsorship.failed` and
+`paymaster.throttled` (sponsorship rejected; `paymaster.throttled` is emitted only when a daily cap was hit, not for a paused merchant or revoked device; see
+[Paymaster administration](../launch/paymaster-admin.md)).
 
-## 2. Monitoring workflow
+Realtime feed: the node serves the WebSocket `/ws/pos/finality` (`rpc/http.go`) and the gRPC
+method `pos.v1.Realtime/SubscribeFinality`. Both stream `pending` and `finalized` updates for
+POS intents; the schema is in [POS realtime](../api/pos-realtime.md).
 
-1. **Dashboards** – The `POS Operations` Grafana board combines finality latency, gateway acceptance, and paymaster utilisation traces. Filter by merchant to isolate outliers.
-2. **Logs** – Stream gateway logs for error spikes: `kubectl logs deploy/gateway -f | grep pos`.
-3. **Realtime feed** – Use the realtime finality WebSocket `/ws/pos/finality` to observe individual transaction progress during incidents.【F:docs/api/pos-realtime.md†L14-L64】【F:rpc/http.go†L328-L336】
+The general request error and latency alerts are in the [alert runbook](./alerts.md).
 
-## 3. QoS tuning
+## Tuning
 
-1. **Gateway queue reservation**
-   * Adjust the POS queue reservation if latency drifts up: update the gateway config map and reload the deployment (`kubectl rollout restart deploy/gateway`).
-   * Reference the QoS specification for recommended reservation ratios across busy periods.【F:docs/specs/pos-qos.md†L20-L63】
-2. **Consensus tuning**
-   * Validate validator vote participation; if `nhb_consensus_finality_lag_seconds` rises above 15s, investigate validator health.
-   * Increase proposer batch size only if mempool saturation is observed; confirm with `make bugcheck-perf` in staging before deploying changes.【F:scripts/bugcheck.sh†L118-L128】
-3. **Paymaster throttles**
-   * Review `PaymasterLimits` in the node config if devices are being throttled unexpectedly.【F:core/sponsorship.go†L92-L145】【F:config/global.go†L8-L56】
+1. **POS lane reservation.** `[global.Mempool] POSReservationBPS` in `config.toml` is the
+   share of each block reserved for POS transactions, in basis points. The default is `1500`
+   (`consensus.DefaultPOSReservationBPS`) and validation rejects values above `10000`
+   (`config/validate.go`). Block size is `[global.Blocks] MaxTxs` (default `500`). Both are
+   read from the node's configuration.
+2. **Sponsorship limits.** Sponsored POS traffic is limited by the settings in
+   [paymaster budgets](./paymaster-budgets.md). Those are also read from `config.toml` at start.
+3. **Consensus timing.** Proposal, prevote, precommit and commit timeouts can be set with the
+   `consensusd` flags `--consensus-timeout-proposal`, `--consensus-timeout-prevote`,
+   `--consensus-timeout-precommit` and `--consensus-timeout-commit`, or in the `[consensus]`
+   section of `config.toml`.
+4. **Benchmark before changing.** `make bugcheck-perf` runs the performance audit target
+   (`Makefile`).
 
-## 4. Common incidents & mitigation
+## Common incidents
 
-| Symptom | Likely cause | Resolution |
-| --- | --- | --- |
-| Finality latency > 3.5s | Validator offline or consensus backlog | Page validator owners, restart unhealthy nodes, run `make bugcheck-perf` in canary to validate chain health. |
-| Gateway rejections spike | Merchant paused or device revoked | Check registry change log, coordinate with risk, and resume if appropriate. |
-| Sponsored cap exhausted mid-day | Caps misconfigured or merchant surge | Follow the paymaster budget runbook to evaluate cap increase and document the change. |
-| Device attestation failures | Expired certificates or firmware mismatch | Execute the device attestation runbook to reissue credentials. |
+| Symptom | Where to look |
+| --- | --- |
+| Finality latency high | `nhb_mempool_pos_p95_finality_ms` and `nhb_consensus_block_interval_seconds`; validator health. |
+| POS lane over 1 | `nhb_mempool_pos_lane_fill` and `nhb_mempool_pos_lane_backlog`; raise `POSReservationBPS` or investigate a burst. |
+| Sponsored transactions rejected | Run `tx_previewSponsorship` on one of them. A paused merchant, revoked device, exhausted cap or low sponsor balance each has its own `reason` (see [paymaster budgets](./paymaster-budgets.md) and [POS pause and revoke](./pos-pause-revoke.md)). |
+| Authorizations disappearing | `pos.auth_auto_voided` events and `nhb_pos_auth_expired_total`. |
 
-## 5. Incident review checklist
+## Incident review
 
-1. Capture dashboard snapshots (finality, acceptance, budgets) and attach to the incident ticket.
-2. Export relevant log segments and mTLS handshake traces for forensic analysis.
-3. File a post-incident review summarising impact, timeline, and corrective actions.
-4. Raise follow-up tasks for tooling gaps (e.g., automate cap alerts, improve dashboard annotations).
+Record the metrics above for the incident window, the rejected transactions' `status` and
+`reason` values, and any configuration change applied before the incident.

@@ -1,42 +1,27 @@
-# NHBChain Lending dApp Example
+# Lending dApp (mock)
 
-This example showcases how to build a lending interface on top of the NHBChain developer APIs. It is intentionally lightweight so it can act as a copy-and-paste starting point for experimentation, hackathons, or production prototypes.
+A small Next.js app with two flows, Earn and Borrow, driven entirely by in-browser mock state. It makes no network requests and does not talk to a node.
 
-## Features
+## What is in it
 
-- **Earn**: Supply and withdraw NHB liquidity using the NHBChain Lending Playbook pattern LEND-02.
-- **Borrow**: Deposit ZNHB as collateral, borrow NHB, repay loans, and experiment with developer fees using the NHBChain Lending Playbook pattern LEND-01.
-- **Fee Recipient Demo**: Demonstrates how a developer can monetize their local deployment via the `lend_borrowNHBWithFee` RPC endpoint.
-- **Empowerment Narrative**: Includes messaging that connects the protocol to NHBChain's mission of expanding access to credit for unbanked communities.
+- `pages/index.tsx`: landing page.
+- `pages/earn.tsx`: supply and withdraw against mock balances (`lib/mockData.ts`, `useEarnState`).
+- `pages/borrow.tsx`: deposit collateral, borrow, repay against mock balances (`useBorrowState`), plus a "Developer fee recipient" input that the mock state ignores.
+- `components/`: cards, layout and forms.
 
-## Getting Started
+`lib/mockData.ts` computes a health factor from constants in the file (`MAX_UTILIZATION = 0.75`, `LIQUIDATION_THRESHOLD = 0.85`). These are illustrative values, not the chain's lending parameters.
+
+## Method names on the pages are outdated
+
+The pages label buttons with `lend_supplyNHB`, `lend_withdrawNHB`, `lend_getPosition`, `lend_depositZNHB`, `lend_borrowNHBWithFee` and `lend_getHealthFactor`. None of those names is registered in the node's RPC dispatcher (`rpc/http.go`). The node's lending methods are named `lending_*` (for example `lending_getMarket`, `lending_getUserAccount`, `lending_borrowNHBWithFee`), and the write methods among them (`lending_supplyNHB`, `lending_withdrawNHB`, `lending_depositZNHB`, `lending_withdrawZNHB`, `lending_borrowNHB`, `lending_borrowNHBWithFee`, `lending_repayNHB`, `lending_liquidate`) are disabled and return HTTP `410`. Lending writes are signed transactions submitted with `nhb_sendTransaction` (`TxTypeLendingSupplyNHB` `0x13` through `TxTypeLendingRepayNHB` `0x18`, `TxTypeLendingLiquidate` `0x1D`; `core/types/transaction.go`). See [`docs/finance/lending`](../../docs/finance/lending) for the module documentation.
+
+## Getting started
 
 ```bash
 npm install
 npm run dev
 ```
 
-Visit http://localhost:3000 to explore the landing page, and use the navigation to jump between the Earn and Borrow flows.
-
-> **Tip:** The component structure mirrors the walkthrough in the [NHBChain Lending developer guide](../../docs/), making it easy to align the UI with the accompanying documentation and RPC examples.
-
-## Project Structure
-
-- `pages/index.tsx` — Landing page with a summary, call to action, and links to docs.
-- `pages/earn.tsx` — Earn flow with mock state management for supply and withdraw actions.
-- `pages/borrow.tsx` — Borrow flow demonstrating collateral, borrowing, repayment, and fee recipient entry.
-- `components/` — Reusable UI primitives (cards, layout, and forms).
-- `lib/mockData.ts` — Mock data to make the example interactive without deploying contracts.
-
-The mock state flows can be swapped for real NHBChain RPC calls when you are ready to integrate with the chain.
-
-## Production Considerations
-
-- Integrate real wallet authentication (e.g., WalletConnect or custom NHBChain wallets).
-- Replace the mock state hooks with real calls to the NHBChain RPC endpoints found in `/docs`.
-- Validate addresses before accepting them as developer fee recipients.
-- Add analytics to capture supply/borrow events and monitor liquidity health.
-
-## License
+Then open the URL that `next dev` prints.
 
 This example inherits the root repository license.

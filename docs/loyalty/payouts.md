@@ -1,68 +1,62 @@
 # Base Spend Rewards
 
-The base spend reward pays ZapNHB (ZNHB) to shoppers for every qualifying NHB
-transaction. Rewards are sourced from the loyalty treasury and accrue alongside
-program-specific payouts.
+The base spend reward pays ZNHB to the sender of a qualifying NHB transfer. It is funded from the loyalty treasury account (a ZNHB balance moved to the spender; nothing is minted) and runs alongside business program rewards ([`loyalty.md`](./loyalty.md)). Code: `native/loyalty/engine_base.go`, `native/loyalty/global.go`, `native/loyalty/params.go`, `core/state_transition.go` (`QueuePendingBaseReward`, `EndBlockRewards`).
 
-## Default Accrual Rate
+## When it runs
 
-* The chain-wide default accrual rate is **50 basis points (0.50%)** as defined by
-  `loyalty.DefaultBaseRewardBps`, paying 0.5 ZNHB for every 100 NHB of qualifying
-  spend.
-* All basis-point math uses the `loyalty.BaseRewardBpsDenominator` constant of
-  10,000.
-* Operators can toggle the engine with the `Active` flag, but when enabled an
-  explicit reward rate is no longer required—the default is applied whenever the
-  stored config omits `BaseBps`.
+`Engine.ApplyBaseReward` runs after each successful native NHB transfer (`TxTypeTransfer`) that has a recipient. Context: from = sender, to = recipient, token `NHB`, amount = transfer value. It does not run for other transaction types. If the `loyalty` module pause flag is set, nothing runs and no events are produced.
 
-For example, a 20,000 wei NHB payment pays 100 wei ZNHB: `20_000 * 50 / 10_000`.
-Caps (per-transaction or daily) clamp the computed reward after the rate is
-applied.
+## Rate and formula
 
-## Configuration Surface
+* `reward = amount * baseBps / 10000`, integer division (`BaseRewardBpsDenominator` = 10000).
+* `DefaultBaseRewardBps` is 50 (0.50%). `GlobalConfig.Normalize` applies it whenever the stored `BaseBps` is zero. `BaseBps` cannot exceed 10000 (`Validate`).
+* Example: a 20,000 wei payment earns `20000 * 50 / 10000` = 100 wei of ZNHB.
+* The reward is then clamped in this order: `CapPerTx` (when greater than zero), the sender's remaining `DailyCapUser` for the UTC day, and the remaining `DailyCapCounterparty` budget for the sender/recipient pair for the UTC day. A zero cap disables that check.
 
-The global configuration lives at `loyalty.GlobalConfig` and is stored on-chain
-via `state.Manager.SetLoyaltyGlobalConfig`. Relevant fields:
+## Configuration (`loyalty.GlobalConfig`)
 
-| Field | Description |
-|-------|-------------|
-| `Active` | Enables/disables base reward accrual. |
-| `Treasury` | 20-byte address that funds rewards. |
-| `BaseBps` | Optional basis-point override; defaults to 50 when zero. |
-| `MinSpend` | Minimum NHB spend required to earn the reward. |
-| `CapPerTx` | Hard cap (in ZNHB) per transaction. |
-| `DailyCapUser` | Daily cap (in ZNHB) per shopper. |
+The configuration is one record in state, written by the genesis loader from the `loyaltyGlobal` object of the genesis file (`core/genesis/spec.go`, `LoyaltyGlobalSpec`). Nothing changes it afterwards. All amounts are decimal strings in wei (18 decimals).
 
-`Normalize()` now applies the default basis points before enforcing non-negative
-caps and thresholds. Governance tooling and genesis loaders automatically apply
-these defaults so nodes ingest consistent settings.
+| Genesis field | Description |
+|---------------|-------------|
+| `active` | Enables base rewards. When false every payment emits `loyalty.base.skipped` with reason `inactive`. |
+| `treasury` | Bech32 account that funds rewards (required). |
+| `baseBps` | Rate in basis points; 0 selects the default of 50. |
+| `minSpend` | Minimum NHB amount that qualifies. |
+| `capPerTx` | Maximum ZNHB reward per payment. |
+| `dailyCapUser` | Maximum ZNHB reward per sender per UTC day. |
+| `dailyCapCounterparty` | Maximum ZNHB reward per unordered address pair per UTC day (A to B and B to A share one budget). Omitted or 0 disables it. |
+| `seedZNHB` | When greater than 0, the genesis loader sets the treasury's ZNHB genesis allocation to this amount (`core/genesis/loader.go`). |
+| `dynamic` | Daily budget and pro-rating settings, see [`policy.md`](./policy.md). |
 
-## Event Stream
+The genesis files under `config/` (`genesis.json`, `genesis.mainnet.json`, `genesis.phase-e.json`, `genesis.local.json`) set `active` true, `baseBps` 50, `minSpend` 1 NHB (1e18), `capPerTx` 50 ZNHB (50e18), `dailyCapUser` 200 ZNHB (200e18) and no `dailyCapCounterparty`.
 
-Base rewards emit `loyalty.base.accrued` events with attributes:
+## Skip reasons
+
+Each skip emits `loyalty.base.skipped` with a `reason`. In evaluation order: `config_error`, `inactive`, `missing_from_account`, `token_not_supported` (token is not NHB), `invalid_addresses`, `self_transfer`, `amount_not_positive`, `below_min_spend`, `no_reward_rate`, `reward_zero`, `daily_cap_reached`, `counterparty_daily_cap_reached`, `meter_error`, `treasury_error`, `treasury_insufficient` (treasury ZNHB balance below the reward).
+
+## Settlement (pro-rating)
+
+After the checks above the reward is added to the block's pending queue (`QueuePendingBaseReward`) and `loyalty.reward.proposed` is emitted. The per-user, per-pair and lifetime base meters and the accrual record are written at this point with the full proposed amount, and `loyalty.base.accrued` is emitted with that proposed amount.
+
+The actual credit happens at the end of the block (`EndBlockRewards`) when the stored `dynamic.EnableProRate` is true, which is the default and the only value the genesis loader can produce: the day's remaining budget is compared with the queued demand and every reward is scaled by `min(1, budget / demand)`. Details and events are in [`policy.md`](./policy.md). Each payout is also capped by the treasury's remaining balance. The recipient of the credit is the sender (the spender).
+
+If `EnableProRate` is false in the stored configuration, each reward is credited immediately (`settleBaseRewardImmediate`), limited only by the treasury balance.
+
+Because the accrued event and the meters record the proposed amount, the ZNHB actually received can be lower than `reward` in `loyalty.base.accrued` when pro-rating applies or the treasury runs low.
+
+## Event `loyalty.base.accrued`
 
 | Attribute | Description |
 |-----------|-------------|
-| `day` | UTC day (`YYYY-MM-DD`). |
-| `token` | Always `NHB`. |
+| `day` | UTC day, `YYYY-MM-DD`. |
+| `token` | `NHB`. |
 | `amount` | Spend amount (wei). |
-| `from` | Hex sender address. |
-| `to` | Hex recipient address. |
-| `reward` | Minted ZNHB (wei). |
-| `baseBps` | Basis points used for the reward computation. |
+| `from`, `to` | Lowercase hex addresses, no `0x`. |
+| `reward` | Proposed ZNHB reward (wei). |
+| `baseBps` | Basis points used. |
 
-When rewards are skipped (due to pauses, caps, treasury balance, etc.)
-`loyalty.base.skipped` events continue to carry the `reason` and contextual
-metadata to aid observability.
+## Operations
 
-## Pauses and Caps
-
-* `gov.v1.MsgSetPauses` toggles module-wide pauses; when active no base rewards
-  are paid and no events are produced.
-* `CapPerTx` truncates the computed reward before persistence.
-* `DailyCapUser` clamps the total paid amount per shopper per UTC day; the
-  remaining allowance is calculated with on-chain meters.
-
-Operators should ensure the treasury maintains sufficient ZNHB liquidity. The
-engine refuses to pay when the treasury balance falls below the requested
-reward and emits a `treasury_insufficient` skip event.
+* Keep the treasury account funded with ZNHB: rewards are skipped with `treasury_insufficient` when the balance is below one reward.
+* The `loyalty` pause flag (`[global.Pauses] Loyalty`) stops rewards without producing events.

@@ -1,9 +1,12 @@
-# NHB vs. ZNHB transfers
+# NHB and ZNHB transfers
 
-ZapNHB (ZNHB) transfers use a dedicated transaction type alongside the existing
-NHB coin payments. Both payloads share the same ECDSA signing flow: construct a
-`types.Transaction`, recover the sender nonce from the latest account state, and
-sign the SHA-256 hash before submitting the JSON-RPC request.
+NHB (`TxTypeTransfer`, `0x01`) and ZapNHB (`TxTypeTransferZNHB`, `0x10`) are both
+sent with `nhb_sendTransaction`. Construct a `types.Transaction`, read the
+sender's nonce from `nhb_getBalance`, sign it, and submit the JSON-RPC request.
+The signing hash is the SHA-256 of the `NHB_TX_V3_MAINNET` binary encoding
+(`Transaction.Hash`, `core/types/transaction.go`); the [wallet builder
+guide](../sdk/wallets.md) lists every rule the code enforces. This page shows the
+request shapes.
 
 For a copy/paste JSON-RPC payload that showcases the ZNHB transfer format, see
 the [Sending ZNHB via `nhb_sendTransaction`](../api/rpc.md#sending-znhb-via-nhb_sendtransaction)
@@ -11,34 +14,32 @@ example in the RPC reference.
 
 ## Authenticated submission
 
-`nhb_sendTransaction` is a privileged RPC on validator nodes. Every request is
-wrapped by `requireAuth`/`requireAuthInto`, which reject calls that omit the
-`Authorization` header or fail bearer-token verification before
-`handleSendTransaction` even parses the payload. Wallets
-MUST proxy signed transactions through trusted server infrastructure so the
-token never ships to the browser. Reuse helpers such as `rpcRequest(...,
-withAuth=true)` on your server routes, then forward the fully signed JSON body
-with the chain ID header and `Authorization: Bearer <NHB_RPC_TOKEN>` already
-attached. Both NHB (`TxTypeTransfer`) and ZNHB (`TxTypeTransferZNHB`) sends rely
-on the same authenticated flow.
+`nhb_sendTransaction` is a privileged RPC. The dispatcher calls
+`requireAuthInto` before `handleSendTransaction` (`rpc/http.go`), which accepts a
+verified TLS client certificate when the server requires one, and otherwise an
+`Authorization: Bearer <token>` header carrying a JWT that the server's verifier
+accepts. A request that fails this check is answered with HTTP 401 before the
+payload is parsed. Wallets must not ship the bearer token to browsers or mobile
+clients; proxy the signed transaction through a trusted server endpoint that
+attaches the header. Both transfer types use the same authenticated flow. When
+the handler accepts the transaction it returns `0x` plus the transaction hash.
 
-## 1. Fetch the current nonce and balances
+The CLI does this for you: `nhb-cli send-nhb` and `nhb-cli send-znhb` take
+`[--rpc <url>] [--gas <limit>] [--gas-price <price>] <recipient> <amount> <key_file>`,
+read the token from `NHB_RPC_TOKEN` and the endpoint from `--rpc` or `RPC_URL`
+(default `http://localhost:8080`). `--gas` defaults to `21000` for NHB and
+`25000` for ZNHB; `--gas-price` defaults to `1`. `amount` is a positive integer in
+wei (`cmd/nhb-cli/send.go`).
 
-Before building either transaction, query the account with `nhb_getBalance` to
-retrieve the `nonce` and confirm available balances. The node returns both NHB
-and ZNHB balances in wei together with the next nonce that must be echoed in the
-outgoing transaction.
+Query the account with `nhb_getBalance` (no token needed) to read the `nonce`
+and the balances. The result includes `balanceNHB`, `balanceZNHB` and `nonce`,
+among other fields (`BalanceResponse` in `rpc/http.go`).
 
-```jsonc
-// Request
-{
-  "id": 1,
-  "jsonrpc": "2.0",
-  "method": "nhb_getBalance",
-  "params": ["nhb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"]
-}
+`nhb_getBalance` returns `nonce`, `balanceNHB` and `balanceZNHB`
+([rpc.md](../api/rpc.md#nhb_getbalance)). Use `nonce` as the transaction `nonce`;
+a lower value is rejected.
 
-// Response
+// Response (abridged)
 {
   "id": 1,
   "jsonrpc": "2.0",
@@ -51,14 +52,29 @@ outgoing transaction.
 }
 ```
 
-Wallets can reuse the same nonce lookup irrespective of the asset being moved
-and should block send attempts if either NHB gas or ZNHB balance is insufficient.
+The nonce lookup is the same for both assets. The node rejects a transaction
+whose nonce is lower than the account nonce with `nonce N has already been used;
+current account nonce is M`.
 
-## 2. NHB transfer (type `0x01`)
+Which balance a wallet must check before sending depends on the asset. An NHB
+transfer debits NHB and a ZNHB transfer debits ZNHB only (see "Fee model"
+below), so a wallet should check the balance of the asset being sent against the
+amount plus the fee. A ZNHB send does not need any NHB.
 
-Standard NHB payments continue to use `TxTypeTransfer (0x01)` and execute on the
-EVM path. Loyalty rewards and merchant fee routing remain scoped to these
-transfers.
+## Request body encoding
+
+The request body is the transaction object. `to` and `data` are byte fields and
+must be base64 strings (`rpc/http.go`, `txDTO`); a `0x` hex string is not
+accepted there. `chainId`, `nonce`, `value`, `gasLimit`, `gasPrice`, `r`, `s` and
+`v` accept a JSON number, a decimal string or a `0x` hex string. The `r`, `s`
+and `v` values below are placeholders, not a valid signature.
+
+`TxTypeTransfer` takes a native fast path inside `applyEvmTransaction`: balances
+are updated by the state processor rather than by running EVM code. The receipt's
+gas used is the transaction's `gasLimit`.
+
+`applyEvmTransaction` handles `TxTypeTransfer`. The recipient must be a 20-byte,
+non-zero address and `value` must be positive.
 
 ```json
 {
@@ -70,24 +86,23 @@ transfers.
       "chainId": "0x4e4842",
       "type": 1,
       "nonce": 42,
-      "to": "0x1b9b9fb69f2c6c9c1d4c1c4e7b999b20461ab29f",
+      "to": "G5uftp8sbJwdTBxOe5mbIEYasp8=",
       "value": "0x2386f26fc10000",
       "gasLimit": "0x61a8",
-      "gasPrice": "0x3b9aca00",
-      "data": "0x",
-      "r": "0xc1efc6c2f0c3f3d71e2c195911edbf7a7e8bc2bd52d4b3f6b14d4b0e54738b62",
-      "s": "0x27a1a8e31f42d8c3e65d021779f8921bb5ca5066a8b0f67fc6f2df548b6e2771",
-      "v": "0x1b"
+      "gasPrice": "0x1",
+      "data": "",
+      "r": "<signature r>",
+      "s": "<signature s>",
+      "v": "<signature v, 27 or 28>"
     }
   ]
 }
 ```
 
-## 3. ZNHB transfer (type `0x10`)
+## Fees
 
-ZapNHB uses the new `TxTypeTransferZNHB (0x10)` constant. Only the asset changes
-— the fee path still burns NHB gas and no loyalty accrual is triggered. The
-`value` field is denominated in ZNHB wei and the recipient must be supplied.
+`applyTransferZNHB` handles `TxTypeTransferZNHB`. The recipient must be a
+20-byte, non-zero address and `value` (in ZNHB base units) must be positive.
 
 ```json
 {
@@ -99,45 +114,47 @@ ZapNHB uses the new `TxTypeTransferZNHB (0x10)` constant. Only the asset changes
       "chainId": "0x4e4842",
       "type": 16,
       "nonce": 42,
-      "to": "0x5c9d4cde23f68cd2209a2f5eaf0a1d34ac3e5f2a",
+      "to": "XJ1M3iP2jNIgmi9erwodNKw+Xyo=",
       "value": "0xde0b6b3a7640000",
       "gasLimit": "0x61a8",
-      "gasPrice": "0x3b9aca00",
-      "data": "0x",
-      "r": "0x9d6bb1226fb5c07f42d41f017cbf6f6fb1dcf1c563cb5b5b6f2a7d2639a4bce1",
-      "s": "0x42fdedb6f5b1f59fa3d793c9d86b8b156382fa4995df794ba53d0d2ca4f8cb22",
-      "v": "0x1c"
+      "gasPrice": "0x1",
+      "data": "",
+      "r": "<signature r>",
+      "s": "<signature s>",
+      "v": "<signature v, 27 or 28>"
     }
   ]
 }
 ```
 
-### Authenticated submission
-
-`nhb_sendTransaction` is a privileged RPC. Every request must present
-`Authorization: Bearer <NHB_RPC_TOKEN>` so only trusted infrastructure can push
-transactions into the network. The HTTP layer enforces this via the
-`requireAuth`/`requireAuthInto` guard that runs before `handleSendTransaction`,
-rejecting any call that lacks the bearer token. When the header is accepted the handler forwards
-the payload to `node.AddTransaction`, queuing it for consensus alongside other
-pending transfers. Wallets **must not** ship the bearer token to browsers or
-mobile clients—proxy the submission through a server endpoint (for example the
-`rpcRequest(..., withAuth=true)` helper used elsewhere in these docs) so the
-token is only attached on trusted backends.
+`gasLimit` must be greater than zero and `gasPrice` must be greater than zero, or
+the RPC rejects the request (`rpc/http.go`); the amounts above are examples.
 
 ### Fee model
 
-The `gasLimit`/`gasPrice` fields describe the NHB gas that is burned for
-execution. ZNHB transfers **do not** carry an additional MDR-style fee; instead
-they follow the per-asset merchant discount rate described in the [fees
-reference](../fees/policy.md) where ZNHB promotions are currently fully
-sponsored. Any NHB required for gas is withdrawn from the sender (or from the
-configured sponsor account if [pass-through sponsorship](../fees/policy.md) is
-enabled for the merchant), while the ZNHB face value routes to the recipient.
+The transfer fee is not `gasLimit * gasPrice`. It is a protocol-enforced
+percentage of the amount, computed by `TransferGasPolicy.ComputeFee` and charged
+in the asset being sent (`core/state_transition.go`):
+
+- **ZNHB transfer** (`applyTransferZNHB`): the sender's ZNHB balance is debited by
+  the amount plus the fee, the recipient is credited the amount, and the fee goes
+  to the configured fee collector. The handler does not read or change the
+  sender's NHB balance. If the ZNHB balance cannot cover both, the transfer fails
+  with `znhb transfer: insufficient balance`.
+- **NHB transfer**: the sender's NHB balance is debited by the amount plus the
+  fee unless the sender is in the free-spend tier or a paymaster sponsors the
+  transfer; otherwise it fails with `insufficient funds for transfer+gas`.
+- Both types can additionally be charged a domain fee when `merchantAddr` names a
+  domain with a configured fee policy (`applyTransactionFee`); see the [wallet
+  builder guide](../sdk/wallets.md) and the [fees reference](../fees/policy.md).
+
+Both transfer types can be paused by governance; the transaction then fails with
+`nhb transfer: paused` or `znhb transfer: paused`.
 
 ### Expected responses
 
-Once the envelope is submitted the node returns the transaction hash:
+Once the transaction is accepted the node returns the transaction hash as a
+string:
 
 ```json
 {
@@ -147,8 +164,13 @@ Once the envelope is submitted the node returns the transaction hash:
 }
 ```
 
-Poll `nhb_getTransactionReceipt` to confirm settlement and to surface the asset
-recorded in the `Transfer` log.
+Poll `nhb_getTransactionReceipt` with that hash. The result is `null` until the
+transaction is found in a block. Otherwise the receipt has `transactionHash`,
+`blockHash`, `blockNumber`, `status` (always `"0x1"` for a transaction that is in
+a block), `gasUsed` and `logs` (`buildReceiptResult`, `rpc/http.go`). Each log is
+a string map built from the transaction's events; a transfer produces a
+`Transfer` log with `asset` (`NHB` or `ZNHB`), `value` and the event's other
+attributes, and a domain fee adds a `FeeApplied` log.
 
 ```json
 {
@@ -157,44 +179,11 @@ recorded in the `Transfer` log.
   "method": "nhb_getTransactionReceipt",
   "params": ["0xa9a6f4d59e11cce45bfb0fb89f743ad39df0cedf0e09a0e02ff80db152df2b03"]
 }
-
-// Response
-{
-  "id": 3,
-  "jsonrpc": "2.0",
-  "result": {
-    "transactionHash": "0xa9a6f4d59e11cce45bfb0fb89f743ad39df0cedf0e09a0e02ff80db152df2b03",
-    "status": "0x1",
-    "gasUsed": "0x5208",
-    "logs": [
-      {
-        "event": "Transfer",
-        "asset": "ZNHB",
-        "from": "nhb1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh",
-        "to": "nhb1f3v0uf2p5uvq6m7jq3q3fyhml8prwv35u2hgq9t",
-        "value": "0xde0b6b3a7640000"
-      }
-    ]
-  }
-}
 ```
 
-After signing, submit the payload through `nhb_sendTransaction`. Successful
-settlement debits the sender, credits the recipient, and increments the sender
-nonce:
-
-* **NHB transfers** – `applyEvmTransaction` executes the envelope on the EVM,
-  then reloads sender and recipient accounts to apply gas, loyalty, and fee
-  bookkeeping before persisting the debited `from`/credited `to` balances back
-  into the trie (`core/state_transition.go`, `applyEvmTransaction`).
-* **ZNHB transfers** – `applyTransferZNHB` performs the debit/credit entirely in
-  the native state processor, subtracting from `BalanceZNHB`, adding to the
-  recipient (creating the account if needed), handling fees, and recording the
-  transfer event (`core/state_transition.go`, `applyTransferZNHB`).
-
-Gas charges are still paid in NHB, so wallets should confirm sufficient NHB
-balance alongside ZNHB holdings before attempting either transfer type.
-
-For an end-to-end example that automates signing for either token, refer to the
-`send-znhb` command in `cmd/nhb-cli`, which reuses the same signing primitives
-exposed in the SDK.
+Successful settlement debits the sender, credits the recipient and increments the
+sender nonce. `applyTransferZNHB` does this entirely in the native state
+processor (subtracting from `BalanceZNHB`, adding to the recipient, creating the
+account if needed) and records a `transfer.native` event
+(`core/events/transfer.go`). For an end-to-end example that signs for either
+asset, see the `send-nhb` and `send-znhb` commands in `cmd/nhb-cli`.

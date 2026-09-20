@@ -1,7 +1,7 @@
 # Bug Bounty Program
 
 ## Scope
-Our bug bounty program covers the NHBChain core node implementation, official SDKs, and reference wallets. Third-party integrations, experimental branches, and deprecated releases are out of scope unless explicitly stated otherwise. Review the [audit readiness pack](../../ops/audit-pack/README.md) for component boundaries and configuration details when planning your research.
+Our bug bounty program covers the NHBChain core node implementation, official SDKs, and reference wallets. Third-party integrations, experimental branches, and deprecated releases are out of scope unless explicitly stated otherwise. See the [audit readiness guide](./audit-readiness.md) for the code layout and configuration samples when planning your research.
 
 ## Rewards
 We offer tiered rewards based on the severity and impact of the vulnerability. Reward amounts
@@ -25,7 +25,7 @@ for high-quality reports with working proofs-of-concept.
 * **Acknowledgement:** We confirm receipt of submissions within **24 hours**.
 * **Triage:** We complete an initial severity assessment within **5 business days**.
 * **Fix Commitment:** We communicate remediation plans within **10 business days** of triage.
-* **Reward & Disclosure:** We target patch release and reward payment within **30 days** for high and critical issues, and **45 days** for other severities.
+* **Resolution:** Resolution targets by severity are those in [disclosure.md](./disclosure.md). Reward payment timing is stated above.
 
 SLA targets may be adjusted when coordinated disclosure with upstream dependencies is required. Reporters are kept informed of any extensions.
 

@@ -1,130 +1,82 @@
-# POTSO Evidence Intake
+# POTSO Evidence and Penalties
 
-Phase 3A introduces a canonical intake flow for POTSO misbehaviour evidence. This layer validates authenticity, enforces replay protection, and persists accepted records so that subsequent penalty logic can consume a deduplicated feed.
+Misbehaviour reports ("evidence") are recorded on-chain by a dedicated transaction type, and a penalty engine runs during block processing. Code: `consensus/potso/evidence`, `consensus/potso/penalty`, `core/potso_evidence_tx.go`, `core/node.go`, `rpc/modules/potso_evidence.go`.
 
-## Submitting evidence
+## Submission path
 
-Evidence is reported with an ordinary signed native transaction of type `TxTypeSubmitEvidence` (`0x4C`), sent through `nhb_sendTransaction` like every other signed transaction. There is no separate submit RPC method (`potso_submitEvidence` was removed): the reporter is always the transaction's recovered signer, and the transaction carries a nonce like any other.
+`potso_submitEvidence` builds a `TxTypeSubmitEvidence` (`0x4C`) transaction whose `Data` is the RLP-encoded evidence, with no envelope signature, `GasLimit` 0 and `GasPrice` 0 (`Node.PotsoSubmitEvidence`, `RequiresSignature` in `core/types/transaction.go`), and passes it to `AddTransaction`. If the record already exists, `PotsoSubmitEvidence` returns the `idempotent` receipt before building a transaction. Otherwise `AddTransaction` runs `validateTransaction`, which simulates the transaction against a copy of state while `Node.txSimulationEnabled` is true (`core/node.go`). It defaults to true, and `SetTransactionSimulationEnabled` is called only from tests (no other caller in the repository), so on a running node an invalid report is rejected synchronously. If simulation were switched off, `validateTransaction` would return before executing the transaction and validation would happen only when a block containing it is applied. A valid one is queued in the mempool and gossiped. It is recorded in the state trie only when a block containing it is applied (`applySubmitEvidenceTransaction`). The RPC result therefore means "admitted", not "recorded"; `potso_getEvidence` returns "evidence not found" until the block is applied.
 
-`tx.Data` is the RLP encoding of the evidence value: the list `[type, offender, heights, details, reporter, reporterSig, timestamp]`, where `type` is the upper-case type name, `offender` and `reporter` are 20-byte addresses, `heights` is a list of unsigned integers, `details` and `reporterSig` are byte strings and `timestamp` is an unsigned integer. A Go client can use `rlp.EncodeToBytes(&evidence.Evidence{...})` from `nhbchain/consensus/potso/evidence`.
+The POTSO module pause (`system/pauses`, module `potso`) blocks both the RPC and the transaction.
 
-A submission is only accepted when:
-
-* `reporter` in the payload is the account that signed the transaction.
-* That account has at least the governed minimum validator stake bonded (its own locked ZNHB).
-* The transaction nonce is the account's current nonce; it is consumed by an accepted report.
-* The chain has room: at most 256 evidence records are held at once and one reporter may hold at most 4 live records.
-* For `EQUIVOCATION`, the proof names a height that the report lists among its `heights` and that is no later than the block the report is applied in, and the same double-sign is not already recorded (see [Canonical hash & replay guard](#canonical-hash--replay-guard)).
-
-A report that is refused for any of these reasons is an ordinary failed transaction and never affects the rest of the block.
-
-## Evidence payload schema
-
-Evidence submissions must include the following fields:
+## Evidence payload
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `type` | string | One of `DOWNTIME`, `EQUIVOCATION`, `INVALID_BLOCK_PROPOSAL`. |
-| `offender` | string | NHB Bech32 address of the validator being accused. |
-| `heights` | array<uint64> | Block heights relevant to the accusation (at most 64). Heights must be in ascending order. An `EQUIVOCATION` report must list the height its proof is about. |
-| `details` | JSON | Free-form, reporter-controlled data (at most 2048 bytes). The raw bytes are part of the canonical hash. For `EQUIVOCATION` it is the proof. |
-| `reporter` | string | NHB Bech32 address of the reporter. |
-| `reporterSig` | hex | 65-byte secp256k1 signature authenticating the payload. |
-| `timestamp` | int64 | Reporter clock in UNIX seconds; embedded into the signing digest. |
+| `type` | string | Case-insensitive on input, stored upper-case. One of `DOWNTIME`, `EQUIVOCATION`, `INVALID_BLOCK_PROPOSAL`. |
+| `offender` | string | Bech32 address of the accused. Must not be the zero address. |
+| `heights` | array of uint64 | At least one. Ascending order (equal neighbours are allowed). |
+| `details` | JSON | Raw bytes, hashed. For `EQUIVOCATION` it must be an equivocation proof (below). |
+| `reporter` | string | Bech32 address of the reporter. Must not be the zero address. |
+| `reporterSig` | hex | 65-byte secp256k1 signature. |
+| `timestamp` | int64 | Included in the signing digest. Must be non-negative. |
 
-## Canonical hash & replay guard
+There is no reporter allow-list: any address whose key signs the payload can report.
 
-Every payload is mapped to a canonical hash:
+### Canonical hash and signature
 
 ```
-blake3(type || offender || len(heights) || heights || details)
+hash   = BLAKE3-256( uint32be(len(TYPE)) || TYPE || offender(20 bytes)
+                     || uint32be(len(heights)) || heights (each uint64 big-endian, sorted ascending)
+                     || uint32be(len(details)) || details )
+digest = SHA-256( "potso_evidence|" || hex(hash) || "|" || decimal(timestamp) )
 ```
 
-`type` is upper-cased and ASCII encoded, addresses are raw 20-byte values, and heights are encoded as big-endian 64-bit integers prefixed by the list length. This hash is stable across reporters and serves two purposes:
+`hex(hash)` has no `0x` prefix. The reporter signs `digest`; the recovered address must equal `reporter` (`CanonicalHash`, `SigningDigest`, `ValidateEvidence`).
 
-* Replay protection - a submission whose hash is already recorded is refused and no new record is written.
-* Query key – `potso_getEvidence` resolves records by canonical hash.
+### Equivocation proof
 
-For `EQUIVOCATION` the hash alone is not enough to tell reports apart. It covers the heights the reporter lists and the exact bytes of the proof, so one double-sign written another way (the two votes swapped, a block hash in another case, the JSON laid out differently, a signature in its other valid encoding, another conflicting vote in place of one of the two, another height listed beside the proof's) has another hash, and would otherwise be a new first report of the same misdeed. A double-sign is therefore identified by its **offense**: the offender and the height, round and vote type the proof names. The votes a validator signs cover exactly those, so a proof for any other decision point cannot be produced without the offender's key. Each offense is recorded once: a report whose offense is already recorded is refused as already recorded, whatever its hash, and the penalty is applied and remembered per offense (see [Penalty math & idempotency](#penalty-math--idempotency)). Separate double-signs (another height, round or vote type) are separate offenses. A report of any other type is its own offense, identified by its canonical hash.
+For `EQUIVOCATION`, `details` must be JSON `{"height": H, "round": R, "voteType": 1|2, "voteA": {"blockHash": "hex", "signature": "hex"}, "voteB": {...}}` (`1` prevote, `2` precommit). Each vote's signature must be a 65-byte signature over `SHA-256(JSON({"blockHash", "round", "type", "height"}))` (the BFT vote payload) that recovers to the offender's address, and the two block hashes must differ (`VerifyEquivocationProof`). `DOWNTIME` and `INVALID_BLOCK_PROPOSAL` have no proof requirement beyond the reporter signature.
 
-The signature domain uses the canonical hash and timestamp: reporters sign the SHA-256 digest of `"potso_evidence|<hash>|<timestamp>"`.
+## Validation
 
-## Authenticity checks
+`ValidateEvidence` runs in the transaction path with the height of the block being applied and `DefaultMaxAgeBlocks = 8640`. It rejects, with these reasons: `invalid_type`, `invalid_offender`, `invalid_reporter`, `empty_heights`, `unsorted_heights`, `future_height` (a height greater than the current block height), `expired` (a height more than 8640 blocks old), `invalid_signature` (length, recovery or reporter mismatch) and `invalid_equivocation_proof`. `unknown_height` is defined but is not checked in this path, because no height lookup is supplied.
 
-The verifier enforces:
+Only an `*evidence.ValidationError` from `AddTransaction` becomes a rejected receipt, and only that case returns HTTP 400, code `-32602`, message = the validation message, and `data = {"hash": "0x..."}` (`rpc/modules/potso_evidence.go`, `Submit`). Every other error from `Node.PotsoSubmitEvidence` (module paused, nonce or mempool errors, a negative `timestamp`, which `Evidence.EncodeRLP` refuses, and so on) is returned as HTTP 500, code `-32000`, with the error text as the message. Malformed request fields (missing or unknown `type`, bad addresses, bad `reporterSig` hex) return HTTP 400, code `-32602`, before the node is called. No `potso.evidence.rejected` event is emitted by any code path.
 
-* Known evidence type.
-* Non-zero offender and reporter addresses.
-* Ascending `heights` list.
-* Heights not in the future relative to the node's tip.
-* Heights within the rolling window (`DefaultMaxAgeBlocks = 8640`).
-* Heights that actually exist in the canonical chain.
-* For `EQUIVOCATION`, that the height the proof names is one of the listed `heights` and is no later than the block the report is applied in. The window checks above look at the listed heights, which the reporter chooses, so this is what makes them apply to the double-sign itself: a proof for an older double-sign cannot be carried by a report that lists a recent height, and votes for a height the chain never reached are refused.
-* At most 64 heights and 2048 bytes of `details`, and a non-negative `timestamp`.
-* Valid 65-byte secp256k1 signature matching the reporter.
-* For `EQUIVOCATION`, a proof that the offender's own key signed two conflicting votes.
+## Persistence and queries
 
-A rejected submission fails as an ordinary transaction with a machine-readable reason such as `invalid_signature`, `expired` or `oversized`. A proof for a height the report does not list, or beyond the current height, is refused as `invalid_equivocation_proof`.
+Accepted records are stored at `potso/evidence/record/<hash>` (`potsoEvidenceRecordKey`, written with `KVPut` on the plain key, so under a single `Keccak256(key)`) and the hash is appended to `potso/evidence/pending` (`KVAppend`, also a single `Keccak256`). Resubmitting an already-recorded hash is a no-op; the RPC reports `status: "idempotent"` if the record already exists when it is called.
 
-**Known limit.** The vote a validator signs carries no chain id (changing it would change consensus), so two votes signed with one validator key at the same height, round and vote type on two different chains prove a double-sign on either. A validator key must never be used on more than one chain. The evidence rules above bound the damage to one penalty per offense on this chain; they cannot tell the chains apart.
+RPC (no authentication):
 
-## Persistence & queries
+- `potso_submitEvidence(EvidencePayload) -> { hash, status }`, where `status` is `accepted` or `idempotent`.
+- `potso_getEvidence({ hash }) -> record`, where the record has `hash`, `type`, `offender`, `heights`, `details`, `reporter`, `reporterSig`, `timestamp`, `receivedAt` (block timestamp). Unknown hash: HTTP 400, "evidence not found".
+- `potso_listEvidence({ offender?, type?, fromHeight?, toHeight?, page: { offset?, limit? } }) -> { records, nextOffset? }`. Newest first; `limit` defaults to 50. `fromHeight` / `toHeight` compare against the record's smallest height.
 
-Accepted submissions are stored in chain state with their canonical hash, full payload, and the block timestamp at which they were recorded. The set of live records is bounded: a record is removed once the height of its offense is older than `DefaultMaxAgeBlocks` (the same window that stops an old report being submitted), and no more than 256 records are held at any time. The height of the offense is the height the proof names for an `EQUIVOCATION` and the oldest height listed for any other report. A removed record cannot be submitted again, because the height of its offense is then expired and an `EQUIVOCATION` report has to list it; until then the offense stays recorded, so it cannot be reported afresh in between.
+Event on acceptance (`core/events/potso_evidence.go`): `potso.evidence.accepted` with `hash`, `type`, `offender`, `height` (smallest height), `reporter`.
 
-RPC surfaces two read-only endpoints under the POTSO namespace:
+## Penalty processing
 
-* `potso_getEvidence(hash) -> EvidenceRecord`
-* `potso_listEvidence(filters?) -> { records, nextOffset? }`
+`Node.processPendingEvidenceForState` runs after block lifecycle processing in `CreateBlock`, `ValidateBlock` and `CommitBlock`. For each recorded report whose smallest height is not older than `currentHeight - 8640`, it refreshes the offender's base weight from the account's current `Stake` (`Ledger.EnsureBaseline`) and calls `penalty.Engine.Apply`. The node builds the engine from `penalty.DefaultConfig()` with `SlashEnabled = true` and `EquivocationSlashBps = 10000`, and always passes `MissedEpochs = 0`.
 
-Filters support `offender`, `type`, `fromHeight`, `toHeight`, and pagination via `page: { offset, limit }`; a page holds at most 200 records. Results expose raw `details` bytes exactly as submitted, the reporter signature, and the `receivedAt` block timestamp.
+Rules (`consensus/potso/penalty/rules.go`, amounts in wei):
 
-## Events
+| Type | Severity | Decay applied to the weight ledger | Slash |
+| --- | --- | --- | --- |
+| `EQUIVOCATION` | CRITICAL | `min(current, max(base * 5000 / 10000, 100))` | `base * 10000 / 10000` (all of the base weight) with the node's settings |
+| `DOWNTIME` | MEDIUM | Ladder by missed epochs: 1 -> 200 bps, 2 -> 500 bps, 3+ -> 1000 bps of the current weight. With `MissedEpochs = 0` the decay is 0. | none |
+| `INVALID_BLOCK_PROPOSAL` | HIGH | 300 bps of the current weight | none |
 
-Two new topics are emitted:
+`penalty.Config` also has cooldown fields (7, 1 and 1 epochs); nothing in `Apply` reads them.
 
-* `potso.evidence.accepted { hash, type, offender, height, reporter }` for new records (the smallest referenced height is published).
-* `potso.evidence.rejected { reason, reporter }` is defined but not currently emitted: a rejected submission fails as a transaction, and a failed transaction's events are discarded.
+The slash (`state/bank.ValidatorSlasher.Slash`) reduces the offender account's `LockedZNHB` by up to the slash amount (capped at the locked balance), reduces `Stake` by the same amount, and credits the amount to the escrow fee treasury account. The `slashAmt` value in the event is the computed amount, not the capped amount.
 
-Downstream consumers can subscribe to these to trigger dashboards, alerting, or follow-on enforcement once penalty logic is wired up.
+Idempotency is per `(evidence hash, offender)`. The record is marked in `state/potso.Ledger`, which is held in memory by the node.
 
-## Penalty math & idempotency
+### Event
 
-Phase 3B introduces a deterministic penalty engine that maps accepted evidence to participation weight decay and optional token slashing. The rules are table-driven per evidence type:
+`potso.penalty.applied`: `hash`, `type`, `offender`, `decayPct` (basis points rendered as a percentage with two decimals), `slashAmt`, `newWeight`, `block`, `idempotent`. The node appends this event only for non-idempotent applications. `nhb_getSlashingEvents` returns these events from the node's current event list.
 
-| Evidence type | Severity | Weight decay | Slash | Cooldown |
-| --- | --- | --- | --- | --- |
-| `EQUIVOCATION` | Critical | `max(θ_eq × baseWeight, minDecay)` | Optional `S_eq` basis points of base weight (feature-gated) | 7 epochs |
-| `DOWNTIME` | Medium | Ladder: `θ_dt(N)` for `N` missed epochs (defaults: 2%, 5%, 10%) | None | 1 epoch |
-| `INVALID_BLOCK_PROPOSAL` | High | Fixed percentage (default 3%) of current weight | None | 1 epoch |
+## Not implemented
 
-Decay percentages are expressed in basis points and applied against the offender's participation weight. Results are clamped between configured floor and ceiling bounds to prevent negative or runaway values. When slashing is disabled, any computed slash amount is ignored but still surfaced to telemetry.
-
-Every application is idempotent: the pair `{offense, offender}` is recorded in chain state together with the penalty it guards, so the record is versioned with the block that applied it. The offense is the identity described under [Canonical hash & replay guard](#canonical-hash--replay-guard), not the hash of whichever report brought it to light, so no other way of writing the same double-sign is penalised again. Every node computes the same result whether it is building, validating, committing or replaying a block, and a trial build that is discarded leaves nothing behind. The record is removed together with the evidence record when that ages out of the window.
-
-A slash moves the offender's locked ZNHB to the treasury (the chain's admin wallet). What is forfeited is bounded by what the offender really has: the penalty never exceeds its recorded stake or the ZNHB it holds locked itself, so stake that other accounts delegated to the offender is not reached by a slash. Because that wallet's balance is covered by the sale and reward pools, the forfeited amount is added to the reward pool in the same step, so the ZNHB supply invariant holds across a slash.
-
-### Penalty events
-
-Successful executions emit `potso.penalty.applied { hash, type, offender, decayPct, slashAmt, newWeight, block, idempotent }`. `decayPct` is rendered as a percentage with two decimal places (basis-point precision) and `slashAmt` is the amount actually forfeited to the treasury, which can be less than the penalty asked for (zero when disabled or when the offender has nothing bonded). `newWeight` reports the post-penalty participation weight for observability.
-
-## Appeals & remediation process
-
-No dispute or appeals mechanism is currently implemented. There is no `potso_submitAppeal` RPC method or equivalent (confirmed: no "appeal" references anywhere in the Go source), no triage/hearing workflow, and no `potso.penalty.reversed`/`adjusted`/`refund` events. The evidence `type` field is hard-restricted to `DOWNTIME`, `EQUIVOCATION`, and `INVALID_BLOCK_PROPOSAL` with no appeal-flavored type or flag. An offender who believes evidence was filed in error currently has no on-chain or RPC-level recourse -- this is a known gap, not a documented process.
-
-### Audit logging fields
-
-All evidence and penalty actions feed into the audit log stream `potso.audit`. Each record contains:
-
-| Field | Description |
-| --- | --- |
-| `eventType` | `evidence_submitted`, `evidence_rejected`, `penalty_applied`. |
-| `hash` | Canonical evidence hash. |
-| `offender` | Validator address. |
-| `actor` | Reporter or governance signer responsible for the action. |
-| `timestamp` | ISO8601 string with millisecond precision. |
-| `decision` | Present for appeals: `approve`, `deny`, or `partial`. |
-| `metadata` | JSON blob mirroring RPC payloads (redacted of secrets). |
-
-Operators ingest this stream into retention storage with a minimum 365 day retention policy. The stream underpins compliance reporting and enables deterministic reconstruction of penalty history during audits.
-
+There is no appeals or dispute mechanism: no RPC method, transaction type, event or evidence type for it. There is no `potso.audit` log stream in the code.

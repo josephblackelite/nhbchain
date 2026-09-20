@@ -1,133 +1,96 @@
 # Developer Cookbooks
 
-The following quickstarts demonstrate the new service topology using real code
-snippets that compile as part of `make docs:verify`.
+Task-oriented examples that use the code in this repository. Blocks marked with
+an `embed` comment in the Markdown source are copied from a file under
+`examples/` and are checked by `go run ./tools/docs/verify.go` (which
+`make audit:docs` runs): the block must match the file, each embedded Go file
+must build, and embedded TypeScript is compiled with
+`npx tsc --noEmit --project examples/docs/tsconfig.json`. The first example
+below is not embedded and is not compiled by that check.
 
 ## First transaction
 
-1. Export your consensus endpoint (`CONSENSUSD_GRPC_ADDR`) and funding key.
-2. Use the SDK helpers to assemble a lending supply transaction.
-3. Submit the signed envelope to the consensus service.
+Send a transfer with the Go SDK's JSON-RPC client.
 
-<!-- embed:examples/docs/go/first_transaction/main.go -->
+1. Have a node RPC endpoint (`nhb-cli` defaults to `http://localhost:8080`), a
+   bearer token for it (`NHB_RPC_TOKEN`), and a funded account's private key.
+2. Build the client with `client.New`, passing the endpoint and
+   `client.WithAuthToken`.
+3. Call `SendNHBTransfer` (or `SendZNHBTransfer`). The client reads the nonce with
+   `nhb_getBalance`, signs, and submits with `nhb_sendTransaction`.
+4. Keep the returned hash (`0x` plus the transaction hash) and poll
+   `nhb_getTransactionReceipt` for it.
+
 ```go
 package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/hex"
 	"log"
+	"math/big"
 	"os"
+	"strings"
 	"time"
 
 	"nhbchain/crypto"
-	cons "nhbchain/sdk/consensus"
-	"nhbchain/sdk/lending"
+	"nhbchain/sdk/go/client"
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	endpoint := os.Getenv("CONSENSUSD_GRPC_ADDR")
-	if endpoint == "" {
-		endpoint = "localhost:9090"
-	}
-
-	client, err := cons.Dial(ctx, endpoint, cons.WithInsecure())
+	keyBytes, err := hex.DecodeString(strings.TrimPrefix(os.Getenv("SENDER_KEY_HEX"), "0x"))
 	if err != nil {
-		log.Fatalf("dial consensus: %v", err)
+		log.Fatalf("decode key: %v", err)
 	}
-	defer client.Close()
-
-	key, err := crypto.GeneratePrivateKey()
+	key, err := crypto.PrivateKeyFromBytes(keyBytes)
 	if err != nil {
-		log.Fatalf("generate key: %v", err)
+		log.Fatalf("parse key: %v", err)
 	}
-	sender := key.PubKey().Address().String()
 
-	supplyMsg, err := lending.NewMsgSupply(sender, "usd-pool-1", "1000000")
+	rpc, err := client.New(
+		os.Getenv("NHB_RPC_URL"), // for example http://localhost:8080
+		client.WithAuthToken(os.Getenv("NHB_RPC_TOKEN")),
+	)
 	if err != nil {
-		log.Fatalf("build supply msg: %v", err)
+		log.Fatalf("new client: %v", err)
 	}
 
-	envelope, err := cons.NewTx(supplyMsg, 1, "localnet", "1000", "znhb", sender, "first transaction demo")
+	tx, hash, err := rpc.SendNHBTransfer(ctx, key, os.Getenv("RECIPIENT"), big.NewInt(1000))
 	if err != nil {
-		log.Fatalf("build envelope: %v", err)
+		log.Fatalf("send: %v", err)
 	}
-
-	signed, err := cons.Sign(envelope, key)
-	if err != nil {
-		log.Fatalf("sign envelope: %v", err)
-	}
-
-	if err := client.SubmitEnvelope(ctx, signed); err != nil {
-		log.Fatalf("submit envelope: %v", err)
-	}
-	fmt.Printf("broadcasted supply from %s to pool %s\n", sender, supplyMsg.GetPoolId())
+	log.Printf("submitted nonce=%d hash=%s", tx.Nonce, hash)
 }
 ```
 
-<!-- embed:examples/docs/ts/first-transaction.ts -->
-```ts
-import path from 'node:path';
-import process from 'node:process';
-import { credentials, ClientUnaryCall, ServiceError, Metadata } from '@grpc/grpc-js';
-import { loadPackageDefinition } from '@grpc/grpc-js';
-import { loadSync } from '@grpc/proto-loader';
-
-type LendingServiceClient = {
-  SupplyAsset(
-    request: { account: string; market?: { symbol: string }; amount: string },
-    metadata: Metadata,
-    callback: (err: ServiceError | null, response: { position?: unknown }) => void
-  ): ClientUnaryCall;
-};
-
-type LendingServiceCtor = new (address: string, creds: ReturnType<typeof credentials.createInsecure>) => LendingServiceClient;
-
-const protoRoot = path.resolve(__dirname, '../../../proto/lending/v1/lending.proto');
-const definition = loadSync(protoRoot, {
-  keepCase: true,
-  longs: String,
-  enums: String,
-  defaults: true,
-  oneofs: true
-});
-
-const pkg = loadPackageDefinition(definition) as unknown as {
-  lending: {
-    v1: {
-      LendingService: LendingServiceCtor;
-    };
-  };
-};
-
-const endpoint = process.env.LENDING_GRPC_ADDR ?? 'localhost:9444';
-const client = new pkg.lending.v1.LendingService(endpoint, credentials.createInsecure());
-
-client.SupplyAsset(
-  {
-    account: process.env.LENDING_ACCOUNT ?? 'nhb1exampleaddress',
-    market: { symbol: 'usd-pool-1' },
-    amount: '1000000'
-  },
-  new Metadata(),
-  (err, resp) => {
-    if (err) {
-      console.error('supply asset failed', err);
-      return;
-    }
-    console.log('submitted first transaction, position snapshot:', resp.position ?? {});
-  }
-);
-```
+`RECIPIENT` must be a bech32 address. See the [Go SDK guide](../sdk/go.md) for
+the client's defaults and options, and [`send-nhb`](../cli/send.md) for the CLI
+equivalent.
 
 ## Query positions
 
-1. Call the consensus query API for the lending module.
-2. Parse the JSON payload into a friendly structure.
-3. Render the position summary to standard out.
+Read a lending account's positions from the consensus query service.
+
+1. Call `QueryState` on the `lending` namespace with the key
+   `positions/<address>` (`core/query_router.go`). The address may be bech32 or
+   `0x` hex.
+2. The value is a JSON array with one `{ "poolId": ..., "account": ... }` entry
+   per pool where the address has an account. An address with no accounts yields
+   `[]`.
+3. Decode it and print it.
+
+Set `LENDING_ADDRESS` to the address to query; `CONSENSUSD_GRPC_ADDR` selects the
+`consensusd` gRPC endpoint (the snippet falls back to `localhost:9090`;
+`consensusd` itself listens on `127.0.0.1:9090` unless started with a different
+`--grpc`). Note that `consensusd` requires a shared secret or a client
+certificate on every gRPC call and serves plaintext only on a loopback listener
+when explicitly allowed (`buildConsensusServerSecurity` in
+`cmd/consensusd/main.go`), so a real deployment needs the TLS and
+`WithPerRPCCredentials` options described in the [Go SDK guide](../sdk/go.md)
+in addition to what this snippet passes.
 
 <!-- embed:examples/queries/lending_positions.go -->
 ```go
@@ -183,6 +146,13 @@ func main() {
 }
 ```
 
+The same data is available from the lending service's `GetPosition` call. The
+TypeScript snippet below calls it with the stubs in `clients/ts`. It reads
+`LENDING_GRPC_ADDR` (fallback `localhost:9444`; the lending service's own default
+listen address is `:50053`) and `LENDING_ACCOUNT`. Read calls do not need
+authentication (`services/lending/server/auth.go` authenticates only the
+mutation RPCs).
+
 <!-- embed:examples/docs/ts/query-positions.ts -->
 ```ts
 import path from 'node:path';
@@ -234,173 +204,20 @@ client.GetPosition(
 );
 ```
 
-## Publish a price oracle update
+## Send a lending transaction through the lending service
 
-1. Establish a streaming session with the price oracle service.
-2. Sign and send a price observation payload.
-3. Await acknowledgement and log the resulting attestation identifier.
+The lending service's mutation RPCs (`SupplyAsset`, `WithdrawAsset`,
+`BorrowAsset`, `RepayAsset`, `DepositCollateral`, `WithdrawCollateral`,
+`Liquidate`) relay a transaction you have already signed; they never sign for
+you, and a request without `signed_tx_json` is rejected.
 
-<!-- embed:examples/docs/go/price_oracle_publish/main.go -->
-```go
-package main
+1. Look up the account nonce with `AccountNonce` from `sdk/go/client`.
+2. Build the transaction with `lending.NewSupplyTx` (or the matching builder) and
+   sign it with `lending.SignAndEncode`.
+3. Pass the resulting JSON as the `signedTxJSON` argument to the matching
+   `lending.Client` method, which returns the mempool-accepted transaction hash.
+4. Poll `GetPosition` after the transaction confirms.
 
-import (
-        "context"
-        "encoding/json"
-        "fmt"
-        "log"
-        "os"
-        "time"
-
-        "google.golang.org/grpc"
-        "google.golang.org/grpc/credentials/insecure"
-
-        networkv1 "nhbchain/proto/network/v1"
-)
-
-func main() {
-        ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-        defer cancel()
-
-        endpoint := os.Getenv("ORACLE_GRPC_ADDR")
-        if endpoint == "" {
-                endpoint = "localhost:9555"
-        }
-
-        conn, err := grpc.DialContext(ctx, endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
-        if err != nil {
-                log.Fatalf("dial price oracle: %v", err)
-        }
-        defer conn.Close()
-
-        client := networkv1.NewNetworkServiceClient(conn)
-        stream, err := client.Gossip(ctx)
-        if err != nil {
-                log.Fatalf("open gossip stream: %v", err)
-        }
-        defer stream.CloseSend()
-
-        payload, err := json.Marshal(map[string]any{
-                "symbol":     "NHB/USD",
-                "price":      "1.0002",
-                "timestamp":  time.Now().UTC().Format(time.RFC3339),
-                "publisherId": "oracle-publisher-1",
-        })
-        if err != nil {
-                log.Fatalf("marshal price payload: %v", err)
-        }
-
-        msg := &networkv1.GossipRequest{
-                Envelope: &networkv1.NetworkEnvelope{
-                        Event: &networkv1.NetworkEnvelope_Gossip{
-                                Gossip: &networkv1.GossipMessage{
-                                        Type:    7001,
-                                        Payload: payload,
-                                },
-                        },
-                },
-        }
-        if err := stream.Send(msg); err != nil {
-                log.Fatalf("send price gossip: %v", err)
-        }
-
-        ack, err := stream.Recv()
-        if err != nil {
-                log.Fatalf("receive oracle ack: %v", err)
-        }
-        ackEnvelope := ack.GetEnvelope()
-        if ackEnvelope == nil {
-                fmt.Println("oracle acknowledged price update with empty envelope")
-                return
-        }
-        if gossip := ackEnvelope.GetGossip(); gossip != nil {
-                fmt.Printf("oracle acknowledged price update: %s\n", string(gossip.GetPayload()))
-        } else {
-                fmt.Println("oracle acknowledged price update with empty payload")
-        }
-}
-```
-
-<!-- embed:examples/docs/ts/price-oracle-publish.ts -->
-```ts
-import path from 'node:path';
-import process from 'node:process';
-import {
-  credentials,
-  ClientDuplexStream,
-  ChannelCredentials,
-  ServiceError
-} from '@grpc/grpc-js';
-import { loadPackageDefinition } from '@grpc/grpc-js';
-import { loadSync } from '@grpc/proto-loader';
-
-type GossipEnvelope = {
-  envelope?: {
-    gossip?: {
-      type?: number;
-      payload?: Buffer;
-    };
-  };
-};
-
-type NetworkServiceClient = {
-  Gossip(): ClientDuplexStream<GossipEnvelope, GossipEnvelope>;
-};
-
-type NetworkServiceCtor = new (address: string, creds: ChannelCredentials) => NetworkServiceClient;
-
-const protoRoot = path.resolve(__dirname, '../../../proto/network/v1/network.proto');
-const definition = loadSync(protoRoot, {
-  keepCase: true,
-  longs: String,
-  enums: String,
-  defaults: true,
-  oneofs: true,
-  bytes: Buffer
-});
-
-const pkg = loadPackageDefinition(definition) as unknown as {
-  network: {
-    v1: {
-      NetworkService: NetworkServiceCtor;
-    };
-  };
-};
-
-const endpoint = process.env.ORACLE_GRPC_ADDR ?? 'localhost:9555';
-const client = new pkg.network.v1.NetworkService(endpoint, credentials.createInsecure());
-const stream = client.Gossip();
-
-stream.on('data', (msg: GossipEnvelope) => {
-  const payload = msg.envelope?.gossip?.payload;
-  if (payload) {
-    console.log('oracle ack payload', payload.toString('utf8'));
-  } else {
-    console.log('oracle ack with empty payload');
-  }
-  stream.end();
-});
-
-stream.on('error', (err: ServiceError) => {
-  console.error('oracle gossip error', err);
-});
-
-const pricePayload = Buffer.from(
-  JSON.stringify({
-    symbol: 'NHB/USD',
-    price: '1.0002',
-    timestamp: new Date().toISOString(),
-    publisherId: process.env.ORACLE_PUBLISHER_ID ?? 'oracle-publisher-1'
-  }),
-  'utf8'
-);
-
-stream.write({
-  envelope: {
-    gossip: {
-      type: 7001,
-      payload: pricePayload
-    }
-  }
-});
-```
+`sdk/examples/lending/go/main.go` implements these steps for supply, borrow and
+repay. See the [Go SDK guide](../sdk/go.md#lending-sdklending) for the builders,
+their defaults and the service's authentication.

@@ -1,40 +1,46 @@
 # Audit Overview
 
-This guide outlines how to plan and execute the multi-phase audit program for the nhbchain stack. Teams should use it as the entry point when preparing an engagement or triaging findings.
+This directory documents the audit tooling that exists in the repository. Start here to see which command covers which area, then use the per-topic pages.
 
-## Objectives
+## Tooling map
 
-- Establish the scope of services, smart contracts, infrastructure, and operational processes under review.
-- Define audit phases, owners, timelines, and the expected artifacts for each deliverable.
-- Capture success criteria and exit gates so the team knows when the audit is considered complete.
+| Area | Command | Page |
+| --- | --- | --- |
+| Static analysis, vulnerability scan, protobuf lint and breaking-change check | `make audit:static`, `make bugcheck-static`, `make bugcheck-proto` | [static-analysis.md](./static-analysis.md) |
+| Text-pattern security scan | `make audit:english` | [README.md](./README.md) |
+| Fuzzing | `go test -fuzz` per target (see the page; `make bugcheck-fuzz` names several packages) | [fuzzing.md](./fuzzing.md) |
+| Unit and package tests | `make audit:tests` (`go test ./...` plus `go test ./...` in `sdk/`) | this page |
+| Determinism and Byzantine-vote tests | `make audit:determinism` (`./tests/determinism/...`, `./tests/consensus/...`) | this page |
+| End-to-end flows | `make audit:e2e`, `make bugcheck-gateway` | [e2e-flows.md](./e2e-flows.md) |
+| Chaos | `go test ./tests/chaos/...` (`make audit:chaos` does not run these tests; it only records the two `pending` checks from `ops/audit/chaos.yaml`) | [e2e-flows.md](./e2e-flows.md) (the tests use the in-process simulation) |
+| Network security tests | `make audit:netsec` (`./tests/netsec/...`) | this page |
+| Performance | `make audit:perf` (`./tests/perf/...` benchmarks) | this page |
+| Ledger and supply fixtures | `make audit:ledger`, `make audit:supply` (`./tests/ledger/...`) | this page |
+| Configuration hashes | `make audit:config` (records `pending` checks and hashes files; currently fails, see below) | this page |
+| Documentation | `make audit:docs` (currently fails at the hashing step, see below) | [docs-quality.md](./docs-quality.md) |
+| Everything in one run | `make bugcheck` (`scripts/bugcheck.sh`) | [index.md](./index.md) |
 
-## Phase sequencing
+## How the phase targets work
 
-1. **Reconnaissance & documentation review.** Inventory system diagrams, data flows, third-party dependencies, and production infrastructure notes. Confirm that operators can supply configuration snapshots and chain state exports on request.
-2. **Static analysis.** Run automated code scanning across the repository, tracking suppressions and interpreting rule coverage gaps.
-3. **Fuzzing.** Stress consensus-critical and financial components to surface panics, invariant violations, and state divergence.
-4. **End-to-end flows.** Exercise integration paths (wallets, gateways, bridge jobs) against realistic environments to detect regressions that automation may miss.
-5. **Documentation quality.** Ensure runbooks and READMEs enable operators and auditors to reproduce findings and respond to incidents.
-6. **Remediation & sign-off.** Track fixes through issue management, confirm regression tests exist, and capture the closing statement for leadership.
+The `determinism`, `e2e`, `netsec`, `ledger`, `supply` and `perf` phase targets do two things: run a Go test package or benchmark (`go test -json` summarised by `scripts/audit/summarize_tests.py`, or `go test -bench` for `perf`) and then run `scripts/audit/run_phase.sh <phase> ops/audit/<phase>.yaml artifacts/<phase>`. `audit:e2e` runs only `TestAuditSmokePlan`, not the whole `tests/e2e` package. `audit:chaos` and `audit:config` do only the second step: no Go test runs, so `make audit:chaos` (and the `bugcheck-chaos` target that wraps it) never executes `tests/chaos`. `audit:docs` runs `go run ./tools/docs/verify.go` and then the second step.
 
-## Roles & responsibilities
+The second step runs `go run ./tools/audit`, which reads the phase YAML, records every check listed there with the status `pending`, hashes the YAML and any `--hash` files, and writes `artifacts/<phase>/report.json` and `report.md`. It does not execute the checks named in the YAML. The YAML files in `ops/audit/` are plans and fixtures, and the pass/fail evidence comes from the Go tests. `tools/audit` exits with an error when a `--hash` file cannot be read (`hash %s: %v`, `tools/audit/main.go`).
 
-| Role | Responsibilities |
-| --- | --- |
-| Audit coordinator | Maintains the schedule, collects artifacts, and facilitates sign-off. |
-| Security engineer | Leads technical review of code, infrastructure, and operational configurations. |
-| Service owner | Provides subject matter expertise, performs fixes, and validates remediation tests. |
-| Compliance | Confirms controls alignment, ensures retention policies are respected, and signs off on procedural coverage. |
+Two phase targets currently fail for that reason. `make audit:config` hashes `config/config.toml`, `config-peer.toml` and `config-local.toml` (`Makefile`), and none of those three paths exists (the repository has a root `config.toml`). `make audit:docs` hashes `docs/security/audit-readiness.md` (present) and `ops/audit-pack/BUILD_STEPS.md` (not present).
 
-## Artifact checklist
+`ops/audit/ledger.yaml` and `ops/audit/supply.yaml` contain sample records and numbers used by the ledger and supply tests, not chain data.
 
-- Scoped checklist describing in-scope repositories, services, and chains.
-- Static-analysis findings report with issue owners and statuses.
-- Fuzzer crash triage spreadsheet with reproduction steps and mitigations.
-- E2E test transcripts (logs, traces, metrics dashboards) for each major workflow.
-- Documentation gaps list referencing the relevant runbooks or READMEs.
-- Final audit summary with outstanding risks, compensating controls, and follow-up actions.
+## Suggested order
 
-## Using this directory
+1. Read the code and configuration in scope (`config/`, `core/`, `rpc/`, `p2p/`, `native/`, `services/`).
+2. Run the static analysis and fuzzing steps.
+3. Run the test phases, noting which ones use real packages and which use the in-process simulation.
+4. Review the documentation against the code.
+5. Track each finding to a fix and a regression test.
 
-Each phase has its own guide under `docs/audit/`. Start with this overview, then work through the specific playbooks as you execute the engagement.
+## Artifacts the commands produce
+
+- `logs/` – tool and test logs.
+- `artifacts/<phase>/` – JSON and Markdown phase summaries and test JSON.
+- `audit/bugcheck-<timestamp>.md` – written by `scripts/bugcheck.sh` as it runs. The script is also meant to write `artifacts/bugcheck-<timestamp>.json`, but it exits before that step (see the caveats in [index.md](./index.md)).
+- `docs/audit/english-latest.md` – written by `make audit:english`.

@@ -1,56 +1,55 @@
-# Devnet Migration: Staking Schema Upgrade
+# Devnet Migration: State Schema Version Guard
 
-This runbook documents the procedure required to migrate development networks to
-the staking-aware state schema introduced with `StateVersion` 2. The upgrade
-adds persistent staking metadata to the global state. Nodes compiled from this
-release refuse to start when the on-disk schema version does not match the
-expected value unless the operator explicitly opts in to manual migration mode
-via `--allow-migrate`.
+The node records a schema version in state under the key `state/version`. The version this
+code expects is `StateVersion = 2` (`core/state/version.go`), which added persistent staking
+fields. On startup the node compares the stored version with `2`:
 
-## Prerequisites
+* A missing version counts as `0`.
+* If the versions differ, startup fails with `state: schema version mismatch: on-disk=<n>
+  expected=2; pass --allow-migrate to bypass the guard`.
+* Passing `--allow-migrate` skips the comparison. It does not migrate anything.
 
-* Access to each devnet node's data directory.
-* The upgraded `nhb` and `consensusd` binaries (or containers) that include the
-  staking schema guard.
-* The resolved genesis file that will seed the upgraded chain.
+Both `nhb` (`cmd/nhb`) and `consensusd` (`cmd/consensusd`) accept
+`--allow-migrate` ("Allow starting with a mismatched state schema (manual migrations
+only)") and pass it to `core.NewNode`. New databases written by a genesis load or by
+`core/blockchain.go` are stamped with the current version.
 
-## Migration Steps
+## When the guard trips
 
-1. **Announce maintenance** – Notify participants that the devnet will undergo a
-   short maintenance window. Pause automated jobs that publish transactions to
-   the network.
-2. **Capture a snapshot** – Stop the node processes and take a full backup of the
-   existing data directory. A simple archive is sufficient for devnets:
+The code stamps `state/version` only when it creates a state from genesis
+(`core/genesis/loader.go`, `core/blockchain.go`). No routine rewrites the version of an
+existing database, so the way to move a development network onto a build with a newer
+schema is to wipe the state and start from genesis again.
+
+## Steps
+
+1. **Announce maintenance** and stop anything that submits transactions to the network.
+2. **Stop the node processes and back up the data directory.**
 
    ```bash
    tar -czf nhb-devnet-backup.tgz /path/to/datadir
    ```
 
-   The backup provides a safety net in case the new schema needs to be rolled
-   back or inspected.
-3. **Clear the old state** – Remove the contents of the data directory. The new
-   staking fields are seeded at genesis, so the legacy database cannot be reused.
-
-   ```bash
-   rm -rf /path/to/datadir/*
-   ```
-4. **Regenerate genesis** – Populate the data directory with the updated genesis
-   state. For devnets this typically means running the operator tooling that
-   renders a fresh resolved genesis JSON and writing it to
-   `/path/to/datadir/genesis.resolved.json`.
-5. **Restart nodes** – Launch the upgraded binaries. When running in manual
-   migration workflows (for example, verifying data before wiping the store),
-   supply `--allow-migrate` to temporarily bypass the guard. After bootstrapping
-   from the regenerated genesis the stored schema version matches the binary and
-   the flag is no longer required.
-6. **Verify health** – Confirm that the nodes synchronise, produce blocks, and
-   expose healthy RPC endpoints. Once validated, inform participants that the
-   devnet is back online.
+   `DataDir` is the `DataDir` value of the node's `config.toml`.
+3. **Clear the old state.** The node also keeps its peer store and node identity in
+   `<DataDir>/p2p/` (`peerstore` and `node_key.json`, see `cmd/nhb/main.go` and
+   `cmd/p2pd/main.go`). Removing the whole directory therefore creates a new node identity.
+   To keep the identity, keep `p2p/node_key.json` (and the `p2p/peerstore` directory)
+   when you clear the rest.
+4. **Provide the genesis file.** Start the node with `--genesis <file>` (or the `NHB_GENESIS`
+   environment variable or `GenesisFile` in `config.toml`). When a genesis file is given,
+   `nhb` loads and validates it and writes the resolved spec to
+   `<DataDir>/genesis.resolved.json` itself (`cmd/nhb/main.go`), so no separate tool is needed
+   to create that file. Without a genesis file the node only creates one automatically when
+   started with `--allow-autogenesis`, which is marked DEV ONLY.
+5. **Start the upgraded binaries.** After bootstrapping from genesis the stored version equals
+   the binary's, and later restarts do not need `--allow-migrate`.
+6. **Verify health.** Confirm the nodes synchronise, produce blocks and answer RPC, then
+   tell participants the network is back.
 
 ## Notes
 
-* The guard is enforced in both `nhb` and `consensusd`. Ensure any automation
-  that starts these services is updated to include `--allow-migrate` only when a
-  manual migration is underway.
-* The schema version is persisted in state; subsequent restarts without
-  `--allow-migrate` succeed once the node has booted from the upgraded genesis.
+* Use `--allow-migrate` only while performing a manual migration you have designed yourself.
+  Automation that starts `nhb` or `consensusd` should not pass it by default.
+* Both binaries pass the flag to `core.NewNode`, which calls `EnsureStateVersion`
+  (`core/node.go`), so the guard behaves the same in both.

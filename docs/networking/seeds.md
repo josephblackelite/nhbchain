@@ -1,22 +1,30 @@
 # Network Seed Registry
 
-The network seed system couples a governance-managed registry with signed DNS
-records so operators can rotate bootstrap peers without rebuilding every node
-binary. Each node merges three sources of truth when it starts:
+A node combines up to three sources of seed peers (`p2p/seeds/registry.go`,
+`p2p/server.go`):
 
-1. **Static configuration** – entries from `[p2p].Seeds` in the local TOML file.
-2. **Registry static fallbacks** – emergency entries embedded in the
-   `network.seeds` governance parameter.
-3. **DNS authorities** – TXT records signed by the authorities enumerated in the
+1. **Static configuration**: `[p2p] Seeds` entries in the local TOML, each
+   `0xNODEID@host:port`. Entries without a node ID are ignored with a warning.
+2. **Registry static fallbacks**: the `static` list of the on-chain `network.seeds`
+   governance parameter.
+3. **DNS authorities**: TXT records signed by the Ed25519 keys listed in the same
    registry.
 
-The merged catalogue is exposed via `net_info` so observability tooling can see
-exactly which seeds were considered.
+The merged catalogue is what the connection manager dials (one dial loop per
+active seed) and what `p2p_info` returns under `seeds` (see
+[net-rpc.md](net-rpc.md)). Each entry carries its source: `config`,
+`registry.static` (or the entry's own `source` string), or `dns:<domain>`.
 
-## Governance payload structure
+**The registry is read once, when the process starts.** `cmd/nhb` and `cmd/p2pd`
+load the `network.seeds` parameter at start-up (`Node.NetworkSeedsParam`,
+`core/node.go` line 5130) and parse it once; no code reloads it afterwards. A
+governance change to `network.seeds` reaches a node only after that node
+restarts. While running, the node re-resolves DNS for the registry it started
+with.
 
-Governance proposals targeting `network.seeds` must submit a JSON payload with
-this shape:
+## Registry payload
+
+The `network.seeds` value is a JSON object (`seeds.Registry`):
 
 ```json
 {
@@ -26,7 +34,7 @@ this shape:
     {
       "domain": "seeds.mainnet.example.org",
       "algorithm": "ed25519",
-      "publicKey": "<base64 public key>",
+      "publicKey": "<base64 Ed25519 public key>",
       "lookup": "_nhbseed.seeds.mainnet.example.org",
       "notBefore": 1700000000,
       "notAfter": 0
@@ -44,23 +52,31 @@ this shape:
 }
 ```
 
-* `version` currently must be `1`.
-* `refreshSeconds` controls how frequently running nodes poll DNS authorities.
-  Omit or set to zero to fall back to 15 minutes.
-* Each authority entry points at a DNS zone and the base64-encoded Ed25519
-  public key used to verify TXT payloads. `notBefore` / `notAfter` act as a
-  timelock for the authority itself.
-* Static entries serve as an emergency fallback when DNS or the registry is
-  unreachable. They use the same `notBefore` / `notAfter` semantics to schedule
-  rotations.
+Rules enforced by `seeds.Parse` (which the governance engine also runs when a
+proposal touching `network.seeds` is submitted, `native/governance/engine.go`
+line 421):
 
-The governance engine validates the payload during proposal submission; invalid
-DNS keys or empty entries are rejected before voting starts.
+- `version` may be omitted (treated as `1`); any other value than `1` is
+  rejected.
+- `refreshSeconds` is how often running nodes re-query DNS; `0` or omitted means
+  15 minutes.
+- Each authority needs a non-empty `domain`, `algorithm` `ed25519` (or empty),
+  and a base64 `publicKey` that decodes to 32 bytes. `lookup` is the TXT name to
+  query and defaults to `_nhbseed.<domain>`. `notBefore` / `notAfter` (Unix
+  seconds, `0` = unset) bound when the authority is used; `notAfter` must not be
+  before `notBefore`.
+- Each static entry needs a `nodeId` and an `address` that is `host:port`, with
+  the same optional `notBefore` / `notAfter`.
+- An empty payload is rejected. The parameter must also be in the governance
+  allow-list (`network.seeds` is in the repo `config.toml` `AllowedParams`).
 
 ## DNS record format
 
-Authorities publish seed endpoints as TXT records prefixed with `nhbseed:v1:`.
-The suffix is a base64-encoded JSON object with the following schema:
+An authority publishes each seed as a TXT record whose value is
+
+```
+nhbseed:v1:<base64 of the JSON below>
+```
 
 ```json
 {
@@ -72,110 +88,83 @@ The suffix is a base64-encoded JSON object with the following schema:
 }
 ```
 
-Nodes construct the verification message as the lowercase node ID, address and
-Unix activation bounds separated by newlines followed by the authority domain:
+The signature is over these bytes (`buildSigningMessage`), where `nodeId` is
+normalized to lower-case `0x` form and the domain is lower-cased:
 
 ```
 <nodeId>\n<address>\n<notBefore>\n<notAfter>\n<domain>
 ```
 
-The Ed25519 signature must be produced over this exact byte sequence. `notBefore`
-and `notAfter` default to zero which means “active immediately” and “no expiry”.
-Any entry outside its activation window is ignored until the window opens again.
+`notBefore` and `notAfter` are decimal integers (`0` when absent). A record
+outside its window is skipped; a record with an invalid signature or format is
+reported as an error and skipped while valid records from the same lookup are
+still used.
 
 ## Runtime behaviour
 
-On boot the P2P server performs the following steps:
+At start (`cmd/nhb/main.go`, `cmd/p2pd/main.go`):
 
-1. Normalise local config seeds and mark them with the source `config`.
-2. Parse the `network.seeds` registry (if present) and record static fallbacks.
-3. Query each active DNS authority; verified records are tagged with
-   `dns:<authority>`.
-4. Merge, de-duplicate and expose the final list to the dialer and RPC layer.
-5. Periodically refresh authorities on the configured cadence. If a refresh
-   fails the node keeps the last known-good set of DNS seeds and always preserves
-   config/static entries.
+1. Config seeds are normalized and tagged `config`.
+2. If `network.seeds` exists, the registry is parsed. Its active static entries
+   and the DNS records resolved with a 5-second timeout are added, skipping
+   duplicates.
+3. The merged list is handed to the P2P server, which drops entries outside their
+   activation window and de-duplicates by `nodeId@address`.
+4. If a registry is present, a loop re-resolves it every `refreshSeconds`
+   (15 minutes by default). After a refresh that returns at least one seed, the
+   registry-sourced (non-config) seeds are replaced by the new result; a refresh
+   that returns nothing leaves the previous registry-sourced seeds in place.
+   Failures are logged as `Seed registry refresh failed`. Config seeds are never
+   removed.
+5. New seeds get a dial loop immediately; a seed that leaves the catalogue or
+   whose window ends stops being dialed.
 
-The connection manager tracks the merged catalogue and spawns dial loops for new
-seeds immediately. Seeds removed from DNS or the registry wind down gracefully
-once their activation window ends.
+DNS lookups use Go's default resolver (`seeds.DefaultResolver()`); there is no
+setting that points a node at a different DNS server.
 
-## Governance rotation workflow
+## Rotating seeds through governance
 
-1. **Prepare new seed identities** – operators generate Ed25519 keys for each
-   DNS authority, derive node IDs for the replacement peers, and produce signed
-   TXT payloads.
-2. **Stage DNS updates** – publish the new `nhbseed:v1:` records with sensible
-   TTLs (60–300 seconds) and leave the old records in place until the proposal
-   executes.
-3. **Submit proposal** – craft a `network.seeds` payload that includes the new
-   authority public keys and optional static fallback entries. Use `notBefore`
-   timestamps to align on-chain activation with DNS TTL expiry if needed.
-4. **Execute & monitor** – once the timelock expires and the proposal executes
-   the runtime begins honouring the new catalogue. Monitor `net_info` or the
-   node logs (`Seed registry refresh failed` messages) for any anomalies.
+1. **Generate keys and records.** Use the helper (see below) to create an Ed25519
+   authority key and the signed TXT record for each seed.
+2. **Publish the TXT records** at the authority's lookup name.
+3. **Submit a proposal** that sets `network.seeds`. With `nhb-cli`
+   (`cmd/nhb-cli/gov.go`), where `seeds-payload.json` contains
+   `{"network.seeds": { ...registry... }}`:
 
-Because authorities can be timelocked independently, the community can stage a
-rotation days in advance while keeping DNS live traffic on the previous cohort.
-
-## Local verification
-
-You can exercise the full discovery pipeline on a workstation without external
-infrastructure:
-
-1. **Generate a temporary authority**
    ```bash
-   go run ./ops/seeds/tools/authority \
-     --domain dev.seeds.local \
-     --output authority.json
-   ```
-   The helper (documented in the runbook) prints an Ed25519 keypair and a sample
-   TXT record payload.
-
-2. **Create a `network.seeds` payload** that references the generated key and a
-   static fallback:
-   ```json
-   {
-     "version": 1,
-     "authorities": [
-       {
-         "domain": "dev.seeds.local",
-         "algorithm": "ed25519",
-         "publicKey": "<from authority.json>",
-         "lookup": "_nhbseed.dev.seeds.local"
-       }
-     ],
-     "static": [
-       {
-         "nodeId": "0xfeed...",
-         "address": "127.0.0.1:46656",
-         "source": "registry.static"
-       }
-     ]
-   }
+   nhb-cli gov propose --kind param.update --payload @seeds-payload.json \
+     --key proposer.key --deposit 1000e18
    ```
 
-3. **Populate the on-chain parameter** by importing the JSON into your devnet
-   state (or using `nhbctl gov execute --param network.seeds --file ...`).
+   The other steps are `nhb-cli gov vote`, `finalize`, `queue` and `execute`,
+   each taking `--id` and `--key`. Voting period, timelock, quorum and deposit
+   come from the `[governance]` settings.
+4. **Restart nodes** so they read the new registry (see above).
 
-4. **Serve the TXT record locally**. The runbook includes a minimal Go program
-   (`ops/seeds/tools/dnsstub`) that reads `authority.json` and responds to
-   `_nhbseed.dev.seeds.local` lookups on `127.0.0.1:8053`.
+## Local verification with the helpers
 
-5. **Start the node** with a config that omits `[p2p].Seeds` and export
-   `NHB_DNS=127.0.0.1:8053` so the resolver targets the stub. On startup the
-   logs should include the merged catalogue. Any DNS resolution failures are
-   logged but the static entries remain active.
+`ops/seeds/tools/authority` and `ops/seeds/tools/dnsstub` build a signed record
+and serve it over DNS:
 
-6. **Inspect `net_info`** to confirm the resolved seed is reported with
-   `source="dns:dev.seeds.local"` and that the static fallback carries the
-   `registry.static` tag.
+```bash
+go run ./ops/seeds/tools/authority \
+  --domain dev.seeds.local --host 127.0.0.1 --port 46656 \
+  --node-id 0xFEED... --out authority.json
+```
 
-These steps demonstrate discovery with only registry and DNS inputs—no static
-configuration is required.
+Flags: `--domain`, `--host` and `--node-id` are required; `--port` (default
+`46656`), `--lookup`, `--not-before`, `--not-after`, `--out` (default
+`authority.json`). It writes `authority.json` (mode `0600`, includes the private
+key) containing the domain, lookup name, node ID, address, public and private
+keys and the TXT value, and prints the TXT record and a registry `authorities`
+snippet.
 
-## Additional references
+```bash
+go run ./ops/seeds/tools/dnsstub --authority authority.json --listen 127.0.0.1:8053 --ttl 60
+```
 
-* [`docs/networking/ops.md`](./ops.md) summarises operational checklists.
-* [`ops/seeds/runbook.md`](../../ops/seeds/runbook.md) contains a full
-  provisioning playbook for independent seed operators.
+The stub answers TXT queries for the lookup name over UDP and TCP. Because a node
+resolves through the operating system's resolver, using the stub with a running
+node requires configuring that resolver yourself.
+
+See also [ops.md](ops.md) and [`ops/seeds/runbook.md`](../../ops/seeds/runbook.md).

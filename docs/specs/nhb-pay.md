@@ -1,112 +1,76 @@
-# NHB Pay Point-of-Sale Intents
+# NHB Pay point-of-sale intents
 
-This document defines the portable payment intent payloads that NHB Pay POS
-terminals emit and compatible wallets consume. The same fields are attached to
-every on-chain `TxEnvelope` and signed along with the transaction body so that
-validators can reject replayed payloads and enforce bounded settlement windows.
+A POS intent is a set of optional fields on an ordinary signed transaction that
+give it a single-use reference and a deadline. The chain enforces the reference
+and deadline; the deep-link/QR URI format described later is a client convention
+implemented only in the SDK example, not something the node parses or verifies.
 
-## Envelope metadata
+## On-chain fields
 
-| Field | Type | Description |
-| ----- | ---- | ----------- |
-| `intent_ref` | 32&nbsp;bytes | Merchant generated nonce that uniquely identifies the payment intent. Terminals SHOULD generate a cryptographically random 32 byte value. Wallets and services MUST treat the field as opaque bytes on-chain. |
-| `intent_expiry` | `uint64` seconds | Unix timestamp indicating the absolute expiry of the intent. Validators clamp the stored expiry to `min(intent_expiry, block_time + 24h)` and reject any payload where `now >= intent_expiry`. |
-| `merchant_addr` | string | Canonical merchant address presented to the customer. The canonical representation is the NHB bech32 string (e.g. `nhb1...`). The consensus layer stores the trimmed string exactly as supplied. |
-| `paymaster` | string (optional) | Address or identifier of the entity subsidising the payment. Wallets MUST ignore unknown paymaster schemes but SHOULD preserve the value when submitting transactions. |
-| `device_id` | string (optional) | Identifier emitted by the POS terminal. The value is opaque to consensus and is only surfaced in events for downstream telemetry. |
+Fields of `types.Transaction` (`core/types/transaction.go`). They are covered by
+the signed transaction hash ([signing](../transactions/signing.md)). The same
+values travel in the gRPC `TxEnvelope` as `intent_ref`, `intent_expiry`,
+`merchant_addr`, `device_id`, `refund_of`.
 
-`amount` is not a field on the signed envelope alongside `intent_ref`,
-`intent_expiry`, `merchant_addr`, and `device_id`. For the replay-protected
-path (an ordinary `Transfer`/`TransferZNHB` transaction carrying
-`tx.IntentRef`), the amount is the transaction's own `Value` field
-(`core/types/transaction.go`) — a big integer, not a decimal string carried on
-the envelope.
+| JSON field | Type | Meaning |
+| --- | --- | --- |
+| `intentRef` | bytes (base64 in `nhb_sendTransaction`) | Single-use reference. Maximum 1024 bytes at the transaction level; the intent registry accepts 1 to 64 bytes (`intent: invalid reference` otherwise). |
+| `intentExpiry` | uint64, unix seconds | Absolute deadline. |
+| `merchantAddr` | string | Free-form string, trimmed, stored as supplied; also selects the fee domain (see [fee policy](../fees/policy.md)) and is echoed in events. |
+| `deviceId` | string | Opaque terminal identifier, echoed in events. |
+| `paymaster` | 20-byte address | Gas sponsor, not a POS label. Requires `paymasterR/S/V`, a signature by that address over the same hash; the node's paymaster module must be enabled. |
+| `refundOf` | string | Origin transaction hash for a refund; see [refunds](./refunds.md). |
 
-### Replay protection
+There is no `amount` or `currency` field. The amount of an NHB or ZNHB transfer is
+the transaction's `value` (wei, an integer); no currency code exists on-chain.
 
-* Every block stores the `intent_ref` with a consumed flag. Subsequent
-  transactions referencing the same value fail with `ErrIntentConsumed`.
-* Expired intents are rejected during mempool simulation and again during
-  block execution with `ErrIntentExpired`.
-* The registry clamps the persisted expiry to a 24-hour time-to-live (TTL)
-  window to avoid unbounded growth.
+## Rules enforced when a transaction has an `intentRef`
 
-## Canonical encodings
+`ApplyTransaction` (`core/state_transition.go`) calls
+`IntentRegistryValidate` (`core/state/intent_registry.go`) with the block
+timestamp:
 
-### QR / deep-link URI
+* `intentExpiry` must be non-zero and greater than the block time, else
+  `intent: expired`.
+* If the reference already exists in the registry: `intent: expired` when its
+  stored expiry has passed (the record is then deleted), otherwise `intent:
+  already consumed`.
+* The stored expiry is `min(intentExpiry, block_time + 24h)` (`defaultIntentTTL`).
+* After the transaction applies successfully the reference is stored as consumed
+  under `pos/intent/<ref>` and a `payments.intent_consumed` event is emitted. A
+  failed transaction does not consume the reference.
 
-Wallets SHOULD encode the metadata inside a URI with the following shape:
+Mempool admission (`Node.addTransaction`) also rejects a transaction whose
+`intentExpiry` is in the past by wall-clock time. For transactions without an
+`intentRef`, a non-zero `intentExpiry` in the past by block time fails execution
+with `ErrTransactionExpired`.
 
-```
-nhbpay://intent/<intent_ref_hex>?amount=<decimal>&currency=<code>&expiry=<unix_seconds>&merchant=<bech32>[&paymaster=<scheme:value>][&device=<url-encoded>][&sig=<sig_hex>]
-```
+Every transaction type can carry these fields; NHB and ZNHB transfers with an
+`intentRef` are additionally routed to the POS mempool lane
+([QoS](./pos-qos.md)).
 
-* `<intent_ref_hex>` is the lowercase hex encoding of the 32 byte reference.
-* `amount` is the decimal string amount including fractional digits.
-* `currency` is the three letter ISO-4217 currency code.
-* `<unix_seconds>` is the decimal representation of `intent_expiry`.
-* `<bech32>` is the canonical merchant address.
-* `paymaster` and `device` parameters are optional; their values MUST be URL
-  encoded. Unknown query parameters MUST be ignored by wallets.
-* `sig` is the lowercase hex encoding of the canonical signature described
-  below. Wallets MAY reject unsigned payloads depending on policy.
+## Event `payments.intent_consumed`
 
-#### Canonical string-to-sign
+Attributes (`core/events/payments.go`): `intentRef` (lowercase hex, no `0x`),
+`txHash` (`0x`-prefixed), and `merchantAddr` and `deviceId` when set.
 
-Terminals MUST derive the signature payload by concatenating the URI scheme and
-a sorted key/value list. The canonical plaintext is:
+## URI convention used by the SDK example
 
-```
-nhbpay://intent/<intent_ref_hex>?amount=<amount>&currency=<currency>&expiry=<expiry>&merchant=<merchant>[&device=<device>][&paymaster=<paymaster>]
-```
-
-* Optional parameters are included only when present in the original intent.
-* Keys are lowercase ASCII and MUST be appended in the order shown above.
-* Values MUST be percent decoded prior to signing.
-* The signature is generated with the merchant private key over the UTF-8 bytes
-  of the canonical string. Ed25519 is the default POS key type.
-
-The resulting signature is hex encoded and placed in the `sig` query parameter
-of the URI. Wallets MUST verify the signature before constructing and
-submitting the payment transaction.
-
-##### Worked example
-
-Given the following parameters:
-
-| Field | Value |
-| ----- | ----- |
-| `intent_ref` | `0x2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01` |
-| `amount` | `15.25` |
-| `currency` | `USD` |
-| `merchant_addr` | `nhb1m0ckmerchantaddre55` |
-| `intent_expiry` | `1707436800` |
-| `device_id` | `kiosk-7` |
-| `paymaster` | `nhb1sponsorship` |
-
-The canonical string-to-sign is:
+`sdk/pos/examples/create_intent.go` and `submit_and_watch.ts` build the following.
+Nothing in the node verifies this format or the signature.
 
 ```
-nhbpay://intent/2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01?amount=15.25&currency=USD&expiry=1707436800&merchant=nhb1m0ckmerchantaddre55&device=kiosk-7&paymaster=nhb1sponsorship
+nhbpay://intent/<intent_ref_hex>?amount=<decimal>&currency=<code>&expiry=<unix_seconds>&merchant=<address>[&paymaster=<value>][&device=<value>][&sig=<hex>]
 ```
 
-Assuming the merchant signs this string with Ed25519 and obtains the signature
-`0x5b0481e43cbb27c4c76bf0fa104d8a2ffb329a84797d0c0edc55fb6a2dcef0125c7d4090560ce10a4bf845ba1b4c745cf3e5012ef0d8c2a8d98d00ab91c5dd1a`, the full URI becomes:
+* Query values are percent-escaped for the characters space, `"`, `#`, `%`, `&`,
+  `+`, `/`, `=`, `?` (Go example) or with `encodeURIComponent` (TypeScript
+  example).
+* The signed string is `nhbpay://intent/<ref hex>?amount=..&currency=..&expiry=..&merchant=..`
+  followed by `&device=..` and `&paymaster=..` when present, in that order
+  (values unescaped). The example signs its UTF-8 bytes with Ed25519 and puts the
+  hex signature in `sig`.
+* In the example `paymaster` is an arbitrary string; it is unrelated to the
+  on-chain `paymaster` address field.
 
-```
-nhbpay://intent/2d8c7fd3e1a94f4c998e4cfedc3a4567bb12aa09887766554433221100ff9a01?amount=15.25&currency=USD&expiry=1707436800&merchant=nhb1m0ckmerchantaddre55&device=kiosk-7&paymaster=nhb1sponsorship&sig=5b0481e43cbb27c4c76bf0fa104d8a2ffb329a84797d0c0edc55fb6a2dcef0125c7d4090560ce10a4bf845ba1b4c745cf3e5012ef0d8c2a8d98d00ab91c5dd1a
-```
-
-Wallets display or embed this URI in QR codes and deep links.
-
-### NFC payloads
-
-When transporting an intent over NFC, use the dedicated NDEF layouts described
-in [NHB Pay NFC intents](./nfc-ndef.md). Wallets MUST follow the signing
-instructions above prior to validating the payload carried in the NDEF record.
-
-## Events
-
-The chain emits `payments.intent_consumed` whenever a transaction consumes an
-intent. Subscribers receive the original reference, the transaction hash, and
-any merchant/device annotations carried in the envelope.
+An NFC/NDEF carrier for this data is only a proposal; see [nfc-ndef.md](./nfc-ndef.md).

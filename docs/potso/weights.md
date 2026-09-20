@@ -1,155 +1,124 @@
 # POTSO Composite Weighting
 
-This document specifies the engagement weighting pipeline used by POTSO epoch
-distributions. The process blends bonded stake with a decayed engagement EMA,
-allowing governance to tune responsiveness while preserving determinism.
+This page describes the pipeline implemented by `ComputeWeightSnapshot` in `native/potso/metrics.go`. It runs once per reward epoch from `processPotsoRewardEpoch` (`core/state_transition.go`). The result is stored and used for reward payouts, the leaderboard, and governance voting power.
 
 ## Inputs
 
-For each candidate address `i` in epoch `E` we collect:
+For each candidate address `i` in epoch `E`, `processPotsoRewardEpoch` builds:
 
-- `stake_i`: bonded stake in wei at the epoch boundary.
-- `tx_i`, `escrow_i`, `uptime_i`: per-epoch activity counters sourced from the
-  POTSO meters.
-- `EMA_{E-1,i}`: the engagement score stored for the previous epoch.
+- `stake_i` (wei): the sum of
+  - the bonded total from POTSO stake locks (`potso/stake/<owner>`, see [stake.md](stake.md)); and
+  - for addresses in `EligibleValidators`, the eligibility basis stored there (added on top of the lock total).
+- `tx_i`, `escrow_i`: per-epoch counters accumulated as transactions are applied (`PotsoMetricsAddEngagement`, keyed by `height / EpochLengthBlocks`).
+- `uptime_i`: `UptimeSeconds / 60` for the epoch (whole minutes). Only `Node.PotsoHeartbeat` writes uptime and nothing in the running node calls it (see [README](README.md)), so this is 0 in practice.
+- `EMA_{E-1,i}`: the engagement stored in the previous epoch's snapshot (0 if none).
 
-Configuration parameters (all integer values) are provided via
-`[potso.weights]`:
+The candidate set is every address with stake, every address with an epoch meter, and every address in the previous snapshot.
 
-- `AlphaStakeBps`: stake blend factor in basis points (0–10_000).
-- `TxWeightBps`, `EscrowWeightBps`, `UptimeWeightBps`: component multipliers
-  applied to each counter.
-- `MaxEngagementPerEpoch`: upper bound applied after EMA evaluation.
-- `MinStakeToWinWei`, `MinEngagementToWin`: eligibility thresholds.
-- `DecayHalfLifeEpochs`: EMA half-life measured in epochs.
-- `TopKWinners`: deterministic cut-off applied after ranking.
-- `TieBreak`: tie-resolution strategy (`addrLex` or `addrHash`).
+Parameters come from `[potso.weights]` and `[potso.abuse]` in the node's TOML config, see [config.md](config.md):
 
-Two scaling constants are used throughout the implementation:
+- `AlphaStakeBps`, `TxWeightBps`, `EscrowWeightBps`, `UptimeWeightBps`
+- `MaxEngagementPerEpoch`, `MinStakeToWinWei`, `MinStakeToEarnWei`, `MinEngagementToWin`
+- `DecayHalfLifeEpochs`, `TopKWinners`, `TieBreak`
+- `QuadraticTxDampenAfter`, `QuadraticTxDampenPower`
 
-- `WeightBpsDenominator = 10_000` for basis point math.
-- `engagementBetaScale = 1_000_000_000` (1e9) for fixed-point EMA decay.
+Constants: `WeightBpsDenominator = 10000` and `engagementBetaScale = 1_000_000_000` (fixed-point scale for the EMA).
 
-## Step 1: Raw Composite
-
-The raw engagement contribution aggregates counters using component weights:
+## Step 1: Raw composite
 
 ```
-raw_i = TxWeightBps * tx_i + EscrowWeightBps * escrow_i + UptimeWeightBps * uptime_i
+raw_i = TxWeightBps * tx_i' + EscrowWeightBps * escrow_i + UptimeWeightBps * uptime_i
 ```
 
-This computation uses 128-bit integer arithmetic; any overflow is clamped to
-`math.MaxUint64` before the EMA stage.
+`tx_i'` is `tx_i` after the optional quadratic dampening described in [spec.md](spec.md). If `stake_i < MinStakeToEarnWei`, `raw_i` is 0. The sum uses `math/big`; a result wider than 64 bits is clamped to `math.MaxUint64`.
 
-## Step 2: Exponential Moving Average
+## Step 2: Exponential moving average
 
-The decay coefficient `β` is derived from the configured half-life `h`:
+The decay coefficient for half-life `h = DecayHalfLifeEpochs` is
 
 ```
-β = round( 2^(-1/h) * engagementBetaScale )
+β = round( 2^(-1/h) * engagementBetaScale )     (0 when h = 0)
 ```
 
-The EMA for epoch `E` is then:
+computed with exact integer arithmetic (`computeBetaScaled`). The EMA is
 
 ```
 EMA_{E,i} = floor( (EMA_{E-1,i} * β + raw_i * (engagementBetaScale - β)) / engagementBetaScale )
 ```
 
-Special cases:
+- If `h = 0`, `β = 0` and the EMA equals `raw_i`.
+- If `β >= engagementBetaScale`, the previous value is kept unchanged.
+- If `stake_i < MinStakeToEarnWei`, the result is forced to 0.
+- If `MaxEngagementPerEpoch > 0`, the result is clamped to it. The clamped value is what is stored and used as `EMA_{E-1}` next epoch.
 
-- If `h = 0`, then `β = 0` and the EMA equals the raw composite.
-- If `β >= engagementBetaScale`, only the historical component is retained.
+`DecayHalfLifeEpochs` must be `<= 100000` and `QuadraticTxDampenPower` must be `<= 1000` (`WeightParams.Validate`).
 
-The final value is clamped to `MaxEngagementPerEpoch` to avoid runaway scores.
+## Step 3: Eligibility filters
 
-## Step 3: Eligibility Filters
+A participant is removed if any of these holds (checked in this order after step 2):
 
-Participants are removed unless both conditions hold:
+1. `stake_i < MinStakeToWinWei`
+2. `EMA_{E,i} < MinEngagementToWin`
+3. `stake_i = 0` and `EMA_{E,i} = 0`
 
-1. `stake_i ≥ MinStakeToWinWei`
-2. `EMA_{E,i} ≥ MinEngagementToWin`
-
-Filtered entries are excluded from totals and never appear on the leaderboard.
+Removed participants are excluded from the totals and from the snapshot.
 
 ## Step 4: Normalisation
 
-Let `S = Σ stake_i` and `G = Σ EMA_{E,i}` over the remaining participants. The
-stake and engagement shares are computed as rationals:
+With `S = Σ stake_i` and `G = Σ EMA_{E,i}` over the remaining participants:
 
 ```
-stakeShare_i = stake_i / S         (if S > 0)
-engShare_i   = EMA_{E,i} / G       (if G > 0)
+stakeShare_i = stake_i / S        (0 if S = 0 or stake_i = 0)
+engShare_i   = EMA_{E,i} / G      (0 if G = 0 or EMA_{E,i} = 0)
+w_i          = α * stakeShare_i + (1 - α) * engShare_i,   α = AlphaStakeBps / 10000
 ```
 
-The composite weight is then:
+Shares are exact rationals (`big.Rat`). The basis-point figures stored and returned by RPC are `floor(share * 10000)`.
 
-```
-w_i = α * stakeShare_i + (1 - α) * engShare_i
-```
+## Step 5: Ranking, Top-K, tie break
 
-where `α = AlphaStakeBps / WeightBpsDenominator`. Zero denominators contribute
-zero share (e.g. if all stake is zero, only engagement drives the result).
-Basis-point projections used by RPCs are computed as
-`floor(share * WeightBpsDenominator)`.
+Entries are sorted by `w_i` descending. Equal weights are ordered by the tie-break key, ascending:
 
-## Step 5: Ranking, Top-K, Tie Break
+- `addrHash`: SHA-256 digest of the 20-byte address.
+- `addrLex`: the raw 20-byte address. An empty `TieBreak` value behaves as `addrLex` in `tieBreakKey`; the config loader sets `addrHash` when the key is omitted.
 
-Participants are sorted by `w_i` descending. Equal weights are broken using the
-configured strategy:
+The list is then truncated to `TopKWinners` entries when `TopKWinners > 0`.
 
-- `addrLex` compares raw 20-byte addresses lexicographically.
-- `addrHash` hashes addresses with SHA-256 and compares digests lexicographically.
+## Worked example
 
-After ordering, the list is truncated to the first `TopKWinners` entries when
-`TopKWinners > 0`. The resulting ordering is deterministic across all nodes.
-
-## Worked Example
-
-Consider two participants with the following metrics:
+Two participants, no dampening, and `DecayHalfLifeEpochs = 0`:
 
 | Address | Stake | tx | EMA<sub>E-1</sub> |
 | ------- | ----- | -- | ------------------ |
 | A       | 60    | 3  | 0                  |
 | B       | 40    | 7  | 0                  |
 
-Configuration:
+Configuration (only the relevant keys):
 
 ```
-AlphaStakeBps = 7000
-TxWeightBps   = 10000
-DecayHalfLifeEpochs = 0
+AlphaStakeBps         = 7000
+TxWeightBps           = 10000
+MaxEngagementPerEpoch = 100000   # with the default 1000 both raw values would be clamped to 1000
 ```
 
-The raw composites are `30_000` and `70_000`. Because the half-life is zero the
-EMA equals the raw value. Totals: `S = 100`, `G = 100_000`. Shares:
+Raw composites are `30_000` and `70_000`, and with `h = 0` the EMA equals them. Totals: `S = 100`, `G = 100_000`.
 
 ```
-stakeShare_A = 0.60      engShare_A = 0.30
-stakeShare_B = 0.40      engShare_B = 0.70
+stakeShare_A = 0.60   engShare_A = 0.30    w_A = 0.7*0.60 + 0.3*0.30 = 0.51
+stakeShare_B = 0.40   engShare_B = 0.70    w_B = 0.7*0.40 + 0.3*0.70 = 0.49
 ```
 
-Composite weights:
+With a budget of 1,000 wei the base payouts are `floor(1000 * 0.51) = 510` for A and `490` for B.
 
-```
-w_A = 0.7*0.60 + 0.3*0.30 = 0.51
-w_B = 0.7*0.40 + 0.3*0.70 = 0.49
-```
-
-With a 1,000 wei budget, payouts are ⌊1,000 * 0.51⌋ = 510 wei for A and 490 wei
-for B—matching the historical expectations but now derived via the multi-factor
-pipeline.
-
-## Integer Safety
-
-All arithmetic is performed using Go's `math/big` and 64-bit integer types.
-Fixed-point operations rely on `engagementBetaScale` to avoid floating point
-rounding. The SHA-256 based tie break ensures that identical weights yield the
-same ordering on every node.
+(Through the TOML loader `DecayHalfLifeEpochs = 0` is replaced by the default 7, see [config.md](config.md), so this example applies to direct library calls.)
 
 ## Persistence
 
-Computed snapshots are stored as `potso.StoredWeightSnapshot` records containing
-raw stake/engagement figures, basis-point projections, and the deterministic
-ordering. Auditors can reconstruct the full pipeline by re-running
-`ComputeWeightSnapshot` using the stored data and published parameters.
+`processPotsoRewardEpoch` stores the ranked entries as a `potso.StoredWeightSnapshot` (epoch, total stake, total engagement, and per entry: address, stake, engagement, `StakeShareBps`, `EngagementShareBps`, `WeightBps`) under two keys with identical content:
 
+- `potso/metrics/snapshot/<epoch>` - read by `potso_leaderboard` and used as the previous-epoch engagement input.
+- `snapshots/potso/<epoch>/weights` - read by governance voting (`native/governance`) and by `potso_getWeight`.
+
+Trie keys: `snapshots/potso/<epoch>/weights` is written with `KVPut` on the plain string (`SnapshotPotsoWeightsKey`), so it is stored under `Keccak256(key)`. `potso/metrics/snapshot/<epoch>` (and the `potso/metrics/meter/<epoch>:<addr>` and `potso/metrics/index/<epoch>` records) go through key helpers that already return `Keccak256(prefix + id)` (`potsoMetricsSnapshotKey` and siblings in `core/state/manager.go`), so `KVPut` hashes them a second time: `Keccak256(Keccak256(key))`.
+
+The snapshot is written only when `ComputeRewards` computed weights. It returns before that when the epoch budget is zero or negative (for example an empty treasury), so no snapshot is stored for such an epoch.

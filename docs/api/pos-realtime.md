@@ -1,68 +1,40 @@
 # POS realtime finality stream
 
-The realtime service exposes live status transitions for POS payment intents.
-A stream update is emitted when a signed intent transaction enters the
-mempool (`pending`) and again when the enclosing block is BFT-finalized
-(`finalized`). This allows cashier and reconciliation systems to surface
-transaction outcomes without polling JSON-RPC.
+The node streams status transitions for transactions that carry an `intentRef`
+(`core/pos_stream.go`, `rpc/stream_finality.go`, `rpc/ws.go`):
 
-## Transport endpoints
+* `pending` is published when an NHB or ZNHB transfer (`TxTypeTransfer`,
+  `TxTypeTransferZNHB`) with an `intentRef` is admitted to this node's mempool.
+* `finalized` is published when a block containing a transaction with an
+  `intentRef` (any transaction type) is committed.
 
-| Transport | URL pattern | Notes |
+## Transports
+
+| Transport | Endpoint | Notes |
 | --- | --- | --- |
-| gRPC | `pos.v1.Realtime/SubscribeFinality` on the standard node RPC port | Requires HTTP/2 (TLS or h2c). |
-| WebSocket | `/ws/pos/finality` on the node RPC origin | Supports optional `cursor` query for resume. |
+| gRPC | `pos.v1.Realtime/SubscribeFinality` on the node's RPC address | Served by the same listener as JSON-RPC (`grpcHandler` in `rpc/http.go`), so it needs HTTP/2 (TLS or h2c). |
+| WebSocket | `/ws/pos/finality` on the RPC address | Optional `?cursor=<n>` query. Origin check is disabled (`OriginPatterns: ["*"]`); only the client-address allowlist applies. |
 
-Both transports stream the same payload. Each update is tagged with a
-monotonic `cursor` string that can be supplied when reconnecting to request
-backfill for any missed events.
+Neither transport requires the JWT used for privileged JSON-RPC methods.
 
-### Update schema
+## Update fields
 
-All messages describe a `tx_update` event:
+Each update has a `cursor`, which is the decimal string of a per-process,
+monotonically increasing sequence number.
+
+gRPC (`proto/pos/realtime.proto`, `FinalityUpdate`):
 
 | Field | Type | Description |
 | --- | --- | --- |
-| `cursor` | string | Monotonic resume token (opaque). |
-| `intentRef` | bytes/hex | POS intent reference. |
-| `txHash` | bytes/hex | Transaction hash. |
-| `status` | enum/string | `pending` (accepted) or `finalized` (BFT commit). |
-| `blockHash` (gRPC) / `block` (WebSocket) | bytes/hex | Present when `status=finalized`. Field is `blockHash` in the protojson gRPC payload and `block` in the WebSocket JSON payload. |
-| `height` | uint64 | Finalized block height, `0` while pending. |
-| `ts`/`timestamp` | int64 | Block or enqueue timestamp (Unix seconds). |
+| `cursor` | string | Sequence number as a decimal string. |
+| `intent_ref` | bytes | The transaction's `intentRef`. |
+| `tx_hash` | bytes | Transaction hash. |
+| `status` | enum | `FINALITY_STATUS_PENDING` or `FINALITY_STATUS_FINALIZED`. |
+| `block_hash` | bytes | Set when finalized. |
+| `height` | uint64 | Block height when finalized, `0` while pending. |
+| `timestamp` | int64 | Enqueue time (pending) or block timestamp (finalized), unix seconds. |
 
-### gRPC subscription
-
-```protobuf
-service Realtime {
-  rpc SubscribeFinality(SubscribeFinalityRequest)
-      returns (stream SubscribeFinalityResponse);
-}
-
-message SubscribeFinalityRequest {
-  string cursor = 1; // optional resume token
-}
-```
-
-Clients should maintain the latest `cursor` observed and re-issue it on a new
-`SubscribeFinalityRequest` after transient failures.
-
-Example using [`sdk/pos/examples/subscriber.ts`](../../sdk/pos/examples/subscriber.ts):
-
-```bash
-POS_REALTIME_GRPC=rpc.testnet.nhbcoin.net:9090 \
-POS_REALTIME_WS=wss://rpc.testnet.nhbcoin.net/ws/pos/finality \
-ts-node sdk/pos/examples/subscriber.ts
-```
-
-The sample streams via gRPC for `POS_SAMPLE_WINDOW_MS` milliseconds, captures
-the most recent cursor, then reconnects over WebSocket to demonstrate
-backfill.
-
-### WebSocket subscription
-
-Establish a connection to `/ws/pos/finality`. To resume from a previous
-position supply `?cursor=<lastCursor>`. Updates are delivered as JSON objects:
+WebSocket text frames are JSON (`finalityUpdatePayload`):
 
 ```json
 {
@@ -77,19 +49,26 @@ position supply `?cursor=<lastCursor>`. Updates are delivered as JSON objects:
 }
 ```
 
-If the server prunes history older than your cursor, the stream will begin
-from the oldest retained event.
+`block` and `height` are omitted while pending.
 
-## Reconnection guidance
+## Resuming
 
-1. Persist the latest `cursor` string after every message.
-2. On reconnect, include the stored cursor. The server replays any unseen
-   updates (if available) before live data.
-3. If the cursor is too old, the stream starts from the current head. Treat
-   this as a signal to backfill via batch queries if required.
+`SubscribeFinalityRequest.cursor` (gRPC) and `?cursor=` (WebSocket) are parsed as
+an unsigned decimal integer; an empty or unparseable value is treated as `0`. On
+connect the node first sends every retained update with a sequence greater than
+the cursor, then live updates.
 
-## Backward compatibility
+The node retains only the most recent 2048 updates (`posFinalityHistoryLimit`),
+in memory. After a process restart the sequence and history start over, so a
+cursor from before the restart is meaningless. If a cursor is older than the
+oldest retained entry, the stream starts at the oldest retained entry; there is no
+signal that updates were missed, so reconcile with
+`pos_getAuthorizationByIntentRef` ([gateway-pos.md](gateway-pos.md)) after a
+gap. Live delivery to a subscriber is non-blocking: if a subscriber's 32-slot
+buffer is full the update is dropped for that subscriber.
 
-Nodes that do not implement POS-RT-7 simply return `404` for the WebSocket
-route and omit the `Realtime` gRPC service. Clients should detect this
-condition and fall back to existing polling flows.
+Only intents that pass through this validator are visible in its stream. Use
+`sdk/pos/examples/subscriber.ts` as a client reference; it reads
+`POS_REALTIME_GRPC`, `POS_REALTIME_WS`, `POS_SAMPLE_WINDOW_MS` and `POS_CURSOR`
+from the environment (defaults `localhost:9090`,
+`ws://localhost:8545/ws/pos/finality`, `10000`).

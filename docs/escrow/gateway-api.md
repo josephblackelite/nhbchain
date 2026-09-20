@@ -1,142 +1,126 @@
 # Escrow Gateway REST API
 
-The escrow gateway (`services/escrow-gateway`) exposes a small REST surface over the on-chain escrow and P2P trade primitives. It
-creates escrows/trades via node RPC and tracks status locally. It delivers webhook notifications only for the `escrow.created`
-event it raises itself (see section 5); it has no feed of on-chain events. This document describes the endpoints, authentication,
-idempotency, and webhook mechanisms actually implemented by the service.
+The escrow gateway (`services/escrow-gateway`) is an HTTP service in front of the node's escrow features. It verifies signatures, relays escrow actions to the node as signed transactions, and keeps a local SQLite database (idempotency records, audit log, P2P offers). This document lists the endpoints exactly as implemented in `services/escrow-gateway/server.go`. Configuration and the signing envelopes are in [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md).
+
+The gateway has no path prefix and no fixed public base URL: routes are served at `/escrow/...` and `/p2p/...` on the address set by `ESCROW_GATEWAY_LISTEN` (default `:8081`). Any other path returns 404.
 
 ---
 
-## 1. Host & Deployment
+## 1. Authentication
 
-The gateway is self-hosted; there is no fixed public base URL. It listens on `GATEWAY_PORT` (see
-[`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md) for configuration) and is not versioned with a path prefix — routes are
-served directly at the paths listed below (e.g. `POST /escrow/create`, not `POST /v1/escrow/create`).
+### 1.1 API key + HMAC (every `POST`)
 
----
+Every `POST` endpoint calls `Authenticator.Authenticate` (`gateway/auth/auth.go`) and requires:
 
-## 2. Authentication & Signing
+* `X-Api-Key`: the API key identifier.
+* `X-Timestamp`: Unix seconds. The request must be within the allowed skew of the gateway clock (default 2 minutes; the skew is capped at 2 minutes). Within that window the timestamp must also be strictly greater than the last timestamp accepted for the same key, otherwise the request fails with `timestamp not increasing`.
+* `X-Nonce`: per-request nonce. Reusing a `(timestamp, nonce)` pair for the same key fails with `nonce already used`.
+* `X-Signature`: hex-encoded HMAC-SHA256 with the key's secret:
 
-Two layers of authentication protect gateway requests:
-
-1. **API key + HMAC.** Every request, reads (`GET`) included, must include:
-   * `X-Api-Key` — the caller's API key identifier.
-   * `X-Timestamp` — Unix seconds. Requests outside the configured skew window (default up to 2 minutes) are rejected.
-   * `X-Nonce` — a per-request nonce; reuse of the same `(timestamp, nonce)` pair for an API key is rejected as a replay.
-   * `X-Signature` — hex-encoded HMAC-SHA256, computed as:
-
-     ```text
-     signature = hex(HMAC-SHA256(api_secret, timestamp + "\n" + nonce + "\n" + METHOD + "\n" + path + "\n" + body))
-     ```
-
-     `METHOD` is upper-cased and `path` is the canonical request path (query parameters sorted). This is implemented in
-     `gateway/auth/auth.go` (`ComputeSignature`).
-
-2. **Wallet signature.** Privileged escrow actions (`/escrow/release`, `/escrow/refund`, `/escrow/dispute`, `/escrow/resolve`,
-   `/p2p/offers`, `/p2p/accept`) additionally require a wallet signature proving control of the payer/payee/mediator/seller/buyer
-   address:
-   * `X-Sig-Addr` — the signer's bech32 address (`nhb1…`/`znhb…`).
-   * `X-Sig` — hex-encoded, 65-byte EIP-191 signature (`hex(eip191_sign(keccak256(payload)))`).
-   * `X-Timestamp` / `X-Nonce` — reused from the HMAC layer.
-
-   The signed payload is the pipe-joined string:
-
-   ```text
-   METHOD|path|body|timestamp|nonce|resourceId
-   ```
-
-   where `resourceId` is the escrow ID, trade/offer ID, or an empty string when the action has no single resource (e.g. offer
-   creation). This is implemented in `services/escrow-gateway/server.go` (`verifyWalletSignature`).
-
----
-
-## 3. Idempotency
-
-Every mutating endpoint (`POST /escrow/create`, `/escrow/release`, `/escrow/refund`, `/escrow/dispute`, `/escrow/resolve`,
-`/p2p/offers`, `/p2p/accept`) requires an `Idempotency-Key` header. The gateway hashes `(method, path, body)` and stores the
-response keyed by `(api_key, idempotency_key)`:
-
-* A retry with the same key and identical request returns the original cached response and status code.
-* A retry with the same key but a different request body returns `409 Conflict`.
-
----
-
-## 4. Endpoints
-
-### 4.1 Escrow
-
-| Method & Path | Description | Auth |
-|----------------|-------------|------|
-| `POST /escrow/create` | Create an escrow and return a pay intent. | API key + HMAC. |
-| `GET /escrow/{id}` | Fetch escrow status/detail. | API key + HMAC. |
-| `POST /escrow/release` | Release funds to payee. | API key + HMAC + wallet signature (payee or mediator). |
-| `POST /escrow/refund` | Refund payer. | API key + HMAC + wallet signature (payer). |
-| `POST /escrow/dispute` | Flag a dispute. | API key + HMAC + wallet signature (payer or payee). |
-| `POST /escrow/resolve` | Resolve a disputed escrow via a realm arbitration-committee decision. | API key + HMAC + a quorum of the escrow's frozen realm-committee signatures over a signed decision envelope (not a single payer/payee/mediator wallet signature) — see [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md)'s Authentication section for the exact envelope shape and signing contract. |
-
-`release`/`refund`/`resolve` responses are `202 Accepted` with `{"queued": true}` (the node call is made synchronously, but the
-effect is reported as queued); `dispute` responds `202 Accepted` with `{"ok": true}`. `GET /escrow/{id}` returns the escrow struct
-as-is from the node — there is no separate `/escrow/{id}/events` endpoint. The path is matched by prefix (`/escrow/` +
-remainder-as-ID), so no additional path segments are supported after the ID.
-
-### 4.2 P2P offers & trades
-
-| Method & Path | Description | Auth |
-|----------------|-------------|------|
-| `POST /p2p/offers` | Seller creates an offer. | API key + HMAC + wallet signature (seller). |
-| `GET /p2p/offers` | List all offers (no pagination or filtering). | API key + HMAC. |
-| `POST /p2p/accept` | Buyer accepts an offer; gateway creates the dual-lock trade/escrows and returns pay intents. | API key + HMAC + wallet signature (buyer). |
-| `GET /p2p/trades/{id}` | Fetch trade status/detail. | API key + HMAC. |
-
-There is no endpoint to settle, dispute, or resolve a trade over REST — those actions go through the node's `p2p_settle`,
-`p2p_dispute`, and `p2p_resolve` RPC methods directly (see [`escrow.md`](./escrow.md) §5.2).
-
----
-
-## 5. Webhooks
-
-There is no self-service subscription endpoint (no `POST /webhooks`). Webhook targets are rows in the gateway's local `webhooks`
-table (`api_key`, `event_type`, `url`, `secret`, `rate_limit`, `active`), registered by whoever operates the gateway rather than
-through a public API.
-
-The gateway starts the delivery worker (`services/escrow-gateway/webhook.go`) at startup. The only event it queues is the
-gateway-originated `escrow.created`, fired immediately when `POST /escrow/create` succeeds. The funded, released, refunded,
-disputed, resolved, expired and `escrow.trade.*` events are not delivered: the node has no method that lists events (the
-gateway's watcher called an `events_since` method that does not exist, and has been removed), so nothing observes them.
-
-Delivery, implemented in `services/escrow-gateway/webhook.go`:
-
-* Header: `X-Webhook-Signature` — hex-encoded HMAC-SHA256 of the raw JSON body, signed with the subscription's stored secret.
-* Payload:
-
-  ```json
-  {
-    "type": "escrow.trade.settled",
-    "sequence": 1234,
-    "escrowId": "0x...",
-    "tradeId": "0x...",
-    "attributes": { "...": "..." },
-    "timestamp": "2024-03-02T18:45:11.000000000Z",
-    "provider": { "scope": "platform", "type": "...", "profile": "...", "feeBps": 100, "feeRecipient": "nhb1..." }
-  }
+  ```text
+  signature = hex(HMAC-SHA256(secret, timestamp + "\n" + nonce + "\n" + METHOD + "\n" + path + "\n" + body))
   ```
 
-  `provider` is only present when the underlying event carries realm/provider attributes, which the gateway-originated
-  `escrow.created` event does not. A subscription for any other event type is never matched.
-* Delivery is at-least-once with exponential backoff (1s, 2s, 4s, ... capped at 5 minutes), up to 5 attempts per event, subject to a
-  per-subscription rate limit. There is no `retry_policy` field on the subscription payload and no dead-letter/email escalation.
+  `METHOD` is upper-cased. `path` is the request path; if there is a query string it is appended as `?` plus the query parameters sorted as strings (`CanonicalRequestPath`). Request bodies are limited to 1 MiB.
+
+**The `GET` endpoints do not authenticate.** `GET /escrow/{id}`, `GET /p2p/offers` and `GET /p2p/trades/{id}` never call the authenticator (`handleEscrowGet`, `handleListOffers`, `handleGetTrade`); anyone who can reach the gateway can call them.
+
+### 1.2 Wallet signature (participant proof)
+
+Escrow create, release, refund and dispute require a participant signature in addition to API key + HMAC:
+
+* `X-Sig-Addr`: the signer's bech32 address.
+* `X-Sig`: 65-byte hex signature (optional `0x`) over `keccak256` of a canonical JSON envelope. It is not EIP-191 wrapped and does not cover the HTTP request. The envelopes are listed in [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md#signing-envelopes).
+
+`POST /escrow/resolve` takes no wallet headers; it carries the arbitrators' signatures in the body.
+
+The P2P offer endpoints use a different scheme, verified by `verifyWalletSignature`: `X-Sig-Addr`, `X-Sig`, `X-Timestamp`, `X-Nonce`, where the signature is an EIP-191 (`personal_sign`-style) signature over `keccak256` of
+
+```text
+METHOD|path|body|timestamp|nonce|resourceId
+```
+
+with `resourceId` empty for `POST /p2p/offers` and the lower-cased offer ID for `POST /p2p/accept`.
 
 ---
 
-## 6. Error Handling
+## 2. Idempotency
 
-Errors are plain JSON: `{"error": "<message>"}`. There is no `trace_id`, structured `code` field, or audit-log endpoint. Status
-codes used by the handlers:
+Every `POST` endpoint requires an `Idempotency-Key` header (400 if missing). The gateway hashes `(METHOD, canonical path, body)` and stores the response under `(api key, idempotency key)` in SQLite:
 
-* `400` — validation errors (missing/invalid parameters, missing `Idempotency-Key`).
-* `401` — authentication failure (missing/invalid API key, HMAC signature, timestamp skew, or nonce replay).
-* `403` — wallet signature missing, invalid, or from a signer not authorized for the action.
-* `404` — escrow, offer, or trade not found.
-* `409` — idempotency key reused with a different request body.
-* `502` — the underlying node RPC call failed.
-* `500` — internal gateway error (e.g. storage failure).
+* Same key, same request hash: the stored status and body are returned again.
+* Same key, different request hash: `409 Conflict`.
+
+Only successful (or otherwise completed) responses are stored; errors returned before the save (validation, signature, node failure) are not cached.
+
+---
+
+## 3. Endpoints
+
+### 3.1 Escrow
+
+| Method and path | Auth | Description |
+|-----------------|------|-------------|
+| `POST /escrow/create` | API key + HMAC, wallet signature of the payer | Relay a `TxTypeDelegatedCreateEscrow`; returns `201` with `{"escrowId": "0x...", "payIntent": {...}}`. |
+| `GET /escrow/{id}` | none | Returns the node's `escrow_get` result for the ID. |
+| `POST /escrow/release` | API key + HMAC, wallet signature of the payee or mediator | Relay a `TxTypeDelegatedReleaseEscrow`. |
+| `POST /escrow/refund` | API key + HMAC, wallet signature of the payer | Relay a `TxTypeDelegatedRefundEscrow`. |
+| `POST /escrow/dispute` | API key + HMAC, wallet signature of the payer or payee | Relay a `TxTypeDelegatedDisputeEscrow`. |
+| `POST /escrow/resolve` | API key + HMAC | Relay an arbitration decision with committee signatures. |
+
+**`POST /escrow/create` body** (`EscrowCreateRequest`): `payer`, `payee` (bech32), `token`, `amount` (decimal string), `feeBps`, `deadline` (Unix seconds), `nonce` (positive integer), optional `mediator` (bech32), `meta` (hex string that decodes to exactly 32 bytes), `realm` (at most 64 characters). `payer`, `payee`, `token`, `amount`, `deadline` and `nonce` are required. `X-Sig-Addr` must equal `payer`. The escrow ID in the response is computed locally with the same rule as the chain (`keccak256(payer || payee || meta || nonce)`, see [`escrow.md`](./escrow.md)); it is returned once the transaction has been accepted by the node, not once it is in a block.
+
+`payIntent` (`PayIntent`): `vault` (the chain's escrow vault address for the token), `token`, `amount`, `memo` (`ESCROW:` plus the upper-cased escrow ID) and `qr` (`nhb:<vault>?amount=...&memo=...&token=...`). The chain funds an escrow only through the payer's `TxTypeLockEscrow` transaction (`nhb-cli escrow fund`); a plain transfer to the vault address does not fund it.
+
+**`release`, `refund`, `dispute` body** (`EscrowActionRequest`): `escrowId` (required), and for dispute an optional `reason`. The gateway loads the escrow with `escrow_get` and checks that `X-Sig-Addr` is an allowed party before relaying: payee or mediator for release, payer for refund, payer or payee for dispute. Responses are `202 Accepted`: `{"queued":true}` for release and refund, `{"ok":true}` for dispute. The status only means the transaction was accepted by the node.
+
+**`POST /escrow/resolve` body** (`EscrowResolveRequest`): `escrowId`, `decision` (the decision JSON object, relayed byte-for-byte), `signatures` (array of hex strings). Response `202` with `{"queued":true}`. The gateway does not verify the quorum itself; the chain does (see [`escrow.md`](./escrow.md) section 5).
+
+There is no `/escrow/{id}/events` endpoint. The `GET` route matches any path beginning `/escrow/`, so the whole remainder is treated as the ID.
+
+### 3.2 P2P offers and trades
+
+| Method and path | Auth | Description |
+|-----------------|------|-------------|
+| `POST /p2p/offers` | API key + HMAC, wallet signature of the seller | Store an offer in the gateway database. Returns `201` with the offer. |
+| `GET /p2p/offers` | none | All offers, no filtering or paging. |
+| `POST /p2p/accept` | API key + HMAC, wallet signature of the buyer | Always fails; see below. |
+| `GET /p2p/trades/{id}` | none | Reads a trade row from the gateway database (404 if unknown). |
+
+`POST /p2p/offers` body: `seller` (bech32), `baseToken`, `baseAmount`, `quoteToken`, `quoteAmount` (positive decimal strings; tokens `NHB` or `ZNHB`), optional `minAmount`, `maxAmount` (positive decimal strings), optional `terms`. The server assigns `offerId` (`OFF_` plus 32 upper-case hex characters), sets `active` to true and returns the stored offer. No node call is made and no event is emitted.
+
+`POST /p2p/accept` validates the request and the offer, then calls the node client's `P2PCreateTrade`, which always returns the error `escrow-gateway: p2p trade creation is permanently retired -- use the P2P ZNHB market instead`. The handler answers `502 Bad Gateway`. Trade rows in the database are therefore only created by code paths that no longer run. There is no gateway endpoint to settle, dispute or resolve a trade. See [`trade.md`](./trade.md).
+
+---
+
+## 4. Webhooks
+
+The gateway code contains a webhook subsystem, but **it is not started by the shipped binary**: `main.go` creates the webhook queue and passes it to the server, and never constructs or runs `EventWatcher` or `WebhookWorker`. Also, the watcher polls the node method `events_since`, which the node does not implement. As shipped, no webhook is delivered. The following describes the code (`webhook.go`, `webhook_queue.go`, `watcher.go`) for when it is wired up:
+
+* Subscriptions are rows in the gateway's `webhooks` table (`api_key`, `event_type`, `url`, `secret`, `rate_limit` default 60, `active`). There is no REST endpoint to create them.
+* Delivery is an HTTP `POST` with header `X-Webhook-Signature` (hex HMAC-SHA256 of the raw body with the subscription secret) and body:
+
+  ```json
+  {"type":"escrow.released","sequence":1234,"escrowId":"0x...","tradeId":"","attributes":{},
+   "timestamp":"2026-01-01T00:00:00.000000000Z","provider":{"scope":"platform","profile":"...","feeBps":100,"feeRecipient":"nhb1..."}}
+  ```
+
+  `provider` appears only when the event carries realm attributes (`realmScope`, `realmType`, `realmProfile`, `realmFeeBps`, `realmFeeRecipient`).
+* A delivery is retried after a non-2xx response or a network error with backoff of 1s, 2s, 4s and so on, capped at 5 minutes, for at most 5 attempts (`maxWebhookAttempts`). Attempts are recorded in `webhook_attempts`.
+* `POST /escrow/create` enqueues a gateway-originated `escrow.created` event after success.
+
+---
+
+## 5. Errors
+
+Errors are `{"error":"<message>"}` (double quotes in messages are replaced by single quotes). Status codes used by the handlers:
+
+* `400`: validation failure, malformed JSON, missing `Idempotency-Key`, oversized body, realm constraint violation.
+* `401`: API key/HMAC authentication failure (unknown key, bad signature, skew, nonce or timestamp replay).
+* `403`: wallet signature missing or invalid, or signer not authorized for the action.
+* `404`: unknown offer or trade.
+* `409`: idempotency key reused with a different request; inactive offer.
+* `500`: storage or internal failure.
+* `502`: the node call failed (this includes `escrow_get` failures such as an unknown escrow, and every `POST /p2p/accept`).
+
+Every `POST` handler writes an audit-log row (`audit_log` table: API key, method, path, request body, response status and body). There is no HTTP endpoint that reads it.

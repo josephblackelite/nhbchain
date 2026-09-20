@@ -1,316 +1,202 @@
-# Lending RPC API Reference
+# Lending RPC and Transaction Reference
 
-> **Note:** A dedicated `lendingd` service is now available and documents its
-> gRPC API separately in [/docs/lending/service.md](../../lending/service.md).
-> The legacy JSON-RPC interface described below remains supported for existing
-> deployments but will be phased out in favour of the standalone service.
+Lending state is read through JSON-RPC methods on the node and written by
+**signed transactions** submitted with `nhb_sendTransaction`. The old
+per-action RPC methods are disabled.
 
-The NHBChain node exposes a JSON-RPC interface for interacting with the native
-lending engine. This document describes each method, the expected request
-payloads, and the shape of the responses returned by the node. Hardened builds
-only admit the native NHB asset and its wrapped collateral form (ZNHB); requests
-referencing third-party tokens are rejected at validation time.
-
-All requests **must** set `"jsonrpc": "2.0"` and provide a numeric `id`. Amount
-fields are encoded as decimal strings representing wei values.
+All requests use `"jsonrpc": "2.0"`. Amount fields in results are decimal wei
+strings unless noted.
 
 ## Authentication
 
-Mutating endpoints require a bearer token. The node reads the token from the
-`NHB_RPC_TOKEN` environment variable at startup. Clients must send the token via
-the `Authorization` header:
+The read methods below have no authentication check in the dispatch switch
+(`rpc/http.go`). `lending_submitRefPrice` and `nhb_sendTransaction` require the
+RPC credential (`requireAuthInto`): a JWT sent as
+`Authorization: Bearer <jwt>` (validated per `[RPCJWT]` in `config.toml`) or a
+verified client certificate when required. `nhb-cli` reads the token it sends
+from `NHB_RPC_TOKEN`; the node does not read that variable.
 
-```
-Authorization: Bearer <token>
-```
+## Disabled and removed methods
 
-If the token is missing or incorrect the node responds with HTTP `401` and a
-JSON-RPC error.
+* `lending_supplyNHB`, `lending_withdrawNHB`, `lending_depositZNHB`,
+  `lending_withdrawZNHB`, `lending_borrowNHB`, `lending_borrowNHBWithFee`,
+  `lending_repayNHB`, `lending_liquidate` are registered but always return
+  HTTP `410` with JSON-RPC code `-32060` (`codeMethodDisabled`) and a message
+  pointing to signed transactions (`rpc/lending_handlers.go`
+  `lendingRPCDisabledMessage`). The reason recorded in the code is that they
+  mutated any address's position without a signature from that address.
+* `lend_createPool` no longer exists; unknown methods return
+  `codeMethodNotFound` (`-32601`). Pool creation is `TxTypeLendingCreatePool`.
 
-## Market Data
+## Read methods
 
 ### `lending_getMarket`
 
-Return the current market snapshot alongside the risk parameters applied to the
-requested pool.
+Params: none, a pool ID string, or `{"poolId": "..."}`. An empty pool ID means
+`default`; more than one parameter is an error.
 
-**Parameters:** optional `poolId` string. When omitted the default pool is
-returned.
+Result: `{"market": {...}, "riskParameters": {...}}`. `market` is omitted when
+the pool does not exist and is not the default pool.
 
-**Response:**
+`market` is `lending.Market` (`native/lending/types.go`). Only three fields
+have JSON tags, so the rest use Go field names, and `*big.Int` fields are
+rendered as JSON numbers, not strings:
 
-```json
-{
-  "market": {
-    "PoolID": "default",
-    "TotalNHBSupplied": "3678901123000000000000000",
-    "TotalSupplyShares": "3123456789000000000000000",
-    "TotalNHBBorrowed": "2623456789000000000000000",
-    "SupplyIndex": "1001234567890000000",
-    "BorrowIndex": "1004567891230000000",
-    "ReserveFactor": 1500,
-    "LastUpdateBlock": 13245678
-  },
-  "riskParameters": {
-    "MaxLTV": 8000,
-    "LiquidationThreshold": 8500,
-    "LiquidationBonus": 500,
-    "DeveloperFeeCapBps": 500,
-    "BorrowCaps": {
-      "PerBlock": "50000000000000000000",
-      "Total": "12500000000000000000000000",
-      "UtilisationBps": 9000
-    },
-    "Oracle": {
-      "MaxAgeBlocks": 30,
-      "MaxDeviationBps": 500
-    },
-    "Pauses": {
-      "Supply": false,
-      "Borrow": false,
-      "Repay": false,
-      "Liquidate": false
-    },
-    "CircuitBreakerActive": false
-  }
-}
-```
+`PoolID`, `DeveloperOwner`, `DeveloperFeeCollector`, `DeveloperFeeBps`,
+`TotalNHBSupplied`, `TotalSupplyShares`, `TotalNHBBorrowed`, `SupplyIndex`,
+`BorrowIndex`, `LastUpdateBlock`, `ReserveFactor`, `BorrowedThisBlock`,
+`LastBorrowBlock`, `OracleMedianWei`, `OraclePrevMedianWei`,
+`OracleUpdatedBlock`, `TotalFixedTermDepositPrincipalWei`,
+`TotalFixedTermDepositInterestOwedWei`, `FixedTermDepositReserveWei`,
+`TotalFixedTermLoanInterestReceivableWei`, plus the tagged `depositApyBps`,
+`borrowApyBps`, `availableLiquidityWei`.
 
-`market` is `null` when the pool has not been initialised yet.
+The handler projects interest accrual to the current height before returning,
+and computes `depositApyBps`, `borrowApyBps` and `availableLiquidityWei` on the
+fly; they are not stored.
+
+`riskParameters` is `lending.RiskParameters`, also without JSON tags:
+`MaxLTV`, `LiquidationThreshold`, `LiquidationBonus`, `OracleAddress`,
+`CircuitBreakerActive`, `DeveloperFeeCapBps`, `BorrowCaps`
+(`PerBlock`, `Total`, `UtilisationBps`), `Oracle` (`MaxAgeBlocks`,
+`MaxDeviationBps`), `Pauses` (`Supply`, `Borrow`, `Repay`, `Liquidate`). The
+node binaries fill in only `MaxLTV`, `LiquidationThreshold`,
+`DeveloperFeeCapBps` and `Oracle` from config ([on-chain.md](on-chain.md#risk-parameters)),
+so the other fields read as zero or `false`.
 
 ### `lend_getPools`
 
-List the configured lending pools and their current accounting snapshots.
-
-**Parameters:** none
-
-**Response:**
-
-```json
-{
-  "pools": [
-    {"poolID": "default", "totalNHBSupplied": "0", "totalSupplyShares": "0"}
-  ],
-  "riskParameters": {"maxLTV": 7500, "liquidationThreshold": 8000}
-}
-```
-
-### `lend_createPool`
-
-Create a new lending pool using the node’s configured developer fee settings.
-
-**Parameters:** object with `poolId` and `developerOwner` (Bech32) fields.
-
-**Response:** identical to `lending_getMarket` for the newly created pool.
-
-## Account Data
+No parameters. Result: `{"pools": [<market>...], "riskParameters": {...}}`,
+same shapes as above. When no pool is stored, a single default market is
+returned.
 
 ### `lending_getUserAccount`
 
-Fetch the persisted lending position for an address. The parameter can be either
-the raw Bech32 string or an object containing an `address` field. Include
-`poolId` when querying non-default pools.
+Params: one argument, either the bech32 address string or
+`{"address": "...", "poolId": "..."}`; pool defaults to `default`. Returns HTTP
+`404` (`account not found`) when the address has no record in that pool.
 
-**Request:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "lending_getUserAccount",
-  "params": ["nhb1qyexample..."]
-}
-```
-
-**Response:**
+Result:
 
 ```json
 {
   "account": {
-    "CollateralZNHB": "300000000000000000",
-    "SupplyShares": "500000000000000000",
-    "DebtNHB": "900000000000000000",
-    "ScaledDebt": "903375000000000000"
+    "address": "0x<20-byte hex>",
+    "supplied":  [{"poolId": "default", "amountWei": "...", "valueUsd": "..."}],
+    "borrowed":  [{"poolId": "default", "amountWei": "...", "valueUsd": "..."}],
+    "collateralZnhbWei": "...",
+    "collateralValueUsd": "...",
+    "borrowedValueUsd": "...",
+    "rewardsWei": "0"
   }
 }
 ```
 
-The endpoint returns HTTP `404` when the address has no recorded position.
+* `supplied[].amountWei` is the redeemable NHB (shares times the supply
+  index), not the share count. `borrowed[]` lists only the flexible-rate debt.
+* `collateralValueUsd` uses the same oracle-adjusted conversion the engine
+  enforces (`lending.OracleAdjustedCollateralValue`); it is `""` when the
+  market has no reference price. `valueUsd` values treat NHB as 1 USD.
+* `borrowedValueUsd` includes the outstanding amount of an active fixed-term
+  loan; the `borrowed` array does not.
+* `rewardsWei` is always `"0"`; the engine has no rewards accrual.
 
-## Position Actions
+### `lending_getFixedTermLoan`
 
-Every state-changing method returns a pseudo transaction hash that can be used
-for client-side tracking or logging. The node applies the action immediately to
-its local state – the hash is an opaque acknowledgement rather than an on-chain
-identifier.
+Params as for `lending_getUserAccount`. Result: `{"loan": null}` when the
+address has no active fixed-term loan in the pool, otherwise `loan` with
+`loanId`, `borrower`, `poolId`, `tenureDays`, `rateBps`, `principalWei`,
+`totalInterestWei`, `repaidWei`, `outstandingWei`, `issuedAtBlock`,
+`issuedAtTime`, `maturityTime`, `status` (`active`, `repaid`, `delinquent`),
+`autoDebitEnabled`, `nextAutoDebitCycle`, `totalAutoDebitCycles`,
+`consecutiveMissedAutoDebits`.
 
-All mutating requests accept an optional `poolId` field. When omitted the
-default pool is used.
+### `lending_getFixedTermDeposit`
 
-### `lending_supplyNHB`
+Param: a 32-byte hex deposit ID (with or without `0x`), or
+`{"depositId": "..."}`. Result: `{"deposit": null}` or `deposit` with
+`depositId`, `depositor`, `poolId`, `tenureDays`, `rateBps`, `principalWei`,
+`totalInterestOwedWei`, `paidInterestWei`, `outstandingInterestWei`, `payout`
+(`lump_sum_at_maturity` or `periodic_interest_principal_at_maturity`),
+`issuedAtBlock`, `issuedAtTime`, `maturityTime`, `status` (`active`,
+`matured`), `nextPayoutCycle`.
 
-Supply NHB liquidity into the pool and mint LP shares.
+### `lending_getRateSchedule`
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "lending_supplyNHB",
-  "params": [
-    {
-      "from": "nhb1qyexample...",
-      "amount": "1000000000000000000",
-      "poolId": "default"
-    }
-  ]
-}
-```
+No parameters. Result: `{"schedule": [{"tenureDays": 30, "rateBps": 1200}, ...]}`
+sorted by tenure. This is the effective fixed-term **borrow** schedule: the
+governed value if a `policy.lendingRateSchedule` proposal has executed,
+otherwise the built-in default `{30: 1200, 90: 1600}`.
 
-**Result:** `{"txHash": "0x..."}`
+### `lending_getRefPriceStatus`
 
-### `lending_withdrawNHB`
+No parameters. Result: `{"hasRefPrice": bool, "rateNum", "rateDenom",
+"timestamp", "signerCount", "appliedBlock", "marketCount"}`; everything except
+`hasRefPrice` is omitted when no price has been accepted.
 
-Burn LP shares and redeem the underlying NHB back to the supplier. The request
-format matches `lending_supplyNHB` (`from` and `amount`).
+### `lending_submitRefPrice` (JWT required)
 
-### `lending_depositZNHB`
+Params: one object `{"rateNum": "...", "rateDenom": "...", "timestamp": <unix>,
+"signatures": ["0x..."]}`. `rateNum` and `rateDenom` are positive decimal
+integer strings; at least one 65-byte signature is required. Result:
+`{"txHash": "0x..."}`. The node enqueues a `TxTypeLendingRefPrice` (`0x26`)
+transaction.
 
-Lock ZNHB as collateral for a borrower.
+The signed message is
+`NHB_LENDING_REFPRICE_V1|rate=<rate with 18 decimals>|ts=<timestamp>`; the
+digest is its keccak256 (`core/tokenomics/lendingoracle`). On execution the
+signatures must come from distinct addresses in the configured reference-price
+signer set (the same signer set and threshold the buyback config carries,
+`sp.buybackConfig`), meeting the threshold; the timestamp must be strictly
+newer than the last accepted one. The rate is stored on every market as
+`OracleMedianWei = rateNum * 1e18 / rateDenom` (NHB-wei per whole ZNHB).
 
-```json
-{
-  "method": "lending_depositZNHB",
-  "params": [
-    {"from": "nhb1qyexample...", "amount": "500000000000000000", "poolId": "default"}
-  ]
-}
-```
+## Write transactions
 
-### `lending_withdrawZNHB`
+Submit with `nhb_sendTransaction`. The transaction `type` selects the action,
+`value` carries the amount in wei, and `data` (base64 in the JSON transaction)
+is a UTF-8 JSON payload. The sender is the recovered signer; there is no
+caller-supplied address field. Each transaction increments the sender's nonce.
 
-Unlock previously deposited collateral, subject to the position remaining
-healthy. Identical payload to `lending_depositZNHB`.
+| Action | Type | `value` | `data` JSON |
+| --- | --- | --- | --- |
+| Create pool | `TxTypeLendingCreatePool` `0x2C` | not used | `{"poolId": "<non-default id>"}` |
+| Supply NHB | `TxTypeLendingSupplyNHB` `0x13` | NHB to supply | `{"poolId"?}` |
+| Withdraw NHB | `TxTypeLendingWithdrawNHB` `0x14` | **LP shares** to burn | `{"poolId"?}` |
+| Deposit ZNHB collateral | `TxTypeLendingDepositZNHB` `0x15` | ZNHB | `{"poolId"?}` |
+| Withdraw ZNHB collateral | `TxTypeLendingWithdrawZNHB` `0x16` | ZNHB | `{"poolId"?}` |
+| Borrow NHB | `TxTypeLendingBorrowNHB` `0x17` | NHB to borrow | `{"poolId"?, "useDeveloperFee"?}` |
+| Repay NHB | `TxTypeLendingRepayNHB` `0x18` | NHB (capped at current debt) | `{"poolId"?}` |
+| Liquidate | `TxTypeLendingLiquidate` `0x1D` | not used | `{"poolId"?, "borrower": "<bech32>"}` |
+| Fixed-term borrow | `TxTypeLendingBorrowFixedTerm` `0x38` | principal | `{"poolId"?, "tenureDays": 30 or 90}` |
+| Fixed-term repay | `TxTypeLendingRepayFixedTerm` `0x39` | amount | `{"poolId"?}` |
+| Fixed-term supply | `TxTypeLendingSupplyFixedTerm` `0x3A` | principal | `{"poolId"?, "tenureDays", "payout": "lump_sum_at_maturity" or "periodic_interest_principal_at_maturity"}` |
 
-### `lending_borrowNHB`
+Rules from `core/lending_native.go`:
 
-Borrow NHB against enabled collateral.
+* An omitted or empty `poolId` means `default`. A create-pool transaction must
+  name a pool other than `default`, and the pool's developer owner is always
+  the transaction signer.
+* `value` must be positive for every action except liquidate.
+* A borrower cannot liquidate their own position.
+* Fixed-term borrow requires a non-zero `tenureDays` that is in the effective
+  rate schedule; fixed-term supply also requires a valid `payout`.
+* Every lending transaction is counted against the `lending` module quota
+  (`applyQuota`). The engine actions (everything except create pool) are also
+  rejected while the `lending` module is paused.
 
-```json
-{
-  "method": "lending_borrowNHB",
-  "params": [
-    {"borrower": "nhb1qyexample...", "amount": "400000000000000000", "poolId": "default"}
-  ]
-}
-```
+The transaction hash returned by `nhb_sendTransaction` is the mempool
+acknowledgement; the action takes effect when a block includes it.
 
-### `lending_borrowNHBWithFee`
+## Errors
 
-Borrow NHB while routing a governance-approved developer fee to the collector
-configured in the node’s `lending` settings.
-
-```json
-{
-  "method": "lending_borrowNHBWithFee",
-  "params": [
-    {
-      "borrower": "nhb1qyexample...",
-      "amount": "100000000000000000",
-      "poolId": "default"
-    }
-  ]
-}
-```
-
-The endpoint rejects caller-supplied fee configuration. Instead, the node reads
-`DeveloperFeeBps` and `DeveloperFeeCollector` from `config.toml` and validates
-the collector against the governance treasury allow list. The fee amount is
-computed as `amount * DeveloperFeeBps / 10_000`, forwarded to the configured
-collector, and added to the borrower’s outstanding debt.
-
-### `lending_repayNHB`
-
-Repay outstanding NHB debt.
-
-```json
-{
-  "method": "lending_repayNHB",
-  "params": [
-    {"from": "nhb1qyexample...", "amount": "400000000000000000", "poolId": "default"}
-  ]
-}
-```
-
-### `lending_liquidate`
-
-Repay an unhealthy borrower and seize collateral at a discount.
-
-```json
-{
-  "method": "lending_liquidate",
-  "params": [
-    {"liquidator": "nhb1qlqdtor...", "borrower": "nhb1qborrow...", "poolId": "default"}
-  ]
-}
-```
-
-The response again returns a `txHash` acknowledgement. Liquidations will fail if
-the borrower’s health factor is above 1.0 or if the liquidator lacks sufficient
-NHB to cover the debt.
-
-## Error Handling
-
-Validation failures surface as `codeInvalidParams` (`-32602`) with descriptive
-messages such as `"invalid parameter object"`, `"invalid borrower"`, or amount
-parser errors (`"amount is required"`, `"invalid amount"`,
-`"amount must be positive"`). When the engine rejects a call the message retains
-the prefix (for example `"lending engine: borrow exceeds per-block cap"`) and
-the same text is echoed in the `data` field for display or telemetry.
-
-Authentication issues return HTTP `401` / `codeUnauthorized` while unexpected
-infrastructure failures fall back to `codeServerError` (`-32000`). Module errors
-preserve their own HTTP status – hitting a borrow cap or circuit breaker returns
-HTTP `400`, whereas trying to access a pool before it is initialised yields
-HTTP `404`.
-
-Example error response:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 42,
-  "error": {
-    "code": -32602,
-    "message": "lending engine: borrow exceeds per-block cap",
-    "data": "lending engine: borrow exceeds per-block cap"
-  }
-}
-```
-
-## Operational Controls
-
-Two hardened levers gate the money market:
-
-- **Kill switch.** `riskParameters.Pauses` mirrors the on-chain `system/pauses`
-  map. Use the helper scripts to inspect or toggle the state during incident
-  response:
-
-  ```bash
-  go run ./examples/docs/ops/read_pauses
-  go run ./examples/docs/ops/pause_toggle --module lending --state pause
-  ```
-
-- **Borrow caps.** `riskParameters.BorrowCaps` enforces per-block, utilisation,
-  and global ceilings. Stage overrides by editing the node configuration overlay
-  and reloading:
-
-  ```toml
-  [lending.borrowCaps]
-  perBlock = "75000000000000000000"
-  total    = "15000000000000000000000000"
-  utilisationBps = 8800
-  ```
-
-  Track utilisation in dashboards and revert to the baseline once the incident
-  is resolved.
-
+Engine errors keep the `lending engine:` prefix. Those the code defines include
+`lending engine: amount must be positive`, `insufficient balance`,
+`insufficient liquidity`, `borrower health factor below 1`,
+`no outstanding debt to repay`, `borrower not eligible for liquidation`,
+`deposit below minimum liquidity`, `oracle quote stale`,
+`oracle deviation too large`, `borrow would exceed maximum loan-to-value ratio`,
+`cannot withdraw in the same block as a supply`, and
+`supply operations paused` / `borrow operations paused` /
+`repay operations paused` / `liquidation operations paused`
+(`native/lending/engine.go` lines 15-46).

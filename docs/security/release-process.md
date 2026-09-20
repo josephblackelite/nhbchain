@@ -1,70 +1,55 @@
 # Security Release & Freeze Process
 
-This document defines the security, audit, and operational procedures required before and during the public testnet launch freeze. Follow it for coordinating triage, escalations, and roll-forward plans.
+This page describes how security reports and pre-release checks are handled, and points to the code and scripts in this repository that support each step. Reporter-facing timelines (acknowledgement, triage, resolution, embargo) are defined once, in [disclosure.md](./disclosure.md).
 
-## Audit Intake
+## Audit intake
 
-1. **Submission Channel** – All issues must arrive via `security@nhbcoin.com` or the HackerOne program. Public issues are not accepted during freeze.
-2. **Acknowledgement SLA** – Respond to researchers within 24 hours with a tracking ID and severity placeholder.
-3. **Initial Assessment** – Security triage team rates severity using CVSS 3.1 and determines impacted modules.
-4. **Issue Tracking** – Log each report in the private security board with fields: severity, affected versions, exploit prerequisites, mitigation status.
-5. **Communication** – Share sanitized updates with launch leadership during daily stand-ups.
+1. **Submission channel.** Reports arrive at `security@nhbcoin.com` (the address in `.well-known/security.txt`); see [disclosure.md](./disclosure.md) for how to encrypt them.
+2. **Acknowledgement and response times.** As stated in [disclosure.md](./disclosure.md).
+3. **Initial assessment.** Rate severity and identify the affected modules and versions.
+4. **Issue tracking.** Log each report privately with: severity, affected versions, exploit prerequisites, mitigation status.
+5. **Communication.** Share sanitised status with the release owners.
 
-## Fix Windows
+If an issue risks funds or validator safety, treat it as a release blocker regardless of its severity rating.
 
-| Severity | Containment SLA | Fix SLA | Deployment |
-| --- | --- | --- | --- |
-| Critical | Immediate containment | 48 hours | Hotfix prior to freeze lift |
-| High | 24 hours | 72 hours | Include in next scheduled build |
-| Medium | 3 days | 7 days | Bundle with minor release |
-| Low | Best effort | Best effort | Document in backlog |
+## Pre-release checklist
 
-If an issue risks funds or validator safety, initiate the freeze protocol immediately regardless of severity classification.
+* Validate a state snapshot export and its verification path: `sync_snapshot_export` produces the chunk files and an unsigned manifest, and `sync_snapshot_import` verifies signatures, chunk hashes and the state root (see [snapshots-audit.md](./snapshots-audit.md)).
+* Run the production-configuration check, `scripts/verify_prod_config.sh -c config/prod.toml`, against the configuration you intend to deploy. The checked-in `config/prod.toml` currently fails it (wildcard `ListenAddress` and `RPCAddress`, empty fee `owner_wallet` values), so the check only passes on a configuration you have completed.
+* Run `make bugcheck` and the targets in [../audit/index.md](../audit/index.md) on the release commit. Read the per-check logs in `logs/` rather than the summary: `scripts/bugcheck.sh` currently records failing checks as passed and exits before writing its JSON summary (see the caveats in [../audit/index.md](../audit/index.md)).
+* Confirm the transport and authentication settings in [transport.md](./transport.md) and [network-hardening.md](./network-hardening.md).
+* Follow the launch documentation: [testnet](../launch/testnet.md), [faucet](../launch/faucet.md), [explorer](../launch/explorer.md).
 
-## Pre-Launch Checklist
+## Freeze procedures
 
 * Validate state sync snapshots and signature bundles.
 * Verify hardened configuration templates for validators, seeds, RPC, and faucet nodes.
 * Confirm seed rotation and faucet abuse scripts are operational.
 * Rehearse swap, escrow, identity, POTSO, and governance end-to-end scenarios.
 * Ensure all public endpoints (RPC/REST/WS, faucet API, explorer) pass synthetic monitoring checks.
-* Publish launch documentation: [testnet](../launch/testnet.md), [faucet](../launch/faucet.md), [explorer](../launch/explorer.md).
+* Publish launch documentation.
 
-## Freeze Procedures
+## Incident response
 
-1. Announce the freeze window and commit hash in `#launch-control` and the status page.
-2. Lock main branches by revoking push permissions and enabling required reviews.
-3. Disable automatic deployments; require manual approval for infrastructure changes.
-4. Snapshot validator set and RPC state; archive artifacts in the secure bucket.
-5. Activate enhanced monitoring dashboards for consensus health and endpoint latency.
-6. Schedule standby rotations for security, SRE, and developer relations teams.
-
-## Incident Response
-
-1. Confirm impact with the triage team and assign an incident commander.
-2. Notify stakeholders via status page and `#launch-incidents` channel.
-3. Apply mitigations (configuration changes, firewall rules, feature toggles) and document actions.
+1. Confirm impact and assign an incident owner.
+2. Notify stakeholders.
+3. Apply mitigations (configuration changes, firewall rules, feature toggles) and record what was done.
 4. Escalate to external partners if shared infrastructure is affected.
-5. Record timeline, root cause, and remediation steps in the incident log within 24 hours.
+5. Record the timeline, root cause and remediation.
 
-## Rollback & Rollforward
+## Rollback & rollforward
 
-* **Rollback:** Use stored snapshots to restore consensus state. Validators replay from the last good height. Communicate expected downtime and provide verification hashes.
-* **Rollforward:** Once fixes are validated, tag a new release, update artifacts, and coordinate redeployments. Monitor key metrics for at least 2 epochs before declaring stability.
+* **Rollback.** A node can be restored from a snapshot with `sync_snapshot_import`, which requires a manifest signed by at least two thirds of the voting power of the node's current validator set (`core/sync/manifest_verify.go`). Note that nothing in this repository produces those signatures.
+* **Rollforward.** Once a fix is validated, tag a new release, update the deployed artifacts and redeploy validators together. Fields such as `QuorumCertActivationHeight` in `config.toml` must be identical on every validator (see the comment in `config/config.go`).
 
-## Validator Hardening
+## Validator hardening
 
-* Enforce Linux kernel LTS with automatic security patching.
-* Enable firewall rules: allow inbound 26656/26657 from trusted CIDRs, restrict SSH to bastion hosts with MFA.
-* Run validators as non-root users with dedicated systemd units and resource limits.
-* Configure auditd and ship logs to the central SIEM.
-* Rotate consensus keys using the provided HSM integration guide before entering freeze.
+* Keep the validator key out of the configuration file. The node loads it from an encrypted keystore (`ValidatorKeystorePath`, passphrase from the environment or an interactive prompt) or, when `ValidatorKMSEnv` or `ValidatorKMSURI` is set, from a hex-encoded private key held in an environment variable (`ValidatorKMSEnv = "NAME"` or `ValidatorKMSURI = "env://NAME"`). The `env` scheme is the only one implemented; there is no HSM or cloud KMS client (`loadValidatorKey`, `loadFromKMS` in `cmd/nhb/main.go`).
+* The default P2P listen address is `:6001` (`config/config.go`) and the shipped `config.toml` binds `127.0.0.1:6001` for P2P and `127.0.0.1:8545` for RPC; open only the ports your deployment needs and restrict them to the peers or proxies that need them.
+* Run the node as a non-root user with resource limits and ship its logs to your log system.
 
-## Vulnerability Disclosure
+## Vulnerability disclosure
 
 * Email: `security@nhbcoin.com`
-* PGP: `https://security.nhbcoin.net/pgp.txt`
-* Expected timeline: acknowledgement in 24 hours, fix ETA shared within 5 business days.
-* Safe harbor applies for good faith testing that avoids mainnet, personal data, and denial-of-service attacks.
-
-Researchers must not publicly share vulnerabilities until coordinated disclosure timelines are agreed upon. All incidents discovered during the freeze are reviewed in the post-launch retrospective.
+* Encryption key: [`repository-pgp-key.asc`](./repository-pgp-key.asc); the fingerprint is in [bug-bounty.md](./bug-bounty.md).
+* Timelines, safe harbor and embargo: [disclosure.md](./disclosure.md).

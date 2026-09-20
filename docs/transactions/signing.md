@@ -1,31 +1,51 @@
-# Signing transaction envelopes
+# Signing transactions
+
+> This page covers signing a consensus `TxEnvelope` for the consensus gRPC
+> service (`sdk/consensus`). It does not describe the transaction hash used by the
+> `nhb_sendTransaction` JSON-RPC method, which is the SHA-256 of the
+> `NHB_TX_V3_MAINNET` binary encoding (`Transaction.Hash`,
+> `core/types/transaction.go`). For that, see the [wallet builder
+> guide](../sdk/wallets.md).
 
 Once a `TxEnvelope` has been prepared it must be signed before the consensus
 service will accept it. The Go SDK provides a [`consensus.Sign`](../../sdk/consensus/tx.go)
 helper that performs the canonical encoding and secp256k1 signing routine used
 by the validators.
 
-1. The envelope is marshalled with Protocol Buffers.
-2. A SHA-256 digest of the bytes is produced.
-3. The digest is signed with the caller's secp256k1 private key.
-4. The raw 65-byte signature and compressed public key are embedded into a
-   `TxSignature` record.
+Native transactions (`types.Transaction`, `core/types/transaction.go`) are signed
+with secp256k1. For any `type` greater than zero the signed hash
+(`Transaction.Hash`) is SHA-256 over this canonical byte string, in order:
 
-The helper returns a `SignedTxEnvelope` ready for broadcast via the
-[`Client.SubmitEnvelope`](../../sdk/consensus/client.go) method or through the
-higher level [`consensus.Submit`](../../sdk/consensus/tx.go) convenience
-function.
+| Bytes | Content |
+| --- | --- |
+| ASCII | `NHB_TX_V3_MAINNET` |
+| 8 | chain id, big-endian uint64 (`0x4e4842`) |
+| 1 | transaction type |
+| 8 | `nonce` |
+| 8 | `maxBlockHeight` |
+| 8 | `intentExpiry` |
+| 2 + n | `intentRef` (uint16 length, then bytes) |
+| 20 | `to`, left-padded with zeros |
+| 2 + n | `value` (uint16 length of the big-endian bytes, then bytes; length 0 for nil/zero) |
+| 4 + n | `data` (uint32 length, then bytes) |
+| 8 | `gasLimit` |
+| 2 + n | `gasPrice`, encoded like `value` |
+| 1 (+20) | `0` if no paymaster, otherwise `1` followed by the 20-byte paymaster address |
+| 4 + n | `merchantAddr` (trimmed; uint32 length, then bytes) |
+| 4 + n | `deviceId` (same encoding) |
+| 4 + n | `refundOf` (same encoding) |
 
-TypeScript clients should mirror this process, ensuring they serialise the
-`TxEnvelope` using the generated helpers before hashing and signing. The example
-in [`examples/txs/ts/supply.ts`](../../examples/txs/ts/supply.ts) computes the
-transaction digest and highlights the placeholder where wallet integrations
-should inject the signature.
+The signature is `secp256k1.Sign(hash, privateKey)` (go-ethereum `crypto.Sign`)
+split into `r` and `s` (32 bytes each) and `v = recoveryId + 27`. The sender is
+recovered from `(hash, r, s, v)`; `s` must be at most half the curve order
+(otherwise `invalid signature: S > secp256k1n/2`), and `r`/`s` must not exceed 32
+bytes. The transaction hash returned by `nhb_sendTransaction` is this same
+SHA-256 value; it does not cover `r`, `s` or `v`.
 
-For concrete JSON-RPC payloads that cover both NHB (`TxTypeTransfer`) and the
-new ZNHB (`TxTypeTransferZNHB`) transfers, see
+For concrete `nhb_sendTransaction` JSON-RPC payloads that cover both NHB
+(`TxTypeTransfer`) and ZNHB (`TxTypeTransferZNHB`) transfers, see
 [`znhb-transfer.md`](./znhb-transfer.md) and the
 [Sending ZNHB via `nhb_sendTransaction`](../api/rpc.md#sending-znhb-via-nhb_sendtransaction)
-example. They include copy-paste ready requests with populated `r`/`s`/`v`
-signature components, nonce discovery, and the expected receipt payload so
-wallet developers can mirror the node's behaviour.
+example. Those transactions are signed with the `nhb_sendTransaction` hash
+described in the [wallet builder guide](../sdk/wallets.md), not with the envelope
+digest on this page.

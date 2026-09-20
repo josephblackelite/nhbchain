@@ -1,6 +1,9 @@
-# POS-LIFECYCLE-5: Card-Style Payment Authorization
+# POS payment authorization lifecycle
 
-## Overview
+Card-style POS payments in ZNHB: a payer's funds are locked by an authorization,
+then captured (fully or partly) by the merchant or voided. Code:
+`native/pos/auth.go` (the `Lifecycle` engine), `core/state_pos.go`
+(transaction handlers), `core/events/payments.go`.
 
 This task introduces a card-style lifecycle for point-of-sale (POS) payments.
 Merchants can lock ZapNHB from a payer, capture any amount up to the locked
@@ -14,20 +17,17 @@ Key additions include:
   updating account balances atomically.
 * Events emitted for each lifecycle milestone so downstream services can track
   payments in real time.
-* New RPC messages that expose authorization, capture, and void entry points.
+* Proto messages (`MsgAuthorizePayment`, `MsgCapturePayment`, `MsgVoidPayment`) for authorization, capture, and void. The gRPC service that carried them is retired; see Integration points.
 * Documentation of timing guarantees, error codes, and state transitions.
 
 ## Lifecycle flow
 
 ```mermaid
 graph TD
-    A[Authorize] -->|lock funds| B[Pending]
-    B -->|Capture <= amount| C[Captured]
-    B -->|Void| D[Voided]
-    B -->|Expiry reached| E[Expired]
-    C -->|Emit payments.captured| F[Merchant credited]
-    D -->|Emit payments.voided| G[Payer refunded]
-    E -->|Emit payments.voided(expired)| G
+    A[Authorize] -->|lock ZNHB| B[pending]
+    B -->|Capture| C[captured]
+    B -->|Void| D[voided]
+    B -->|expiry reached, swept| E[expired]
 ```
 
 * **Authorize**: Locks the requested ZapNHB in `LockedZNHB` and records an
@@ -36,10 +36,15 @@ graph TD
 * **Capture**: Transfers any amount up to the authorized total to the merchant
   account. Remaining funds are returned to the payer in the same transaction.
 * **Void**: Releases the entire lock back to the payer. This can be triggered
-  manually via `MsgVoidPayment` or automatically when the expiry timestamp is
+  manually via a `TxTypePOSVoid` transaction or automatically when the expiry timestamp is
   reached.
 
-## Message schema
+## Transactions
+
+These proto messages are defined in `proto/pos/tx.proto`. The `pos.v1.Tx` gRPC
+service that carried them is retired and not registered on the node
+(`rpc/http.go`, NHB-AUDIT-S3); on-chain the same operations are the
+`TxTypePOSAuthorize`/`Capture`/`Void` transactions.
 
 | Message | Description |
 | --- | --- |
@@ -47,80 +52,79 @@ graph TD
 | `MsgCapturePayment` | Captures up to the locked amount, refunding any remainder. |
 | `MsgVoidPayment` | Manually voids an authorization prior to capture. |
 
-All amounts are decimal strings representing ZapNHB. Timestamps are UNIX seconds.
+| Type | Message | Signer must be |
+| --- | --- | --- |
+| `TxTypePOSAuthorize` `0x20` | `MsgAuthorizePayment` (`payer`, `merchant`, `amount`, `expiry`, `intent_ref`) | the `payer` |
+| `TxTypePOSCapture` `0x21` | `MsgCapturePayment` (`authorization_id`, `amount`) | the authorization's merchant |
+| `TxTypePOSVoid` `0x22` | `MsgVoidPayment` (`authorization_id`, `reason`) | the payer or the merchant |
 
-## State transitions
+`amount` is a decimal string of ZNHB wei. Each handler advances the signer's
+account nonce on success. Other fields in those messages (`nonce`, `expires_at`,
+`chain_id`) are not read by the handlers.
 
-Authorizations are stored beneath the `pos/auth/<id>` namespace. Each record
-tracks the total amount, captured portion, refunded portion, current status, and
-metadata such as expiry and reason strings for voids. Per-payer counters ensure
-authorization IDs remain unique while keeping them deterministic (hash of payer
-address and nonce).
+## Rules
 
-Account updates are atomic:
+**Authorize** (`Lifecycle.Authorize`): payer and merchant must be non-zero; amount
+positive (`pos: amount must be positive`); `expiry` must be greater than the block
+time (`pos: authorization expired`); the payer needs enough unlocked ZNHB
+(`pos: insufficient balance`). Effect: payer `BalanceZNHB -= amount`, `LockedZNHB
++= amount`. The authorization id is `keccak256(payer address (20 bytes) ||
+big-endian uint64 per-payer counter)`, the counter starting at 0. If an
+`intent_ref` is given, an index from the reference to the id is stored so
+`pos_getAuthorizationByIntentRef` can find it. Emits `payments.authorized`.
 
-1. **Authorize**: `BalanceZNHB -= amount`; `LockedZNHB += amount`.
-2. **Capture**: `LockedZNHB -= amount_authorized`; merchant `BalanceZNHB +=
-   amount_captured`; payer `BalanceZNHB += remainder`.
-3. **Void / Expire**: `LockedZNHB -= amount_authorized`; payer `BalanceZNHB +=
-   amount_authorized`.
+**Capture** (`Lifecycle.Capture`): caller must be the merchant
+(`pos: caller is not authorized for this authorization`); amount positive and not
+above the authorized amount (`pos: capture exceeds authorization`). A captured
+authorization returns `pos: authorization already captured`, a voided one `pos:
+authorization voided`, an expired one `pos: authorization expired`. If the block
+time is at or after `expiry`, the lifecycle voids the authorization and returns
+`pos: authorization expired`, so the capture transaction fails. Effect on success:
+payer `LockedZNHB -= authorized amount`; merchant `BalanceZNHB += captured`;
+payer `BalanceZNHB += authorized - captured`. Emits `payments.captured`.
 
-If any persistence step fails, balances are rolled back to the pre-operation
-state before the error is returned.
+**Void** (`Lifecycle.Void`): caller must be payer or merchant. A captured
+authorization returns `pos: authorization already captured`. Voiding an already
+voided or expired authorization succeeds without change. Otherwise the whole
+locked amount returns to the payer's `BalanceZNHB`; the reason defaults to
+`manual`. Emits `payments.voided`.
 
-## Timing and expiry
+**Expiry sweep**: at the end of every block (`FinalizeBlock`) pending
+authorizations with `expiry <= block time` are voided with status `expired`,
+reason `expired`. Each emits `payments.voided` (`expired=true`) and
+`pos.auth_auto_voided`, and increments `nhb_pos_auth_expired_total`.
 
-* Authorizations must specify an expiry strictly greater than the block
-  timestamp that executes the authorize message.
-* Captures after the expiry automatically void the authorization, emitting a
-  `payments.voided` event with `expired=true` and returning the funds.
-* Each block end sweeps pending authorizations and voids those past their
-  expiry, refunding balances, emitting `payments.voided` and
-  `pos.auth_auto_voided` events, and incrementing the
-  `nhb_pos_auth_expired_total` metric.
-* Manual voids leave the authorization record in `voided` status so idempotent
-  retries do not fail.
+If a persistence step fails inside a lifecycle call, the balance changes made by
+that call are rolled back before the error is returned.
 
-## Operations
+## Storage
 
-* Every block sweeps the expired authorizations as part of its own execution.
-  The on-demand sweep (`pos_sweepVoids`, `nhb-cli pos sweep-voids`) is retired:
-  it ran on one validator's state outside a block, and both now report that
-  and exit non-zero.
-
-## Errors
-
-| Error | Condition |
-| --- | --- |
-| `pos: lifecycle not initialised` | Lifecycle engine configured without state. |
-| `pos: address required` | Payer or merchant address was missing/zeroed. |
-| `pos: amount must be positive` | Amount was zero or negative. |
-| `pos: insufficient balance` | Payer lacks enough ZapNHB to lock. |
-| `pos: authorization expired` | Authorization expired before capture. |
-| `pos: authorization already captured` | Attempted double capture. |
-| `pos: authorization voided` | Capture attempted after a manual void. |
-| `pos: authorization not found` | Unknown authorization ID. |
+Authorizations are stored under `pos/auth/<hex id>`, with a per-payer counter
+under `pos/auth/nonce/`, a pending index under `pos/auth/pending`, and the intent
+reference index under `pos/auth/intent/`.
 
 ## Events
 
-| Event | Payload |
+| Event | Attributes |
 | --- | --- |
-| `payments.authorized` | `authorizationId`, `payer`, `merchant`, `amount`, `expiry`, optional `intentRef`. |
-| `payments.captured` | `authorizationId`, `payer`, `merchant`, `capturedAmount`, `refundedAmount`. |
-| `payments.voided` | `authorizationId`, `payer`, `merchant`, `refundedAmount`, `reason`, `expired`. |
+| `payments.authorized` | `authorizationId`, `payer`, `merchant`, `amount`, `expiry`, `intentRef` |
+| `payments.captured` | `authorizationId`, `payer`, `merchant`, `capturedAmount`, `refundedAmount` |
+| `payments.voided` | `authorizationId`, `payer`, `merchant`, `refundedAmount`, `reason`, `expired` |
+| `pos.auth_auto_voided` | `authorizationId`, `amount` |
 
-Events are emitted even when voided automatically so settlement systems can
-resolve outstanding holds.
+Ids, payer and merchant values in these events are lowercase hex without `0x`;
+attributes that would be empty or zero are omitted. Amounts are decimal strings.
 
-## Integration points
+## Read methods
 
-* **gRPC service not production-ready**: `proto/pos/tx.proto` defines a
-  `pos.v1.Tx` service (`rpc/pos_grpc.go`) intended to expose
-  `MsgAuthorizePayment`/`MsgCapturePayment`/`MsgVoidPayment` directly, but
-  `NewPOSServer` is wired with a hardcoded nil signer -- every submitted
-  payload builds an unsigned transaction envelope and is rejected before it
-  ever reaches execution. `NewPOSServer` has zero call sites anywhere in the
-  codebase and no test coverage. Do not integrate against this service.
+* **gRPC service retired**: `proto/pos/tx.proto` still defines a `pos.v1.Tx`
+  service (`rpc/pos_grpc.go`), but it is no longer registered on the node's
+  gRPC server (`rpc/http.go` `Serve`, NHB-AUDIT-S3, retired 2026-09-18), so
+  `AuthorizePayment`/`CapturePayment`/`VoidPayment` return `Unimplemented`.
+  The messages carry no signature field, and the authorize handler requires
+  the transaction signer to equal the payer (`core/state_pos.go`
+  `applyPOSAuthorize`). Do not
+  integrate against this service.
 * **Real integration path**: authorize/capture/void are native transactions
   (`TxTypePOSAuthorize`/`Capture`/`Void`, `0x20`/`0x21`/`0x22`) signed
   client-side with the payer's or merchant's own wallet key and submitted via

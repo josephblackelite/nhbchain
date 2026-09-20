@@ -1,89 +1,77 @@
-# Fees Query API Examples
+# Fees query API
 
-This guide demonstrates how to export fee settlement data for the network-wide transparency
-reporting pipeline. Use these snippets to hydrate the SQL queries documented in
-[`docs/queries/fees.sql`](../queries/fees.sql).
+The node exposes on-chain fee data through four JSON-RPC methods
+(`rpc/fees_handlers.go`, `rpc/fees_query.go`) and the `fees.applied` event
+(`core/events/fees.go`). None of these methods requires auth. See
+[rpc.md](./rpc.md) for transport rules (`id` must be an integer; `params` is an
+array).
 
-## Prerequisites
+## `fees_listTotals`
 
-- Access to an NHB archival RPC endpoint (`https://rpc.nhbchain.dev` or your self-hosted replica).
-- `jq` or a similar JSON processor for command-line examples.
-
-## Query Fee Totals (JSON-RPC)
+Params: `[{"domain": "<domain>"}]`. `domain` is required.
 
 ```bash
-curl -s -X POST https://rpc.nhbchain.dev \
-  -H "Authorization: Bearer $NHB_API_TOKEN" \
+curl -s -X POST "$RPC_URL" \
   -H "Content-Type: application/json" \
-  -d '{
-        "jsonrpc": "2.0",
-        "id": "fees",
-        "method": "fees_listTotals",
-        "params": [{"domain": "'"$DOMAIN"'"}]
-      }' | jq '.result'
+  -d '{"jsonrpc":"2.0","id":1,"method":"fees_listTotals","params":[{"domain":"'"$DOMAIN"'"}]}' \
+  | jq '.result'
 ```
 
-Returns per-wallet gross/fee/net totals (`domain`, `wallet`, `grossWei`, `feeWei`, `netWei`) for the
-requested domain. Persist the response to object storage before loading it into your analytics
-database. For point-in-time status instead of accumulated totals, use `fees_getMonthlyStatus`
-(network-wide monthly usage window) or `fees_getTransferStatus` (per-address free-tier eligibility,
-params: `{"address": "nhb1..."}`).
+Result: an array with one entry per wallet: `domain`, `wallet` (bech32),
+`grossWei`, `feeWei`, `netWei` (decimal strings).
 
-### Event attribute reference
+## `fees_getMonthlyStatus`
 
-The `fees.applied` payload now exposes additional fields to help downstream systems
-reason about the free-tier window and revenue routing:
+Params: none. Result: `window_yyyymm`, `used`, `remaining`,
+`last_rollover_yyyymm` (network-wide free-tier usage for the current month).
+
+## `fees_getTransferStatus`
+
+Params: `[{"address": "nhb1..."}]`. Result: `window`, `window_key`, `spentWei`,
+`freeLimitWei`, `remainingWei`, `eligible`, and `nextResetUnix` when known
+(per-address transfer free-tier state).
+
+## `fees_getTransferQuote`
+
+Params: `[{"address": "nhb1...", "asset": "NHB" | "ZNHB", "amountWei": "..."}]`.
+`amountWei` must be a positive decimal integer. Result: `eligible`, `feeWei`
+(`"0"` when the address is within its free tier), `feeBps` (the rate for that
+asset).
+
+## `fees.applied` event
+
+Emitted by `applyTransactionFee` (`core/state_transition.go`) for NHB
+(`TxTypeTransfer`) and ZNHB (`TxTypeTransferZNHB`) transfers whose `merchantAddr`
+field names a domain that has a configured fee policy; other transfers emit no
+`fees.applied` event. Attributes (all strings; keys are omitted when empty or zero
+as noted):
 
 | Attribute | Description |
 | --- | --- |
-| `ownerWallet` | Hex-encoded 20-byte address that accrued the fee. |
-| `freeTierApplied` | `true` when the transaction consumed the free tier rather than paying MDR. |
-| `freeTierLimit` | Monthly allowance in transactions for the payer's domain. |
-| `freeTierRemaining` | Transactions remaining in the current UTC month after processing the event. |
-| `usageCount` | Post-increment counter for the payer within the active month. |
-| `windowStartUnix` | Unix timestamp (seconds) for the start of the billing month applied to the event. |
-| `feeBps` | Effective MDR basis points applied when a fee was charged. |
+| `payer` | Hex-encoded 20-byte payer address (no `0x` prefix); omitted if zero. |
+| `domain` | Fee domain. |
+| `asset` | Asset ticker, upper-cased. |
+| `grossWei`, `feeWei`, `netWei` | Decimal amounts. |
+| `policyVersion` | Policy version (omitted if zero). |
+| `ownerWallet` | Hex-encoded 20-byte wallet that accrued the fee (no `0x` prefix); omitted if zero. |
+| `freeTierApplied` | `true` when the free tier was consumed instead of paying a fee. Always present. |
+| `freeTierLimit` | Free-tier allowance in transactions. Always present. |
+| `freeTierRemaining` | Free-tier transactions remaining. Always present. |
+| `usageCount` | Post-increment usage counter (omitted if zero). |
+| `windowStartUnix` | Unix seconds at the start of the billing window (omitted if unset). |
+| `feeBps` | Effective fee basis points when a fee was charged (omitted if zero). |
 
-Older attributes (`payer`, `grossWei`, `feeWei`, `netWei`, etc.) remain unchanged.
+In `nhb_getTransactionReceipt` logs the `payer` and `ownerWallet` values get a
+`0x` prefix and `grossWei`/`feeWei`/`netWei` are returned as hex under
+`gross`/`fee`/`net`.
 
-## Loading into SQLite
+## Loading events into an analytics store
 
-```bash
-sqlite3 fees.db <<'SQL'
-CREATE TABLE IF NOT EXISTS fee_events (
-  tx_id TEXT PRIMARY KEY,
-  block_timestamp DATETIME,
-  domain TEXT,
-  merchant_id TEXT,
-  merchant_name TEXT,
-  fee_amount_native REAL,
-  fee_amount_usdc REAL,
-  fee_amount_usd REAL
-);
-.mode json
-.import fee-events.json fee_events
-SQL
-```
-
-## Loading into ClickHouse
-
-```bash
-clickhouse-client --secure --query "
-CREATE TABLE IF NOT EXISTS fee_events (
-  tx_id String,
-  block_timestamp DateTime64(3, 'UTC'),
-  domain LowCardinality(String),
-  merchant_id String,
-  merchant_name String,
-  fee_amount_native Decimal(38, 18),
-  fee_amount_usdc Decimal(38, 6),
-  fee_amount_usd Decimal(38, 6)
-) ENGINE = MergeTree()
-ORDER BY (block_timestamp, domain);
-"
-
-clickhouse-client --secure --query "INSERT INTO fee_events FORMAT JSONEachRow" < fee-events.ndjson
-```
-
-Once ingested, you can run the transparency queries directly or drive the Grafana dashboard via the
-`clickhouse-datasource` plugin.
+The node has no export command that writes a fee-events file, and the event does
+not carry the columns `tx_id`, `block_timestamp`, `merchant_id`, `merchant_name`
+or the USD/USDC conversions. If you index `fees.applied` events yourself, you
+must derive those columns from the transaction and block that contained the
+event. The sample queries in [`docs/queries/fees.sql`](../queries/fees.sql)
+assume a `fee_events` table with columns `tx_id`, `block_timestamp`, `domain`,
+`merchant_id`, `merchant_name`, `fee_amount_native`, `fee_amount_usdc`,
+`fee_amount_usd`; that schema is defined by those queries, not by the node.

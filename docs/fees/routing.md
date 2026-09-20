@@ -1,46 +1,54 @@
 # Fee routing
 
-Collected fees are split across the ecosystem to fund operations, reserves, and
-stability programs. This document describes the current routing logic and the
-on-chain accounts that receive the proceeds.
+Where the two fee mechanisms described in [fee policy](./policy.md) credit
+their proceeds. Everything here is on-chain account crediting done by
+`core/state_transition.go`; there is no separate fee-router module.
 
-## Destination wallets
+## Domain fees
 
-| Target | Description |
+`applyTransactionFee` debits the fee from the payer (the sender, since the
+configuration builder never sets `FeePayer` to `recipient`) and credits it as
+follows.
+
+| Asset | Recipient |
 | --- | --- |
 | `owner_fee_wallet_nhb` | NHB-denominated wallet that accrues operator fees from retail transactions and POS MDR collections. |
 | `znhb_proceeds_wallet` | Receives the ZNHB (stablecoin) portion of collected fees and routes it to the treasury stabilisation program. |
-| `owner_fee_wallet_usdc` | Off-chain custody wallet that buffers USDC-denominated inflows before sweeping to banking rails. |
 
-Each wallet address is stored in the `FeePolicy` module parameters. Governance
-proposals can rotate the addresses or adjust the split ratios when treasury
-requirements change. Domains now expose an asset map that binds every accepted
-currency (NHB, ZNHB, and future additions) to a specific MDR basis-point value
-and routing wallet, making fee distribution explicit on a per-asset basis.
+- The asset's route wallet comes from `[[global.Fees.Assets]]`; an asset entry
+  with no `OwnerWallet` uses `[global.Fees] OwnerWallet`
+  (`buildFeePolicyFromConfig`, `core/node.go`). If the resolved wallet is the
+  zero address and a fee is due, the transaction fails with `fees: missing
+  route wallet for asset <ASSET>`.
+- **Buyback share.** For NHB fees, when the node has a genesis buyback
+  configuration (`hasBuybackConfig`), `feeShareBps` of the fee (default `2000`,
+  20%, or the value set by a `policy.buybackParams` proposal) is credited to the
+  buyback accrual account instead of the `OwnerWallet`, and the accrual ledger
+  is updated. With no buyback configuration the whole fee goes to the
+  `OwnerWallet`. See [tokenomics](../tokenomics/tokenomics.md#6-the-treasury-buyback-engine).
+- ZNHB domain fees are credited to the route wallet as ordinary balance; they
+  are not adjusted against the Sale Pool or Reward Pool ledgers in
+  `applyTransactionFee`.
 
-### Minimal configuration snippet
+The `ValidateConfig` rule in `config/validate.go` requires an `OwnerWallet` for
+`ZNHB` in `[[global.Fees.Assets]]` whenever a ZNHB asset entry exists
+(`cmd/consensusd` runs it at startup).
 
-Production validators must configure explicit route wallets for both NHB and ZNHB
-assets. The snippet below can be dropped into `config.toml` and edited with the
-correct bech32 addresses.
+## Transfer fees
 
-```toml
-[global.Fees]
-free_tier_tx_per_month = 100
-mdr_basis_points = 150
+The protocol transfer fee is credited to `TransferFeeCollector`, or to the
+node's escrow fee treasury when unset. There is no buyback share on this fee.
+When the collector is the chain's admin wallet, ZNHB transfer fees are also
+credited to the ZNHB Reward Pool ledger. Details are in
+[fee policy](./policy.md#1-protocol-transfer-fee-transfergaspolicy).
 
-[[global.Fees.Assets]]
-asset = "NHB"
-owner_wallet = "nhb1exampleownerwalletxxxxxxxxxxxxxxxxxxxx"
+## Configuration
 
-[[global.Fees.Assets]]
-asset = "ZNHB"
-owner_wallet = "znhb1exampleproceedswalletxxxxxxxxxxxxxxxx"
-```
+See [fee configuration](../governance/fee-params.md). Key names are the
+PascalCase Go field names (`OwnerWallet`, `Assets`, `Asset`, `MDRBasisPoints`);
+the TOML decoder prefers an exact match but also accepts a different case.
 
-The second entry satisfies the `fees.route_wallet_by_asset.ZNHB` requirement. If
-it is omitted while ZNHB fees remain enabled, the node refuses to start so that
-fees never route to an empty account.
+## Observing routing
 
 ## Routing flow
 
@@ -69,8 +77,7 @@ sequenceDiagram
 the merchant. NHB denominated fees route to `owner_fee_wallet_nhb`; any stablecoin portion uses `znhb_proceeds_wallet`.
 * **P2P transfers:** Charge against the sender's balance. Free-tier coverage sets
 the fee to zero; otherwise the NHB share is deposited into `owner_fee_wallet_nhb`.
-* **OTC deals:** Support mixed legs. NHB flows target `owner_fee_wallet_nhb`
-while off-chain settlement instructions are signed for `owner_fee_wallet_usdc`.
+* **OTC deals:** Support mixed legs. NHB flows target `owner_fee_wallet_nhb`.
 
 ### Implementation hooks
 
@@ -83,10 +90,8 @@ flowchart TD
   C -- No --> E[Split by currency]
   E --> F[route_nhb(owner_fee_wallet_nhb)]
   E --> G[route_znhb(znhb_proceeds_wallet)]
-  E --> H[route_offchain(owner_fee_wallet_usdc)]
   F --> I[Record telemetry]
   G --> I
-  H --> I
   I --> J[Emit events for analytics stream]
 ```
 
