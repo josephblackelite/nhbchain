@@ -177,6 +177,40 @@ type Engine struct {
 	signMu        sync.Mutex
 	signed        signState
 	signStatePath string
+
+	// Round synchronisation (see round_sync.go). selfAddr is this validator's
+	// address. roundClaims is, for each other validator, the highest round it has
+	// been seen to send a message in at one height: the evidence a round jump
+	// needs. roundSkipCh wakes the round loop when that evidence says this
+	// validator should be in a later round than it is. dropNotes rate-limits the
+	// warnings about dropped messages. proposerCache holds the proposers chosen
+	// since the last round start, and proposerEpoch changes when it is cleared, so
+	// a proposer chosen from an older validator set is never stored into it. All
+	// of these are guarded by mu.
+	selfAddr      []byte
+	roundClaims   map[string]roundClaim
+	roundSkipCh   chan struct{}
+	dropNotes     map[string]*dropNote
+	proposerCache map[int][]byte
+	proposerEpoch uint64
+	// earlyVotes holds the votes of the current round that arrived before a
+	// proposal was accepted, keyed by validator and vote type (guarded by mu).
+	earlyVotes map[string]*SignedVote
+	// relayedHeight and relayedRound are the round in which this validator last
+	// passed its polka on (relayed says whether it has), so that it does so once a
+	// round (guarded by mu).
+	relayed       bool
+	relayedHeight uint64
+	relayedRound  int
+	// lockRefused is set when prevote refused a proposal because of the lock and
+	// the round loop has not yet acted on it (guarded by mu).
+	lockRefused bool
+	// queueMu serialises who puts a proposal on proposalCh, so that clearing out
+	// what the round loop would ignore (enqueueProposal) cannot lose a proposal
+	// another goroutine is queueing at the same time. The round loop, which only
+	// takes proposals off the channel, does not use it. It is never held together
+	// with mu.
+	queueMu sync.Mutex
 }
 
 // defaultEmptyAfterFailures is how many of its own failed proposals at one
@@ -328,12 +362,17 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		proposalCh:       make(chan *SignedProposal, defaultProposalQueueSize),
 		voteCh:           make(chan *SignedVote, calculateVoteQueueCapacity(validatorSet)),
 		externalCommitCh: make(chan struct{}, 1),
+		roundSkipCh:      make(chan struct{}, 1),
+		roundClaims:      make(map[string]roundClaim),
 		proposalTimeout:  defaultProposalTimeout,
 		prevoteTimeout:   defaultPrevoteTimeout,
 		precommitTimeout: defaultPrecommitTimeout,
 		commitTimeout:    defaultCommitTimeout,
 		ownFailed:        make(map[uint64]int),
 		emptyAfter:       emptyAfterFromEnv(),
+	}
+	if key != nil {
+		engine.selfAddr = key.PubKey().Address().Bytes()
 	}
 
 	for _, opt := range opts {
@@ -419,9 +458,9 @@ func (e *Engine) runRound() {
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	proposer := e.proposerFor(height, round)
 	e.replayBufferedMessages(height, round)
 
-	proposer := e.selectProposer(round)
 	myAddr := e.privKey.PubKey().Address().Bytes()
 	if bytes.Equal(proposer, myAddr) {
 		if err := e.propose(); err != nil {
@@ -468,6 +507,12 @@ func (e *Engine) runRound() {
 			// pick up the real height via syncHeightWithNodeLocked()
 			// instead of continuing to race for a decided height.
 			return
+		case <-e.roundSkipCh:
+			// Enough of the voting power has been seen in a later round than
+			// this one (round_sync.go, supportedRoundLocked): leave this round
+			// now instead of waiting out its timers, and startNewRound moves
+			// there. The rest of this round could not reach a quorum without them.
+			return
 		case sp := <-e.proposalCh:
 			if sp == nil || sp.Proposal == nil || sp.Proposal.Block == nil || sp.Proposal.Block.Header == nil {
 				continue
@@ -492,7 +537,12 @@ func (e *Engine) runRound() {
 			}
 			if e.acceptProposal(sp) {
 				fmt.Printf("Received block proposal for height %d from %x\n", sp.Proposal.Block.Header.Height, sp.Proposer)
+				if e.applyEarlyVotes() {
+					return
+				}
 				e.prevote()
+				// The proposer may not know what this validator's lock rests on.
+				e.relayIfLockRefused()
 			}
 		case sv := <-e.voteCh:
 			if sv == nil || sv.Vote == nil {
@@ -630,34 +680,37 @@ func (e *Engine) HandleProposal(p *SignedProposal) error {
 	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
 		return fmt.Errorf("invalid proposal payload")
 	}
-	if _, ok := e.validatorSet[string(p.Proposer)]; !ok {
-		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
-	}
 
 	e.mu.RLock()
+	_, isValidator := e.validatorSet[string(p.Proposer)]
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	if !isValidator {
+		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
+	}
+
+	// A proposal that proves a polka teaches this validator the block and the
+	// polka whoever sent it and whichever round it is for (round_sync.go).
+	e.learnValidBlock(p)
 
 	if p.Proposal.Block.Header.Height != height || p.Proposal.Round < round {
 		if p.Proposal.Block.Header.Height > height {
 			e.requestCatchUp(height)
+		} else if p.Proposal.Block.Header.Height == height {
+			// A validator that is behind: tell it what this one knows of the polka.
+			e.relayValidBlock()
 		}
 		return nil
 	}
 	if p.Proposal.Round > round {
-		e.mu.Lock()
-		e.bufferProposalLocked(p)
-		e.mu.Unlock()
+		// Kept only within the window, only from that round's proposer and in
+		// bounded numbers; where its signer is may move this validator (round_sync.go).
+		e.handleFutureProposal(p, height)
 		return nil
 	}
 
-	select {
-	case e.proposalCh <- p:
-		return nil
-	default:
-		return fmt.Errorf("proposal queue full")
-	}
+	return e.handleCurrentProposal(p, height, round)
 }
 
 func (e *Engine) HandleVote(v *SignedVote) error {
@@ -667,26 +720,38 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 	if v == nil || v.Vote == nil {
 		return fmt.Errorf("invalid vote payload")
 	}
-	if _, ok := e.validatorSet[string(v.Validator)]; !ok {
-		return fmt.Errorf("vote from non-validator %x", v.Validator)
-	}
 
 	e.mu.RLock()
+	_, isValidator := e.validatorSet[string(v.Validator)]
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	if !isValidator {
+		return fmt.Errorf("vote from non-validator %x", v.Validator)
+	}
 
 	if v.Vote.Height != height || v.Vote.Round < round {
 		if v.Vote.Height > height {
 			e.requestCatchUp(height)
+		} else if v.Vote.Height == height {
+			// A validator that is behind: tell it what this one knows of the polka.
+			e.relayValidBlock()
 		}
 		return nil
 	}
 	if v.Vote.Round > round {
+		// Kept only within the window and in bounded numbers; where its signer
+		// is may move this validator (round_sync.go).
 		e.mu.Lock()
-		e.bufferVoteLocked(v)
+		decision := e.admitFutureRoundLocked(v.Validator, "vote", height, v.Vote.Round)
+		if decision == admitBuffer {
+			e.bufferVoteLocked(v)
+		}
 		e.mu.Unlock()
-		return nil
+		if decision != admitNow {
+			return nil
+		}
+		// The round was reached while the vote was being looked at.
 	}
 
 	e.voteCh <- v
@@ -815,6 +880,7 @@ func (e *Engine) prevote() {
 		reason := fmt.Sprintf("proposal for round %d (validRound=%d) conflicts with lock at round %d",
 			round, e.activeProposal.Proposal.ValidRound, e.lockedRound)
 		e.broadcastPrevoteNilLocked(reason)
+		e.lockRefused = true // the round loop tells the proposer what the lock rests on
 		e.mu.Unlock()
 		fmt.Printf("PREVOTE NIL: refusing to prevote a locked-conflicting proposal: %s\n", reason)
 		return
@@ -1218,7 +1284,15 @@ func (e *Engine) acceptProposal(p *SignedProposal) bool {
 func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil || v == nil || v.Vote == nil {
+	if v == nil || v.Vote == nil {
+		return false, false, false
+	}
+	if e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil {
+		// A vote ahead of the proposal it is for (messages of one round do not
+		// always arrive in the order they were sent, and the ones replayed from the
+		// buffer at a round start are queued separately from the proposal): keep it
+		// until the proposal has been accepted instead of losing it.
+		e.stashEarlyVoteLocked(v)
 		return false, false, false
 	}
 
@@ -1375,6 +1449,8 @@ func (e *Engine) resetProposalStateLocked() {
 }
 
 func (e *Engine) resetVoteTrackingLocked() {
+	e.earlyVotes = nil
+	e.lockRefused = false
 	e.receivedVotes = map[VoteType]map[string]*SignedVote{
 		Prevote:   make(map[string]*SignedVote),
 		Precommit: make(map[string]*SignedVote),
@@ -1446,8 +1522,15 @@ func (e *Engine) startNewRound() {
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
-	if nextRound, ok := e.nextBufferedRoundLocked(e.currentState.Height, e.currentState.Round+1); ok {
-		e.currentState.Round = nextRound
+	// The proposers chosen so far were chosen from the previous validator set.
+	e.proposerCache = nil
+	e.proposerEpoch++
+	// Move on to a later round than the next one only when enough of the voting
+	// power has been seen there (round_sync.go, supportedRoundLocked) -- never on
+	// a single validator's message, and to the highest round that is supported,
+	// not to the lowest one anyone has mentioned.
+	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
+		e.currentState.Round = target
 	}
 	// Never start a round this validator has already signed in (or one before
 	// it): the double-sign guard would refuse every vote there, so the round
@@ -1458,6 +1541,15 @@ func (e *Engine) startNewRound() {
 	// last one signed in.
 	if floor, ok := e.signedRoundFloor(e.currentState.Height); ok && e.currentState.Round <= floor {
 		e.currentState.Round = floor + 1
+	}
+	// Whatever was kept for the rounds this one has passed or jumped over can no
+	// longer be replayed. The wake-up for a round jump is spent: the evidence that
+	// raised it has just been used, and anything that arrives from here on
+	// raises it again.
+	e.purgeBufferedBelowLocked(e.currentState.Height, e.currentState.Round)
+	select {
+	case <-e.roundSkipCh:
+	default:
 	}
 	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
@@ -1525,94 +1617,6 @@ func (e *Engine) syncHeightWithNodeLocked() bool {
 	return false
 }
 
-func (e *Engine) bufferProposalLocked(p *SignedProposal) {
-	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
-		return
-	}
-	height := p.Proposal.Block.Header.Height
-	round := p.Proposal.Round
-	if _, ok := e.bufferedProposal[height]; !ok {
-		e.bufferedProposal[height] = make(map[int][]*SignedProposal)
-	}
-	e.bufferedProposal[height][round] = append(e.bufferedProposal[height][round], p)
-}
-
-func (e *Engine) bufferVoteLocked(v *SignedVote) {
-	if v == nil || v.Vote == nil {
-		return
-	}
-	height := v.Vote.Height
-	round := v.Vote.Round
-	if _, ok := e.bufferedVotes[height]; !ok {
-		e.bufferedVotes[height] = make(map[int][]*SignedVote)
-	}
-	e.bufferedVotes[height][round] = append(e.bufferedVotes[height][round], v)
-}
-
-func (e *Engine) nextBufferedRoundLocked(height uint64, minRound int) (int, bool) {
-	next := 0
-	found := false
-	if rounds := e.bufferedProposal[height]; rounds != nil {
-		for round, proposals := range rounds {
-			if round < minRound || len(proposals) == 0 {
-				continue
-			}
-			if !found || round < next {
-				next = round
-				found = true
-			}
-		}
-	}
-	if rounds := e.bufferedVotes[height]; rounds != nil {
-		for round, votes := range rounds {
-			if round < minRound || len(votes) == 0 {
-				continue
-			}
-			if !found || round < next {
-				next = round
-				found = true
-			}
-		}
-	}
-	return next, found
-}
-
-func (e *Engine) replayBufferedMessages(height uint64, round int) {
-	e.mu.Lock()
-	var proposals []*SignedProposal
-	if rounds := e.bufferedProposal[height]; rounds != nil {
-		proposals = append(proposals, rounds[round]...)
-		delete(rounds, round)
-		if len(rounds) == 0 {
-			delete(e.bufferedProposal, height)
-		}
-	}
-	var votes []*SignedVote
-	if rounds := e.bufferedVotes[height]; rounds != nil {
-		votes = append(votes, rounds[round]...)
-		delete(rounds, round)
-		if len(rounds) == 0 {
-			delete(e.bufferedVotes, height)
-		}
-	}
-	e.mu.Unlock()
-
-	for _, proposal := range proposals {
-		select {
-		case e.proposalCh <- proposal:
-		default:
-			fmt.Printf("dropping buffered proposal for height %d round %d: proposal queue full\n", height, round)
-		}
-	}
-	for _, vote := range votes {
-		select {
-		case e.voteCh <- vote:
-		default:
-			fmt.Printf("dropping buffered vote for height %d round %d: vote queue full\n", height, round)
-		}
-	}
-}
-
 // maxEngagementBoostBps bounds how much a validator's EngagementScore can
 // add to its stake-based proposer-selection weight: at most this many
 // basis points of the validator's OWN stake, reached only at maximum
@@ -1641,8 +1645,14 @@ func engagementWeightBoost(stake *big.Int, engagementScore uint64) *big.Int {
 }
 
 func (e *Engine) selectProposer(round int) []byte {
-	keys := make([]string, 0, len(e.validatorSet))
-	for addrStr := range e.validatorSet {
+	return e.selectProposerIn(e.validatorSet, round)
+}
+
+// selectProposerIn chooses the proposer of round from validatorSet, so that a
+// caller that does not hold e.mu can pass a snapshot of the set (see proposerFor).
+func (e *Engine) selectProposerIn(validatorSet map[string]*big.Int, round int) []byte {
+	keys := make([]string, 0, len(validatorSet))
+	for addrStr := range validatorSet {
 		keys = append(keys, addrStr)
 	}
 	sort.Slice(keys, func(i, j int) bool { return bytes.Compare([]byte(keys[i]), []byte(keys[j])) < 0 })
