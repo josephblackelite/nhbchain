@@ -70,7 +70,7 @@ Entries are appended when `StakeUndelegate` is invoked and removed upon successf
    - Decrease validator `Stake` when delegating away from another validator.
    - Emit `stake.undelegated` event (contains amount, validator, release time, unbond ID).
 
-3. **Claiming**: Before release time, claims are rejected. After maturity, tokens are returned to `BalanceZNHB`, the unbond entry is removed, and a `stake.claimed` event is emitted.
+3. **Claiming**: Before release time, claims are rejected. After maturity, tokens are returned to `BalanceZNHB`, the unbond entry is removed, and a `stake.unbondClaimed` event is emitted.
 
 ## JSON-RPC Interface (Developers & Integrators)
 
@@ -237,8 +237,9 @@ These commands complement the staking dashboard so operations teams can verify h
 | --- | --- | --- |
 | `stake.delegated` | `delegator`, `validator`, `amount`, `locked` | Tracks delegation adjustments and validator power changes. |
 | `stake.undelegated` | `delegator`, `validator`, `amount`, `releaseTime`, `unbondingId` | Signals the start of an unbonding period. |
-| `stake.claimed` | `delegator`, `validator`, `amount`, `unbondingId` | Indicates matured stake reclaimed by the delegator. |
+| `stake.unbondClaimed` | `delegator`, `validator`, `amount`, `unbondingId` | Indicates matured stake reclaimed by the delegator. |
 | `stake.rewardsClaimed` | `addr`, `paidZNHB`, `periods`, `aprBps`, `nextEligibleUnix` | Records reward mints when delegators claim accrued payouts. |
+| `stake.claimed` | `addr`, `minted`, `periods`, `aprBps`, `nextEligibleUnix` | Legacy alias of `stake.rewardsClaimed`. Earlier releases also used this name for a reclaimed unbond, which is now `stake.unbondClaimed`. |
 
 These events stream through the existing node event feed so external observers and webhook infrastructure receive timely updates. When governance pauses staking, `stake.paused` events accompany rejected mutations to document the reason.
 

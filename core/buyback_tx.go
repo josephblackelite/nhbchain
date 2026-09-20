@@ -64,6 +64,37 @@ var ErrBuybackRefPriceStaleEpoch = errors.New("stale reference-price epoch")
 // TestCreateBlockFutureEpochBuybackRefPriceIsSkippedNotAborting.
 var ErrBuybackRefPriceFutureEpoch = errors.New("future reference-price epoch")
 
+// The buyback keeps every pending ask of an epoch in one list that is rewritten
+// whole with each new ask and read whole when the epoch settles, and an ask
+// costs its seller nothing but ZNHB it gets back, so without bounds the list,
+// the work of adding to it and the settlement of the epoch grow with however
+// many asks a holder cares to make.
+var (
+	// minBuybackAskWei is the smallest ask: one whole ZNHB.
+	minBuybackAskWei = big.NewInt(1_000_000_000_000_000_000)
+)
+
+const (
+	// maxBuybackAsksPerSeller is how many asks one address may have pending in
+	// an epoch.
+	maxBuybackAsksPerSeller = 8
+	// maxBuybackAsksPerEpoch is how many asks may be pending in an epoch, so the
+	// list and the settlement that reads it have a fixed size.
+	maxBuybackAsksPerEpoch = 1_024
+)
+
+// ErrBuybackAskTooSmall indicates an ask below minBuybackAskWei. The bound is a
+// constant and the amount is the transaction's own payload, so the transaction
+// can never become valid and the block builder prunes it (see
+// classifyProposalError).
+var ErrBuybackAskTooSmall = errors.New("buybackAsk: znhbAmount is below the minimum ask")
+
+// ErrBuybackAskLimit indicates the epoch already holds as many asks as it may,
+// or the seller as many as one address may have in it. The count starts again
+// with the next epoch, so the transaction is skipped rather than pruned: it
+// stays in the mempool and is offered again.
+var ErrBuybackAskLimit = errors.New("buybackAsk: too many pending asks for this epoch")
+
 // applyBuybackAsk handles TxTypeBuybackAsk: a ZNHB holder's market ask into
 // the current epoch's treasury buyback. The seller's ZNHB is escrowed
 // immediately (moved into the buyback accrual/escrow module account) rather
@@ -83,6 +114,9 @@ func (sp *StateProcessor) applyBuybackAsk(tx *types.Transaction, sender []byte, 
 	}
 	if payload.ZNHBAmount == nil || payload.ZNHBAmount.Sign() <= 0 {
 		return fmt.Errorf("buybackAsk: znhbAmount must be positive")
+	}
+	if payload.ZNHBAmount.Cmp(minBuybackAskWei) < 0 {
+		return fmt.Errorf("%w: %s < %s", ErrBuybackAskTooSmall, payload.ZNHBAmount, minBuybackAskWei)
 	}
 
 	epochNumber, ok := sp.currentBuybackEpoch()
@@ -110,6 +144,17 @@ func (sp *StateProcessor) applyBuybackAsk(tx *types.Transaction, sender []byte, 
 		return fmt.Errorf("buybackAsk: insufficient ZNHB balance")
 	}
 
+	manager := nhbstate.NewManager(sp.Trie)
+	var sellerAddr [20]byte
+	copy(sellerAddr[:], sender)
+	pending, bySeller, err := manager.BuybackAskCounts(epochNumber, sellerAddr)
+	if err != nil {
+		return fmt.Errorf("buybackAsk: count pending asks: %w", err)
+	}
+	if pending >= maxBuybackAsksPerEpoch || bySeller >= maxBuybackAsksPerSeller {
+		return fmt.Errorf("%w: epoch %d holds %d, this seller %d", ErrBuybackAskLimit, epochNumber, pending, bySeller)
+	}
+
 	escrowAcc, err := sp.getAccount(sp.buybackAccrualAddr.Bytes())
 	if err != nil {
 		return fmt.Errorf("buybackAsk: load escrow account: %w", err)
@@ -129,9 +174,6 @@ func (sp *StateProcessor) applyBuybackAsk(tx *types.Transaction, sender []byte, 
 		return fmt.Errorf("buybackAsk: persist escrow account: %w", err)
 	}
 
-	manager := nhbstate.NewManager(sp.Trie)
-	var sellerAddr [20]byte
-	copy(sellerAddr[:], sender)
 	if err := manager.BuybackAppendAsk(epochNumber, nhbstate.BuybackAskRecord{Seller: sellerAddr, AmountWei: payload.ZNHBAmount}); err != nil {
 		return fmt.Errorf("buybackAsk: record ask: %w", err)
 	}

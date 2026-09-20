@@ -33,7 +33,7 @@ func newTestPlan(manager *state.Manager, t *testing.T, merchant [20]byte) *subsc
 		ID:              id,
 		Merchant:        merchant,
 		Name:            "Pro Monthly",
-		PriceWei:        big.NewInt(10_000),
+		PriceWei:        subscriptions.MinPlanPriceWei(),
 		Asset:           subscriptions.AssetNHB,
 		IntervalSeconds: 2_592_000,
 		Active:          true,
@@ -49,7 +49,7 @@ func TestRegistryCreatePlan_UnauthorizedCallerRejected(t *testing.T) {
 	plan := &subscriptions.Plan{
 		Merchant:        merchant,
 		Name:            "Pro Monthly",
-		PriceWei:        big.NewInt(10_000),
+		PriceWei:        subscriptions.MinPlanPriceWei(),
 		Asset:           subscriptions.AssetNHB,
 		IntervalSeconds: 86400,
 	}
@@ -72,9 +72,9 @@ func TestRegistryCreatePlan_RejectsInvalidTerms(t *testing.T) {
 	}{
 		{"zero price", &subscriptions.Plan{Merchant: merchant, Name: "x", PriceWei: big.NewInt(0), Asset: subscriptions.AssetNHB, IntervalSeconds: 86400}},
 		{"negative price", &subscriptions.Plan{Merchant: merchant, Name: "x", PriceWei: big.NewInt(-5), Asset: subscriptions.AssetNHB, IntervalSeconds: 86400}},
-		{"bad asset", &subscriptions.Plan{Merchant: merchant, Name: "x", PriceWei: big.NewInt(10), Asset: "USD", IntervalSeconds: 86400}},
-		{"zero interval", &subscriptions.Plan{Merchant: merchant, Name: "x", PriceWei: big.NewInt(10), Asset: subscriptions.AssetNHB, IntervalSeconds: 0}},
-		{"empty name", &subscriptions.Plan{Merchant: merchant, Name: "  ", PriceWei: big.NewInt(10), Asset: subscriptions.AssetNHB, IntervalSeconds: 86400}},
+		{"bad asset", &subscriptions.Plan{Merchant: merchant, Name: "x", PriceWei: subscriptions.MinPlanPriceWei(), Asset: "USD", IntervalSeconds: 86400}},
+		{"zero interval", &subscriptions.Plan{Merchant: merchant, Name: "x", PriceWei: subscriptions.MinPlanPriceWei(), Asset: subscriptions.AssetNHB, IntervalSeconds: 0}},
+		{"empty name", &subscriptions.Plan{Merchant: merchant, Name: "  ", PriceWei: subscriptions.MinPlanPriceWei(), Asset: subscriptions.AssetNHB, IntervalSeconds: 86400}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

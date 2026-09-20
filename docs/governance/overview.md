@@ -112,8 +112,8 @@ two-step rollout so the runtime enforces sensible caps from the first block:
 
 1. Propose a parameter update that sets
    `global.paymaster.AutoTopUp.DailyCapWei` to a non-zero value aligned with the
-   treasury's daily risk tolerance. Treat the cap as a hard limit on newly
-   minted ZNHB per paymaster per day and document the expected consumption model
+   treasury's daily risk tolerance. Treat the cap as a hard limit on the
+   top-up asset (NHB by default) moved to each paymaster per day and document the expected consumption model
    in the proposal rationale. Operators should model the historical top-up rate
    against the configured `TopUpAmountWei` to ensure the daily cap leaves headroom
    for routine fluctuations while still bounding worst-case spend.

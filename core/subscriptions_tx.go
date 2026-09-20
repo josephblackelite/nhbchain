@@ -153,7 +153,7 @@ func (sp *StateProcessor) applySubscriptionSubscribeTransaction(tx *types.Transa
 	// today's due-index bucket is next processed) -- never charged
 	// synchronously inside this transaction, preserving the "Subscribe
 	// never moves money" invariant above.
-	nextChargeAt := now + plan.TrialPeriodSeconds
+	nextChargeAt := subscriptions.AddSeconds(now, plan.TrialPeriodSeconds)
 
 	sub := &subscriptions.Subscription{
 		ID:              id,

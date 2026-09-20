@@ -240,7 +240,7 @@ func TestSubscriptionSelfSubscribeIsRejectedAndNeverMints(t *testing.T) {
 		t.Fatalf("generate key: %v", err)
 	}
 	addr := key.PubKey().Address().Bytes()
-	const balance = 1_000
+	const balance = 1_000_000_000_000_000_000 // one whole token, the smallest price a plan may have
 	if err := sp.setAccount(addr, &types.Account{BalanceNHB: big.NewInt(balance), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)}); err != nil {
 		t.Fatalf("seed account: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestCreateBlockPrunesSelfSubscriptionWithoutAborting(t *testing.T) {
 			{Address: validatorKeyA.PubKey().Address().String(), Power: 11440},
 			{Address: validatorKeyB.PubKey().Address().String(), Power: 11336},
 		},
-		Alloc: map[string]map[string]string{key.PubKey().Address().String(): {"NHB": "1000", "ZNHB": "0"}},
+		Alloc: map[string]map[string]string{key.PubKey().Address().String(): {"NHB": "1000000000000000000", "ZNHB": "0"}},
 	}
 	data, err := json.Marshal(spec)
 	if err != nil {
@@ -329,7 +329,7 @@ func TestCreateBlockPrunesSelfSubscriptionWithoutAborting(t *testing.T) {
 		t.Fatalf("configure subscriptions: %v", err)
 	}
 
-	planTx := selfDealingCreatePlanTx(t, key, 0, 1_000, "NHB")
+	planTx := selfDealingCreatePlanTx(t, key, 0, 1_000_000_000_000_000_000, "NHB")
 	if err := node.AddTransaction(planTx); err != nil {
 		t.Fatalf("add create-plan: %v", err)
 	}

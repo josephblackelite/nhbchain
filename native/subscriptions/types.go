@@ -34,6 +34,11 @@ const (
 // retroactive repricing -- a merchant who wants different terms creates a
 // new Plan instead). Name and Active remain mutable via UpdatePlan.
 //
+// The terms are bounded when the plan is created: a price of at least
+// MinPlanPriceWei, an interval between MinPlanIntervalSeconds and
+// MaxPlanIntervalSeconds and a trial of at most MaxTrialPeriodSeconds (see
+// params.go for why).
+//
 // New fields must always be appended at the end, never inserted between
 // existing ones: Plan is persisted via the generic KVPut/KVGet helpers,
 // which RLP-encode structs positionally (by declaration order).

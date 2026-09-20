@@ -189,3 +189,127 @@ func TestValidatorSlasherAccumulatesAcrossMultipleSlashes(t *testing.T) {
 		t.Fatalf("expected treasury BalanceZNHB=400 (150+250 accumulated), got %s", treasuryAfter.BalanceZNHB)
 	}
 }
+
+// SlashApplied returns what actually moved to the treasury: with the offender
+// holding only 100 bonded, a penalty of 1000 forfeits 100, and that is what is
+// reported.
+func TestValidatorSlasherReportsWhatItForfeited(t *testing.T) {
+	mgr := newTestManager(t)
+	var offender, treasury [20]byte
+	offender[19] = 8
+	treasury[19] = 9
+	if err := mgr.PutAccount(offender[:], &types.Account{LockedZNHB: big.NewInt(100), Stake: big.NewInt(100)}); err != nil {
+		t.Fatalf("seed offender: %v", err)
+	}
+
+	s := NewValidatorSlasher(mgr, treasury)
+	applied, err := s.SlashApplied(offender, big.NewInt(1_000))
+	if err != nil {
+		t.Fatalf("slash: %v", err)
+	}
+	if applied.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("reported %s forfeited, want 100", applied)
+	}
+	treasuryAfter, err := mgr.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("get treasury: %v", err)
+	}
+	if treasuryAfter.BalanceZNHB.Cmp(applied) != 0 {
+		t.Fatalf("treasury holds %s, the report says %s was forfeited", treasuryAfter.BalanceZNHB, applied)
+	}
+
+	// Nothing bonded, nothing forfeited.
+	again, err := s.SlashApplied(offender, big.NewInt(50))
+	if err != nil {
+		t.Fatalf("slash again: %v", err)
+	}
+	if again.Sign() != 0 {
+		t.Fatalf("a slash of an empty stake reported %s", again)
+	}
+
+	// Slash is the same operation without the report.
+	if err := mgr.PutAccount(offender[:], &types.Account{LockedZNHB: big.NewInt(70), Stake: big.NewInt(70)}); err != nil {
+		t.Fatalf("reseed offender: %v", err)
+	}
+	if err := s.Slash(offender, big.NewInt(20)); err != nil {
+		t.Fatalf("slash: %v", err)
+	}
+	offenderAfter, err := mgr.GetAccount(offender[:])
+	if err != nil {
+		t.Fatalf("get offender: %v", err)
+	}
+	if offenderAfter.LockedZNHB.Cmp(big.NewInt(50)) != 0 || offenderAfter.Stake.Cmp(big.NewInt(50)) != 0 {
+		t.Fatalf("Slash left locked=%s stake=%s, want 50 and 50", offenderAfter.LockedZNHB, offenderAfter.Stake)
+	}
+}
+
+// The penalty is bounded by the offender's recorded stake as well as by its
+// locked ZNHB: it can no longer take more than the stake and floor the stake at
+// zero while the locked ZNHB and the treasury moved by the full amount. What
+// leaves the offender is exactly what reaches the treasury.
+func TestValidatorSlasherIsBoundedByTheStake(t *testing.T) {
+	mgr := newTestManager(t)
+	var offender, treasury [20]byte
+	offender[19] = 10
+	treasury[19] = 11
+	if err := mgr.PutAccount(offender[:], &types.Account{LockedZNHB: big.NewInt(1_000), Stake: big.NewInt(100)}); err != nil {
+		t.Fatalf("seed offender: %v", err)
+	}
+	if err := mgr.PutAccount(treasury[:], &types.Account{BalanceZNHB: big.NewInt(500)}); err != nil {
+		t.Fatalf("seed treasury: %v", err)
+	}
+
+	s := NewValidatorSlasher(mgr, treasury)
+	applied, err := s.SlashApplied(offender, big.NewInt(300))
+	if err != nil {
+		t.Fatalf("slash: %v", err)
+	}
+	if applied.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("forfeited %s, want the 100 the offender has staked", applied)
+	}
+	offenderAfter, err := mgr.GetAccount(offender[:])
+	if err != nil {
+		t.Fatalf("get offender: %v", err)
+	}
+	if offenderAfter.Stake.Sign() != 0 || offenderAfter.LockedZNHB.Cmp(big.NewInt(900)) != 0 {
+		t.Fatalf("offender ended with stake=%s locked=%s, want 0 and 900", offenderAfter.Stake, offenderAfter.LockedZNHB)
+	}
+	treasuryAfter, err := mgr.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("get treasury: %v", err)
+	}
+	if treasuryAfter.BalanceZNHB.Cmp(big.NewInt(600)) != 0 {
+		t.Fatalf("treasury holds %s, want 600", treasuryAfter.BalanceZNHB)
+	}
+	before := big.NewInt(1_000 + 500)
+	after := new(big.Int).Add(offenderAfter.LockedZNHB, treasuryAfter.BalanceZNHB)
+	if before.Cmp(after) != 0 {
+		t.Fatalf("locked plus treasury balance went from %s to %s: ZNHB was created or destroyed", before, after)
+	}
+}
+
+// A validator that is its own treasury forfeits into the same account: the
+// ZNHB moves from locked to liquid and nothing is lost.
+func TestValidatorSlasherWhenTheOffenderIsTheTreasury(t *testing.T) {
+	mgr := newTestManager(t)
+	var offender [20]byte
+	offender[19] = 12
+	if err := mgr.PutAccount(offender[:], &types.Account{LockedZNHB: big.NewInt(400), Stake: big.NewInt(400), BalanceZNHB: big.NewInt(10)}); err != nil {
+		t.Fatalf("seed offender: %v", err)
+	}
+	s := NewValidatorSlasher(mgr, offender)
+	applied, err := s.SlashApplied(offender, big.NewInt(150))
+	if err != nil {
+		t.Fatalf("slash: %v", err)
+	}
+	if applied.Cmp(big.NewInt(150)) != 0 {
+		t.Fatalf("forfeited %s, want 150", applied)
+	}
+	after, err := mgr.GetAccount(offender[:])
+	if err != nil {
+		t.Fatalf("get offender: %v", err)
+	}
+	if after.LockedZNHB.Cmp(big.NewInt(250)) != 0 || after.BalanceZNHB.Cmp(big.NewInt(160)) != 0 {
+		t.Fatalf("locked=%s balance=%s, want 250 and 160", after.LockedZNHB, after.BalanceZNHB)
+	}
+}

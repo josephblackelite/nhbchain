@@ -42,11 +42,11 @@ The values are supplied through the `Global.Paymaster` section of the cluster co
 
 ## 5. Automatic top-ups
 
-Automatic top-ups ensure the paymaster never runs dry during busy settlement windows. The feature is disabled by default and is only active when the `auto_top_up` block is configured under `Global.Paymaster` with a `ZNHB` token, operator address, mint/approve roles, and rate limits.【F:config/types.go†L142-L186】【F:config/global.go†L101-L165】
+Automatic top-ups ensure the paymaster never runs dry during busy settlement windows. The feature is disabled by default and is only active when the `auto_top_up` block is configured under `Global.Paymaster` with an `NHB` token (the default; `ZNHB` is also accepted), operator address, mint/approve roles, and rate limits.【F:config/types.go†L142-L186】【F:config/global.go†L101-L165】
 
 1. **Configuration**
    * `min_balance_wei` – threshold that triggers a top-up when the on-chain balance drops below the value.
-   * `top_up_amount_wei` – amount of ZNHB minted on each execution.
+   * `top_up_amount_wei` – amount of the top-up asset (NHB by default) moved from the funding wallet on each execution.
    * `daily_cap_wei` and `cooldown` – guardrails that limit aggregate minting and cadence.【F:core/state/paymaster_counters.go†L388-L444】【F:core/sponsorship.go†L571-L668】
    * `operator`, `approver_role`, and `minter_role` – governance controls that must be satisfied before minting occurs.【F:core/sponsorship.go†L604-L647】
 2. **Execution flow**

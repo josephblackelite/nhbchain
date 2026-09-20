@@ -23,6 +23,7 @@ import (
 	"nhbchain/native/loyalty"
 	"nhbchain/native/market"
 	nativeparams "nhbchain/native/params"
+	"nhbchain/native/pos"
 	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 )
@@ -81,6 +82,17 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"self liquidation", lending.ErrSelfLiquidation, proposalDispositionPrune},
 		// PRUNE, added with the POS branch: a pure function of the payload.
 		{"pos invalid authorization id", ErrPOSInvalidAuthorizationID, proposalDispositionPrune},
+		// PRUNE: a registry transaction that is invalid on its own bytes, or
+		// whose nonce is not above its authority's last (the nonce only grows).
+		{"pos registry invalid payload", ErrPOSRegistryInvalidPayload, proposalDispositionPrune},
+		{"pos registry invalid request", pos.ErrInvalidRequest, proposalDispositionPrune},
+		{"pos registry stale nonce", pos.ErrStaleNonce, proposalDispositionPrune},
+		// PRUNE: a buyback ask under the minimum is decided by its own amount.
+		{"buyback ask too small", ErrBuybackAskTooSmall, proposalDispositionPrune},
+		// PRUNE: plan terms outside the fixed bounds are decided by the payload.
+		{"subscription plan invalid", subscriptions.ErrInvalidPlan, proposalDispositionPrune},
+		// PRUNE: a reversed voucher never becomes reconcilable.
+		{"swap voucher not reconcilable", swap.ErrVoucherNotReconcilable, proposalDispositionPrune},
 		// PRUNE, added with the loyalty and invariant branches: an owner naming
 		// a wallet other than its own can never succeed for that signer.
 		{"loyalty paymaster consent required", loyalty.ErrPaymasterConsentRequired, proposalDispositionPrune},
@@ -124,6 +136,14 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"mint recipient unresolved", ErrMintRecipientUnresolved, proposalDispositionSkip},
 		{"identity username taken", ErrIdentityUsernameTaken, proposalDispositionSkip},
 		{"buyback ref price future epoch", ErrBuybackRefPriceFutureEpoch, proposalDispositionSkip},
+		// SKIP: the registry role can be granted later, and a device can still
+		// be registered.
+		{"pos registry unauthorized", ErrPOSRegistryUnauthorized, proposalDispositionSkip},
+		{"pos registry device not registered", pos.ErrDeviceNotRegistered, proposalDispositionSkip},
+		// SKIP: the epoch's ask list is full, and the count starts again next epoch.
+		{"buyback ask limit", ErrBuybackAskLimit, proposalDispositionSkip},
+		// SKIP: the voucher a reconciliation names can still be minted.
+		{"swap voucher not found", swap.ErrVoucherNotFound, proposalDispositionSkip},
 		// SKIP, added with the loyalty branch: the named wallet can still opt
 		// in, after which the same assignment succeeds.
 		{"loyalty paymaster consent", loyalty.ErrPaymasterConsent, proposalDispositionSkip},

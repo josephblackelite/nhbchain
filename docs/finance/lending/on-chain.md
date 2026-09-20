@@ -35,7 +35,12 @@ interfaces.
    withdrawals).
 2. **Borrow Index Update:** The protocol calculates the time delta since the
    last accrual and multiplies it by the current borrow rate to update the
-   borrow index.
+   borrow index. The delta is the difference between the block header
+   timestamps of the current block and of the block that last refreshed the
+   market, divided by the seconds in a year (31,536,000), in integer
+   arithmetic; a block that does not move the timestamp forward accrues
+   nothing. The annual rate is therefore the same whether blocks arrive every
+   second or every two.
 3. **Reserve Growth:** A portion of the interest (based on the reserve factor)
    and the configured protocol fee share is redirected to the protocol fee
    accrual.

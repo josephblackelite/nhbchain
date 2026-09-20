@@ -46,7 +46,12 @@ func ComputeManagementFee(amountWei *big.Int, cfg Config) *big.Int {
 //
 // On success: FailedAttempts resets to zero, NextChargeAt advances by the
 // subscription's own IntervalSeconds (snapshotted at subscribe time, see
-// Subscription's doc comment).
+// Subscription's doc comment), and by MinPlanIntervalSeconds if that is
+// longer: a plan cannot be created with a shorter interval, so this only
+// matters for a record that reached state some other way, and it keeps the
+// rate at which the chain charges anyone bounded whatever a record says.
+// Times saturate at the end of the uint64 range instead of wrapping to the
+// past.
 //
 // On failure: FailedAttempts increments. If it has now reached
 // cfg.MaxRetries, the subscription is permanently suspended (dropped from
@@ -61,13 +66,17 @@ func DecideCharge(sub *Subscription, cfg Config, payerBalanceWei *big.Int, now u
 	if balance.Cmp(price) >= 0 {
 		fee := ComputeManagementFee(price, cfg)
 		net := new(big.Int).Sub(price, fee)
+		interval := sub.IntervalSeconds
+		if interval < MinPlanIntervalSeconds {
+			interval = MinPlanIntervalSeconds
+		}
 		return ChargeDecision{
 			Success:           true,
 			FeeWei:            fee,
 			MerchantNetWei:    net,
 			NewStatus:         SubscriptionStatusActive,
 			NewFailedAttempts: 0,
-			NextChargeAt:      now + sub.IntervalSeconds,
+			NextChargeAt:      AddSeconds(now, interval),
 		}
 	}
 
@@ -89,7 +98,7 @@ func DecideCharge(sub *Subscription, cfg Config, payerBalanceWei *big.Int, now u
 		MerchantNetWei:    big.NewInt(0),
 		NewStatus:         SubscriptionStatusPastDue,
 		NewFailedAttempts: attempts,
-		NextChargeAt:      now + cfg.RetryIntervalSeconds,
+		NextChargeAt:      AddSeconds(now, cfg.RetryIntervalSeconds),
 		FailureReason:     "insufficient_balance",
 	}
 }

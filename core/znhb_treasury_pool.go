@@ -213,3 +213,15 @@ func (sp *StateProcessor) bookedSlasher(inner statebank.Slasher) statebank.Slash
 func (s treasuryBookedSlasher) Slash(addr [20]byte, amount *big.Int) error {
 	return s.sp.withTreasuryPoolBooking(true, func() error { return s.inner.Slash(addr, amount) })
 }
+
+// SlashApplied is Slash with the amount the inner slasher actually forfeited,
+// booked into the pools in the same way.
+func (s treasuryBookedSlasher) SlashApplied(addr [20]byte, amount *big.Int) (*big.Int, error) {
+	var applied *big.Int
+	err := s.sp.withTreasuryPoolBooking(true, func() error {
+		var slashErr error
+		applied, slashErr = statebank.SlashReporting(s.inner, addr, amount)
+		return slashErr
+	})
+	return applied, err
+}

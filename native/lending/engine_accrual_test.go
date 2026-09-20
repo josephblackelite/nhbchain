@@ -136,15 +136,21 @@ func TestAccrueInterestUpdatesIndexesAndFees(t *testing.T) {
 	engine.SetInterestModel(NewInterestModel(0, 1, 0, 1))
 	engine.SetReserveFactor(2000)
 	engine.SetProtocolFeeBps(1000)
-	engine.SetBlockHeight(blocksPerYear)
+	// One year of block time since the market was last refreshed, however many
+	// blocks that took.
+	const stamped = 1_700_000_000
+	engine.SetBlockHeight(10)
+	engine.SetBlockTimestamp(stamped + secondsPerYear)
 
 	state := newMockEngineState()
 	market := &Market{
-		TotalNHBSupplied:  big.NewInt(1000),
-		TotalSupplyShares: big.NewInt(1000),
-		TotalNHBBorrowed:  big.NewInt(500),
-		SupplyIndex:       new(big.Int).Set(ray),
-		BorrowIndex:       new(big.Int).Set(ray),
+		TotalNHBSupplied:    big.NewInt(1000),
+		TotalSupplyShares:   big.NewInt(1000),
+		TotalNHBBorrowed:    big.NewInt(500),
+		SupplyIndex:         new(big.Int).Set(ray),
+		BorrowIndex:         new(big.Int).Set(ray),
+		LastUpdateBlock:     1,
+		LastUpdateTimestamp: stamped,
 	}
 	state.market = market
 	engine.SetState(state)

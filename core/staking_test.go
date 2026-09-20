@@ -217,8 +217,8 @@ func TestStakeUndelegateAndClaim(t *testing.T) {
 		t.Fatalf("expected restored balance 2000 got %s", finalAcct.BalanceZNHB.String())
 	}
 	events := sp.Events()
-	if len(events) < 3 || events[len(events)-1].Type != "stake.claimed" {
-		t.Fatalf("expected stake.claimed event, got %#v", events)
+	if len(events) < 3 || events[len(events)-1].Type != "stake.unbondClaimed" {
+		t.Fatalf("expected stake.unbondClaimed event, got %#v", events)
 	}
 }
 

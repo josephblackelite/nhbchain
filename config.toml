@@ -492,8 +492,8 @@ ClientVersion = ""
   CommitTimeout = "4s"
   # The least time a validator lets pass between seeing a block commit and starting
   # the round of the next height: the pace of block production, at most one block per
-  # interval. Everything counted in blocks (epoch length, emission per epoch, interest
-  # per block) follows it. Omitting the key keeps the default, one second; "0s" turns
+  # interval. Everything counted in blocks (epoch length, emission per epoch) follows it;
+  # lending interest reads the block timestamp and does not. Omitting the key keeps the default, one second; "0s" turns
   # the wait off and blocks then come as fast as the validators can make them (tens a
   # second while they are in step). The value is local to the validator, changes no
   # message or state rule, and is limited to half the commit timeout (2s at the default

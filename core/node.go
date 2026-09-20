@@ -114,6 +114,7 @@ type Node struct {
 	txSimulationEnabled   bool
 	bftEngine             *bft.Engine
 	stateMu               sync.RWMutex
+	eventLog              *eventLog // events of committed blocks, bounded (event_log.go)
 	// selfProposedHash is the header hash of the block CreateBlock most
 	// recently built from the current, possibly-drifted n.state (guarded by
 	// stateMu). ValidateBlock/commitBlock skip the committed-head drift
@@ -625,7 +626,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		swapSanctions:        swap.DefaultSanctionsChecker,
 		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
 		paymasterLimits:      PaymasterLimits{},
-		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
+		eventLog:             newEventLog(maxRetainedEvents, maxPinnedEvents),
 		timestampTolerance:   DefaultBlockTimestampTolerance,
 		timeSource:           func() time.Time { return time.Now().UTC() },
 		// Disabled by default (see the field doc comment): every existing
@@ -3439,6 +3441,19 @@ const (
 //     become valid.
 //   - ErrPOSInvalidAuthorizationID: a capture or void whose authorization id
 //     is not 64 hex characters is decided by the payload alone.
+//   - ErrBuybackAskTooSmall: an ask below the fixed minimum is decided by its
+//     own amount.
+//   - subscriptions.ErrInvalidPlan: plan terms outside the fixed bounds (a
+//     price or interval under the minimum, an interval or trial over the
+//     maximum, no name, an unknown asset) are decided by the payload alone.
+//   - ErrPOSRegistryInvalidPayload, pos.ErrInvalidRequest, pos.ErrStaleNonce: a
+//     registry transaction that does not decode, names no registry message,
+//     claims an authority other than its signer or breaks a rule of the
+//     request itself is decided by its own bytes, and an authority's registry
+//     nonce only grows.
+//   - swap.ErrVoucherNotReconcilable: a TxTypeSwapMarkReconciled naming a
+//     reversed voucher; a voucher's status only moves forward, so it can never
+//     become reconcilable (the same one-way rule as ErrSwapVoucherNotMinted).
 //   - loyalty.ErrPaymasterConsentRequired: an owner naming a wallet other than
 //     its own as the loyalty paymaster can never succeed for that signer (only
 //     a loyalty admin may name another wallet).
@@ -3527,6 +3542,15 @@ const (
 //     the chain has not entered yet becomes valid the moment that epoch
 //     opens, so it stays in the mempool and is offered again -- the
 //     counterpart to ErrBuybackRefPriceStaleEpoch (PRUNE) above.
+//   - swap.ErrVoucherNotFound: a TxTypeSwapMarkReconciled naming a provider
+//     transaction id the ledger does not know yet; the voucher can still be
+//     minted by a later transaction (ErrSwapVoucherReversalNotFound's reasoning).
+//   - ErrBuybackAskLimit: the epoch's ask list, or the seller's share of it, is
+//     full; the count starts again with the next epoch.
+//   - ErrPOSRegistryUnauthorized, pos.ErrDeviceNotRegistered: a registry change
+//     whose signer is neither the merchant's owner nor a holder of
+//     RolePOSRegistryAdmin (the role can be granted later), and a change to a
+//     device that can still be registered.
 //   - loyalty.ErrPaymasterConsent: a loyalty admin naming a wallet that has
 //     not yet recorded its own opt-in; the opt-in is a later transaction from
 //     the named wallet, after which the same assignment succeeds.
@@ -3683,6 +3707,8 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// already-committed ledger state" reasoning above.
 		errors.Is(err, ErrSwapVoucherNotMinted),
 		errors.Is(err, ErrSwapVoucherAlreadyReversed),
+		// Reconciling a reversed voucher is the same one-way status rule.
+		errors.Is(err, swap.ErrVoucherNotReconcilable),
 		// A ref price for a given epoch, once recorded, can never become
 		// unrecorded -- the epoch number only moves forward -- so a
 		// duplicate submission is a permanently dead transaction, never
@@ -3721,6 +3747,19 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// it can never become valid. See ErrPOSInvalidAuthorizationID
 		// (core/state_pos.go).
 		errors.Is(err, ErrPOSInvalidAuthorizationID),
+		// A registry transaction that does not decode, names no registry
+		// message, claims an authority other than its signer, or breaks a
+		// rule of the request itself (a zero nonce, a missing id) is decided
+		// by its own bytes; a nonce at or below the authority's last one can
+		// never be valid again, since that nonce only grows.
+		errors.Is(err, ErrPOSRegistryInvalidPayload),
+		// A buyback ask under the minimum is a pure function of its own amount.
+		errors.Is(err, ErrBuybackAskTooSmall),
+		// Plan terms are checked against constants, so a plan that breaks a
+		// bound can never be created by the same transaction later.
+		errors.Is(err, subscriptions.ErrInvalidPlan),
+		errors.Is(err, pos.ErrInvalidRequest),
+		errors.Is(err, pos.ErrStaleNonce),
 		// An owner naming a wallet other than its own as the loyalty paymaster
 		// is refused as a pure function of the transaction's own sender and
 		// payload and the business's owner, which never changes, so it can
@@ -3769,6 +3808,16 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// transaction (e.g. one still sitting in the same mempool) -- see
 		// ErrSwapVoucherReversalNotFound's doc comment (core/swap.go).
 		errors.Is(err, ErrSwapVoucherReversalNotFound),
+		// The same for a reconciliation naming a voucher not minted yet.
+		errors.Is(err, swap.ErrVoucherNotFound),
+		// A registry change by a signer that is neither the merchant's owner
+		// nor a registry admin: the role can be granted later. And a change to
+		// a device that is not registered yet, which can still be registered.
+		errors.Is(err, ErrPOSRegistryUnauthorized),
+		errors.Is(err, pos.ErrDeviceNotRegistered),
+		// The ask list of an epoch is full, or the seller's share of it is; the
+		// count starts again with the next epoch.
+		errors.Is(err, ErrBuybackAskLimit),
 		// A same-block-or-later credit to the voucher's recipient could
 		// make a currently-insufficient reversal succeed on a later
 		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning
@@ -4280,6 +4329,10 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		}
 	}
 	n.state = stateCopy
+	// The committed state carries the events of every block still to be handed
+	// over; move them to the node's bounded log so the next copy of the state
+	// starts with an empty one.
+	n.retainCommittedEventsLocked()
 	if err := n.refreshModulePauses(); err != nil {
 		return fmt.Errorf("refresh module pauses: %w", err)
 	}
@@ -8418,10 +8471,6 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 		return fmt.Errorf("swap: burn receiptId required")
 	}
 	return n.WithState(func(m *nhbstate.Manager) error {
-		burnLedger := swap.NewBurnLedger(m)
-		if err := burnLedger.Put(receipt); err != nil {
-			return err
-		}
 		var proofIDs []string
 		if len(receipt.VoucherIDs) > 0 {
 			voucherLedger := swap.NewLedger(m)
@@ -8441,9 +8490,15 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 					}
 				}
 			}
+			// MarkReconciled refuses a reversed or unknown voucher without
+			// writing anything, and it runs before the receipt is stored, so a
+			// refused receipt leaves no trace.
 			if err := voucherLedger.MarkReconciled(receipt.VoucherIDs); err != nil {
 				return err
 			}
+		}
+		if err := swap.NewBurnLedger(m).Put(receipt); err != nil {
+			return err
 		}
 		observed := receipt.ObservedAt
 		if observed <= 0 {
@@ -8542,11 +8597,30 @@ func (n *Node) HasRole(role string, addr []byte) bool {
 	return n.state.HasRole(role, addr)
 }
 
+// retainCommittedEventsLocked moves the events the live state has logged into
+// the node's bounded event log. Callers must hold stateMu for writing.
+func (n *Node) retainCommittedEventsLocked() {
+	if n == nil || n.state == nil || n.eventLog == nil {
+		return
+	}
+	n.eventLog.append(n.state.takeEvents())
+}
+
+// Events returns the events the node has seen, oldest first: the most recent of
+// those committed blocks produced (see event_log.go for how many are kept),
+// then the ones the live state has logged since the last commit. It is read
+// under the state lock so an event is never missed or counted twice while a
+// block is being committed.
 func (n *Node) Events() []types.Event {
-	if n == nil || n.state == nil {
+	if n == nil {
 		return nil
 	}
-	return n.state.Events()
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil
+	}
+	return append(n.eventLog.snapshot(), n.state.Events()...)
 }
 
 func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
