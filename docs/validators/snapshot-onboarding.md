@@ -43,6 +43,15 @@ named where it is used. What could not be tested is listed in
   (`nhb-snapshot manifest show --manifest manifest.json --field producer.binaryCommit`).
   Your node executes every later block with your own build, so it has to be the
   same consensus code: check that commit out before you run the script.
+  **That commit has to contain this procedure** (`scripts/deployvalidator.sh` as
+  described here and `cmd/nhb-snapshot`), because you run the script from it.
+  It does only for a snapshot made by a node whose binary was built from a commit
+  that contains them. A snapshot made by a validator that still runs an earlier
+  build names a commit whose script starts from an empty data directory and syncs
+  from genesis, which does not work on this network. The validators that make
+  snapshots have to run a build that contains this procedure first, and
+  `make-snapshot.sh` refuses to make a snapshot that does not name its commit (see
+  [Making snapshots](#making-snapshots)).
 
 ## Quick start
 
@@ -50,6 +59,7 @@ named where it is used. What could not be tested is listed in
 git clone https://github.com/josephblackelite/nhbchain.git
 cd nhbchain
 git checkout COMMIT_NAMED_IN_THE_MANIFEST
+ls cmd/nhb-snapshot scripts/make-snapshot.sh   # both must exist: see "What you need"
 
 bash scripts/validator-only-bootstrap.sh \
   --beneficiary YOUR_NHB_WALLET_ADDRESS \
@@ -79,7 +89,8 @@ The flags:
 | `--tip-rpc` | Optional (or `NHB_TIP_RPC_URL`). A node you trust. Used to decide when you have caught up, and to refuse a node whose newest blocks are not that node's. |
 | `--max-lag-blocks` | How far from that node (either side) still counts as caught up. Default 3, at most 15. |
 | `--sync-timeout` | Seconds to wait for the catch-up. Default 7200. |
-| `--max-snapshot-age` | Refuse a snapshot created longer ago than this, for example `48h`. |
+| `--rpc-timeout` | Seconds the node's RPC may stay silent after the service starts. Default 180. A node that never answers is not running or is crash-looping; the script says so after this long, with the commands that show why, instead of waiting out `--sync-timeout`. (`nhb-snapshot wait-synced` also gives up on a silent node after its `--stall-timeout`, when that is shorter.) |
+| `--max-snapshot-age` | Refuse a snapshot whose newest block is older than this, for example `48h`. The limit rests on the date of the newest block, which `extract` checks against the database it unpacked; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. |
 | `--tip-hash`, `--state-root` | Optional. The tip hash and state root the snapshot must have, 32 bytes of hex each, as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
 | `--max-snapshot-gib` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. Default 16. |
 | `--listen-addr`, `--rpc-addr`, `--external-address` | As before. |
@@ -177,9 +188,12 @@ quietly, and no secret is printed.
    (`TestDeployRenderConfigChangesOnlyNodeLocalValues`,
    `TestDeployRenderConfigFailsLoudlyOnAStaleTemplateAndRefusesDrift`)
 7. **Starts `nhb.service`** as a follower, or leaves it running when nothing
-   changed, and **waits until the node is at the network tip**, checking on the
-   first answer that it reports the pinned chain id and genesis hash. At the tip
-   means all of these, on two polls in a row:
+   changed, and **waits until the node is at the network tip**. The node's RPC has
+   `--rpc-timeout` (180 seconds) to answer for the first time; a service that is
+   not running, or that crash-loops, never does, and the script then stops with
+   that message and the commands that show why (`systemctl status`, `journalctl`).
+   It checks on the first answer that the node reports the pinned chain id and
+   genesis hash. At the tip means all of these, on two polls in a row:
    - the node is connected to at least one peer;
    - when this run installed a snapshot, the node has applied a block **above the
      snapshot's height**. A snapshot that is not part of the network's chain can
@@ -192,7 +206,8 @@ quietly, and no secret is printed.
    - without `--tip-rpc`, its newest block is dated within a minute of this
      host's clock, on either side (a block dated in the future says nothing).
 
-   It stops with a diagnosis when the node makes no progress for 15 minutes or
+   It stops with a diagnosis when the RPC does not answer within 180 seconds,
+   when the node makes no progress (or answers nothing) for 15 minutes, or when
    the timeout passes.
    (`TestDeployWaitUntilSynced`, `TestDeployWaitUntilSyncedNeedsBlocksPastTheSnapshot`,
    `TestWaitSynced*`, `TestAForgedSnapshotIsRefusedAndAnUnconnectedNodeOnItIsNeverAtTheTip`)
@@ -204,7 +219,11 @@ in `cmd/nhb-snapshot/snapshot_test.go`):
 
 - the archive's size and sha256 against the manifest, before anything is written;
 - the manifest against the chain id and genesis hash you pin (and, if you give
-  them, a minimum height, a maximum age, a tip hash and a state root);
+  them, a minimum height, a maximum age, a tip hash and a state root). The
+  maximum age is the age of the snapshot's newest block, and `extract` checks it
+  again on the block time of the database it unpacked, so a manifest that claims
+  to have been made a minute ago does not get an old snapshot past it
+  (`TestMaxAgeIsNotDefeatedByAManifestThatLiesAboutWhenItWasMade`);
 - the archive itself: gzip and tar only, regular files only, exactly the files
   the manifest lists with the sizes and hashes it gives, and only the names of
   chain database files (`CURRENT`, `MANIFEST-*`, `*.log`, `*.ldb`, `*.sst`). A path
@@ -360,6 +379,39 @@ manifest as `manifest.json` (the fixed name a new node fetches). Uploading them 
 a separate step and is your decision: where snapshots are hosted is not part of
 this repository.
 
+**Which build the snapshot names.** The manifest records the node binary the
+database was written by (its sha256) and the source commit it was built from. A
+new node runs every later block with its own build, so `deployvalidator.sh`
+accepts a snapshot only when its build is that binary or that commit, and tells
+the operator to check the commit out. The command above is for a host that
+`scripts/deployvalidator.sh` installed: the binary is `/opt/nhbchain/bin/nhb`, the
+checkout it was built from is `/opt/nhbchain`, and both are read from there. **On
+a host that was not installed by `scripts/deployvalidator.sh`** (a checkout in
+another place, a binary somewhere else) the script cannot find them, and it stops
+before it copies anything rather than publish a manifest that no new node can use.
+Pass the path of the binary that is running and the full commit id it was built
+from:
+
+```bash
+bash scripts/make-snapshot.sh \
+  --data-dir /path/to/nhb-data --out-dir /path/to/snapshots \
+  --node-binary /path/to/nhbchain/bin/nhb \
+  --binary-commit "$(git -C /path/to/nhbchain rev-parse HEAD)"
+```
+
+- `--binary-commit` is the whole commit id (40 hexadecimal digits, as `git
+  rev-parse HEAD` prints it): a new node compares it with its own checkout's, and
+  an abbreviation or a tag would never match. It has to be the commit the running
+  binary was built from, not a checkout that was updated after the last build, and
+  it has to contain this procedure (see [What you need](#what-you-need)).
+- git refuses to read a checkout that another user owns. Run as root against a
+  checkout the service user owns, the script cannot read the commit and stops: pass
+  `--binary-commit`, or run it as the service user.
+- `--allow-unknown-binary` publishes a manifest that does not name the commit
+  anyway, for tests. A new node then refuses it, and is told there is nothing to
+  check out, unless it passes `--allow-binary-mismatch`
+  (`TestMakeSnapshotRefusesToPublishAManifestNoNewNodeCanAccept`).
+
 How the copy is made:
 
 1. The chain database is a LevelDB directory. Its table files (`*.ldb`) never
@@ -408,8 +460,8 @@ files, in hex and as raw bytes, and finds none.
 The manifest records the chain id, genesis hash, height, tip hash, state root,
 the tip's block time, when it was made, the binary it was taken with (its
 sha256, its source commit and version, from `--node-binary`, `--binary-commit`
-and `--binary-version`, or from the checkout the binary was built in), and the
-archive's name, size, sha256 and the size and sha256 of every file in it.
+and `--binary-version`, or from the checkout the binary was built in, as above),
+and the archive's name, size, sha256 and the size and sha256 of every file in it.
 
 ## Snapshot age and how large a gap a follower can close
 
@@ -478,7 +530,10 @@ What that means for the live chain, read with care:
   records the binary), and refuse older ones with `--max-snapshot-age`.
 - **Refresh snapshots at least daily**, and set `--max-snapshot-age 72h` (or
   shorter) for new nodes. A daily cadence keeps every catch-up to a few minutes and
-  keeps the snapshot from predating a release. The schedule is yours to set.
+  keeps the snapshot from predating a release. The schedule is yours to set. The
+  limit is judged on the date of the snapshot's newest block, the value `extract`
+  checks against the database it unpacked; the creation time in the manifest is
+  not signed by anyone and is not what the limit rests on.
 - If a snapshot is stale, get a newer one: run the script again with
   `--reset-state` and a fresher `--snapshot-url`. Do not start from an empty data
   directory.
@@ -545,12 +600,17 @@ bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 --tip-rpc https://TRUST
 |---|---|
 | `the snapshot is for chain ... not the pinned network` | The manifest is for another network. Nothing was installed. |
 | `the node built here is not the one the snapshot was taken with` | Your build differs from the snapshot's. `git checkout` the commit it prints and run the script again. `--allow-binary-mismatch` is only for two builds that differ in nothing consensus executes. |
+| `The snapshot does not say which commit it was made with` | The manifest's commit is `unknown`, so there is nothing to check out. Ask whoever published it for a snapshot made by a current `make-snapshot.sh`, which refuses to make one that does not name its commit. |
+| `the source commit of the node binary is not known` and `a dead end for every new node` (from `make-snapshot.sh`) | The producer could not read the commit from the checkout above the node binary (a host not installed by the script, or git refusing a checkout another user owns). Pass `--node-binary` and `--binary-commit`; see [Making snapshots](#making-snapshots). Nothing was copied or published. |
+| `the snapshot's newest block is dated ... ago, older than the allowed ...` | The snapshot is stale for the `--max-snapshot-age` you gave, whatever creation time its manifest states. Get a newer one. |
 | `the archive sha256 is ... the manifest says ...` or `a truncated or replaced download` | A damaged or replaced download. Fetch it again. |
 | `the archive entry ... is not a chain database file name` and similar | The archive is not a snapshot made by `make-snapshot.sh`. Do not use it. |
 | `the unpacked snapshot does not open` | The archive is genuine but the database inside is damaged or incomplete. Ask for another snapshot. |
 | `... is a validator in this snapshot's state` | On a first run: the key on this host is already a validator. It must not start a second node. (`--reset-state` on a node's own data directory does not make this check.) |
+| `the node's RPC did not come up within ... seconds` (and `waiting for the node's RPC: ... connection refused` before it) | `nhb.service` is not running, or it is crash-looping (`Restart=on-failure` starts it again every few seconds, so `systemctl status` may say `activating`). The node never answered in `--rpc-timeout` (180 seconds). The usual causes are a config it cannot read (owner and mode of `/etc/nhbchain`), a data directory it cannot open, and being killed for lack of memory; `journalctl -u nhb.service -n 80` says which. A very large database on a slow disk may need a longer `--rpc-timeout`. |
 | `the node did not reach the network tip within ...` | Still catching up: raise `--sync-timeout`, or the snapshot is too old (see the measured gap above). |
 | `the node has stopped making progress` | No new block for 15 minutes while behind. Check `journalctl -u nhb.service`, the bootnode, and that this host's clock is right. |
+| `the node has not answered a request for its newest block` | The node's RPC answered, then stopped answering what the wait asks, for 15 minutes. Check `systemctl status nhb.service` and its journal. |
 | `connected to no peer` or `no block above the snapshot's height N has been applied yet` in the wait output | The node has not heard from the network, or has not applied one block past its snapshot. Check the `--bootnode` address and the firewall (6001 TCP and UDP), and that the snapshot is one of the network's. |
 | `the node's newest blocks are not the ones the --tip-rpc node has` | The node's chain and the reference node's differ: the snapshot is not part of the network's chain, or one of the two nodes is on a fork. Do not register. Get a snapshot from a source you trust. |
 | `the snapshot archive is ... more than the ... GiB this run accepts`, or `the snapshot unpacks to ...` | The manifest asks for more than `--max-snapshot-gib` allows. Nothing was downloaded. If the network's snapshot has really grown that large, raise the flag; otherwise do not use that host. |
@@ -634,6 +694,14 @@ Tested, on a local network of real `nhb` processes (Windows, Git Bash):
   failing swap, the size, disk-space and pin refusals, and the sync check
   (`deploy_rerun_test.go`, `deploy_limits_test.go`, `sync_forged_test.go`,
   `snapshot_limits_test.go`).
+- The bounds on the wait for the tip (a node that never answers ends the wait
+  after `--rpc-timeout`, and one that stops answering after `--stall-timeout`, not
+  after `--timeout`: `TestWaitSyncedGivesUpOnARPCThatNeverComesUp`,
+  `TestWaitSyncedDoesNotWaitOutTheTimeoutForANodeThatStopsAnswering`,
+  `TestDeployWaitUntilSynced`), the age limit on a snapshot whose manifest lies
+  about when it was made (`TestMaxAgeIsNotDefeatedByAManifestThatLiesAboutWhenItWasMade`),
+  and what the producer refuses to publish
+  (`TestMakeSnapshotRefusesToPublishAManifestNoNewNodeCanAccept`).
 
 Not tested here, and the exact commands to run on Linux:
 
@@ -647,6 +715,11 @@ Not tested here, and the exact commands to run on Linux:
   `go test ./cmd/nhb-snapshot -count=1` on Linux runs them.
 - The producer on ext4 or xfs (hard links were exercised on NTFS):
   `bash scripts/make-snapshot.sh --data-dir DIR --out-dir OUT` against a running node.
+- git's refusal of a checkout that another user owns (`detected dubious ownership`,
+  Linux only): as root against `/opt/nhbchain` after the installer gave it to the
+  service user, `make-snapshot.sh` must stop with git's message and ask for
+  `--binary-commit`, not publish `commit=unknown`. The tests cover the same path
+  with a checkout git cannot read for another reason (`git could not read`).
 - A snapshot of the live chain (334 MB, 214,000 blocks). The live chain's own
   snapshot RPCs and replay were not touched.
 - Two things were not proven against the live network and rest on the
@@ -665,7 +738,7 @@ nhb-snapshot verify       --manifest FILE --archive FILE --chain-id N --genesis-
 nhb-snapshot extract      --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX [--reject-validator ADDR] [--max-bytes N] [--tip-hash HEX] [--state-root HEX]
 nhb-snapshot manifest show --manifest FILE [--field NAME]
 nhb-snapshot check-config --config FILE --genesis FILE
-nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--stall-timeout D]
+nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--rpc-timeout D] [--stall-timeout D]
 ```
 
 `--chain-id` and `--genesis-hash` may come from `NHB_SNAPSHOT_CHAIN_ID` and
@@ -675,9 +748,12 @@ open cannot be read (its lock is taken), which is why a snapshot is made from a 
 `wait-synced` exits 0 when the node is at the tip (see step 7 above: it has a peer;
 with `--min-height` it has applied a block above that height; with `--tip-rpc` it is
 within `--max-lag-blocks`, at most 15, of that node and holds the same newest
-blocks), 3 on timeout, 4 when the node stopped advancing, 5 when the node or the
-reference RPC is on another chain, and 6 when the node's blocks differ from the
-reference node's. Without `--tip-rpc` it compares the date of the newest block with
+blocks), 3 on timeout, 4 when the node stopped advancing (or, after its RPC
+answered, answers nothing for `--stall-timeout`), 5 when the node or the reference
+RPC is on another chain, 6 when the node's blocks differ from the reference node's,
+and 7 when the node's RPC never answered within `--rpc-timeout` (default 3
+minutes: a service that is not running, or that crash-loops, so that the wait does
+not run for the whole `--timeout`). Without `--tip-rpc` it compares the date of the newest block with
 this host's clock (`--max-lag-seconds`, default 60, either side), so keep the clock
 synchronised. `verify` and `extract` refuse a manifest announcing more than
 `--max-bytes` uncompressed bytes (default 64 GiB; the script passes its own, lower,

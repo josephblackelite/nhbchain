@@ -16,6 +16,23 @@
 #                                                              a new node fetches (written last)
 # Uploading them anywhere is a separate step that is not part of this script.
 #
+# WHICH NODE BUILD THE SNAPSHOT NAMES. The manifest records the node binary the
+# database was written by (its sha256) and the source commit it was built from.
+# A new node runs every later block with its own build, so scripts/deployvalidator.sh
+# accepts a snapshot only when its own build is that binary or that commit, and
+# tells the operator to check the commit out. A manifest that names no commit is
+# a dead end for every new node, so this script refuses to publish one. On a host
+# laid out by scripts/deployvalidator.sh (the binary in /opt/nhbchain/bin, the
+# checkout in /opt/nhbchain) both are read from there. On any other host (a
+# checkout in a home directory, a binary somewhere else, or a checkout that git
+# will not read for the user running this script, such as one another user owns)
+# pass --node-binary, the path of the binary that is running, and
+# --binary-commit, the full commit id it was built from ("git rev-parse HEAD" in
+# its checkout). That commit has to contain scripts/deployvalidator.sh and
+# cmd/nhb-snapshot as they are now, or a new node that checks it out finds the
+# script that syncs from genesis, which does not work on this network (see
+# docs/validators/snapshot-onboarding.md).
+#
 # HOW THE COPY IS MADE. The chain database is a LevelDB directory. Its table
 # files (*.ldb) are immutable once written, so they are hard-linked into a
 # private staging directory (copied when a hard link is not possible); the
@@ -56,10 +73,15 @@
 #   --tool PATH            the nhb-snapshot binary (default: bin/nhb-snapshot of
 #                          the install root, then PATH)
 #   --node-binary PATH     the node binary to describe in the manifest
-#                          (default: /opt/nhbchain/bin/nhb)
+#                          (default: /opt/nhbchain/bin/nhb; pass it on a host
+#                          that was not installed by scripts/deployvalidator.sh)
 #   --binary-version TEXT  version of that binary   (default: git describe)
-#   --binary-commit TEXT   source commit of that binary (default: git rev-parse
-#                          of the install root)
+#   --binary-commit TEXT   full source commit id of that binary (default: git
+#                          rev-parse HEAD of the install root, the directory
+#                          above the binary's). Required when that cannot be read.
+#   --allow-unknown-binary publish although the manifest cannot name the commit.
+#                          New nodes refuse such a snapshot unless they pass
+#                          --allow-binary-mismatch. For tests only.
 #   --max-passes N         give up after N passes (default 20)
 #   --no-latest            do not write manifest.json
 #   --keep-work            keep the staging directory
@@ -77,6 +99,7 @@ TOOL=''
 NODE_BINARY='/opt/nhbchain/bin/nhb'
 BINARY_VERSION=''
 BINARY_COMMIT=''
+ALLOW_UNKNOWN_BINARY=0
 MAX_PASSES=20
 WRITE_LATEST=1
 KEEP_WORK=0
@@ -96,6 +119,7 @@ while [[ $# -gt 0 ]]; do
     --node-binary) NODE_BINARY="${2:-}"; shift 2 ;;
     --binary-version) BINARY_VERSION="${2:-}"; shift 2 ;;
     --binary-commit) BINARY_COMMIT="${2:-}"; shift 2 ;;
+    --allow-unknown-binary) ALLOW_UNKNOWN_BINARY=1; shift ;;
     --max-passes) MAX_PASSES="${2:-}"; shift 2 ;;
     --no-latest) WRITE_LATEST=0; shift ;;
     --keep-work) KEEP_WORK=1; shift ;;
@@ -266,10 +290,18 @@ one_pass() {
 # 0. what is being described
 # ---------------------------------------------------------------------------
 INSTALL_ROOT=$(cd "$(dirname "${NODE_BINARY}")/.." 2>/dev/null && pwd || echo '')
+COMMIT_WHY=''
 if [[ -z "${BINARY_COMMIT}" ]]; then
   BINARY_COMMIT=unknown
-  if [[ -n "${INSTALL_ROOT}" ]] && command -v git >/dev/null 2>&1 && git -C "${INSTALL_ROOT}" rev-parse --git-dir >/dev/null 2>&1; then
-    BINARY_COMMIT=$(git -C "${INSTALL_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)
+  if [[ -z "${INSTALL_ROOT}" ]]; then
+    COMMIT_WHY="${NODE_BINARY} is not in a directory that exists, so there is no checkout to read the commit from"
+  elif ! command -v git >/dev/null 2>&1; then
+    COMMIT_WHY="git is not installed"
+  elif found=$(git -C "${INSTALL_ROOT}" rev-parse HEAD 2>/dev/null); then
+    BINARY_COMMIT=${found}
+  else
+    # Typically a checkout that another user owns, read as root: git refuses it.
+    COMMIT_WHY="git could not read ${INSTALL_ROOT}: $(git -C "${INSTALL_ROOT}" rev-parse HEAD 2>&1 | head -n 1 || true)"
   fi
 fi
 if [[ -z "${BINARY_VERSION}" ]]; then
@@ -301,6 +333,21 @@ log "output:          ${OUT_DIR}"
 log "staging:         ${STAGE}"
 log "tool:            ${TOOL}"
 log "binary:          version=${BINARY_VERSION} commit=${BINARY_COMMIT} sha256=${BINARY_SHA256:-unknown}"
+
+# A manifest that does not name the commit is one no new node can accept:
+# deployvalidator.sh needs it to know what to build and check out. It is never
+# published unless the operator says so, and that is decided here, before the
+# long copy.
+if [[ ! "${BINARY_COMMIT}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+  if [[ -z "${COMMIT_WHY}" ]]; then
+    COMMIT_WHY="--binary-commit '${BINARY_COMMIT}' is not a full commit id (40 lower-case hex digits, as git rev-parse HEAD prints)"
+  fi
+  warn "the source commit of the node binary is not known: ${COMMIT_WHY}"
+  if [[ "${ALLOW_UNKNOWN_BINARY}" != "1" ]]; then
+    die "a snapshot that does not name the commit its node was built from is a dead end for every new node: pass --binary-commit with the full commit id (git rev-parse HEAD in the checkout the binary was built from), and --node-binary when the binary is not ${NODE_BINARY}; --allow-unknown-binary publishes it anyway"
+  fi
+  warn "publishing it because --allow-unknown-binary was given: a new node can use this snapshot only with --allow-binary-mismatch"
+fi
 
 # Space check: tables are hard-linked when the staging directory allows it.
 avail_kb=$(df -Pk "${WORK_DIR}" 2>/dev/null | awk 'NR==2 {print $4}' || true)

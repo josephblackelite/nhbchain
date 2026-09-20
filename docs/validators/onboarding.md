@@ -67,7 +67,11 @@ verifies, how snapshots are made and how old one may be is in
 You need two things from whoever operates the network, neither of which is built
 into the script: the location of a snapshot (`--snapshot-url`) and a bootnode
 (`--bootnode`). Check out the source commit the snapshot's manifest names, then
-run:
+run. (The script you run is the one in that commit, so the commit has to contain
+this procedure, `scripts/deployvalidator.sh` as described here and
+`cmd/nhb-snapshot`: a snapshot made by a validator that still runs an earlier
+build names a commit whose script syncs from genesis, which does not work on this
+network. See [What you need](snapshot-onboarding.md#what-you-need).)
 
 ```bash
 bash scripts/validator-only-bootstrap.sh \
@@ -102,7 +106,8 @@ validator; a snapshot that does not check out changes nothing.
 | `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust. Used to decide when the node has caught up, and to refuse a node whose newest blocks are not that node's. |
 | `--max-lag-blocks` | `3` | How far from that node (either side) still counts as caught up; at most 15. |
 | `--sync-timeout` | `7200` | Seconds to wait for the catch-up. |
-| `--max-snapshot-age` | *(any age)* | Refuse a snapshot created longer ago than this, for example `48h`. |
+| `--rpc-timeout` | `180` | Seconds the node's RPC may stay silent after the service starts. A node that never answers is not running or is crash-looping: the script stops after this long with the commands that show why, and does not wait out `--sync-timeout`. |
+| `--max-snapshot-age` | *(any age)* | Refuse a snapshot whose newest block is older than this, for example `48h`. The limit rests on the date of the newest block, which is checked against the unpacked database; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. |
 | `--tip-hash`, `--state-root` | *(none)* | The tip hash and state root the snapshot must have (32 bytes of hex), as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
 | `--max-snapshot-gib` | `16` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
@@ -161,14 +166,15 @@ many colons in address`. The script refuses it.
 10. Writes `/etc/nhbchain/node.env` (mode `600`, owned `root:root`; the RPC secret
     of an earlier run is kept), installs `deploy/systemd/nhb.service`, and starts
     or restarts it.
-11. Waits for the node's RPC, checks it reports the pinned chain id and genesis
-    hash, and waits until it is at the network tip: connected to a peer, past the
-    snapshot's height (when this run installed one) and, with `--tip-rpc`, within
-    `--max-lag-blocks` of that node and holding the same newest blocks as it. It
-    **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
-    node never comes up, stops making progress, or is on another chain. (Health
-    checks of the RPC must be a **POST**: a bare `GET` always returns 400 even on
-    a healthy node.)
+11. Waits for the node's RPC (at most `--rpc-timeout`, 180 seconds), checks it
+    reports the pinned chain id and genesis hash, and waits until it is at the
+    network tip: connected to a peer, past the snapshot's height (when this run
+    installed one) and, with `--tip-rpc`, within `--max-lag-blocks` of that node
+    and holding the same newest blocks as it. It **hard-fails** with diagnostics
+    (`systemctl status`, `journalctl`) if the node's RPC never comes up within
+    that time (the service is not running or is crash-looping), stops making
+    progress, or is on another chain. (Health checks of the RPC must be a
+    **POST**: a bare `GET` always returns 400 even on a healthy node.)
 12. Only then runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` and
     `nhb-cli register-validator 0 <validator.key>` as the `nhb` user. If a step
     fails, the script stops with the exact retry commands.
@@ -358,10 +364,13 @@ signal to update.
 
 **Cause:** an old version of the script assumed success once the service
 unit started, without verifying it.
-**Fix:** the current script polls real RPC health via a POST to
-`nhb_getNetworkStats` and hard-fails with diagnostics on timeout, instead of
-assuming success. If you see the old banner-only behavior on an old
-checkout, don't trust it — check `systemctl status` yourself.
+**Fix:** the current script waits for the node's RPC to answer (a POST of
+`net_info`, which also confirms the chain) for at most 3 minutes (`--rpc-timeout`)
+and, if it never does, stops with `the node's RPC did not come up within 180
+seconds: nhb.service is not running, or it is crash-looping` and the commands that
+show why, instead of assuming success or waiting out the sync timeout. If you see
+the old banner-only behavior on an old checkout, don't trust it: check
+`systemctl status` yourself.
 
 ## Common confusions
 

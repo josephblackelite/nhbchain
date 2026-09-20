@@ -26,6 +26,32 @@ bash scripts/make-snapshot.sh \
   --out-dir /var/lib/nhbchain/snapshots
 ```
 
+That command is for a host that `scripts/deployvalidator.sh` installed: the script
+reads the node binary from `/opt/nhbchain/bin/nhb` and the commit it was built from
+out of the checkout in `/opt/nhbchain`. **On a host that was not installed by
+`scripts/deployvalidator.sh`** it can find neither, and it stops before copying
+anything: a manifest that does not name the commit its node was built from is one
+no new node can use (`deployvalidator.sh` needs the commit to know what to check
+out). Pass the binary that is running and the full commit id it was built from:
+
+```bash
+bash scripts/make-snapshot.sh \
+  --data-dir /path/to/nhb-data --out-dir /path/to/snapshots \
+  --node-binary /path/to/nhbchain/bin/nhb \
+  --binary-commit "$(git -C /path/to/nhbchain rev-parse HEAD)"
+```
+
+The same is needed as root against a checkout the service user owns: git refuses to
+read it, so pass `--binary-commit` (or run the script as the service user).
+`--allow-unknown-binary` publishes a manifest without the commit anyway, for tests
+only; a new node then refuses it unless it passes `--allow-binary-mismatch`.
+
+The commit has to contain this procedure (`scripts/deployvalidator.sh` as
+described in the onboarding page, and `cmd/nhb-snapshot`), because a new node
+checks it out and runs the script from it. Snapshots made by a validator that still
+runs an earlier build name a commit whose script syncs from genesis, which does not
+work on this network: upgrade the validators that make snapshots first.
+
 It copies the database consistently while the node runs (immutable table files
 by hard link or copy, the MANIFEST and journal last, repeated until two passes
 agree), opens the copy read-only and refuses to go on if it does not open, packs
@@ -53,7 +79,10 @@ Publish a new snapshot regularly and delete old ones: a new node starts from the
 newest, and a follower can only close so large a gap in reasonable time (measured
 figures are in the onboarding page). A daily snapshot is a sensible default; the
 schedule and retention are yours to set. Take snapshots from a node you trust and
-that is at the tip.
+that is at the tip. New nodes are told to refuse a snapshot older than a limit
+(`--max-snapshot-age`); it is judged on the date of the snapshot's newest block,
+so a snapshot taken from a node that lagged is as stale as its tip, whatever
+creation time the manifest states.
 
 ## Distribution
 
