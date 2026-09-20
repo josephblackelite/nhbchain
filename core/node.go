@@ -5378,6 +5378,66 @@ func (n *Node) LoyaltyBusinessesByOwner(owner [20]byte) ([]loyalty.BusinessID, e
 	return n.state.LoyaltyBusinessesByOwner(owner)
 }
 
+// LoyaltyBudgetStatus is the loyalty engine's base-reward budget for the current
+// UTC day, as the engine itself works it out when it settles a block's rewards.
+type LoyaltyBudgetStatus struct {
+	// Day is the UTC day the figures are for, formatted YYYYMMDD.
+	Day string
+	// BudgetRemainingZNHB is what the engine could still pay out today, in wei.
+	BudgetRemainingZNHB *big.Int
+	// PaidTodayZNHB and ProposedTodayZNHB are the running totals the engine keeps
+	// for the day: what it has paid and what the rewards it settled asked for.
+	PaidTodayZNHB     *big.Int
+	ProposedTodayZNHB *big.Int
+	// ResetAt is when the day rolls over and the budget starts again.
+	ResetAt time.Time
+	// GuardFallback names the fallback the price guard has the budget computed
+	// with ("last_good_price" or "min_emission"), or is empty when it is not
+	// using one.
+	GuardFallback string
+}
+
+// LoyaltyBudgetStatus reads the loyalty engine's budget for the current UTC day.
+// It runs against a disposable view of the state (see WithStateView) and only
+// reads: the budget is worked out by the same function the block executor calls
+// (Manager.GetRemainingDailyBudgetZNHB), and a zero amount asks the day totals
+// for their current value without adding to them.
+func (n *Node) LoyaltyBudgetStatus() (*LoyaltyBudgetStatus, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	now := n.currentTime()
+	status := &LoyaltyBudgetStatus{}
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
+		remaining, fallback, err := m.GetRemainingDailyBudgetZNHB(now)
+		if err != nil {
+			return err
+		}
+		paid, err := m.AddPaidTodayZNHB(now, nil)
+		if err != nil {
+			return err
+		}
+		proposed, err := m.AddProposedTodayZNHB(now, nil)
+		if err != nil {
+			return err
+		}
+		status.BudgetRemainingZNHB = remaining
+		status.PaidTodayZNHB = paid
+		status.ProposedTodayZNHB = proposed
+		if fallback != nil {
+			status.GuardFallback = fallback.Strategy
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	day := now.UTC()
+	status.Day = day.Format("20060102")
+	status.ResetAt = time.Date(day.Year(), day.Month(), day.Day()+1, 0, 0, 0, 0, time.UTC)
+	return status, nil
+}
+
 // SubscriptionsManager returns a fresh state.Manager over the node's
 // current trie -- every accessor below constructs one per call, matching
 // LoyaltyManager's convention (cheap: two pointers + an interface).
