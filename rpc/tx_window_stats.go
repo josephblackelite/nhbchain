@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,6 +27,11 @@ const txWindowStatsMaxBlocksScanned = 2_000_000
 // underlying answer plainly hasn't changed enough to matter at day-level
 // granularity.
 const txWindowStatsCacheTTL = 45 * time.Second
+
+// txWindowStatsCacheMaxEntries bounds the result cache. Its key is the
+// caller's lookbackSeconds, which is any positive number, so without a bound a
+// client could grow it without limit by asking for a new value each time.
+const txWindowStatsCacheMaxEntries = 32
 
 type txWindowStatsParams struct {
 	LookbackSeconds int64 `json:"lookbackSeconds"`
@@ -56,7 +62,7 @@ type txWindowStatsCacheEntry struct {
 	result     *txWindowStatsResult
 }
 
-func (s *Server) handleTxWindowStats(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleTxWindowStats(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "txWindowStats requires a parameter object", nil)
 		return
@@ -71,15 +77,18 @@ func (s *Server) handleTxWindowStats(w http.ResponseWriter, _ *http.Request, req
 		return
 	}
 
-	result, err := s.cachedTxWindowStats(params.LookbackSeconds)
+	result, err := s.cachedTxWindowStats(r.Context(), params.LookbackSeconds)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to compute transaction window stats", err.Error())
 		return
 	}
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) cachedTxWindowStats(lookbackSeconds int64) (*txWindowStatsResult, error) {
+func (s *Server) cachedTxWindowStats(ctx context.Context, lookbackSeconds int64) (*txWindowStatsResult, error) {
 	s.txWindowStatsMu.Lock()
 	if entry, ok := s.txWindowStatsCache[lookbackSeconds]; ok && time.Since(entry.computedAt) < txWindowStatsCacheTTL {
 		s.txWindowStatsMu.Unlock()
@@ -87,7 +96,7 @@ func (s *Server) cachedTxWindowStats(lookbackSeconds int64) (*txWindowStatsResul
 	}
 	s.txWindowStatsMu.Unlock()
 
-	result, err := s.computeTxWindowStats(lookbackSeconds)
+	result, err := s.computeTxWindowStats(ctx, lookbackSeconds)
 	if err != nil {
 		return nil, err
 	}
@@ -96,10 +105,33 @@ func (s *Server) cachedTxWindowStats(lookbackSeconds int64) (*txWindowStatsResul
 	if s.txWindowStatsCache == nil {
 		s.txWindowStatsCache = make(map[int64]*txWindowStatsCacheEntry)
 	}
+	if _, kept := s.txWindowStatsCache[lookbackSeconds]; !kept && len(s.txWindowStatsCache) >= txWindowStatsCacheMaxEntries {
+		s.evictTxWindowStatsLocked(time.Now())
+	}
 	s.txWindowStatsCache[lookbackSeconds] = &txWindowStatsCacheEntry{computedAt: time.Now(), result: result}
 	s.txWindowStatsMu.Unlock()
 
 	return result, nil
+}
+
+// evictTxWindowStatsLocked makes room in the result cache: it drops the entries
+// that are past their time to live and, if that is not enough, the oldest one.
+func (s *Server) evictTxWindowStatsLocked(now time.Time) {
+	var oldestKey int64
+	var oldest time.Time
+	first := true
+	for key, entry := range s.txWindowStatsCache {
+		if now.Sub(entry.computedAt) >= txWindowStatsCacheTTL {
+			delete(s.txWindowStatsCache, key)
+			continue
+		}
+		if first || entry.computedAt.Before(oldest) {
+			oldestKey, oldest, first = key, entry.computedAt, false
+		}
+	}
+	if len(s.txWindowStatsCache) >= txWindowStatsCacheMaxEntries && !first {
+		delete(s.txWindowStatsCache, oldestKey)
+	}
 }
 
 // computeTxWindowStats scans backward from the chain tip, bucketing every
@@ -108,13 +140,18 @@ func (s *Server) cachedTxWindowStats(lookbackSeconds int64) (*txWindowStatsResul
 // timestamp as height decreases, so a single backward pass suffices and the
 // scan can stop as soon as a block older than the previous window's start is
 // seen (or genesis is reached).
-func (s *Server) computeTxWindowStats(lookbackSeconds int64) (*txWindowStatsResult, error) {
+func (s *Server) computeTxWindowStats(ctx context.Context, lookbackSeconds int64) (*txWindowStatsResult, error) {
+	return s.computeTxWindowStatsAt(ctx, lookbackSeconds, time.Now().UTC().Unix())
+}
+
+// computeTxWindowStatsAt is computeTxWindowStats for a given "now" (unix
+// seconds), which lets a test pin the two windows down.
+func (s *Server) computeTxWindowStatsAt(ctx context.Context, lookbackSeconds, now int64) (*txWindowStatsResult, error) {
 	if s == nil || s.node == nil || s.node.Chain() == nil {
 		return nil, fmt.Errorf("node unavailable")
 	}
 	chain := s.node.Chain()
 	latestHeight := chain.GetHeight()
-	now := time.Now().UTC().Unix()
 	latestCutoff := now - lookbackSeconds
 	previousCutoff := now - 2*lookbackSeconds
 
@@ -138,14 +175,20 @@ func (s *Server) computeTxWindowStats(lookbackSeconds int64) (*txWindowStatsResu
 	)
 
 	for height > 0 && scanned < txWindowStatsMaxBlocksScanned {
-		block, err := chain.GetBlockByHeight(height)
+		// Only the timestamp and the transaction count of each block are used, and
+		// those are what a block summary holds, so a block is read at most once
+		// however many windows are asked about (see block_summary.go).
+		sum, err := s.summaryAt(ctx, chain, height)
+		if err != nil {
+			return nil, err
+		}
 		scanned++
 		result.OldestHeightScanned = height
 
 		reachedGenesis := height == 1
-		if err == nil && block != nil && block.Header != nil {
-			ts := block.Header.Timestamp
-			txCount := len(block.Transactions)
+		if sum.readable() {
+			ts := sum.timestamp
+			txCount := int(sum.txCount)
 			switch {
 			case ts >= latestCutoff:
 				result.LatestCount += txCount

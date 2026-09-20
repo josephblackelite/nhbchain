@@ -605,6 +605,12 @@ func main() {
 		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
 		WebSocketMaxConnections:  cfg.RPCWebSocketMaxConnections,
 		WebSocketMaxPerIP:        cfg.RPCWebSocketMaxPerIP,
+		QueryMaxConcurrent:       cfg.RPCQueryMaxConcurrent,
+		QueryMaxPerClient:        cfg.RPCQueryMaxPerClient,
+		QueryQueueDepth:          cfg.RPCQueryQueueDepth,
+		QueryQueueWait:           time.Duration(cfg.RPCQueryQueueWaitMS) * time.Millisecond,
+		QueryTimeout:             time.Duration(cfg.RPCQueryTimeoutSeconds) * time.Second,
+		DisableExplorerLoop:      cfg.RPCDisableExplorerLoop,
 		SwapAuth:                 swapAuthCfg,
 	})
 	if err != nil {

@@ -20,6 +20,9 @@ import (
 
 type LendingModule struct {
 	node *core.Node
+	// replayHeights remembers which blocks hold a committed lending
+	// transaction (see lending_replay_index.go).
+	replayHeights lendingHeightIndex
 }
 
 func NewLendingModule(node *core.Node) *LendingModule {
@@ -58,6 +61,7 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 		id = defaultLendingPoolID
 	}
 	params := m.node.LendingRiskParameters()
+	m.warmReplayIndex()
 	var market *lending.Market
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetMarket(id)
@@ -122,6 +126,7 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 		return nil, lending.RiskParameters{}, m.moduleUnavailable()
 	}
 	params := m.node.LendingRiskParameters()
+	m.warmReplayIndex()
 	var markets []*lending.Market
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		list, err := manager.LendingListMarkets()
@@ -289,6 +294,7 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 		id = defaultLendingPoolID
 	}
 	var account *lending.UserAccount
+	m.warmReplayIndex()
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetUserAccount(id, addr)
 		if err != nil {
@@ -457,7 +463,10 @@ func (m *LendingModule) replayCommittedPoolState(poolID string) (*lending.Market
 	users := make(map[[20]byte]*lending.UserAccount)
 	var sawLendingTx bool
 	height := m.node.GetHeight()
-	for blockHeight := uint64(1); blockHeight <= height; blockHeight++ {
+	// Only blocks that hold a committed lending transaction change anything here,
+	// so only those are visited, in the same ascending order as a walk over every
+	// height would reach them.
+	for _, blockHeight := range m.replayHeights.through(m.node, height) {
 		block, err := m.node.GetBlockByHeight(blockHeight)
 		if err != nil || block == nil {
 			continue

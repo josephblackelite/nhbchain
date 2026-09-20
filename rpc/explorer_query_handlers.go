@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,7 +23,6 @@ import (
 const (
 	explorerDefaultRecentBlocks        = 120
 	explorerMaxRecentBlocks            = 400
-	explorerHistoricalBackfillLimit    = 50000
 	explorerDefaultLatestBlockCount    = 15
 	explorerDefaultLatestTxCount       = 20
 	// explorerActiveAddressLimit bounds both how many distinct addresses
@@ -45,6 +45,12 @@ const (
 	explorerZNHBFixedSupply            = "1000000000"
 )
 
+// explorerHistoricalBackfillLimit bounds how many blocks below the tip the
+// explorer scans (address history, the snapshot's look-back, a transaction
+// lookup that the index cannot answer) will read. A var, not a const, so tests
+// can shrink it to exercise the boundary without a chain of 50,000 blocks.
+var explorerHistoricalBackfillLimit = 50000
+
 type explorerAddressStats struct {
 	address       string
 	label         string
@@ -63,7 +69,7 @@ type explorerMerchantStats struct {
 	volume   *big.Int
 }
 
-func (s *Server) handleGetExplorerSnapshot(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetExplorerSnapshot(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	recentBlocks := explorerDefaultRecentBlocks
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params[0], &recentBlocks); err != nil {
@@ -77,19 +83,18 @@ func (s *Server) handleGetExplorerSnapshot(w http.ResponseWriter, _ *http.Reques
 		recentBlocks = explorerMaxRecentBlocks
 	}
 
-	snapshot := s.cachedExplorerSnapshot(recentBlocks)
-	var err error
-	if snapshot == nil {
-		snapshot, err = s.buildExplorerSnapshot(recentBlocks)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to build explorer snapshot", err.Error())
+	snapshot, err := s.explorerSnapshotFor(r.Context(), recentBlocks)
+	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
 			return
 		}
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to build explorer snapshot", err.Error())
+		return
 	}
 	writeResult(w, req.ID, snapshot)
 }
 
-func (s *Server) handleGetTransactionHistory(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetTransactionHistory(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "address parameter required", nil)
 		return
@@ -112,8 +117,11 @@ func (s *Server) handleGetTransactionHistory(w http.ResponseWriter, _ *http.Requ
 		limit = explorerMaxAddressHistoryLimit
 	}
 
-	result, err := s.buildAddressActivity(address, limit)
+	result, err := s.buildAddressActivity(r.Context(), address, limit)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to resolve address history", err.Error())
 		return
 	}
@@ -123,7 +131,7 @@ func (s *Server) handleGetTransactionHistory(w http.ResponseWriter, _ *http.Requ
 	})
 }
 
-func (s *Server) handleGetAddressActivity(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetAddressActivity(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "address parameter required", nil)
 		return
@@ -146,15 +154,18 @@ func (s *Server) handleGetAddressActivity(w http.ResponseWriter, _ *http.Request
 		limit = explorerMaxAddressHistoryLimit
 	}
 
-	result, err := s.buildAddressActivity(address, limit)
+	result, err := s.buildAddressActivity(r.Context(), address, limit)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "failed to resolve address activity", err.Error())
 		return
 	}
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handleSearchExplorer(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleSearchExplorer(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) == 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "query parameter required", nil)
 		return
@@ -170,15 +181,18 @@ func (s *Server) handleSearchExplorer(w http.ResponseWriter, _ *http.Request, re
 		return
 	}
 
-	result, err := s.searchExplorer(query)
+	result, err := s.searchExplorer(r.Context(), query)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to search explorer", err.Error())
 		return
 	}
 	writeResultAllowNil(w, req.ID, result)
 }
 
-func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResult, error) {
+func (s *Server) buildExplorerSnapshot(ctx context.Context, recentBlocks int) (*ExplorerSnapshotResult, error) {
 	if s == nil || s.node == nil || s.node.Chain() == nil {
 		return nil, fmt.Errorf("node unavailable")
 	}
@@ -192,26 +206,30 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 		currentEpoch = latestHeight / cfg.Length
 	}
 
-	recent := make([]*types.Block, 0, recentBlocks)
+	// The blocks of the window, oldest first, as digests: a block already seen is
+	// not read again (see snapshot_digest.go). The chain height is read first so
+	// that the tip, the one block that may still be rewritten, is never kept.
+	recent := make([]*blockDigest, 0, recentBlocks)
 	for i := 0; i < recentBlocks && uint64(i) <= latestHeight; i++ {
-		height := latestHeight - uint64(i)
-		block, err := chain.GetBlockByHeight(height)
-		if err != nil || block == nil || block.Header == nil {
+		d, err := s.digestAt(ctx, chain, latestHeight-uint64(i), latestHeight)
+		if err != nil {
+			return nil, err
+		}
+		if d == nil {
 			continue
 		}
-		recent = append(recent, block)
+		recent = append(recent, d)
 	}
-	sort.Slice(recent, func(i, j int) bool {
-		return recent[i].Header.Height < recent[j].Header.Height
-	})
+	for i, j := 0, len(recent)-1; i < j; i, j = i+1, j-1 {
+		recent[i], recent[j] = recent[j], recent[i]
+	}
 
 	latestBlocks := make([]ExplorerBlockResult, 0, minInt(explorerDefaultLatestBlockCount, len(recent)))
 	for i := len(recent) - 1; i >= 0 && len(latestBlocks) < explorerDefaultLatestBlockCount; i-- {
-		summary, err := buildExplorerBlockResult(recent[i])
-		if err != nil {
+		if recent[i].block == nil {
 			continue
 		}
-		latestBlocks = append(latestBlocks, *summary)
+		latestBlocks = append(latestBlocks, *recent[i].block)
 	}
 
 	latestTransactions := make([]ExplorerTransactionResult, 0, explorerDefaultLatestTxCount*4)
@@ -221,74 +239,59 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 	paymentsHistory := make([]ExplorerSeriesPoint, 0, explorerSeriesPointLimit)
 	rewardsHistory := make([]ExplorerSeriesPoint, 0, explorerSeriesPointLimit)
 
-	collectBlock := func(block *types.Block, blockTps float64, includeSeries bool) {
-		if block == nil || block.Header == nil {
-			return
-		}
-		blockHash, _ := block.Header.Hash()
-		blockRewardFlow := big.NewInt(0)
-		blockPaymentCount := 0
-
-		for _, tx := range block.Transactions {
-			txHashBytes, hashErr := tx.Hash()
-			if hashErr != nil {
-				continue
+	collectBlock := func(d *blockDigest, blockTps float64, includeSeries bool) {
+		for i := range d.txs {
+			t := &d.txs[i]
+			if t.userFacing {
+				latestTransactions = append(latestTransactions, t.record)
+				s.recordAddressActivity(addressStats, &t.record)
 			}
-			record, err := buildExplorerTransactionResult(tx, ensureHexPrefix(hex.EncodeToString(txHashBytes)), blockHash, block.Header.Height, block.Header.Timestamp)
-			if err != nil {
-				continue
-			}
-			if isExplorerUserFacingType(tx.Type) {
-				latestTransactions = append(latestTransactions, *record)
-				s.recordAddressActivity(addressStats, record)
-			}
-			s.recordMerchantActivity(merchantStats, record)
-			if isPaymentLikeType(tx.Type) {
-				blockPaymentCount++
-			}
-			if strings.EqualFold(record.Asset, "ZNHB") {
-				if amountWei, ok := new(big.Int).SetString(record.Amount, 10); ok {
-					blockRewardFlow.Add(blockRewardFlow, amountWei)
-				}
-			}
+			s.recordMerchantActivity(merchantStats, &t.record)
 		}
 
 		if includeSeries {
-			timestamp := time.Unix(block.Header.Timestamp, 0).UTC().Format(time.RFC3339)
+			timestamp := time.Unix(d.timestamp, 0).UTC().Format(time.RFC3339)
 			throughputHistory = append(throughputHistory, ExplorerSeriesPoint{Timestamp: timestamp, Value: roundTo(blockTps, 2)})
-			paymentsHistory = append(paymentsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Payments: blockPaymentCount})
-			rewardsHistory = append(rewardsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Rewards: decimalAsFloat(blockRewardFlow, explorerTokenDecimals)})
+			paymentsHistory = append(paymentsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Payments: d.payments})
+			rewardsHistory = append(rewardsHistory, ExplorerSeriesPoint{Timestamp: timestamp, Rewards: decimalAsFloat(d.rewardFlow, explorerTokenDecimals)})
 		}
 	}
 
-	for idx, block := range recent {
+	for idx, d := range recent {
 		var blockTps float64
-		if idx > 0 && recent[idx-1] != nil && recent[idx-1].Header != nil {
-			delta := block.Header.Timestamp - recent[idx-1].Header.Timestamp
+		if idx > 0 {
+			delta := d.timestamp - recent[idx-1].timestamp
 			if delta > 0 {
-				blockTps = float64(len(block.Transactions)) / float64(delta)
+				blockTps = float64(d.txCount) / float64(delta)
 			} else {
-				blockTps = float64(len(block.Transactions))
+				blockTps = float64(d.txCount)
 			}
 		} else {
-			blockTps = float64(len(block.Transactions))
+			blockTps = float64(d.txCount)
 		}
-		collectBlock(block, blockTps, true)
+		collectBlock(d, blockTps, true)
 	}
 
 	if len(latestTransactions) < explorerDefaultLatestTxCount || len(addressStats) < explorerActiveAddressLimit {
 		var oldestHeight uint64
-		if len(recent) > 0 && recent[0] != nil && recent[0].Header != nil {
-			oldestHeight = recent[0].Header.Height
+		if len(recent) > 0 {
+			oldestHeight = recent[0].height
 		}
 		backfillScanned := 0
 		for height := oldestHeight; height > 0 && backfillScanned < explorerHistoricalBackfillLimit; height-- {
-			block, err := chain.GetBlockByHeight(height - 1)
-			if err != nil || block == nil || block.Header == nil {
+			// Only a block with a user-facing transaction has anything for the
+			// stats below (collectBlock leaves the rest alone), so only those are
+			// visited, from their summary and then from their digest: the blocks of
+			// the look-back that an earlier rebuild went through cost nothing.
+			d, err := s.userFacingDigestAt(ctx, chain, height-1, latestHeight)
+			if err != nil {
+				return nil, err
+			}
+			if d == nil {
 				backfillScanned++
 				continue
 			}
-			collectBlock(block, 0, false)
+			collectBlock(d, 0, false)
 			backfillScanned++
 			if len(latestTransactions) >= explorerDefaultLatestTxCount && len(addressStats) >= explorerActiveAddressLimit {
 				break
@@ -309,6 +312,10 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 	activeAddresses := s.materializeActiveAddresses(addressStats)
 	topMerchants := s.materializeTopMerchants(merchantStats)
 	allTimePayments, allTimeZNHBFlow, activityComplete := s.currentExplorerActivityTotals()
+	currentTps, err := s.recentTPS(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	return &ExplorerSnapshotResult{
 		UpdatedAt:             now.Format(time.RFC3339),
@@ -317,7 +324,7 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 		CurrentEpoch:          currentEpoch,
 		CurrentTime:           now.Unix(),
 		MempoolSize:           s.node.MempoolSize(),
-		CurrentTps:            roundTo(estimateRecentTPS(s.node), 2),
+		CurrentTps:            roundTo(currentTps, 2),
 		AverageTps24h:         averageSeriesValue(throughputHistory),
 		TotalPayments:         allTimePayments,
 		TotalZNHBFlow:         roundTo(decimalAsFloat(allTimeZNHBFlow, explorerTokenDecimals), 6),
@@ -333,7 +340,7 @@ func (s *Server) buildExplorerSnapshot(recentBlocks int) (*ExplorerSnapshotResul
 	}, nil
 }
 
-func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddressResult, error) {
+func (s *Server) buildAddressActivity(ctx context.Context, address string, limit int) (*ExplorerAddressResult, error) {
 	if s == nil || s.node == nil || s.node.Chain() == nil {
 		return nil, fmt.Errorf("node unavailable")
 	}
@@ -387,9 +394,16 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 	// is every caller hanging indefinitely on every request.
 	scanned := 0
 	for height := latestHeight; scanned < explorerHistoricalBackfillLimit; height-- {
-		block, err := chain.GetBlockByHeight(height)
+		// Only a block with a user-facing transaction can hold anything for this
+		// address, so only those are read (from their summary, see
+		// block_summary.go); it takes the scan from decoding 50,000 blocks to
+		// reading the handful that have one.
+		block, err := s.userFacingBlockAt(ctx, chain, height)
+		if err != nil {
+			return nil, err
+		}
 		scanned++
-		if err == nil && block != nil && block.Header != nil {
+		if block != nil && block.Header != nil {
 			blockHash, _ := block.Header.Hash()
 			for _, tx := range block.Transactions {
 				if !isExplorerUserFacingType(tx.Type) {
@@ -500,7 +514,7 @@ func (s *Server) buildAddressActivity(address string, limit int) (*ExplorerAddre
 	}, nil
 }
 
-func (s *Server) searchExplorer(query string) (*ExplorerSearchResult, error) {
+func (s *Server) searchExplorer(ctx context.Context, query string) (*ExplorerSearchResult, error) {
 	if s == nil || s.node == nil || s.node.Chain() == nil {
 		return nil, fmt.Errorf("node unavailable")
 	}
@@ -519,7 +533,7 @@ func (s *Server) searchExplorer(query string) (*ExplorerSearchResult, error) {
 		}
 	}
 	if addr, err := crypto.DecodeAddress(trimmed); err == nil {
-		activity, buildErr := s.buildAddressActivity(addr.String(), explorerDefaultAddressHistoryLimit)
+		activity, buildErr := s.buildAddressActivity(ctx, addr.String(), explorerDefaultAddressHistoryLimit)
 		if buildErr != nil {
 			return nil, buildErr
 		}
@@ -527,7 +541,7 @@ func (s *Server) searchExplorer(query string) (*ExplorerSearchResult, error) {
 	}
 	normalized := strings.ToLower(strings.TrimPrefix(trimmed, "0x"))
 	if len(normalized) == 64 {
-		tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(trimmed)
+		tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(ctx, trimmed)
 		if err != nil {
 			return nil, err
 		}
@@ -820,12 +834,15 @@ func (s *Server) recordMerchantActivity(stats map[string]*explorerMerchantStats,
 
 func (s *Server) materializeActiveAddresses(stats map[string]*explorerAddressStats) []ExplorerActiveAddressResult {
 	addresses := make([]*explorerAddressStats, 0, len(stats))
+	// One copy of the validator set for the whole page, not one (taken under the
+	// node's exclusive lock) per address.
+	validators := s.node.GetValidatorSet()
 	for _, entry := range stats {
 		if addr, err := crypto.DecodeAddress(entry.address); err == nil {
 			if account, accountErr := s.node.GetAccount(addr.Bytes()); accountErr == nil && account != nil {
 				entry.balanceNHB = formatDecimalAmount(account.BalanceNHB, explorerTokenDecimals)
 				entry.balanceZNHB = formatDecimalAmount(account.BalanceZNHB, explorerTokenDecimals)
-				entry.segment = explorerSegmentForAccount(account, s.node.GetValidatorSet(), entry.address)
+				entry.segment = explorerSegmentForAccount(account, validators, entry.address)
 				if username := strings.TrimSpace(account.Username); username != "" {
 					entry.label = username
 				}
