@@ -199,8 +199,9 @@ const (
 	RejectReasonUnknownHeight    RejectReason = "unknown_height"
 	// NHB-AUDIT-C10: Details failed to decode as an EquivocationProof, or
 	// decoded but didn't cryptographically prove the offender themselves
-	// signed two conflicting votes. Only reachable for TypeEquivocation --
-	// see equivocation.go.
+	// signed two conflicting votes, or proved a decision point the report
+	// does not list among its heights or the chain has not reached. Only
+	// reachable for TypeEquivocation -- see equivocation.go and verify.go.
 	RejectReasonInvalidEquivocationProof RejectReason = "invalid_equivocation_proof"
 	// The payload is larger than the fixed bounds below allow (too many
 	// heights, or Details longer than MaxDetailsBytes). Evidence is stored
@@ -292,6 +293,42 @@ func (r *Record) MinHeight() uint64 {
 		}
 	}
 	return min
+}
+
+// Offense is what a report accuses its offender of, taken apart from how the
+// report happens to be written down. The canonical hash of a report covers
+// everything the reporter chooses -- the heights it lists, the exact bytes of
+// its details, its timestamp -- so several reports with different hashes can
+// accuse an offender of one and the same misconduct. Being recorded once, and
+// being penalised once, are properties of the offense, not of one encoding of it.
+type Offense struct {
+	// Key identifies the offense. Two reports with the same Key accuse the
+	// offender of the same thing, whoever reports it and however it is written,
+	// and the offender answers for it once.
+	Key [32]byte
+	// Height is the height the offense was committed at. A report can only be
+	// submitted while every height it lists is inside the evidence window and it
+	// has to list this one, so this height is what a record's stay in state is
+	// measured from: the record must outlive every report that could still be
+	// submitted about the same offense, or the offense could be reported again.
+	Height uint64
+}
+
+// Offense returns the identity the record is recorded and penalised under and the
+// height its stay in the evidence window is measured from.
+//
+// For an EQUIVOCATION report that is the double-sign its proof is about: the
+// offender and the decision point (height, round, vote type) at which it signed
+// conflicting votes. Any other report has no proof to identify a misdeed by, so
+// it is its own offense: its hash, and the oldest height it references.
+func (r *Record) Offense() Offense {
+	if r == nil {
+		return Offense{}
+	}
+	if offense, ok := r.Evidence.equivocationOffense(); ok {
+		return offense
+	}
+	return Offense{Key: r.Hash, Height: r.MinHeight()}
 }
 
 // ReceiptStatus captures the outcome of an evidence submission.

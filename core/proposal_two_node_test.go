@@ -333,9 +333,12 @@ func TestEquivocationEvidenceBlockIsBuiltValidatedCommittedAndReplayedWithOneSla
 		if err != nil {
 			t.Fatalf("evidence hash: %v", err)
 		}
+		// The record is kept against the offense the report accuses the offender
+		// of, not against the report's own hash.
+		offense := (&evidence.Record{Hash: hash, Evidence: ev}).Offense().Key
 		node.stateMu.Lock()
 		defer node.stateMu.Unlock()
-		applied, err := nhbstate.NewManager(node.state.Trie).PotsoPenaltyApplied(hash, offender)
+		applied, err := nhbstate.NewManager(node.state.Trie).PotsoPenaltyApplied(offense, offender)
 		if err != nil {
 			t.Fatalf("penalty record: %v", err)
 		}

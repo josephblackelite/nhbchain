@@ -3446,10 +3446,12 @@ const (
 //   - ErrEvidenceInvalidPayload, ErrEvidenceReporterMismatch,
 //     ErrEvidenceAlreadyRecorded and every evidence.ValidationError reason
 //     decided by the report alone (expired, invalid type/offender/reporter/
-//     signature/equivocation proof, empty or unsorted heights, oversized,
-//     negative timestamp): a TxTypeSubmitEvidence report that cannot become
-//     valid later. RejectReasonFutureHeight is the exception (SKIP below), and
-//     RejectReasonUnknown / RejectReasonUnknownHeight are left to the default.
+//     signature/equivocation proof -- which includes a proof for a height the
+//     report does not list or the chain has not reached --, empty or unsorted
+//     heights, oversized, negative timestamp): a TxTypeSubmitEvidence report
+//     that cannot become valid later. RejectReasonFutureHeight is the
+//     exception (SKIP below), and RejectReasonUnknown /
+//     RejectReasonUnknownHeight are left to the default.
 //
 // == SKIP: depends on mutable state shared across transactions in this
 // attempt, or on ordering within this attempt -- a later attempt can
@@ -3703,9 +3705,10 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// A TxTypeSubmitEvidence payload that does not decode, or whose
 		// reporter is not the account that signed it, is a pure function of
 		// the transaction's own immutable bytes. A report that is already
-		// recorded can never become a first report again (a record only
-		// leaves state once it is too old to be submitted). None of them
-		// can ever succeed later.
+		// recorded, or that reports an offense already recorded, can never
+		// become a first report again (a record only leaves state once the
+		// height of its offense is too old for any report of it to be
+		// submitted). None of them can ever succeed later.
 		errors.Is(err, ErrEvidenceInvalidPayload),
 		errors.Is(err, ErrEvidenceReporterMismatch),
 		errors.Is(err, ErrEvidenceAlreadyRecorded),
