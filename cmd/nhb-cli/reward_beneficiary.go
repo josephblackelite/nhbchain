@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math/big"
+	"os"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/rlp"
@@ -13,14 +14,17 @@ import (
 // printAddressForKeyFile derives and prints the public address for an
 // existing local key file, without ever printing the key itself. Useful for
 // scripts that need to know a previously-generated validator's address
-// again (e.g. re-running the bootstrap script after the first time).
-func printAddressForKeyFile(keyFile string) {
+// again (e.g. re-running the bootstrap script after the first time). A failure
+// is reported on stderr and exits non-zero, so a script that captures stdout
+// gets the address or nothing (scripts/deployvalidator.sh reads it that way).
+func printAddressForKeyFile(keyFile string) int {
 	privKey, err := loadPrivateKey(keyFile)
 	if err != nil {
-		fmt.Printf("Error loading private key: %v\n", err)
-		return
+		fmt.Fprintf(os.Stderr, "Error loading private key: %v\n", err)
+		return 1
 	}
 	fmt.Println(privKey.PubKey().Address().String())
+	return 0
 }
 
 // setRewardBeneficiary lets a validator redirect its own epoch reward

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -25,7 +23,7 @@ func runStakeCommand(args []string, stdout, stderr io.Writer) int {
 	case "preview":
 		return runStakePreview(args[1:], stdout, stderr)
 	case "claim":
-		return runStakeClaim(args[1:], stdout, stderr)
+		return reportRetired(stderr, "nhb-cli stake claim", "stake_claimRewards")
 	default:
 		return runLegacyStake(args, stdout, stderr)
 	}
@@ -103,65 +101,12 @@ func runStakePreview(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func runStakeClaim(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "Usage: nhb-cli stake claim <address>")
-		return 1
-	}
-	addr := strings.TrimSpace(args[0])
-	if addr == "" {
-		fmt.Fprintln(stderr, "Error: address is required")
-		return 1
-	}
-
-	result, status, rpcErr, err := stakeRPCCall("stake_claimRewards", []interface{}{addr}, true)
-	if err != nil {
-		return handleRPCCallError(stderr, err)
-	}
-	if rpcErr != nil {
-		if strings.EqualFold(rpcErr.Message, "staking not ready") {
-			fmt.Fprintln(stdout, "Staking rewards are not available yet. Please try again later.")
-			return 0
-		}
-		if nextTs, ok := parseStakeNotDue(status, rpcErr); ok {
-			if nextTs > 0 {
-				fmt.Fprintf(stdout, "Not yet eligible. Next at %s (%d).\n", formatTimestamp(nextTs), nextTs)
-			} else {
-				fmt.Fprintln(stdout, "Not yet eligible.")
-			}
-			return 0
-		}
-		return handleRPCError(stderr, rpcErr)
-	}
-
-	var claim stakeClaimRewardsResponse
-	if err := json.Unmarshal(result, &claim); err != nil {
-		fmt.Fprintf(stderr, "Failed to decode response: %v\n", err)
-		return 1
-	}
-
-	minted := strings.TrimSpace(claim.Minted)
-	if mintedInt, ok := new(big.Int).SetString(claim.Minted, 10); ok {
-		minted = formatBigInt(mintedInt)
-	}
-	periods := claim.Periods
-	fmt.Fprintf(stdout, "Minted %s ZNHB across %d period(s).\n", minted, periods)
-	if claim.NextEligible > 0 {
-		fmt.Fprintf(stdout, "Next eligible at %s (%d).\n", formatTimestamp(claim.NextEligible), claim.NextEligible)
-	} else {
-		fmt.Fprintln(stdout, "Next eligible time is not yet available.")
-	}
-
-	return 0
-}
-
 func runLegacyStake(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 2 {
 		amountStr := strings.TrimSpace(args[0])
 		amount, ok := new(big.Int).SetString(amountStr, 10)
 		if ok && amount.Sign() > 0 {
-			stake(amount, args[1])
-			return 0
+			return stake(amount, args[1])
 		}
 	}
 	fmt.Fprintln(stderr, stakeUsage())
@@ -177,23 +122,6 @@ type stakePositionResponse struct {
 type stakePreviewResponse struct {
 	Payable      string `json:"payable"`
 	NextPayoutTs uint64 `json:"nextPayoutTs"`
-}
-
-type stakeClaimRewardsResponse struct {
-	Minted       string `json:"minted"`
-	Periods      int    `json:"periods"`
-	AprBps       uint64 `json:"aprBps"`
-	NextEligible uint64 `json:"nextEligibleTs"`
-}
-
-type stakeClaimErrorDetail struct {
-	NextEligible   uint64 `json:"nextEligible"`
-	NextEligibleTs uint64 `json:"nextEligibleTs"`
-	NextPayoutTs   uint64 `json:"nextPayoutTs"`
-	NextClaimTs    uint64 `json:"nextClaimTs"`
-	Timestamp      uint64 `json:"timestamp"`
-	Message        string `json:"message"`
-	Error          string `json:"error"`
 }
 
 func printStakeAccountSnapshot(w io.Writer, account *balanceResponse) {
@@ -233,8 +161,8 @@ func stakeUsage() string {
 Commands:
   position <address>             Show staking share metadata for an address
   preview <address>              Preview claimable staking rewards and next payout
-  claim <address>                Claim staking rewards for an address
-  <amount> <key_file>            (legacy) delegate ZapNHB using the original flow
+  claim <address>                (retired) the node no longer serves stake_claimRewards
+  <amount> <key_file>            (legacy) stake ZapNHB with a signed transaction
 `)
 }
 
@@ -262,85 +190,4 @@ func callStakeRPC(method string, params []interface{}, requireAuth bool) (json.R
 		return nil, resp.StatusCode, nil, fmt.Errorf("failed to decode RPC response: %w", err)
 	}
 	return rpcResp.Result, resp.StatusCode, rpcResp.Error, nil
-}
-
-func parseStakeNotDue(status int, rpcErr *rpcError) (uint64, bool) {
-	if rpcErr == nil {
-		return 0, false
-	}
-
-	recognized := status == http.StatusConflict || containsNotDue(rpcErr.Message)
-	if len(rpcErr.Data) > 0 {
-		if ts, ok := decodeNextEligible(rpcErr.Data); ok {
-			return ts, true
-		}
-		if msg, ok := decodeErrorString(rpcErr.Data); ok {
-			if containsNotDue(msg) {
-				return 0, true
-			}
-			if ts, err := strconv.ParseUint(strings.TrimSpace(msg), 10, 64); err == nil {
-				return ts, true
-			}
-		}
-	}
-
-	if recognized {
-		return 0, true
-	}
-	return 0, false
-}
-
-func decodeNextEligible(raw json.RawMessage) (uint64, bool) {
-	if len(raw) == 0 {
-		return 0, false
-	}
-
-	var detail stakeClaimErrorDetail
-	if err := json.Unmarshal(raw, &detail); err == nil {
-		next := detail.NextPayoutTs
-		if next == 0 {
-			next = detail.NextEligibleTs
-		}
-		if next == 0 {
-			next = detail.NextEligible
-		}
-		if next == 0 {
-			next = detail.NextClaimTs
-		}
-		if next == 0 {
-			next = detail.Timestamp
-		}
-		if next > 0 {
-			return next, true
-		}
-		if containsNotDue(detail.Message) || containsNotDue(detail.Error) {
-			return 0, true
-		}
-	}
-
-	var tsNumeric uint64
-	if err := json.Unmarshal(raw, &tsNumeric); err == nil {
-		return tsNumeric, true
-	}
-
-	return 0, false
-}
-
-func decodeErrorString(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
-		return "", false
-	}
-	var msg string
-	if err := json.Unmarshal(raw, &msg); err == nil {
-		return msg, true
-	}
-	return "", false
-}
-
-func containsNotDue(msg string) bool {
-	if msg == "" {
-		return false
-	}
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "not due") || strings.Contains(lower, "not eligible") || strings.Contains(lower, "payout window")
 }
