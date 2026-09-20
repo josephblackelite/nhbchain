@@ -7,11 +7,13 @@ package modules
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"math/rand"
 	"os"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,14 +25,48 @@ import (
 	"nhbchain/storage"
 )
 
-// countingStore counts reads that reach the block store.
+// countingStore counts reads that reach the block store, and can be told to fail
+// the reads of chosen keys, as a store that has a bad moment does.
 type countingStore struct {
 	storage.Database
-	gets atomic.Int64
+	gets   atomic.Int64
+	failed atomic.Int64 // reads that were made to fail
+
+	mu    sync.Mutex
+	fails map[string]int // key -> reads still to fail; negative: every read
+}
+
+var errInjectedRead = errors.New("injected store read failure")
+
+// failReads makes the next n reads of key fail (every read when n is negative).
+func (c *countingStore) failReads(key []byte, n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fails == nil {
+		c.fails = map[string]int{}
+	}
+	c.fails[string(key)] = n
+}
+
+func (c *countingStore) shouldFail(key []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n, ok := c.fails[string(key)]
+	if !ok || n == 0 {
+		return false
+	}
+	if n > 0 {
+		c.fails[string(key)] = n - 1
+	}
+	return true
 }
 
 func (c *countingStore) Get(key []byte) ([]byte, error) {
 	c.gets.Add(1)
+	if c.shouldFail(key) {
+		c.failed.Add(1)
+		return nil, errInjectedRead
+	}
 	return c.Database.Get(key)
 }
 
@@ -150,6 +186,20 @@ func (lc *lendingChain) extend(t *testing.T, n, every int) {
 			lc.lending[lc.height] = true
 		}
 	}
+}
+
+// blockKey is the key the block at height is stored under.
+func (lc *lendingChain) blockKey(t *testing.T, height uint64) []byte {
+	t.Helper()
+	block, err := lc.node.GetBlockByHeight(height)
+	if err != nil {
+		t.Fatalf("block %d: %v", height, err)
+	}
+	hash, err := block.Header.Hash()
+	if err != nil {
+		t.Fatalf("hash block %d: %v", height, err)
+	}
+	return hash
 }
 
 func (lc *lendingChain) lendingHeights() []uint64 {

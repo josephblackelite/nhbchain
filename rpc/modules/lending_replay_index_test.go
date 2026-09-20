@@ -114,7 +114,7 @@ func TestWarmReplayIndexCatchesUpAndStops(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(20 * time.Second):
+	case <-time.After(60 * time.Second): // only a failure waits this long
 		t.Fatalf("the warm-up did not finish")
 	}
 	module.replayHeights.mu.Lock()
@@ -137,7 +137,7 @@ func TestWarmReplayIndexCatchesUpAndStops(t *testing.T) {
 	}()
 	select {
 	case <-finished:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second): // only a failure waits this long
 		t.Fatalf("a cancelled warm-up kept running")
 	}
 	m2.replayHeights.mu.Lock()
@@ -145,5 +145,150 @@ func TestWarmReplayIndexCatchesUpAndStops(t *testing.T) {
 	m2.replayHeights.mu.Unlock()
 	if scanned >= lc2.node.GetHeight() {
 		t.Fatalf("a cancelled warm-up still scanned the whole chain")
+	}
+}
+
+// A store that fails to read a block once must not make the index forget that
+// block for good: the walk this replaced read every block on every call, so a
+// one-off failure cost one call, and it must not cost more than that now.
+
+func heightsInclude(list []uint64, h uint64) bool {
+	for _, v := range list {
+		if v == h {
+			return true
+		}
+	}
+	return false
+}
+
+// indexUnderTest is a module whose index reads a clock the test moves.
+func indexUnderTest(lc *lendingChain) (*LendingModule, *time.Time) {
+	module := NewLendingModule(lc.node)
+	clock := time.Unix(1_700_000_000, 0)
+	module.replayHeights.now = func() time.Time { return clock }
+	return module, &clock
+}
+
+func TestReplayFindsALendingBlockWhoseFirstReadFailed(t *testing.T) {
+	lc := newLendingChain(t, 31)
+	lc.extend(t, 400, 7)
+	heights := lc.lendingHeights()
+	if len(heights) < 6 {
+		t.Fatalf("the test chain has only %d lending blocks", len(heights))
+	}
+	victim := heights[len(heights)/2]
+	module, clock := indexUnderTest(lc)
+	tip := lc.node.GetHeight()
+
+	lc.store.failReads(lc.blockKey(t, victim), 1)
+	first := module.replayHeights.through(lc.node, tip)
+	if lc.store.failed.Load() != 1 {
+		t.Fatalf("the injected failure was not hit (%d)", lc.store.failed.Load())
+	}
+	if heightsInclude(first, victim) {
+		t.Fatalf("height %d was read although its read failed", victim)
+	}
+
+	// Asked again at once, the index does not go back to the failed block.
+	before := lc.store.gets.Load()
+	for i := 0; i < 25; i++ {
+		module.replayHeights.through(lc.node, tip)
+	}
+	if reads := lc.store.gets.Load() - before; reads != 0 {
+		t.Fatalf("calls inside the retry interval read the store %d times", reads)
+	}
+
+	// Once the interval has passed the block is read again, and this time it reads.
+	*clock = clock.Add(lendingUnreadRetryAfter)
+	if got, want := module.replayHeights.through(lc.node, tip), heights; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("after the retry the index holds %v, want %v", got, want)
+	}
+	// It is settled: nothing is retried any more.
+	before = lc.store.gets.Load()
+	*clock = clock.Add(time.Hour)
+	module.replayHeights.through(lc.node, tip)
+	if reads := lc.store.gets.Load() - before; reads != 0 {
+		t.Fatalf("a settled index read the store %d times", reads)
+	}
+
+	// And the replay the reads are answered from is the one of a store that never failed.
+	for _, pool := range []string{"", "default", "poolB", "poolC"} {
+		wantMarket, wantUsers, wantErr := module.legacyReplayCommittedPoolState(pool)
+		gotMarket, gotUsers, gotErr := module.replayCommittedPoolState(pool)
+		if (wantErr == nil) != (gotErr == nil) {
+			t.Fatalf("pool %q: error mismatch %v / %v", pool, wantErr, gotErr)
+		}
+		if want, got := describeReplay(wantMarket, wantUsers), describeReplay(gotMarket, gotUsers); want != got {
+			t.Fatalf("pool %q: replay differs after the retry\nwant %s\n got %s", pool, want, got)
+		}
+	}
+}
+
+// The failure is found while the index is being brought up in the background
+// too, and a block that reads fine and holds nothing is never looked at again.
+func TestWarmUpRecordsAFailedReadForARetry(t *testing.T) {
+	lc := newLendingChain(t, 32)
+	lc.extend(t, 3000, 300)
+	heights := lc.lendingHeights()
+	if len(heights) == 0 {
+		t.Fatalf("the test chain has no lending block")
+	}
+	victim := heights[len(heights)-1]
+	module, clock := indexUnderTest(lc)
+	lc.store.failReads(lc.blockKey(t, victim), 1)
+
+	module.WarmReplayIndex(context.Background())
+	tip := lc.node.GetHeight()
+	if lc.store.failed.Load() != 1 {
+		t.Fatalf("the injected failure was not hit (%d)", lc.store.failed.Load())
+	}
+	if heightsInclude(module.replayHeights.through(lc.node, tip), victim) {
+		t.Fatalf("height %d is in the index although its read failed", victim)
+	}
+	*clock = clock.Add(lendingUnreadRetryAfter)
+	before := lc.store.gets.Load()
+	got := module.replayHeights.through(lc.node, tip)
+	if fmt.Sprint(got) != fmt.Sprint(heights) {
+		t.Fatalf("after the retry the index holds %v, want %v", got, heights)
+	}
+	if reads := lc.store.gets.Load() - before; reads != 1 {
+		t.Fatalf("the retry read the store %d times; one block had failed and every other block had been read", reads)
+	}
+}
+
+// A block that keeps failing is tried once per interval, however many calls
+// arrive, and is found as soon as it can be read.
+func TestABlockThatStaysUnreadableIsRetriedOncePerInterval(t *testing.T) {
+	lc := newLendingChain(t, 33)
+	lc.extend(t, 300, 6)
+	heights := lc.lendingHeights()
+	victim := heights[1]
+	module, clock := indexUnderTest(lc)
+	tip := lc.node.GetHeight()
+	key := lc.blockKey(t, victim)
+
+	lc.store.failReads(key, -1)
+	module.replayHeights.through(lc.node, tip)
+	for round := 0; round < 4; round++ {
+		before := lc.store.gets.Load()
+		for i := 0; i < 50; i++ {
+			if heightsInclude(module.replayHeights.through(lc.node, tip), victim) {
+				t.Fatalf("round %d: an unreadable block is in the index", round)
+			}
+		}
+		if reads := lc.store.gets.Load() - before; reads != 0 {
+			t.Fatalf("round %d: 50 calls inside the interval read the store %d times", round, reads)
+		}
+		*clock = clock.Add(lendingUnreadRetryAfter)
+		before = lc.store.gets.Load()
+		module.replayHeights.through(lc.node, tip)
+		if reads := lc.store.gets.Load() - before; reads != 1 {
+			t.Fatalf("round %d: the first call after the interval read the store %d times, want the one failed block", round, reads)
+		}
+	}
+	lc.store.failReads(key, 0)
+	*clock = clock.Add(lendingUnreadRetryAfter)
+	if got := module.replayHeights.through(lc.node, tip); fmt.Sprint(got) != fmt.Sprint(heights) {
+		t.Fatalf("once the block can be read the index holds %v, want %v", got, heights)
 	}
 }

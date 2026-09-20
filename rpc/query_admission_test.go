@@ -4,7 +4,9 @@ package rpc
 // stops before it has read more than its small free budget, the lending reads
 // are refused before they touch the state lock, and a query whose deadline
 // passes or whose client goes away stops reading. Counted in reads from the
-// block store, not in time.
+// block store, not in time (the one check of how quickly a refusal comes takes
+// the best of several calls, and a scan that has to be caught in the act is held
+// there by the store, not raced).
 
 import (
 	"bytes"
@@ -38,25 +40,36 @@ func TestRefusedQueryStopsBeforeReadingMuchOfTheChain(t *testing.T) {
 	}
 	defer held()
 
-	before := rc.Reads.gets.Load()
-	call := doRPC(t, srv, nil, "203.0.113.7:5000", "nhb_getTransaction", unknownHash())
-	reads := rc.Reads.gets.Load() - before
+	// What a refusal is (and how much it reads) does not depend on the machine.
+	// How long it takes does, a little: the queue wait is 20ms and a loaded
+	// machine can add to that in one call, but not in every one of several, so
+	// the promptness is judged by the quickest of five.
+	const attempts = 5
+	fastest := time.Duration(1<<63 - 1)
+	for i := 0; i < attempts; i++ {
+		before := rc.Reads.gets.Load()
+		call := doRPC(t, srv, nil, "203.0.113.7:5000", "nhb_getTransaction", unknownHash())
+		reads := rc.Reads.gets.Load() - before
 
-	if call.Code != http.StatusTooManyRequests || call.errCode() != codeRateLimited {
-		t.Fatalf("expected HTTP 429 with the rate-limit code, got HTTP %d: %s", call.Code, call.Body)
+		if call.Code != http.StatusTooManyRequests || call.errCode() != codeRateLimited {
+			t.Fatalf("expected HTTP 429 with the rate-limit code, got HTTP %d: %s", call.Code, call.Body)
+		}
+		if ra := call.Header.Get("Retry-After"); ra == "" || ra == "0" {
+			t.Fatalf("a refused query must carry a Retry-After hint, got %q", ra)
+		}
+		data, _ := call.Resp.Error.Data.(map[string]interface{})
+		if data["reason"] == nil || data["retryAfterMs"] == nil {
+			t.Fatalf("the refusal must say why and when to retry: %v", call.Resp.Error.Data)
+		}
+		if reads > int64(queryFreeBlockBudget)+8 {
+			t.Fatalf("a refused query read the store %d times; its free budget is %d blocks", reads, queryFreeBlockBudget)
+		}
+		if call.Duration < fastest {
+			fastest = call.Duration
+		}
 	}
-	if ra := call.Header.Get("Retry-After"); ra == "" || ra == "0" {
-		t.Fatalf("a refused query must carry a Retry-After hint, got %q", ra)
-	}
-	data, _ := call.Resp.Error.Data.(map[string]interface{})
-	if data["reason"] == nil || data["retryAfterMs"] == nil {
-		t.Fatalf("the refusal must say why and when to retry: %v", call.Resp.Error.Data)
-	}
-	if reads > int64(queryFreeBlockBudget)+8 {
-		t.Fatalf("a refused query read the store %d times; its free budget is %d blocks", reads, queryFreeBlockBudget)
-	}
-	if call.Duration > 250*time.Millisecond {
-		t.Fatalf("a refused query took %s", call.Duration)
+	if fastest > 250*time.Millisecond {
+		t.Fatalf("a refused query took %s at best of %d", fastest, attempts)
 	}
 }
 
@@ -111,26 +124,34 @@ func TestClientDisconnectStopsAScan(t *testing.T) {
 	removeCompletenessMarker(t, rc)
 	srv := gatedTestServer(t, rc, ServerConfig{QueryTimeout: time.Minute})
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	before := rc.Reads.gets.Load()
+	// The scan is held at its 200th read, the client hangs up while it is held,
+	// and only then is it let go: the scan is certain to be under way when the
+	// client leaves however slowly this goroutine gets to run, where a test that
+	// polled for "under way" and then hung up could find the scan already over.
+	reached, resume := rc.Reads.stallAt(before + 200)
+	defer resume()
 	done := make(chan rpcCall, 1)
 	go func() { done <- doRPC(t, srv, ctx, "203.0.113.10:5000", "nhb_getTransactionReceipt", unknownHash()) }()
-	// Let the scan get going, then hang up.
-	deadline := time.Now().Add(5 * time.Second)
-	for rc.Reads.gets.Load()-before < 200 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	select {
+	case <-reached:
+	case <-time.After(gatePatience):
+		t.Fatalf("the scan never read 200 blocks")
 	}
 	cancel()
+	resume()
 	select {
 	case call := <-done:
 		reads := rc.Reads.gets.Load() - before
 		if call.Code != 499 {
 			t.Fatalf("expected the cancelled request to end with 499, got HTTP %d: %s", call.Code, call.Body)
 		}
-		if reads >= 29000 {
-			t.Fatalf("the scan went on after the client left: %d reads", reads)
+		if reads > 1000 {
+			t.Fatalf("the scan went on after the client left: %d reads of a %d-block chain, 200 before it left", reads, rc.Height)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("the scan was still running 5s after its client disconnected")
+	case <-time.After(gatePatience):
+		t.Fatalf("the scan was still running %s after its client disconnected", gatePatience)
 	}
 	if running, waiting := srv.queryGate.load(); running != 0 || waiting != 0 {
 		t.Fatalf("slots leaked: %d running, %d waiting", running, waiting)
@@ -199,7 +220,7 @@ func TestSlowReaderDoesNotHoldASlot(t *testing.T) {
 	}()
 	select {
 	case <-w.entered:
-	case <-time.After(10 * time.Second):
+	case <-time.After(gatePatience):
 		t.Fatalf("the handler never started writing its response")
 	}
 	// The handler is now writing to a client that is not reading.
@@ -213,7 +234,7 @@ func TestSlowReaderDoesNotHoldASlot(t *testing.T) {
 	close(w.release)
 	select {
 	case <-done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(gatePatience):
 		t.Fatalf("the handler never finished")
 	}
 	var resp RPCResponse

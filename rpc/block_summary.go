@@ -16,11 +16,18 @@ package rpc
 // The cache is a plain array of 8-byte entries covering the heights that have
 // been looked at, bounded to the most recent txWindowStatsMaxBlocksScanned
 // blocks, which is as far back as any scan reads.
+//
+// A block that could not be read is not a fact about the block: the read may
+// have failed once and succeed the next time. Such an entry is only remembered
+// for blockSummaryRetryAfter (so that a block that stays unreadable is not read
+// again by every call), after which the block is read again and the entry
+// replaced by what that finds.
 
 import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"nhbchain/core"
 	"nhbchain/core/types"
@@ -61,6 +68,10 @@ const (
 	// covers, and above the tip as blocks are added), so that growing is an
 	// occasional reallocation and not one per block.
 	blockSummaryGrowStep = 8192
+	// blockSummaryRetryAfter is how long the failure to read a block is
+	// remembered. It is counted in whole seconds, which is what the entry has room
+	// for, so a failure is retried between four and five seconds after it was seen.
+	blockSummaryRetryAfter = 5 * time.Second
 )
 
 // A summary is kept as one 64-bit word so that a scan can read entries without
@@ -69,7 +80,8 @@ const (
 // than the read. Layout: flags in bits 0-3, transaction count in bits 4-27,
 // timestamp (seconds) in bits 28-63. A summary that does not fit (a count of
 // 16 million or a timestamp outside 0..2^36) is simply not cached and its block
-// is read each time, which is slower but not wrong.
+// is read each time, which is slower but not wrong. For a block that could not be
+// read the timestamp field holds the time, in seconds, that the failure was seen.
 const (
 	summaryTxBits = 24
 	summaryTsBits = 36
@@ -91,8 +103,9 @@ func unpackSummary(v uint64) blockSummary {
 }
 
 // summaryTable covers the heights base .. base+len(sums)-1. It is never
-// modified in shape once published; only its entries change, and each entry is
-// written once, from zero (not examined) to its summary.
+// modified in shape once published; only its entries change, from zero (not
+// examined) to a summary, or to the failure to read the block, which is replaced
+// when the block is read again (and never replaces a summary).
 type summaryTable struct {
 	base uint64
 	sums []atomic.Uint64
@@ -100,8 +113,16 @@ type summaryTable struct {
 
 type blockSummaryCache struct {
 	table atomic.Pointer[summaryTable]
-	mu    sync.Mutex // serialises growing the table
-	max   int        // most heights kept; zero means maxCachedBlockSummaries
+	mu    sync.Mutex       // serialises growing the table
+	max   int              // most heights kept; zero means maxCachedBlockSummaries
+	now   func() time.Time // the clock; nil means time.Now
+}
+
+func (c *blockSummaryCache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *blockSummaryCache) limit() int {
@@ -120,7 +141,38 @@ func (c *blockSummaryCache) lookup(height uint64) (blockSummary, bool) {
 	if v == 0 {
 		return blockSummary{}, false
 	}
-	return unpackSummary(v), true
+	sum := unpackSummary(v)
+	if !sum.loaded() {
+		// The block could not be read when it was looked at, which says nothing about
+		// whether it can be now: the failure is only trusted for a short while (and a
+		// stamp from the future, which no clock of ours wrote, not at all).
+		seen := sum.timestamp
+		if now := c.clock().Unix(); now < seen || time.Duration(now-seen)*time.Second >= blockSummaryRetryAfter {
+			return blockSummary{}, false
+		}
+		sum.timestamp = 0
+	}
+	return sum, true
+}
+
+// putSummary writes the packed entry v to slot. A summary of a block that was
+// read is final; the failure to read one only fills an entry that is empty or
+// holds an earlier failure, so a slow reader that lost a race cannot bury what
+// another one found.
+func putSummary(slot *atomic.Uint64, v uint64) {
+	if unpackSummary(v).loaded() {
+		slot.Store(v)
+		return
+	}
+	for {
+		cur := slot.Load()
+		if cur != 0 && unpackSummary(cur).loaded() {
+			return
+		}
+		if slot.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 func (c *blockSummaryCache) store(height uint64, sum blockSummary) {
@@ -129,10 +181,16 @@ func (c *blockSummaryCache) store(height uint64, sum blockSummary) {
 		return
 	}
 	if t := c.table.Load(); t != nil && height >= t.base && height-t.base < uint64(len(t.sums)) {
-		t.sums[height-t.base].Store(v)
+		putSummary(&t.sums[height-t.base], v)
 		return
 	}
 	c.grow(height, v)
+}
+
+// storeFailure records that the block at height, which is at or below the tip,
+// could not be read just now. It is remembered for blockSummaryRetryAfter.
+func (c *blockSummaryCache) storeFailure(height uint64) {
+	c.store(height, blockSummary{flags: sumKnown, timestamp: c.clock().Unix()})
 }
 
 // grow publishes a table that covers height (if it is within what is worth
@@ -152,7 +210,7 @@ func (c *blockSummaryCache) grow(height, v uint64) {
 			newLen = limit
 		}
 	case height >= old.base && height-old.base < uint64(len(old.sums)):
-		old.sums[height-old.base].Store(v) // another writer grew it first
+		putSummary(&old.sums[height-old.base], v) // another writer grew it first
 		return
 	case height >= old.base:
 		newBase = old.base
@@ -235,7 +293,13 @@ func (s *Server) summaryAt(ctx context.Context, chain *core.Blockchain, height u
 	block, err := chain.GetBlockByHeight(height)
 	sum := summarizeBlock(block, err)
 	if height <= tip {
-		s.blockSummaries.store(height, sum)
+		if sum.loaded() {
+			s.blockSummaries.store(height, sum)
+		} else {
+			// A block at or below the tip that cannot be read is a failure of this
+			// read, not a fact about the block: it is remembered only briefly.
+			s.blockSummaries.storeFailure(height)
+		}
 	}
 	return sum, nil
 }
