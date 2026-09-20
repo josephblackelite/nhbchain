@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"nhbchain/core/txroot"
 	"nhbchain/core/types"
 	"nhbchain/p2p"
 
@@ -41,7 +42,8 @@ import (
 //
 // Nothing here changes what a valid message is, what is signed, or which blocks
 // commit: every message keeps its encoding, and the vote and lock rules
-// (sign_state.go, lockCompliesLocked) are untouched.
+// (sign_state.go, lockCompliesLocked) are untouched. The lock is still set by this
+// validator's own tally of a round and by nothing it is told (addVoteIfRelevant).
 
 const (
 	// maxFutureRounds is how many rounds ahead of the round this validator is in
@@ -751,12 +753,91 @@ func (e *Engine) replayBufferedMessages(height uint64, round int) {
 // Neither the lock nor the vote rules are touched, no vote is signed, and the
 // message is an ordinary proposal message, which an engine that does not know this
 // ignores like any proposal from a validator that is not the round's proposer.
+//
+// What is learnt is checked first, because anyone in the validator set can send
+// it: the proof says that more than two thirds of the power prevoted the header,
+// and says nothing of the transactions, which the header commits to only by their
+// root. A body that is not the one that root commits to is refused
+// (blockBodyMatchesHeader): otherwise a validator that knew of a real polka could
+// hand out its header with a body of its own, and have it re-proposed, and passed
+// on, as the valid block.
+
+// polkaLearnable reports whether the polka of round polkaRound, cited by a proposal
+// for height, is one to learn from when this validator is in state and holds the
+// polka of round held. It has to be later than the one held and of a round this
+// validator has already passed. For the round it is in, or a later one, its own
+// tally may still reach the polka, and a record of that round made from a message
+// would stand in for the lock (see addVoteIfRelevant), which only the tally may
+// set; and a polka of a round that is not before this validator's own could not be
+// the ValidRound of a proposal of that round (propose). Nothing is lost by it: the
+// validator that holds a polka says so again in each round in which it hears from
+// one that is behind, and a validator that has moved on learns it then.
+func polkaLearnable(height uint64, polkaRound int, state State, held int) bool {
+	return height == state.Height && polkaRound > held && polkaRound < state.Round
+}
+
+// blockBodyMatchesHeader reports whether the transactions of b are the ones its
+// header commits to (by their root, which is all of them that the header's hash
+// covers). It reads nothing but b: a full validation would also execute the block
+// against the node's state, which is not something to do for every message that
+// carries a polka.
+func blockBodyMatchesHeader(b *types.Block) bool {
+	if b == nil || b.Header == nil {
+		return false
+	}
+	root, err := txroot.Compute(b.Transactions)
+	return err == nil && bytes.Equal(root, b.Header.TxRoot)
+}
+
+// What a validator keeps of a polka it is told of, and passes on, is what the proof
+// and the root vouch for and no more: whatever else a message carries is not covered
+// by any signature, and this validator would carry it into the proposal it makes of
+// the block, and the messages it sends of the polka, which a peer refuses -- and ends
+// its connection over -- when they are larger than the transport allows.
+
+// plainBlock is b without its quorum certificate. A block is proven by its header
+// (the hash the polka is of) and its transactions (the root in the header); the
+// certificate is neither, and commit makes it again from the precommits of the round.
+func plainBlock(b *types.Block) *types.Block {
+	return types.NewBlock(b.Header, b.Transactions)
+}
+
+// plainVotes returns copies of votes that hold what each vote's signature covers,
+// the validator, and the signature itself, and the public key only for a scheme that
+// verifies with the one in the message: the rest of a signed vote is not signed, and
+// is room to pad it. A vote that is not a whole signed vote is left out.
+func plainVotes(votes []*SignedVote) []*SignedVote {
+	plain := make([]*SignedVote, 0, len(votes))
+	for _, sv := range votes {
+		if sv == nil || sv.Vote == nil || sv.Signature == nil {
+			continue
+		}
+		signature := &Signature{Scheme: sv.Signature.Scheme, Signature: append([]byte(nil), sv.Signature.Signature...)}
+		if sv.Signature.Scheme == SignatureSchemeEd25519 {
+			signature.PublicKey = append([]byte(nil), sv.Signature.PublicKey...)
+		}
+		plain = append(plain, &SignedVote{
+			Vote:      &Vote{BlockHash: append([]byte(nil), sv.Vote.BlockHash...), Round: sv.Vote.Round, Type: sv.Vote.Type, Height: sv.Vote.Height},
+			Validator: append([]byte(nil), sv.Validator...),
+			Signature: signature,
+		})
+	}
+	return plain
+}
 
 // learnValidBlock remembers the block and the polka of a proposal that carries a
-// proof of one, when the proof verifies and is for a later round than the polka
-// this validator already holds. It is what turns a re-proposal, or the message of a
-// validator that passes on its polka (relayValidBlock), into the valid block this
-// validator re-proposes when its own turn comes. It does not touch the lock.
+// proof of one, when the proof verifies, the block is the one the proof is for
+// (header and transactions), and the polka is later than the polka this validator
+// already holds and of a round it has already passed (polkaLearnable). It is what
+// turns a re-proposal, or the message of a validator that passes on its polka
+// (relayValidBlock), into the valid block this validator re-proposes when its own
+// turn comes. It does not touch the lock.
+//
+// It is called for every proposal of every validator, on the network's goroutines,
+// so what it costs -- a signature check for each vote of the proof, and the root of
+// the transactions -- is paid with no lock held, on a copy of what the checks need
+// that is taken at the start; the write lock, which the round loop and every other
+// message wait for, is taken once, at the end, to record the result.
 func (e *Engine) learnValidBlock(p *SignedProposal) {
 	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
 		return
@@ -766,30 +847,51 @@ func (e *Engine) learnValidBlock(p *SignedProposal) {
 		return
 	}
 	height := prop.Block.Header.Height
-	hash, err := prop.Block.Header.Hash()
-	if err != nil {
-		return
+
+	e.mu.RLock()
+	state, held := e.currentState, e.validRound
+	validators := e.validatorSet
+	total := new(big.Int)
+	if e.totalVotingPower != nil {
+		total.Set(e.totalVotingPower)
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if height != e.currentState.Height || prop.ValidRound <= e.validRound {
+	e.mu.RUnlock()
+	if !polkaLearnable(height, prop.ValidRound, state, held) {
 		return
 	}
 	// A proof holds one vote per validator at most; a longer one only costs the
 	// signature checks.
-	if len(prop.ValidRoundProof) > len(e.validatorSet) {
+	if len(prop.ValidRoundProof) > len(validators) {
 		return
 	}
-	if !e.verifyPolkaProofLocked(prop.ValidRoundProof, prop.ValidRound, hash, height) {
+	hash, err := prop.Block.Header.Hash()
+	if err != nil {
 		return
 	}
-	e.validBlock = prop.Block
+	counted, power := countedPolkaVotes(prop.ValidRoundProof, prop.ValidRound, hash, height, validators)
+	if !types.HasQuorum(power, total) {
+		return
+	}
+	if !blockBodyMatchesHeader(prop.Block) {
+		return
+	}
+	block, votes := plainBlock(prop.Block), plainVotes(counted)
+
+	e.mu.Lock()
+	// The height or the round may have moved on, or another message may have taught
+	// a later polka, while the checks ran.
+	if !polkaLearnable(height, prop.ValidRound, e.currentState, e.validRound) {
+		e.mu.Unlock()
+		return
+	}
+	e.validBlock = block
 	e.validRound = prop.ValidRound
 	e.polkaHistory[prop.ValidRound] = polkaRecord{
-		block:     prop.Block,
+		block:     block,
 		blockHash: append([]byte(nil), hash...),
-		votes:     append([]*SignedVote(nil), prop.ValidRoundProof...),
+		votes:     votes,
 	}
+	e.mu.Unlock()
 	fmt.Printf("VALID BLOCK: learned block %x with a polka at round %d from %x\n", hash, prop.ValidRound, p.Proposer)
 }
 
@@ -812,7 +914,11 @@ func (e *Engine) buildValidBlockRelayLocked() *p2p.Message {
 	if e.relayed && e.relayedHeight == height && e.relayedRound == round {
 		return nil
 	}
-	proposal := &Proposal{Block: e.validBlock, Round: round, ValidRound: e.validRound, ValidRoundProof: record.votes}
+	proof := plainVotes(record.votes)
+	if len(proof) == 0 {
+		return nil
+	}
+	proposal := &Proposal{Block: plainBlock(e.validBlock), Round: round, ValidRound: e.validRound, ValidRoundProof: proof}
 	proposalHash := sha256.Sum256(proposal.bytes())
 	sig, err := ethcrypto.Sign(proposalHash[:], e.privKey.PrivateKey)
 	if err != nil {

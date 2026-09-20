@@ -44,6 +44,7 @@ import (
 	"math/big"
 	"testing"
 
+	"nhbchain/core/txroot"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
 	"nhbchain/p2p"
@@ -148,8 +149,26 @@ func candidateBlock(height uint64, round int, proposer []byte, salt byte) *types
 		// same height hash differently -- a real node derives it from the
 		// actual chain; tests only need distinct, stable identities.
 		PrevHash: []byte{salt},
+		// What the header of a block with no transactions carries.
+		TxRoot: testTxRoot(),
 	}
 	return types.NewBlock(header, nil)
+}
+
+// testTxRoot is the root a header commits to for txs (what core.ComputeTxRoot
+// returns, which this package cannot import).
+func testTxRoot(txs ...*types.Transaction) []byte {
+	root, err := txroot.Compute(txs)
+	if err != nil {
+		panic(err)
+	}
+	return root
+}
+
+// blockWithTxs is a candidate block whose header commits to txs.
+func blockWithTxs(height uint64, proposer []byte, salt byte, txs ...*types.Transaction) *types.Block {
+	header := &types.BlockHeader{Height: height, Validator: proposer, PrevHash: []byte{salt}, TxRoot: testTxRoot(txs...)}
+	return types.NewBlock(header, txs)
 }
 
 func signPrevote(t *testing.T, key *crypto.PrivateKey, addr []byte, blockHash []byte, round int, height uint64) *SignedVote {

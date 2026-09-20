@@ -236,7 +236,9 @@ func TestAValidatorThatLearnsAPolkaReProposesTheBlockAndTheLockedValidatorAccept
 
 // A relay is only learnt from when its proof is a real polka for the block it
 // carries, at the round it names, from more than two thirds of the power, and is
-// for a later round than the polka already held.
+// for a later round than the polka already held (and for a round the validator has
+// passed, and with the body of the block its header commits to: see
+// polka_learn_test.go).
 func TestAPolkaIsLearntOnlyFromAGoodProof(t *testing.T) {
 	tv := newTestValidators(t, 3)
 	hashOf := func(b *types.Block) []byte { return headerHash(t, b) }

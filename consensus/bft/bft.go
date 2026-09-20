@@ -133,6 +133,13 @@ type Engine struct {
 	// lock_snapshot.go), so a validator that crashed after locking still
 	// has, once restarted, exactly the one entry it actually needs to
 	// satisfy its own restored lock in propose().
+	//
+	// A record is not always this validator's own tally: learnValidBlock also
+	// records the polka of an earlier round that a message proved to it. Such a
+	// record is only ever of a round this validator has already passed, and
+	// whether a record exists for a round says nothing of whether this
+	// validator locked in it -- the lock is lockedRound, and addVoteIfRelevant
+	// sets it whatever is recorded here.
 	polkaHistory map[int]polkaRecord
 
 	proposalCh chan *SignedProposal
@@ -416,7 +423,11 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		// prohibition alone, exactly like the pre-fix behavior.
 		if snap.LockedBlock != nil && snap.LockedBlock.Header != nil && len(snap.PolkaVotes) > 0 {
 			if blockHash, hashErr := snap.LockedBlock.Header.Hash(); hashErr == nil && bytes.Equal(blockHash, snap.LockedBlockHash) {
-				if engine.verifyPolkaProofLocked(snap.PolkaVotes, snap.LockedRound, snap.LockedBlockHash, snap.Height) {
+				if !blockBodyMatchesHeader(snap.LockedBlock) {
+					// The hash covers the header only: a body that is not the one the
+					// header commits to would be re-proposed and fail its validation.
+					fmt.Println("lock snapshot: persisted block's transactions are not the ones its header commits to; restoring lock without a re-propose value")
+				} else if engine.verifyPolkaProofLocked(snap.PolkaVotes, snap.LockedRound, snap.LockedBlockHash, snap.Height) {
 					engine.validBlock = snap.LockedBlock
 					engine.validRound = snap.LockedRound
 					engine.polkaHistory[snap.LockedRound] = polkaRecord{
@@ -968,11 +979,28 @@ func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte, height
 // past vr (see the Engine struct's lockedBlockHash doc comment for why that
 // distinction matters). Must be called with e.mu held.
 func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash []byte, height uint64) bool {
-	if len(proof) == 0 || e.totalVotingPower == nil || e.totalVotingPower.Sign() <= 0 {
+	return verifyPolkaProof(proof, vr, blockHash, height, e.validatorSet, e.totalVotingPower)
+}
+
+// verifyPolkaProof is verifyPolkaProofLocked over a validator set and a total
+// voting power that the caller passes in, so that a caller that holds its own
+// copy of them can check a proof with no lock held: a proof costs a signature
+// check for each vote in it.
+func verifyPolkaProof(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int, total *big.Int) bool {
+	if len(proof) == 0 || total == nil || total.Sign() <= 0 {
 		return false
 	}
+	_, signedPower := countedPolkaVotes(proof, vr, blockHash, height, validators)
+	return types.HasQuorum(signedPower, total)
+}
+
+// countedPolkaVotes returns the votes of proof that count towards a polka of
+// round vr for blockHash at height -- one for each validator of the set, and only
+// if its signature verifies -- and the voting power they hold.
+func countedPolkaVotes(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int) ([]*SignedVote, *big.Int) {
 	seen := make(map[string]struct{}, len(proof))
 	signedPower := big.NewInt(0)
+	var counted []*SignedVote
 	for _, sv := range proof {
 		if sv == nil || sv.Vote == nil {
 			continue
@@ -986,17 +1014,18 @@ func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash [
 		if _, dup := seen[key]; dup {
 			continue
 		}
-		weight, isValidator := e.validatorSet[key]
+		weight, isValidator := validators[key]
 		if !isValidator || weight == nil || weight.Sign() <= 0 {
 			continue
 		}
-		if err := e.verifySignedVote(sv); err != nil {
+		if err := verifyVoteSignature(sv); err != nil {
 			continue
 		}
 		seen[key] = struct{}{}
 		signedPower.Add(signedPower, weight)
+		counted = append(counted, sv)
 	}
-	return types.HasQuorum(signedPower, e.totalVotingPower)
+	return counted, signedPower
 }
 
 // lockedBlockHashLocked returns the hash of the currently locked block, or
@@ -1340,11 +1369,15 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	// OTHER validators cryptographic proof instead of asking them to trust
 	// its memory or their own -- see Proposal.ValidRoundProof's doc
 	// comment for why that distinction is the whole point of this design.
-	// Guarded by polkaHistory's own presence check so a Polka is recorded
-	// (and the lock set) at most once per round.
+	// Guarded by the round of the lock itself so a Polka is recorded (and the
+	// lock set) at most once per round, and never raised again to a round this
+	// validator has already locked in. It is not guarded by whether polkaHistory
+	// holds a record of the round: a record is not a lock, and a record of the
+	// round made from anything but this tally must not stand in for locking,
+	// or this validator would precommit a block it is not locked on.
 	if v.Vote.Type == Prevote && reachedPrevote {
 		round := e.currentState.Round
-		if _, already := e.polkaHistory[round]; !already {
+		if e.lockedRound < round {
 			block := e.activeProposal.Proposal.Block
 			hashCopy := append([]byte(nil), expectedHash...)
 			votes := make([]*SignedVote, 0, len(voteMap))
@@ -1734,6 +1767,12 @@ func (e *Engine) verifySignedProposal(p *SignedProposal) error {
 }
 
 func (e *Engine) verifySignedVote(v *SignedVote) error {
+	return verifyVoteSignature(v)
+}
+
+// verifyVoteSignature checks that v is signed by the validator it names. It reads
+// nothing of the engine's state.
+func verifyVoteSignature(v *SignedVote) error {
 	if v == nil || v.Vote == nil || v.Signature == nil {
 		return fmt.Errorf("invalid signed vote")
 	}
