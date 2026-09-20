@@ -70,6 +70,8 @@ If a dispute has been resolved the `resolutionHash` field contains the recorded 
 
 Streams recent `escrow.*` events emitted by the node. Front-ends can use these payloads to display signer fingerprints (`decisionSigners`), frozen policy metadata, and realm lifecycle information without custom parsing.
 
+The node keeps these events in memory only, so the list starts empty after a restart. It retains up to 100,000 events of the escrow, fee and penalty kinds together, and events of other kinds never push them out; once a node has seen more than that the oldest are dropped and the `sequence` numbers restart at 1 from the oldest event still held.
+
 **Parameters (optional)**
 
 - `prefix` – filter by event type prefix (defaults to `escrow.`).
