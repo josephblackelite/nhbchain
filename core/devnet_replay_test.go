@@ -15,8 +15,10 @@ import (
 	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
 
 	"nhbchain/core/genesis"
+	nhbstate "nhbchain/core/state"
 	"nhbchain/core/tokenomics/buyback"
 	"nhbchain/core/tokenomics/lendingoracle"
 	"nhbchain/core/types"
@@ -40,9 +42,11 @@ import (
 // files.
 //
 // The transactions are the kinds the live chain has included: NHB transfers
-// (0x01), staking (0x06), signed mints (0x0E), ZNHB transfers (0x10) and the
-// buyback and lending reference prices (0x25, 0x26); the per-block lifecycle
-// (rewards, epochs, loyalty, POTSO) runs on every block.
+// (0x01), staking (0x06), heartbeats (0x08), signed mints (0x0E), ZNHB transfers
+// (0x10), redemption requests and their attestations (0x1B, 0x1C) and the buyback
+// and lending reference prices (0x25, 0x26); the per-block lifecycle (rewards,
+// epochs, loyalty, POTSO) runs on every block. Governance and loyalty
+// transactions are not driven by it.
 const devnetBlocks = 3_000
 
 const (
@@ -50,27 +54,27 @@ const (
 	devnetCheckEvery  = 250
 
 	// Recorded from release/hardening-r4.
-	devnetBlocksDigest      = "037825ff6917dd32d22f25aff1f44fc8a4a61bdd81ae6dda1e325f45856891eb"
-	devnetFinalEventCount   = 13281
-	devnetFinalEventsDigest = "14b2b83b19842fb9bd33e3db4ffde169d34b2bac5fbd5a523b0b2ced3f90ced4"
-	devnetIncludedByType    = "0x01=4000 0x06=18 0x0e=60 0x10=750 0x25=50 0x26=40"
+	devnetBlocksDigest      = "3c11e4fdf071cf5fbefa0ff168caabff60f869d9cfca6b497e8cc0487673ceda"
+	devnetFinalEventCount   = 13612
+	devnetFinalEventsDigest = "c665cd85a40c1bea2dd66b49dc698dfbf4b6a5584b5d533976ca859b6ece0f5e"
+	devnetIncludedByType    = "0x01=4000 0x06=18 0x08=251 0x0e=60 0x10=750 0x1b=22 0x1c=22 0x25=50 0x26=40"
 )
 
 // devnetCheckpointDigests are the digests of every event readable at heights 250,
 // 500, ..., 3000, recorded from release/hardening-r4.
 var devnetCheckpointDigests = []string{
-	"7e78f8957f99e40c5942ba426769629b432f6d3069be32372b3d1ef91ed72dfb",
-	"0cea96011e1ccdd8f7b059f9f07a9646229e00175f3669d1af34bbde253bccc0",
-	"6c7dcf5863c39bba1e9ce0e31d6e1ff1fefcf90ec9dfd5ce9f3ad552e53ece7e",
-	"1e17167703d78e6491dd5d02267b46f7e2a3e153a82f800e8fb5fa07fce1478b",
-	"ddd00b6c251d053bc4f5bf1c8fac55890f1e06e7e0bab285c576fa758ce017e3",
-	"20d8f827263e9cd939ba39467556a71cb0df07d98e79782bdf9d87961dd89ab1",
-	"6a42dcbd5ccf10b54442248e45044861522390c7b0a7c7bc4f147cecec291064",
-	"99ef18a55c693da68c3ea29067682c31398a60c7082b2415e9522a27b35cfe36",
-	"039b1c94d4fea2f7b35099a1b73cb4705c6ba172682714813f3c98fa32bc4713",
-	"26181f636d824e0aa9f7c69cff2e2bb8fbe29d3ab1795c5162e602c86c13e212",
-	"9fa59b8a1b71323e81e4a44e1005bb67c8a3aea464341d7fbe826e18aa769f86",
-	"14b2b83b19842fb9bd33e3db4ffde169d34b2bac5fbd5a523b0b2ced3f90ced4",
+	"4149f0db1a8bcf3aa4b1d0991c267936d425fc365959ca3627e01f820dcdfeb3",
+	"d4767712238e636be799f63cbb27bce43f76cb49b2471f103283b500d6567e99",
+	"6325dee870ca96dc3cadc9e0040d4d4d1d5b6d53ca814598b6d2bb0bfd091ba6",
+	"6c434a3ac9f6d89c8225fad1d76f021d6d50d48935bd099c4cfa0caac5b1b74c",
+	"23f4b2802a604d93bbbd296e57cb94d02f27716414c67da8c60aaf7db39b4d27",
+	"98d38a85146edcfd693ae018dd76c64363cd11306dedea31c1257e48e382631b",
+	"135da4c2e10ecc42e646ac5dfa4464a402511c160c2b9efb027ee48549f1849f",
+	"5eb74c9a4d22509f9ec7ea77c32b6b741ec9d2ce74df4f8cddd6890148f0fbf6",
+	"844f9b67f877607edd96b9b8d88850ec63b25383a21c5e906bef1b42eafc79ff",
+	"b74385fa53ec4a91fdef0748f46b30b49435a0e6b191e77db2401dac7fd92e20",
+	"a36b9941cb297549c43e1d35fd705f213a794f2152fade2bd397afc9d0231d46",
+	"c665cd85a40c1bea2dd66b49dc698dfbf4b6a5584b5d533976ca859b6ece0f5e",
 }
 
 type devnetResult struct {
@@ -157,6 +161,7 @@ func runDevnetObserved(t *testing.T, blocks int, observe func(*Node) func()) *de
 	}
 	adminKey := devnetKey(0x20)
 	minterKey := devnetKey(0x21)
+	attestorKey := devnetKey(0x28)
 	signerKeys := []*crypto.PrivateKey{devnetKey(0x22), devnetKey(0x23), devnetKey(0x24)}
 	var signerAddrs [][20]byte
 	for _, k := range signerKeys {
@@ -164,7 +169,8 @@ func runDevnetObserved(t *testing.T, blocks int, observe func(*Node) func()) *de
 	}
 
 	alloc := map[string]map[string]string{
-		adminKey.PubKey().Address().String(): {"NHB": "0", "ZNHB": znhbExpectedTotalSupplyWei.String()},
+		adminKey.PubKey().Address().String():    {"NHB": "0", "ZNHB": znhbExpectedTotalSupplyWei.String()},
+		attestorKey.PubKey().Address().String(): {"NHB": "1000000000000000000000000", "ZNHB": "0"},
 	}
 	for _, k := range userKeys {
 		alloc[k.PubKey().Address().String()] = map[string]string{"NHB": "1000000000000000000000000", "ZNHB": "0"}
@@ -180,7 +186,10 @@ func runDevnetObserved(t *testing.T, blocks int, observe func(*Node) func()) *de
 		},
 		Alloc:       alloc,
 		AdminWallet: adminKey.PubKey().Address().String(),
-		Roles:       map[string][]string{"MINTER_NHB": {minterKey.PubKey().Address().String()}},
+		Roles: map[string][]string{
+			"MINTER_NHB":           {minterKey.PubKey().Address().String()},
+			RoleSwapPayoutAttestor: {attestorKey.PubKey().Address().String()},
+		},
 	}
 	data, err := json.Marshal(spec)
 	if err != nil {
@@ -210,16 +219,19 @@ func runDevnetObserved(t *testing.T, blocks int, observe func(*Node) func()) *de
 	nonces := map[[20]byte]uint64{}
 	// submit signs and submits a transaction from key. A refused submission is
 	// part of the record, not a failure: every build must refuse the same ones.
-	submit := func(key *crypto.PrivateKey, typ types.TxType, to []byte, value *big.Int) {
+	submit := func(key *crypto.PrivateKey, typ types.TxType, to []byte, value *big.Int, payload []byte) (*types.Transaction, bool) {
 		addr := devnetAddr(key)
-		tx := &types.Transaction{ChainID: types.NHBChainID(), Type: typ, Nonce: nonces[addr], To: to, Value: value, GasLimit: 21_000, GasPrice: big.NewInt(1)}
+		tx := &types.Transaction{ChainID: types.NHBChainID(), Type: typ, Nonce: nonces[addr], To: to, Value: value, Data: payload, GasLimit: 25_000, GasPrice: big.NewInt(1)}
 		if err := tx.Sign(key.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		if err := node.AddTransaction(tx); err == nil {
-			nonces[addr]++
+		if err := node.AddTransaction(tx); err != nil {
+			return tx, false
 		}
+		nonces[addr]++
+		return tx, true
 	}
+	var pendingRedemptions []string
 	weiPerToken := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
 	signers := func(digest []byte) [][]byte {
 		var sigs [][]byte
@@ -239,35 +251,96 @@ func runDevnetObserved(t *testing.T, blocks int, observe func(*Node) func()) *de
 			defer done()
 		}
 	}
+	senders := append(append([]*crypto.PrivateKey{}, userKeys...), adminKey, attestorKey)
 	for height := 1; height <= blocks; height++ {
 		current = start.Add(time.Duration(height) * 2 * time.Second)
+		// A transaction accepted into the pool may still be left out of the block,
+		// so start each block from the nonces the chain holds.
+		for _, key := range senders {
+			addr := devnetAddr(key)
+			account, err := node.GetAccount(addr[:])
+			if err != nil {
+				t.Fatalf("load account: %v", err)
+			}
+			nonces[addr] = account.Nonce
+		}
 		sender := userKeys[height%users]
 		receiver := userKeys[(height*7+3)%users]
 		to := receiver.PubKey().Address().Bytes()
 
 		// NHB transfers between the users.
-		submit(sender, types.TxTypeTransfer, to, big.NewInt(int64(1+height%5)))
+		submit(sender, types.TxTypeTransfer, to, big.NewInt(int64(1+height%5)), nil)
 		if height%3 == 0 {
-			submit(userKeys[(height+5)%users], types.TxTypeTransfer, userKeys[(height*3+1)%users].PubKey().Address().Bytes(), big.NewInt(int64(2+height%7)))
+			submit(userKeys[(height+5)%users], types.TxTypeTransfer, userKeys[(height*3+1)%users].PubKey().Address().Bytes(), big.NewInt(int64(2+height%7)), nil)
 		}
 		// ZNHB transfers, from the admin wallet to a user and between users.
 		if height%4 == 0 {
-			submit(adminKey, types.TxTypeTransferZNHB, to, new(big.Int).Mul(big.NewInt(int64(1+height%9)), weiPerToken))
+			submit(adminKey, types.TxTypeTransferZNHB, to, new(big.Int).Mul(big.NewInt(int64(1+height%9)), weiPerToken), nil)
 		}
 		if height%6 == 1 {
-			submit(sender, types.TxTypeTransferZNHB, to, new(big.Int).Mul(big.NewInt(int64(1+height%3)), weiPerToken))
+			submit(sender, types.TxTypeTransferZNHB, to, new(big.Int).Mul(big.NewInt(int64(1+height%3)), weiPerToken), nil)
 		}
 		// Staking.
 		if height%40 == 5 {
-			submit(userKeys[(height/40)%users], types.TxTypeStake, nil, new(big.Int).Mul(big.NewInt(3), weiPerToken))
+			submit(userKeys[(height/40)%users], types.TxTypeStake, nil, new(big.Int).Mul(big.NewInt(3), weiPerToken), nil)
 		}
-		// Signed mints.
+		// Heartbeats from a few of the users.
+		if height%45 == 7 {
+			for i := 0; i < 4; i++ {
+				submit(userKeys[i], types.TxTypeHeartbeat, nil, nil, nil)
+			}
+		}
+		// Redemption requests, and the attestor's answer to the earlier ones:
+		// paid for one, failed (which returns the burned NHB) for the next.
+		if height%100 == 33 {
+			requester := userKeys[(height/100)%users]
+			request, err := rlp.EncodeToBytes(struct {
+				DestinationAsset   string
+				DestinationAddress string
+			}{"asset-a", "destination-" + strconv.Itoa(height)})
+			if err != nil {
+				t.Fatalf("encode redemption request: %v", err)
+			}
+			if tx, ok := submit(requester, types.TxTypeRedeemNHB, nil, new(big.Int).Mul(big.NewInt(6), weiPerToken), request); ok {
+				hash, err := tx.Hash()
+				if err != nil {
+					t.Fatalf("hash redemption request: %v", err)
+				}
+				requester := devnetAddr(requester)
+				pendingRedemptions = append(pendingRedemptions, nhbstate.RedemptionRequestID(requester[:], hash))
+			}
+		}
+		if height%100 == 39 {
+			for i, id := range pendingRedemptions {
+				answer := struct {
+					RequestID       string
+					Status          string
+					PayoutReference string
+					FailureReason   string
+				}{RequestID: id, Status: "paid", PayoutReference: "reference-" + strconv.Itoa(height)}
+				if (height/100+i)%2 == 1 {
+					answer.Status, answer.PayoutReference, answer.FailureReason = "failed", "", "not completed"
+				}
+				payload, err := rlp.EncodeToBytes(answer)
+				if err != nil {
+					t.Fatalf("encode attestation: %v", err)
+				}
+				submit(attestorKey, types.TxTypeAttestRedemption, nil, nil, payload)
+			}
+			pendingRedemptions = nil
+		}
+		// Signed mints. The first is large enough for the redemptions to burn
+		// from, since the recorded NHB supply starts at what was minted.
 		if height%50 == 10 {
+			mintAmount := strconv.Itoa(1_000 + height)
+			if height == 10 {
+				mintAmount = "1000000000000000000000"
+			}
 			voucher := MintVoucher{
 				InvoiceID: "devnet-inv-" + strconv.Itoa(height),
 				Recipient: receiver.PubKey().Address().String(),
 				Token:     "NHB",
-				Amount:    strconv.Itoa(1_000 + height),
+				Amount:    mintAmount,
 				ChainID:   MintChainID,
 				Expiry:    start.Add(24 * time.Hour).Unix(),
 			}
