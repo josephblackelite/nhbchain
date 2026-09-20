@@ -21,6 +21,21 @@ three places:
 - **Post-commit cleanup:** `commit` re-runs the synchronisation helper to clear
   out entries for heights that have been finalised on the node.
 
+## The round a height starts in
+
+A height starts in round 1 at every validator, whichever way the height before it ended.
+After the engine's own commit, `commit` leaves round 0 and `startNewRound` moves on one
+round from it, as it does for an engine that has just been built; a height the node reaches
+because it took a block from a peer (`syncHeightWithNodeLocked`, which sets round 0) is moved
+to round 1 in the same way. Two validators that start a height in different rounds hear
+nothing from each other until the round of the one behind times out.
+
+`NotifyExternalCommit` ends the round in progress only when the node's chain has reached the
+height of that round. A peer's block that reaches the node while the engine is committing the
+same one is answered without an error and signalled all the same, and the engine has already
+counted it: taken for news it ended the first round of the next height and started that height
+one round ahead of the peer. See [Block cadence](block-cadence.md).
+
 ## Operational impact
 
 - **Restarts:** Validators that restart after falling behind no longer need to

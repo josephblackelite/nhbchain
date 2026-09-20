@@ -155,7 +155,9 @@ type Engine struct {
 	// height the network has already finalized, needlessly stalling
 	// (never a safety issue -- it can't manufacture quorum alone -- but a
 	// real, observed liveness bug). Signaling this channel makes runRound
-	// abandon the stale round immediately instead of waiting out the timer.
+	// abandon the stale round immediately instead of waiting out the timer --
+	// unless the chain has not reached the round's height, which means the
+	// signal is for a block this engine committed itself (chainReached).
 	externalCommitCh chan struct{}
 
 	proposalTimeout  time.Duration
@@ -585,6 +587,9 @@ func (e *Engine) runRound() {
 			// Abandon this round now -- the next startNewRound() will
 			// pick up the real height via syncHeightWithNodeLocked()
 			// instead of continuing to race for a decided height.
+			if !e.chainReached(height) {
+				continue // for a block this engine has already counted: nothing has changed
+			}
 			return
 		case <-e.roundSkipCh:
 			// Enough of the voting power has been seen in a later round than
@@ -658,9 +663,10 @@ func (e *Engine) noteCommitSeen() {
 
 // waitMinBlockInterval waits out what is left of the minimum block interval, counted
 // from the last commit this validator saw, and reports whether the round was given up
-// instead: a block committed outside this engine's rounds, or a later round the
-// others are in, means the round just started is not the one to propose or vote in,
-// and the round loop starts another (the same two events end a round in progress).
+// instead: a block committed outside this engine's rounds that the chain holds at
+// this round's height (chainReached), or a later round the others are in, means the
+// round just started is not the one to propose or vote in, and the round loop starts
+// another (the same two events end a round in progress).
 // It waits for nothing when there is no interval, no commit yet -- a validator that
 // has just started -- or the interval has already passed, as it has after a round
 // that failed.
@@ -678,14 +684,35 @@ func (e *Engine) waitMinBlockInterval() bool {
 	}
 	timer := time.NewTimer(remaining)
 	defer stopTimer(timer)
-	select {
-	case <-timer.C:
-		return false
-	case <-e.externalCommitCh:
-		return true
-	case <-e.roundSkipCh:
-		return true
+	e.mu.RLock()
+	height := e.currentState.Height
+	e.mu.RUnlock()
+	for {
+		select {
+		case <-timer.C:
+			return false
+		case <-e.externalCommitCh:
+			if e.chainReached(height) {
+				return true
+			}
+		case <-e.roundSkipCh:
+			return true
+		}
 	}
+}
+
+// chainReached reports whether the node's chain holds a block at height or later, which
+// is what makes a NotifyExternalCommit signal news to the round of that height. The
+// signal is sent for every block the node takes from its peer, and the peer's block for
+// the height this engine is committing reaches the node while it does: the node commits
+// a block once, whichever of the two is first, and answers the second without an error,
+// so both report a commit and the engine has counted the block (commit moved it on to
+// the next height) by the time the signal is read. Read as news it ended the first
+// round of that next height before anything was done in it, startNewRound took it for a
+// round that failed and started the height in round 2, and the peer, which had no such
+// signal, started it in round 1.
+func (e *Engine) chainReached(height uint64) bool {
+	return e.node != nil && e.node.GetHeight() >= height
 }
 
 // rejectProposal answers a proposal that failed validation with a prevote for
@@ -1338,8 +1365,9 @@ func (e *Engine) requestStatus() {
 // makes no claim about which height changed, since the engine re-derives the
 // real height itself from e.node.GetHeight() on its next round start. This
 // only needs to happen when the node is genuinely behind (an in-flight round
-// still targeting an already-finalized height); calling it spuriously just
-// causes one harmless extra round restart.
+// still targeting an already-finalized height); a signal read when the chain
+// has not reached the height of the round in progress is for a block the
+// engine has already counted and changes nothing (chainReached).
 func (e *Engine) NotifyExternalCommit() {
 	if e == nil {
 		return
@@ -1674,6 +1702,19 @@ func (e *Engine) startNewRound() {
 			e.countOwnUncommittedLocked(previous)
 			e.currentState.Round = roundAfter(e.currentState.Round)
 		}
+	} else {
+		// A block this engine did not commit -- the node took it from its peer -- has
+		// moved the chain on: what starts is a new height, not the next round of one that
+		// failed, and it starts in the round every new height starts in. That is round 1:
+		// commit leaves round 0 and the branch above moves on one round from it, after
+		// this engine's own commit and at a start. It stayed in round 0 here, so the
+		// validator that was told a block started the next height one round behind the
+		// one that committed it, and a validator sends nothing in a round in which it
+		// neither proposes nor has a proposal: the two heard nothing from each other until
+		// the round of the one behind timed out. Round 1 and not 0 because an engine that
+		// has not been replaced yet starts the height after its own commit in round 1,
+		// and the two must agree.
+		e.currentState.Round = roundAfter(e.currentState.Round)
 	}
 	e.pruneOwnFailuresLocked()
 	// NHB-AUDIT-C1: a round TIMING OUT must never clear the lock -- that
