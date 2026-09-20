@@ -16,15 +16,24 @@ RPC methods and the `core/sync` package are not used by this procedure (see
 
 ## Producing a snapshot
 
-Run `scripts/make-snapshot.sh` on a host that runs a validator or a follower, as
-root or as the node's user. It only reads the data directory and never stops,
-signals or locks the node, so there is no need to pause anything first.
+Run `scripts/make-snapshot.sh` on a host that runs a validator or a follower, **as
+the user the node runs as** (the owner of its data directory). It only reads the
+data directory and never stops, signals or locks the node, so there is no need to
+pause anything first.
 
 ```bash
-bash scripts/make-snapshot.sh \
+sudo -u nhb bash scripts/make-snapshot.sh \
   --data-dir /var/lib/nhbchain/nhb-data \
   --out-dir /var/lib/nhbchain/snapshots
 ```
+
+Not as root. The node's user controls the data directory, and what the script copies
+is published, so a root-run script would read whatever that user pointed a link at
+and publish it. The script refuses to run as root against a directory root does not
+own, and says how to run it. (If the node itself runs as root, the script may be run
+as root, and then `--tool`, `--work-dir` and `--out-dir` have to be given and have to
+be places only root can change.) Whoever uploads `--out-dir` as another user must
+copy regular files only and never follow a link.
 
 That command is for a host that `scripts/deployvalidator.sh` installed: the script
 reads the node binary from `/opt/nhbchain/bin/nhb` and the commit it was built from
@@ -35,16 +44,17 @@ no new node can use (`deployvalidator.sh` needs the commit to know what to check
 out). Pass the binary that is running and the full commit id it was built from:
 
 ```bash
-bash scripts/make-snapshot.sh \
+sudo -u nhb bash scripts/make-snapshot.sh \
   --data-dir /path/to/nhb-data --out-dir /path/to/snapshots \
   --node-binary /path/to/nhbchain/bin/nhb \
   --binary-commit "$(git -C /path/to/nhbchain rev-parse HEAD)"
 ```
 
-The same is needed as root against a checkout the service user owns: git refuses to
-read it, so pass `--binary-commit` (or run the script as the service user).
-`--allow-unknown-binary` publishes a manifest without the commit anyway, for tests
-only; a new node then refuses it unless it passes `--allow-binary-mismatch`.
+git refuses to read a checkout that another user owns, so run the script as the
+checkout's owner (the service user, in the layout the installer makes), or pass
+`--binary-commit`. `--allow-unknown-binary` publishes a manifest without the commit
+anyway, for tests only; a new node then refuses it unless it passes
+`--allow-binary-mismatch`.
 
 The commit has to contain this procedure (`scripts/deployvalidator.sh` as
 described in the onboarding page, and `cmd/nhb-snapshot`), because a new node
@@ -52,10 +62,16 @@ checks it out and runs the script from it. Snapshots made by a validator that st
 runs an earlier build name a commit whose script syncs from genesis, which does not
 work on this network: upgrade the validators that make snapshots first.
 
-It copies the database consistently while the node runs (immutable table files
-by hard link or copy, the MANIFEST and journal last, repeated until two passes
-agree), opens the copy read-only and refuses to go on if it does not open, packs
-it deterministically, unpacks and opens the archive again, and only then writes
+It copies the database consistently while the node runs, and only the files the
+database refers to: `CURRENT`, the MANIFEST it names, the tables that MANIFEST lists
+(by hard link or copy) and the journal it names, last, repeated until two passes
+agree. A file that merely has the name of one of those (a page of text called
+`999999.log`, a table nothing lists, an older MANIFEST) is never copied, and a name
+of the database that is a link or a directory ends the run before anything is read.
+It opens the copy read-only (`nhb-snapshot info --staged`, which refuses a copy that
+holds anything its MANIFEST does not refer to, a journal that is not one, or a table
+that does not read in full) and refuses to go on if it does not open, packs it
+deterministically, unpacks and opens the archive again, and only then writes
 `nhb-snapshot-<genesis prefix>-h<height>.tar.gz`, its manifest and `manifest.json`.
 The manifest carries the chain id, genesis hash, height, tip hash, state root,
 creation time, the binary the snapshot was taken with (sha256, commit, version),
@@ -66,6 +82,12 @@ and peer list, its vote and lock state, its keys and its logs are not, and the
 consensus key is not in the data directory at all. The script prints which files
 were left out.
 
+Old snapshots are not deleted unless you ask: `--keep N` keeps the `N` newest
+snapshots of each chain in `--out-dir` and deletes the archives and manifests of
+older ones (never the one just made, nor the one `manifest.json` names, and nothing
+but files named exactly as the script names them). Each snapshot is about as large
+as the database (334 MB when the live chain had 214,000 blocks).
+
 The tool refuses to publish, and consumers refuse to use, a snapshot larger than
 64 GiB (archive or unpacked) or one that unpacks to more than 64 times its archive:
 the live chain's is a few hundred megabytes. A new node's script also refuses, by
@@ -75,9 +97,10 @@ the tool's own bounds in `cmd/nhb-snapshot/manifest.go` in the next release.
 
 ## Cadence
 
-Publish a new snapshot regularly and delete old ones: a new node starts from the
-newest, and a follower can only close so large a gap in reasonable time (measured
-figures are in the onboarding page). A daily snapshot is a sensible default; the
+Publish a new snapshot regularly and delete old ones (`make-snapshot.sh --keep N`
+does the deleting): a new node starts from the newest, and a follower can only
+close so large a gap in reasonable time (measured figures are in the onboarding
+page). A daily snapshot is a sensible default; the
 schedule and retention are yours to set. Take snapshots from a node you trust and
 that is at the tip. New nodes are told to refuse a snapshot older than a limit
 (`--max-snapshot-age`); it is judged on the date of the snapshot's newest block,

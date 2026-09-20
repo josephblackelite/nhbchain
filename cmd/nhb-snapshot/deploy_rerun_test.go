@@ -97,13 +97,14 @@ func (h *deployHarness) stubNodeBinaries() string {
 }
 
 // mainSnippet runs the script's main() with the steps that need a real server
-// stubbed. wait_until_synced reports the snapshot height it was given.
+// stubbed. wait_until_synced reports the snapshot height it was given, and, like
+// the real one when the node has been seen at the tip, forgets the record of it.
 func mainSnippet(publisherURL string, extra ...string) string {
 	return `
 install_prerequisites(){ :; }
 install_tree_and_build(){ :; }
 install_service(){ :; }
-wait_until_synced(){ echo "wait_until_synced: snapshot height [${SNAPSHOT_HEIGHT:-}]"; }
+wait_until_synced(){ echo "wait_until_synced: snapshot height [${SNAPSHOT_HEIGHT:-}]"; forget_snapshot_height; }
 mint_rpc_token(){ echo tok; }
 submit_validator_steps(){ :; }
 main --beneficiary ` + goodBeneficiary + ` --snapshot-url ` + publisherURL + ` --bootnode 127.0.0.1:6001 --allow-insecure-http --external-address 1.2.3.4 ` + strings.Join(extra, " ") + "\n"

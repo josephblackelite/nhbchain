@@ -22,6 +22,7 @@ named where it is used. What could not be tested is listed in
 - [What a snapshot proves, and what it does not](#what-a-snapshot-proves-and-what-it-does-not)
 - [Making snapshots](#making-snapshots)
 - [Snapshot age and how large a gap a follower can close](#snapshot-age-and-how-large-a-gap-a-follower-can-close)
+- [How long the node takes to start](#how-long-the-node-takes-to-start)
 - [Never copy another validator's identity](#never-copy-another-validators-identity)
 - [Doing it by hand](#doing-it-by-hand)
 - [Troubleshooting](#troubleshooting)
@@ -39,10 +40,18 @@ named where it is used. What could not be tested is listed in
   snapshots you trust is your decision, and the script has no default host.
 - Optionally the RPC URL of a node you trust (`--tip-rpc`), used only to decide
   when your node has caught up.
-- The source commit the snapshot was taken with. The manifest names it
-  (`nhb-snapshot manifest show --manifest manifest.json --field producer.binaryCommit`).
-  Your node executes every later block with your own build, so it has to be the
-  same consensus code: check that commit out before you run the script.
+- The source commit the snapshot was taken with. The manifest names it in its
+  `producer.binaryCommit` field. On a clean machine `nhb-snapshot` does not exist
+  yet (the script builds it), so read the field from the manifest's JSON with
+  `curl`, which needs nothing built: `curl -fsS https://SNAPSHOT-HOST.example/PATH/manifest.json | sed -n 's/.*"binaryCommit": *"\([0-9a-f]*\)".*/\1/p'`
+  (it prints nothing when the manifest names no commit). Your node executes every
+  later block with your own build, so it has to be the same consensus code: check
+  that commit out before you run the script. **The manifest is not signed, so
+  check that this commit is a release you recognise** (compare it with what the
+  people who run the network announce) before you check it out: whoever hosts the
+  manifest chooses the commit, and an old commit is old consensus code. Pass the
+  oldest release you accept as `--min-release-commit` and the script refuses any
+  manifest whose commit is not that commit or a descendant of it.
   **That commit has to contain this procedure** (`scripts/deployvalidator.sh` as
   described here and `cmd/nhb-snapshot`), because you run the script from it.
   It does only for a snapshot made by a node whose binary was built from a commit
@@ -58,6 +67,9 @@ named where it is used. What could not be tested is listed in
 ```bash
 git clone https://github.com/josephblackelite/nhbchain.git
 cd nhbchain
+# The commit the snapshot was taken with: the manifest is JSON, and nothing has to
+# be built to read it. Check that it is a release you recognise before you use it.
+curl -fsS https://SNAPSHOT-HOST.example/PATH/manifest.json | sed -n 's/.*"binaryCommit": *"\([0-9a-f]*\)".*/\1/p'
 git checkout COMMIT_NAMED_IN_THE_MANIFEST
 ls cmd/nhb-snapshot scripts/make-snapshot.sh   # both must exist: see "What you need"
 
@@ -65,11 +77,15 @@ bash scripts/validator-only-bootstrap.sh \
   --beneficiary YOUR_NHB_WALLET_ADDRESS \
   --snapshot-url https://SNAPSHOT-HOST.example/PATH \
   --bootnode BOOTNODE-HOST.example:6001 \
+  --max-snapshot-age 72h \
+  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT \
   --tip-rpc https://TRUSTED-RPC-HOST.example      # optional
 ```
 
 `SNAPSHOT-HOST.example`, `BOOTNODE-HOST.example` and `TRUSTED-RPC-HOST.example`
-are placeholders. `scripts/validator-only-bootstrap.sh` is a five-line wrapper
+are placeholders, and so is the release commit. `--max-snapshot-age 72h` is here
+because without it a snapshot of any age is accepted and a stale one fails only
+later, with a stall. `scripts/validator-only-bootstrap.sh` is a five-line wrapper
 around `scripts/deployvalidator.sh`; both take the same flags. Run it again at
 any time: it is safe to repeat (see
 [Running it again](#running-it-again-and---reset-state)).
@@ -86,11 +102,12 @@ The flags:
 | `--beneficiary` | Required. Wallet that receives this validator's epoch reward payouts. |
 | `--snapshot-url` | Required (or `NHB_SNAPSHOT_URL`). Directory URL holding `manifest.json` and the archive. `https` only unless `--allow-insecure-http`. |
 | `--bootnode` | Required (or `NHB_BOOTNODE`). Plain `host:port`, never an `enode://` URI. |
+| `--min-release-commit` | Optional (or `NHB_MIN_RELEASE_COMMIT`), advised. The full commit id of the oldest release you accept. A manifest whose commit is neither that commit nor a descendant of it is refused, and so is one that names no commit or one your checkout does not have (`git fetch` first). The manifest is not signed, so this is what keeps a snapshot host from steering you to old consensus code. |
 | `--tip-rpc` | Optional (or `NHB_TIP_RPC_URL`). A node you trust. Used to decide when you have caught up, and to refuse a node whose newest blocks are not that node's. |
 | `--max-lag-blocks` | How far from that node (either side) still counts as caught up. Default 3, at most 15. |
 | `--sync-timeout` | Seconds to wait for the catch-up. Default 7200. |
-| `--rpc-timeout` | Seconds the node's RPC may stay silent after the service starts. Default 180. A node that never answers is not running or is crash-looping; the script says so after this long, with the commands that show why, instead of waiting out `--sync-timeout`. (`nhb-snapshot wait-synced` also gives up on a silent node after its `--stall-timeout`, when that is shorter.) |
-| `--max-snapshot-age` | Refuse a snapshot whose newest block is older than this, for example `48h`. The limit rests on the date of the newest block, which `extract` checks against the database it unpacked; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. |
+| `--rpc-timeout` | Seconds the node's RPC may stay silent after the service starts. Default 180, which is far above what was measured (see [How long the node takes to start](#how-long-the-node-takes-to-start)). A node that never answers is not running or is crash-looping; the script says so after this long, with the commands that show why, instead of waiting out `--sync-timeout`. (`nhb-snapshot wait-synced` also gives up on a silent node after its `--stall-timeout`, when that is shorter.) |
+| `--max-snapshot-age` | Refuse a snapshot whose newest block is older than this; use `72h`. The limit rests on the date of the newest block, which `extract` checks against the database it unpacked; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. Without it a snapshot of any age is accepted. |
 | `--tip-hash`, `--state-root` | Optional. The tip hash and state root the snapshot must have, 32 bytes of hex each, as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
 | `--max-snapshot-gib` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. Default 16. |
 | `--listen-addr`, `--rpc-addr`, `--external-address` | As before. |
@@ -163,14 +180,27 @@ quietly, and no secret is printed.
    (`TestDeployArgumentChecksRunBeforeAnythingIsTouched`)
 2. **Installs the tools and builds** `nhb`, `nhb-cli` and `nhb-snapshot`, after
    checking that `config/genesis.relaunch.json` is byte for byte the live genesis.
+   When the host has no Go, it installs Go 1.24.3, and it unpacks that tarball (as
+   root) only after its sha256 has matched the one go.dev publishes for the file
+   (`3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8`, pinned in
+   the script). (`TestDeployGoToolchainIsCheckedBeforeItIsUnpacked`)
 3. **When it will install a snapshot** (the data directory holds nothing, or
    `--reset-state` was given), **fetches only the manifest first** and checks that
    it is for the pinned chain id and genesis hash (and for the tip hash and state
-   root you pinned, if you did) and that the node built here is the one the
-   snapshot was taken with. A node that already holds the chain gets none of this
+   root you pinned, if you did), that the commit it names is the release you
+   pinned with `--min-release-commit` or built on it (if you pinned one), and that
+   the node built here is the one the snapshot was taken with. When it is not, it
+   says which commit to check out, and to check first that it is a release you
+   recognise: the manifest is not signed, and the host that serves it chooses that
+   commit. It reads this checkout's own commit with git told that this checkout is
+   safe to read, for that one command (a checkout that another user owns, run as
+   root, is otherwise refused by git as "dubious ownership"), and when git still
+   cannot read it, it shows git's message instead of sending you to check out the
+   commit you are already on. A node that already holds the chain gets none of this
    (see [Running it again](#running-it-again-and---reset-state)).
    (`TestDeployInstallsAVerifiedSnapshotAndRefusesTheRest`,
-   `TestDeployBinaryIdentityPolicy`, `TestDeployPinsTheSnapshotsTipAndStateRoot`)
+   `TestDeployBinaryIdentityPolicy`, `TestDeployPinsTheSnapshotsTipAndStateRoot`,
+   `TestDeployMinimumReleaseCommit`, `TestDeployTheLocalCommitIsReadOrExplained`)
 4. **Makes this validator's key on this machine** and never accepts one. It
    refuses to go on when another `nhb` process is running outside `nhb.service`,
    or when the key file was not made by this script and this host has no node data
@@ -257,6 +287,22 @@ because an earlier run stopped part of the way.
   node only when its binary, config or key changed, waits for the tip and
   registers, as always.
   (`TestDeployRerunDoesNotDependOnTheSnapshotHost`)
+- **An interrupted first run is finished by the next one, with the same guard.**
+  The run that installs a snapshot records its height in
+  `/var/lib/nhbchain/.snapshot-height` and removes that record only when it has
+  seen the node at the tip, past the snapshot's height. If the run is interrupted
+  before that (an SSH session that dropped, a Ctrl-C), the next run finds the data
+  in place, fetches no manifest, and reads the height from the record, so it still
+  requires the node to apply a block above it. Without the record a re-run would
+  have no height to require, and "at the tip" would rest on a peer and a block
+  dated close to this host's clock. A record that does not hold a block height
+  stops the run and says why. (`TestDeployRemembersTheSnapshotHeightUntilTheNodeHasBeenSeenPastIt`)
+- Two runs at the same time are refused. The lock is a directory in the state
+  directory of the user who runs the script (`$XDG_STATE_HOME/nhbchain`, or
+  `~/.local/state/nhbchain`), which only that user can write: it used to be a fixed
+  name in `/tmp`, which any user could make first (stopping every run), and whose
+  holder, a process of another user, could not be signalled and so looked gone.
+  (`TestDeployLock`)
 - A run that does install a snapshot (an empty data directory, or `--reset-state`)
   fetches the manifest and checks the binary before anything else on the host
   changes: the key, the config, the data and the service are all untouched until
@@ -321,6 +367,32 @@ host can ask for:
   refused for what it says before a byte of it is unpacked.
 - It refuses a snapshot whose newest block is dated more than five minutes ahead
   of this host's clock: a block cannot be in a snapshot before it exists.
+- A host that sends too slowly is given up on: the transfer is aborted when it
+  runs below 10 KiB a second for a minute (with the three retries, a few minutes
+  at most), where `--max-time` alone, which is two hours, would let a host that
+  trickles bytes hold even the manifest, a few kilobytes, for hours.
+  (`TestDeployFetchGivesUpOnAHostThatTrickles`)
+- Root does not write, chown, chmod or copy through a path the service user can
+  replace. The data directory, the key file, the download directory and the
+  fingerprint of the running service are all in directories the service user owns,
+  so it can put a link in place of any of them. The script therefore does its work
+  in them as that user (unpacking, closing the data directory to other users,
+  keeping the fingerprint, carrying the node's identity and vote state over on
+  `--reset-state`), and where root has to act on the key file it refuses a link and
+  sets the ownership on the name (`chown -h`), never on what a link leads to.
+  `restore_identity`, which copies the identity and vote files of the old data
+  directory, refuses a link as a source (and a `p2p` directory that is one), and
+  `write_env` refuses a `node.env` that is a link before it reads the RPC secret
+  from it. A few reads as root remain (a hash of the config and of `node.env`,
+  whether the data directory is empty) that disclose nothing.
+  (`TestDeployRestoreIdentityRefusesALink`, `TestDeployKeyIsNeverHandledThroughALink`,
+  `TestDeployRootTouchesNothingTheServiceUserCanReplace`)
+- The short-lived RPC token that submits the registration goes to `nhb-cli` on a
+  pipe and into its environment, never on a command line: `sudo -u nhb env
+  NHB_RPC_TOKEN=... nhb-cli` stays in the process list, where any user can read it,
+  for as long as sudo waits. The commands the script prints for you to run later
+  pass it through the environment as well (`sudo --preserve-env=...`).
+  (`TestValidatorStepsPassTheLocalRPCToken` in `tests/scripts`)
 
 (`TestDeployRefusesASnapshotBeyondWhatTheOperatorAccepts`,
 `TestDeployChecksThereIsRoomForTheSnapshotBeforeItDownloadsIt`,
@@ -360,24 +432,55 @@ host can ask for:
   configuration (see above). Sync from a bootnode you trust.
 - The manifest is not signed. Fetch it over `https` from a location you control
   or trust.
+- **The commit the manifest names is the host's choice.** It is the commit the
+  script tells you to build, and a host that names an old commit steers you to old
+  consensus code. Check that it is a release you recognise before you check it out,
+  and pass the oldest release you accept as `--min-release-commit`: the script then
+  refuses a commit that is not that release or built on it.
 
 ## Making snapshots
 
-`scripts/make-snapshot.sh` runs on a host that runs a validator or a follower,
-as root or as the node's user. It only reads the node's data directory. It never
-stops, signals, locks or writes to the node.
+`scripts/make-snapshot.sh` runs on a host that runs a validator or a follower, **as
+the user the node runs as** (the owner of its data directory). It only reads the
+node's data directory. It never stops, signals, locks or writes to the node.
 
 ```bash
-bash scripts/make-snapshot.sh \
+sudo -u nhb bash scripts/make-snapshot.sh \
   --data-dir /var/lib/nhbchain/nhb-data \
   --out-dir /var/lib/nhbchain/snapshots
 ```
+
+**Why not as root.** The node is the network-facing part of the host, and its user
+owns its data directory, so whatever that user puts there is an input of this
+script, and what the script copies is published. Run as root, it would read
+whatever the user pointed a link at (a link called `999999.log`, aimed at a file
+only root can read) and publish it. The script therefore refuses to run as root
+against a directory that root does not own, and says how to run it (`sudo -u <the
+directory's owner> bash ...`). Run as the directory's owner, nothing it reads is
+more than that user already holds. If the node itself runs as root, the directory
+is root's and the script may be run as root; then `--tool`, `--work-dir` and
+`--out-dir` have to be given, and all three have to be places nobody but root can
+change (the script checks that each one, and every directory above it, is root's and
+cannot be written by its group or by others; a directory that does not exist yet is
+made only where the nearest one that does is root's own): as root it executes the
+tool and writes the staging area, and it does not take either from a default place
+next to the node's data. Run as anyone else, the default tool is used only when the user running the
+script, or root, owns it. (`TestMakeSnapshotAsRoot`, `TestRootOnlyPath`,
+`TestMakeSnapshotDefaultToolIsNotTakenFromAnotherUser`)
 
 It writes into `--out-dir`, in this order, an archive
 `nhb-snapshot-<genesis prefix>-h<height>.tar.gz`, its manifest, and the same
 manifest as `manifest.json` (the fixed name a new node fetches). Uploading them is
 a separate step and is your decision: where snapshots are hosted is not part of
-this repository.
+this repository. The node's user writes `--out-dir`, so whoever copies it on as
+another user must copy regular files only and never follow a link. Old snapshots
+stay where they are: pass `--keep N` to keep only the `N` newest snapshots of each
+chain in `--out-dir` after a run and delete the archives and manifests of older
+ones (the one just made, and the one `manifest.json` names, are never deleted, and
+nothing but files named exactly as this script names them is). Without `--keep`
+every snapshot is kept, and each is about as large as the database (334 MB when the
+live chain had 214,000 blocks).
+(`TestMakeSnapshotKeepPrunesOnlyOldSnapshotsOfTheSameChain`)
 
 **Which build the snapshot names.** The manifest records the node binary the
 database was written by (its sha256) and the source commit it was built from. A
@@ -393,7 +496,7 @@ Pass the path of the binary that is running and the full commit id it was built
 from:
 
 ```bash
-bash scripts/make-snapshot.sh \
+sudo -u nhb bash scripts/make-snapshot.sh \
   --data-dir /path/to/nhb-data --out-dir /path/to/snapshots \
   --node-binary /path/to/nhbchain/bin/nhb \
   --binary-commit "$(git -C /path/to/nhbchain rev-parse HEAD)"
@@ -404,40 +507,72 @@ bash scripts/make-snapshot.sh \
   an abbreviation or a tag would never match. It has to be the commit the running
   binary was built from, not a checkout that was updated after the last build, and
   it has to contain this procedure (see [What you need](#what-you-need)).
-- git refuses to read a checkout that another user owns. Run as root against a
-  checkout the service user owns, the script cannot read the commit and stops: pass
-  `--binary-commit`, or run it as the service user.
+- git refuses to read a checkout that another user owns. Run as the checkout's
+  owner (the service user, in the layout the installer makes) the script reads the
+  commit; run as any other user it says what git said and stops: pass
+  `--binary-commit`.
 - `--allow-unknown-binary` publishes a manifest that does not name the commit
   anyway, for tests. A new node then refuses it, and is told there is nothing to
   check out, unless it passes `--allow-binary-mismatch`
   (`TestMakeSnapshotRefusesToPublishAManifestNoNewNodeCanAccept`).
 
-How the copy is made:
+How the copy is made. The chain database is a LevelDB directory, and the script
+copies the files **the database refers to, and only those**, chosen by what the
+database says and never by a listing of the directory:
 
-1. The chain database is a LevelDB directory. Its table files (`*.ldb`) never
-   change once written, so they are hard-linked into a private staging directory
-   (copied when a link is not possible). The MANIFEST and the journal change
-   while the node runs, so they are copied, last.
-2. A pass counts only if nothing changed underneath it: the same `CURRENT`, the
+1. `CURRENT`, and the MANIFEST it names, are copied first. They say what the rest
+   is: `nhb-snapshot refs` reads the copied MANIFEST and prints the tables it lists
+   and the journal it names.
+2. Those tables are hard-linked into a private staging directory (copied when a
+   hard link is not possible): they never change once written. (`ln -P`, `cp -P`:
+   a link is never followed.)
+3. The journal the MANIFEST names is copied last, because it changes while the node
+   runs.
+4. A pass counts only if nothing changed underneath it: the same `CURRENT`, the
    same MANIFEST at the same size, the same set of journals before and after, every
-   table copied. The MANIFEST size is read before the tables are listed, so a
-   table it refers to cannot be missing from the list. Passes repeat until two
-   consecutive ones agree.
-3. The staged copy is opened read-only by `nhb-snapshot info`, which prints and
-   checks the chain id, genesis hash, height, tip hash and state root and
-   re-hashes the whole state trie. A copy that does not open is never packed. A
-   copy that lacks a table file the MANIFEST refers to, or holds one of the wrong
-   size, is never packed either; a table nothing refers to (one a compaction was
-   still writing) is left out.
-4. It is packed deterministically (sorted names, fixed owner, mode and time, no
+   listed table copied, and the copied MANIFEST exactly as long as it was when the
+   pass began. The MANIFEST size is read before the copy, so a table it refers to
+   cannot be missing from the list. Passes repeat until two consecutive ones agree.
+   (`TestMakeSnapshotRetriesWhenTheDatabaseChangesDuringAPass`,
+   `TestMakeSnapshotUnderChurn`)
+5. The staged copy is opened read-only by `nhb-snapshot info --staged`, which
+   refuses a copy that holds **any file its own MANIFEST does not refer to**, any
+   file that is not a regular file, a journal that does not read as a journal of
+   write batches (chunk by chunk, checksum by checksum; the only thing it accepts is
+   an end cut short, which is what a copy of a file a node was writing can have),
+   and a table that does not read in full. It then prints and checks the chain id,
+   genesis hash, height, tip hash and state root, and re-hashes the whole state
+   trie. A copy that does not pass is never packed.
+   (`TestVerifyStageRefusesWhatTheDatabaseDoesNotReferTo`,
+   `TestCheckJournalAcceptsEveryPrefixOfARealJournal`,
+   `TestCheckJournalRefusesWhatIsNotAJournal`,
+   `TestAFileThatIsNotATableIsRefusedEvenWhenTheMANIFESTListsIt`)
+6. It is packed deterministically (sorted names, fixed owner, mode and time, no
    gzip name or time; the same files always give the same archive with one build
-   of the tool), written with
-   its manifest, unpacked again and opened again, and only then published.
+   of the tool), written with its manifest, unpacked again and opened again, and
+   only then published.
+
+What that means for a data directory the node's user can put anything in:
+
+- A file that only has the name of one of the database's (`999999.log` holding a
+  page of text, a table nothing lists, an older MANIFEST, a journal the MANIFEST
+  does not name) is never copied and never packed, and the script says so
+  (`... (the MANIFEST does not refer to it: not copied)`).
+  (`TestMakeSnapshotDoesNotPackAFileThatOnlyHasTheNameOfOneOfTheDatabases`)
+- A name of the database that is not a regular file (a link, a directory) ends the
+  run before anything is read: `refusing to run: 999999.log in ... is a symbolic
+  link, not a regular file`. Nothing is published.
+  (`TestMakeSnapshotNeverFollowsALinkInTheDataDirectory`,
+  `TestMakeSnapshotRefusesWhatFileKindReportsAsALink`,
+  `TestMakeSnapshotRefusesANameOfTheDatabaseThatIsNotARegularFile`)
+- A work directory or staging directory that is a link is not used.
+  (`TestMakeSnapshotRefusesAPlantedWorkDirectory`)
 
 Which files are in a snapshot: `CURRENT`, `MANIFEST-*`, `*.log`, `*.ldb`,
-`*.sst`, chosen by name from that allow-list and nothing else. They hold
-blocks, the state trie and indexes: data every node already has and that is
-public on chain. No key, and nothing that identifies the node.
+`*.sst`, chosen by name from that allow-list and then by what the MANIFEST refers
+to, and nothing else. They hold blocks, the state trie and indexes: data every node
+already has and that is public on chain. No key, and nothing that identifies the
+node.
 
 What is never read, copied or packed, and why it matters:
 
@@ -538,6 +673,49 @@ What that means for the live chain, read with care:
   `--reset-state` and a fresher `--snapshot-url`. Do not start from an empty data
   directory.
 
+## How long the node takes to start
+
+`--rpc-timeout` (default 180 seconds) bounds how long the node's RPC may stay
+silent after the service starts, and a node that does not answer in that time is
+reported as not running or crash-looping (exit 7 of `wait-synced`). The default was
+first chosen without a measurement, so it was measured, on the local network of the
+end-to-end test (real `nhb` processes, the shipped `config.toml` with the shipped
+consensus timeouts, Windows 11, a local disk, blocks that carry almost no
+transactions). The chain was grown on fast timeouts to a height, the validator was
+killed the hard way (as a crash leaves a database), and it was started again three
+times; each figure is the time from starting the process to its first answer to
+`net_info`:
+
+| Database | Size | Three starts in a row | First start on a database without the transaction-index marker |
+|---|---|---|---|
+| 1,000 blocks | 0.9 MB | 66 to 90 ms | |
+| 4,000 blocks | 3.5 MB | 68 to 113 ms | 134 ms |
+| 12,000 blocks | 11 MB | 89 to 133 ms | 194 ms |
+| 30,000 blocks | 31 MB | 131 to 236 ms | |
+
+The time grows with the height, by a few microseconds a block: the node reads the
+height index of the whole chain into memory when it starts, and, once for a
+database, walks every block to index its transactions when the database lacks the
+marker that says it did (`BackfillTransactionIndex` in `core/blockchain.go`; a
+snapshot of a validator that has run this code carries the marker, and a database
+that lacks it pays the walk on its first start only, which is the last column).
+Extrapolated linearly to 250,000 blocks, a little more than the live chain has, that
+is about 1 to 1.5 seconds for an ordinary start and 3 to 5 seconds for a first start
+that runs the walk. Ten times that, for a slower disk, blocks that carry transactions and a cold
+cache, is 50 seconds at most, under a third of the default. It is not close, so the default
+stays at 180 seconds.
+
+What this does not show: it was not measured on a database of the live chain's size
+(it was 334 MB at 214,000 blocks), on Linux, or on a host with little memory and
+a slow disk, where a start that swaps can take far longer than these figures. A node
+that is starting, only slowly, is visible in `journalctl -u nhb.service`; give
+`--rpc-timeout` a larger value then. To measure again:
+
+```bash
+NHB_SNAPSHOT_E2E_STARTUP=1 NHB_SNAPSHOT_E2E_STARTUP_TARGETS=1000,4000,12000,30000 \
+  NHB_TEST_BASH=/usr/bin/bash go test ./cmd/nhb-snapshot -run TestNodeStartupTime -v -timeout 90m
+```
+
 ## Never copy another validator's identity
 
 A data directory copied from another validator must never keep that validator's
@@ -565,34 +743,89 @@ p2p identity or consensus key.
 
 ## Doing it by hand
 
-What the script does, without it (Linux; adjust paths):
+What the script does, without it (Ubuntu; adjust paths). Each block says which
+function of `scripts/deployvalidator.sh` it stands for, where every value and every
+mode below comes from. The steps that unpack, and everything that touches the
+service user's directories, are run **as that user** (`sudo -u nhb`), as the script
+does.
 
 ```bash
-# 1. Build from the commit named in the manifest.
-go build -o bin/nhb ./cmd/nhb
-go build -o bin/nhb-cli ./cmd/nhb-cli
-go build -o bin/nhb-snapshot ./cmd/nhb-snapshot
+# 0. The service user, the directories, the tree and the build
+#    (install_tree_and_build). Run it in a checkout of the commit the manifest names.
+sudo useradd --system --home /opt/nhbchain --shell /usr/sbin/nologin nhb
+sudo install -d -m 0700 -o nhb -g nhb /etc/nhbchain
+sudo install -d -o nhb -g nhb /var/lib/nhbchain
+sudo mkdir -p /opt/nhbchain/bin
+sudo rsync -a --delete --exclude '/.gocache' --exclude '/.gopath' --exclude '/.gotmp' ./ /opt/nhbchain/
+echo "10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b  /opt/nhbchain/config/genesis.relaunch.json" | sha256sum -c
+cd /opt/nhbchain
+sudo mkdir -p .gocache .gopath .gotmp
+for p in nhb nhb-cli nhb-snapshot; do
+  sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE=$PWD/.gocache GOPATH=$PWD/.gopath \
+    GOTMPDIR=$PWD/.gotmp TMPDIR=$PWD/.gotmp HOME=/root \
+    go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/$p ./cmd/$p
+done
+sudo chown -R nhb:nhb /opt/nhbchain
 
-# 2. Fetch the manifest, then the archive it names (https).
-curl -fsSLO https://SNAPSHOT-HOST.example/PATH/manifest.json
-ARCHIVE=$(bin/nhb-snapshot manifest show --manifest manifest.json --field archive.name)
-curl -fsSLO "https://SNAPSHOT-HOST.example/PATH/${ARCHIVE}"
+# 1. This validator's key, made on this machine and never passed in (ensure_key).
+( cd "$(mktemp -d)" && /opt/nhbchain/bin/nhb-cli generate-key >/dev/null && \
+  sudo install -m 0600 -o nhb -g nhb wallet.key /etc/nhbchain/validator.key )
 
-# 3. Verify against the pinned identity, then unpack.
-export NHB_SNAPSHOT_CHAIN_ID=18346390202490284624
-export NHB_SNAPSHOT_GENESIS_HASH=0xfe9b78af9223ea50f456f63c41084dd99bac4aaa3a790a10fcc26d1dc63210a2
-bin/nhb-snapshot verify --manifest manifest.json --archive "$ARCHIVE"
-bin/nhb-snapshot extract --manifest manifest.json --archive "$ARCHIVE" \
+# 2. Fetch the manifest, then the archive it names (https), as the service user,
+#    into a directory only that user can enter (fetch_manifest, install_snapshot).
+D=/var/lib/nhbchain/.snapshot-download
+sudo -u nhb sh -c "mkdir -p $D && chmod 0700 $D"
+sudo -u nhb curl -fsSL -o $D/manifest.json https://SNAPSHOT-HOST.example/PATH/manifest.json
+ARCHIVE=$(sudo -u nhb /opt/nhbchain/bin/nhb-snapshot manifest show --manifest $D/manifest.json --field archive.name)
+sudo -u nhb curl -fsSL -o "$D/$ARCHIVE" "https://SNAPSHOT-HOST.example/PATH/$ARCHIVE"
+
+# 3. Verify against the pinned identity, then unpack, as the service user.
+PIN="--chain-id 18346390202490284624 --genesis-hash 0xfe9b78af9223ea50f456f63c41084dd99bac4aaa3a790a10fcc26d1dc63210a2"
+sudo -u nhb /opt/nhbchain/bin/nhb-snapshot verify --manifest $D/manifest.json --archive "$D/$ARCHIVE" $PIN --max-age 72h
+sudo -u nhb /opt/nhbchain/bin/nhb-snapshot extract --manifest $D/manifest.json --archive "$D/$ARCHIVE" $PIN --max-age 72h \
   --target /var/lib/nhbchain/nhb-data \
-  --reject-validator "$(bin/nhb-cli address /etc/nhbchain/validator.key | grep -o 'nhb1[a-z0-9]*')"
+  --reject-validator "$(sudo -u nhb /opt/nhbchain/bin/nhb-cli address /etc/nhbchain/validator.key | grep -o 'nhb1[a-z0-9]*')"
+sudo -u nhb chmod 0700 /var/lib/nhbchain/nhb-data
 
-# 4. Config: copy config.toml, change only the node-local keys, then check it.
-bin/nhb-snapshot check-config --config /etc/nhbchain/config.toml --genesis config/genesis.relaunch.json
+# 4. Config: copy config.toml and change only the node-local keys, then check it
+#    (install_config; render_config does the editing with a small perl program).
+#    Set ListenAddress, RPCAddress, DataDir = "/var/lib/nhbchain/nhb-data",
+#    GenesisFile = "/opt/nhbchain/config/genesis.relaunch.json",
+#    ValidatorKeystorePath = "", ValidatorKMSEnv = "NHB_VALIDATOR_RAW_KEY",
+#    NetworkName = "nhb-mainnet-validator", and in [p2p] NetworkId = 18346390202490284624,
+#    Bootnodes = ["BOOTNODE-HOST.example:6001"], PersistentPeers = the same, and
+#    ExternalAddress = "<this server's public IP>:6001".
+sudo install -m 0600 -o nhb -g nhb /opt/nhbchain/config.toml /etc/nhbchain/config.toml
+sudo -u nhb nano /etc/nhbchain/config.toml
+sudo -u nhb /opt/nhbchain/bin/nhb-snapshot check-config --config /etc/nhbchain/config.toml --genesis /opt/nhbchain/config/genesis.relaunch.json
 
-# 5. Start the node and wait for the tip.
+# 5. The node's environment: the RPC secret and the key, readable by root only
+#    (write_env; systemd reads it and hands it to the node).
+sudo sh -c 'umask 077; { echo NHB_ENV=prod; echo "NHB_RPC_JWT_SECRET=$(openssl rand -hex 32)"; echo "NHB_VALIDATOR_RAW_KEY=$(od -An -tx1 /etc/nhbchain/validator.key | tr -d " \n")"; } > /etc/nhbchain/node.env'
+
+# 6. The service (install_service), then start the node and wait for the tip.
+sudo install -m 0644 /opt/nhbchain/deploy/systemd/nhb.service /etc/systemd/system/nhb.service
+sudo systemctl daemon-reload
+sudo systemctl enable nhb.service
 sudo systemctl start nhb.service
-bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 --tip-rpc https://TRUSTED-RPC-HOST.example
+/opt/nhbchain/bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 $PIN \
+  --min-height "$(sudo -u nhb /opt/nhbchain/bin/nhb-snapshot manifest show --manifest $D/manifest.json --field height)" \
+  --tip-rpc https://TRUSTED-RPC-HOST.example
+
+# 7. Only then register (submit_validator_steps): a short-lived token, which goes
+#    through the environment and never on a command line.
+TOKEN=$(sudo sh -c '. /etc/nhbchain/node.env && printf %s "$NHB_RPC_JWT_SECRET"' | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb \
+  /opt/nhbchain/bin/nhb-cli set-reward-beneficiary nhb1YOUR_WALLET /etc/nhbchain/validator.key
+NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb \
+  /opt/nhbchain/bin/nhb-cli register-validator 0 /etc/nhbchain/validator.key
 ```
+
+This is the same order the script keeps: nothing is registered before the node has
+been seen past its snapshot's height. What the script adds is the checks around it
+(the size limits, the binary and release checks, refusing a key that already runs
+elsewhere or a second node on the host, the record that makes an interrupted run
+finish with the same guard) and the exact stop-and-swap of `--reset-state`.
 
 ## Troubleshooting
 
@@ -602,6 +835,19 @@ bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 --tip-rpc https://TRUST
 | `the node built here is not the one the snapshot was taken with` | Your build differs from the snapshot's. `git checkout` the commit it prints and run the script again. `--allow-binary-mismatch` is only for two builds that differ in nothing consensus executes. |
 | `The snapshot does not say which commit it was made with` | The manifest's commit is `unknown`, so there is nothing to check out. Ask whoever published it for a snapshot made by a current `make-snapshot.sh`, which refuses to make one that does not name its commit. |
 | `the source commit of the node binary is not known` and `a dead end for every new node` (from `make-snapshot.sh`) | The producer could not read the commit from the checkout above the node binary (a host not installed by the script, or git refusing a checkout another user owns). Pass `--node-binary` and `--binary-commit`; see [Making snapshots](#making-snapshots). Nothing was copied or published. |
+| `the commit the snapshot's manifest names (...) is neither the release you pinned (...) nor built on it` | `--min-release-commit` was given and the manifest's commit is older than that release, or on another branch. The manifest is not signed; do not use a snapshot that sends you there. |
+| `the commit the manifest names (...) is not in this checkout` (or `the release you pinned (...) is not in this checkout`) | The script cannot compare two commits when one is missing. Run `git fetch` in the checkout; if the manifest's commit is still missing it is not part of the project's history. |
+| `This checkout's commit could not be read: git said: ...` | git refused the checkout (typically `detected dubious ownership`, when it belongs to another user) or is not installed. The script names the checkout as safe for its own git calls; if git still refuses, fix what it says (`git config --global --add safe.directory <the checkout>`), or check the commit out from a git that can read it. |
+| `the Go 1.24.3 tarball has sha256 ..., not the ... go.dev publishes` | A damaged or replaced download of the toolchain. It was not unpacked. Run the script again; if it happens again, do not go on. |
+| `could not download ...` and `the host has to send at least 10240 bytes a second` | The host was too slow (under 10 KiB a second for a minute) and was given up on, after the retries. Try again later or use another snapshot host. |
+| `an earlier run installed a snapshot at height N and did not finish waiting for the node` | Not an error: the run that installed the snapshot was interrupted before it saw the node at the tip, so this run requires the node to get past height N as well. `/var/lib/nhbchain/.snapshot-height` holds N. |
+| `... does not hold a block height` (naming `.snapshot-height`) | That record was changed by hand or damaged. Remove it only if you know the node is at the network tip, or run again with `--reset-state`. |
+| `another run of this script (pid ...) is in progress` | The lock in `~/.local/state/nhbchain/deploy.lock.d` (or `$XDG_STATE_HOME/nhbchain`) is held by a live process of yours. A lock left by a process that is gone is taken over. |
+| `<path> is a symbolic link, not a key file` (or `... is a symbolic link, not the file the node wrote`) | Something replaced `/etc/nhbchain/validator.key`, or a file of the node's identity or vote state, by a link. The script never follows one. Find out who made it (the service user owns those directories), and remove it. |
+| `refusing to run as root: ... belongs to nhb` (from `make-snapshot.sh`) | Run it as the data directory's owner, as the message says: `sudo -u nhb bash scripts/make-snapshot.sh ...`. |
+| `refusing to run: 999999.log in ... is a symbolic link, not a regular file` (from `make-snapshot.sh`) | A name of the chain database in the node's data directory is not a regular file (a link, a directory). The node never makes one. Nothing was copied or published; find out who made it. |
+| `... (the MANIFEST does not refer to it: not copied)` (from `make-snapshot.sh`) | A file in the node's data directory has the name of one of the database's but the database does not refer to it (a table a compaction was writing, an older MANIFEST, a leftover, or something else put there). It is not in the snapshot. |
+| `refusing to pack ...: the MANIFEST does not list ...` or `... names the journal ..., not ...` (from `nhb-snapshot info --staged` or `pack`) | The staged copy holds a file the database does not refer to. Nothing was packed. |
 | `the snapshot's newest block is dated ... ago, older than the allowed ...` | The snapshot is stale for the `--max-snapshot-age` you gave, whatever creation time its manifest states. Get a newer one. |
 | `the archive sha256 is ... the manifest says ...` or `a truncated or replaced download` | A damaged or replaced download. Fetch it again. |
 | `the archive entry ... is not a chain database file name` and similar | The archive is not a snapshot made by `make-snapshot.sh`. Do not use it. |
@@ -683,9 +929,25 @@ Tested, on a local network of real `nhb` processes (Windows, Git Bash):
   after the snapshot, with a state root mismatch, and stayed at height 1,079.
 - `TestSnapshotGapCatchUp` (`NHB_SNAPSHOT_E2E_GAP=1`): the table above.
 - Unit tests of the tool with hostile archives, of the copy under concurrent
-  writes with compactions (`TestMakeSnapshotUnderChurn`), and of the deployment
-  script's functions against fake `sudo`, `systemctl` and `ps` and a snapshot of a
-  chain with the live genesis.
+  writes with compactions (`TestMakeSnapshotUnderChurn`: bursts of writes with rests
+  between them, every snapshot started with a burst; and
+  `TestMakeSnapshotRetriesWhenTheDatabaseChangesDuringAPass`, which makes the
+  database change in the middle of the first pass, every time), and of the
+  deployment script's functions against fake `sudo`, `systemctl` and `ps` and a
+  snapshot of a chain with the live genesis.
+- What the producer trusts (`producer_trust_test.go`, `dbrefs_test.go`,
+  `stage_test.go`): files that only have a database file's name are not packed; a
+  journal is read chunk by chunk and every prefix of a real one is accepted, and
+  nothing that is not a journal is; a listed table that is not a table is refused;
+  a name that is a link or a directory ends the run (with links made where the
+  machine can make them, and through the `file_kind` stand-in where it cannot);
+  running as root, root-only places and default tools (through stand-ins for who is
+  who, `current_uid` and `owner_and_mode`); `--keep`.
+- What the deployment script trusts (`deploy_trust_test.go`): the node's identity
+  copied without following a link, the key file handled by name and by its owner,
+  root touching nothing the service user can replace, a host that trickles, the
+  lock, the pinned Go tarball, the local commit, the minimum release commit, and the
+  record that makes an interrupted run keep its guard.
 - The deployment script's `main()` run whole, with only the steps that need a real
   server (packages, the build, the service, the node's RPC) stubbed, against a real
   `nhb-snapshot` and a snapshot host on the loopback interface: a fresh install,
@@ -710,9 +972,28 @@ Not tested here, and the exact commands to run on Linux:
   restart, `sudo -u nhb`). On a clean Ubuntu 22.04 VM, serve a snapshot directory
   with `python3 -m http.server 8000 --directory SNAPSHOTS` and run
   `bash scripts/deployvalidator.sh --beneficiary nhb1... --snapshot-url http://127.0.0.1:8000 --allow-insecure-http --bootnode BOOTNODE:6001`.
-- `TestPackRefusesASymlinkedFile` (symlinks need privileges on Windows) and the
-  symlink target case of `TestExtractRefusesBadTargets`:
-  `go test ./cmd/nhb-snapshot -count=1` on Linux runs them.
+- The tests that need a real symbolic link (Windows needs a privilege to make one, so
+  they skip with a message there): `TestPackRefusesASymlinkedFile`, the symlink
+  target case of `TestExtractRefusesBadTargets`,
+  `TestMakeSnapshotNeverFollowsALinkInTheDataDirectory`,
+  `TestMakeSnapshotRefusesAPlantedWorkDirectory`, `TestRefsNeverReadThroughALink/a_real_link`
+  and `TestDeployRestoreIdentityRefusesALink/a_real_link`:
+  `go test ./cmd/nhb-snapshot -count=1` on Linux runs them. The same refusals are
+  tested everywhere with stand-ins for the question "is this a link?" (`file_kind`
+  in `make-snapshot.sh`, `test -L` in `deployvalidator.sh`, the `lstat` of the tool).
+- What only real privilege and a real kernel show, which nothing here ran: that
+  `cp -P` and `ln -P` copy a link as a link (GNU coreutils behaviour, relied on and
+  not observed), that `sudo` keeps the token off its command line when it is given
+  on a pipe (`sudo -u nhb sh -c ...`, as the existing secret-on-stdin step does),
+  that `sudo --preserve-env` in the printed commands is allowed by the host's
+  sudoers (it is by default for a user who may run any command), that git honours
+  `-c safe.directory=` on the command line (git 2.35.2 and later) and that a
+  checkout another user owns is then read, `chown -h` and `install` replacing a
+  link, and `root_only_path` on a real root-owned tree (it is tested against stand-ins
+  for `stat`). On a Linux host: run `sudo bash scripts/make-snapshot.sh` against a
+  node's directory (it must refuse), then as the node's user with a link named
+  `999999.log` aimed at a root-only file in that directory (it must refuse, and
+  publish nothing).
 - The producer on ext4 or xfs (hard links were exercised on NTFS):
   `bash scripts/make-snapshot.sh --data-dir DIR --out-dir OUT` against a running node.
 - git's refusal of a checkout that another user owns (`detected dubious ownership`,
@@ -732,7 +1013,8 @@ Not tested here, and the exact commands to run on Linux:
 ## Reference: nhb-snapshot
 
 ```
-nhb-snapshot info         --data-dir DIR [--format text|json] [--header-window N] [--no-state-check]
+nhb-snapshot info         --data-dir DIR [--format text|json] [--header-window N] [--no-state-check] [--staged]
+nhb-snapshot refs         --data-dir DIR
 nhb-snapshot pack         --data-dir DIR --out-dir DIR [--binary-version S] [--binary-commit S] [--binary-sha256 HEX] [--latest]
 nhb-snapshot verify       --manifest FILE --archive FILE --chain-id N --genesis-hash HEX [--min-height N] [--max-age D] [--tip-hash HEX] [--state-root HEX] [--max-bytes N]
 nhb-snapshot extract      --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX [--reject-validator ADDR] [--max-bytes N] [--tip-hash HEX] [--state-root HEX]
@@ -740,6 +1022,15 @@ nhb-snapshot manifest show --manifest FILE [--field NAME]
 nhb-snapshot check-config --config FILE --genesis FILE
 nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--rpc-timeout D] [--stall-timeout D]
 ```
+
+`refs` prints the files the MANIFEST of a database refers to (`manifest NAME`,
+`journal NAME`, `prev-journal NAME` when it names a second one, and `table NAME`
+for each table it lists); only `CURRENT` and the MANIFEST have to be in the
+directory, which is how `make-snapshot.sh` asks what to copy after it has copied
+those two. `info --staged` is `info` for a staged copy: it refuses a directory that
+holds any file its own MANIFEST does not refer to, a file that is not a regular
+file, a journal that does not read as one, or a table that does not read in full.
+`pack` makes the same checks.
 
 `--chain-id` and `--genesis-hash` may come from `NHB_SNAPSHOT_CHAIN_ID` and
 `NHB_SNAPSHOT_GENESIS_HASH`; the tool has no default for either. It only ever opens

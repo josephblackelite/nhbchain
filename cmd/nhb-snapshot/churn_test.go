@@ -14,12 +14,19 @@ import (
 )
 
 // scripts/make-snapshot.sh copies a database that is being written. This runs
-// it against a chain database whose writer never stops and whose buffers are so
-// small that it flushes tables and compacts all the time (so table files
-// appear and disappear, the MANIFEST grows, and journals rotate while the copy
-// is made). Every snapshot must open, and its tip must be a block the writer
-// really wrote at that height: a copy that mixed two moments of the database
-// would not open, or would name a tip the writer never had.
+// it against a chain database whose buffers are so small that it flushes tables
+// and compacts all the time (so table files appear and disappear, the MANIFEST
+// grows, and journals rotate while the copy is made). Every snapshot must open,
+// and its tip must be a block the writer really wrote at that height: a copy that
+// mixed two moments of the database would not open, or would name a tip the writer
+// never had.
+//
+// The writer works in bursts and rests between them, and every snapshot is
+// started with a burst, so that each copy has to get through a burst of writes and
+// can finish in the rest after it. (A writer that never rests, at this size of
+// buffers, changes the database faster than any copy can be made: a copy that
+// keeps failing is the script's designed answer to that, and a test that asks for
+// success of it is a test of the speed of the machine.)
 func TestMakeSnapshotUnderChurn(t *testing.T) {
 	bash := e2eBash(t)
 	tool := builtTool(t)
@@ -28,28 +35,43 @@ func TestMakeSnapshotUnderChurn(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "node", "data")
 	b := newChainBuilder(t, dir, true, testAddress(0x77))
 
+	const (
+		burstBlocks = 40
+		burstPause  = 15 * time.Millisecond
+		restAfter   = 4 * time.Second
+	)
 	// Standard output belongs to the writer's chatter (core reports every
 	// block it adds) for as long as it runs.
 	restore := silenceStdout()
 	var (
-		mu     sync.Mutex
-		hashes = map[uint64]string{}
-		stop   int32
-		wg     sync.WaitGroup
-		werr   error
+		mu       sync.Mutex
+		hashes   = map[uint64]string{}
+		stop     int32
+		wg       sync.WaitGroup
+		werr     error
+		bursting = make(chan struct{}, 1)
 	)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for atomic.LoadInt32(&stop) == 0 {
-			if err := b.tryAddBlock(3); err != nil {
-				werr = err
-				return
+			select {
+			case bursting <- struct{}{}:
+			default:
 			}
-			time.Sleep(50 * time.Millisecond)
-			mu.Lock()
-			hashes[b.bc.Height()] = hex0x(b.bc.Tip())
-			mu.Unlock()
+			for i := 0; i < burstBlocks && atomic.LoadInt32(&stop) == 0; i++ {
+				if err := b.tryAddBlock(3); err != nil {
+					werr = err
+					return
+				}
+				mu.Lock()
+				hashes[b.bc.Height()] = hex0x(b.bc.Tip())
+				mu.Unlock()
+				time.Sleep(burstPause)
+			}
+			for waited := time.Duration(0); waited < restAfter && atomic.LoadInt32(&stop) == 0; waited += 50 * time.Millisecond {
+				time.Sleep(50 * time.Millisecond)
+			}
 		}
 	}()
 	var once sync.Once
@@ -92,6 +114,16 @@ func TestMakeSnapshotUnderChurn(t *testing.T) {
 	retries, snapshots := 0, 0
 	var heights []uint64
 	for i := 0; i < 6; i++ {
+		// Start with the next burst of writes: not one that began earlier.
+		select {
+		case <-bursting:
+		default:
+		}
+		select {
+		case <-bursting:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("the writer did not start a burst")
+		}
 		out := filepath.Join(t.TempDir(), "out")
 		work := filepath.Join(t.TempDir(), "work")
 		cmd := runBashScript(t, bash, repo, "scripts/make-snapshot.sh",

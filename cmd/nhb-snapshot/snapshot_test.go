@@ -863,25 +863,21 @@ func TestMissingOrShortTableIsDetected(t *testing.T) {
 }
 
 // A copy of a running node may hold a table that was still being written. It
-// belongs to no version of the database, so it is left out of the archive.
-func TestPackLeavesOutTablesNothingRefersTo(t *testing.T) {
+// belongs to no version of the database. The script that makes the copy leaves
+// such a table out (TestMakeSnapshotStagesOnlyWhatTheDatabaseRefersTo), and the
+// packer does not skip one it is handed: a table nothing lists is a file the
+// database does not refer to, and a stage that holds one is refused, whole.
+func TestPackRefusesATableNothingRefersTo(t *testing.T) {
 	f := newFixture(t)
 	if err := os.WriteFile(filepath.Join(f.stage, "999999.ldb"), []byte("half written"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := packSnapshot(packOptions{DataDir: f.stage, OutDir: filepath.Join(t.TempDir(), "out")})
-	if err != nil {
-		t.Fatal(err)
+	out := filepath.Join(t.TempDir(), "out")
+	_, err := packSnapshot(packOptions{DataDir: f.stage, OutDir: out})
+	if err == nil || !strings.Contains(err.Error(), "999999.ldb") || !strings.Contains(err.Error(), "does not list") {
+		t.Fatalf("a table nothing lists was accepted: %v", err)
 	}
-	for _, file := range m.Archive.Files {
-		if file.Name == "999999.ldb" {
-			t.Fatalf("an unreferenced table was packed")
-		}
-	}
-	if len(m.Archive.Files) != len(f.m.Archive.Files) {
-		t.Fatalf("packed %d files, the same chain packs to %d", len(m.Archive.Files), len(f.m.Archive.Files))
-	}
-	if m.Archive.Sha256 != f.m.Archive.Sha256 {
-		t.Fatalf("an unreferenced table changed the archive")
+	if entries, _ := os.ReadDir(out); len(entries) > 0 {
+		t.Fatalf("a refused pack left %d files in the output directory", len(entries))
 	}
 }

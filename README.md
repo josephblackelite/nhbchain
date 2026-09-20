@@ -117,7 +117,11 @@ Full detail, including the exact pricing formula, buyback mechanics, and RPC res
 > automatically. The manual
 > walkthrough below is for standing up a full node for other reasons and
 > assumes more hands-on setup, including config files under `/etc/nhbchain/`
-> this walkthrough does not generate for you.
+> this walkthrough does not generate for you. **It starts a node from genesis,
+> which cannot sync the current mainnet: to run a peer or full node of that
+> network, use the snapshot procedure in
+> [Onboarding a validator from a snapshot](docs/validators/snapshot-onboarding.md)
+> too.**
 
 We have intentionally designed this process so that **anyone**, regardless of Linux experience, can spin up a node in under 5 minutes. 
 
@@ -154,7 +158,10 @@ cd nhbchain
 ```
 
 ### Step 5: Run the Automated Node Bootstrap
-The repository now includes a single node bootstrap script intended to be the public operator entrypoint. It installs the runtime stack, builds the binaries, installs the service units, and brings the node online once your server-side config is ready. Run:
+
+> **Warning: do not use this step to join the current mainnet.** `scripts/run_nhbcoin_node.sh` starts a node from an **empty data directory** (`--reset-state` empties it first): a from-genesis start. **Block sync from genesis is not supported on this network** (chain id `18346390202490284624`): a node started that way rejects block 1 and stays at height 0, however long it runs. To bring a node online on it, as a validator or as a plain peer or full node, start from a verified snapshot instead, with the procedure in [Onboarding a validator from a snapshot](docs/validators/snapshot-onboarding.md) ([why](docs/validators/snapshot-onboarding.md#why-block-sync-from-genesis-is-not-supported)). What follows is for a chain that does start from genesis, such as a network you launch yourself for development.
+
+The repository includes a node bootstrap script for that case. It installs the runtime stack, builds the binaries, installs the service units, and starts the node from genesis once your server-side config is ready. Run:
 
 > **Before you run this:** `scripts/run_nhbcoin_node.sh` execs `scripts/bringup_production_stack.sh`, which requires the following files to already exist under `/etc/nhbchain/` on the server — it fails with no guidance if any are missing:
 > - `config.toml`
@@ -166,13 +173,13 @@ The repository now includes a single node bootstrap script intended to be the pu
 bash scripts/run_nhbcoin_node.sh
 ```
 
-If you are launching a fresh genesis/reset deployment, use:
+If you are launching a fresh genesis/reset deployment of your own chain, use:
 
 ```bash
 bash scripts/run_nhbcoin_node.sh --reset-state
 ```
 
-**That brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
+**On a network that can sync from genesis, that brings the NHBCoin node online as a peer/full node** once the required config files and secrets have been placed on the server. **On the current mainnet it does not: see the warning above.** After startup, check the running services with `sudo systemctl status nhb.service` and watch the node logs with `journalctl -u nhb.service -f`.
 
 ### Step 6: Get paid (stake at least 10,000 ZNHB)
 The validator's signing key and your everyday NHBCoin wallet are **two
@@ -186,7 +193,8 @@ anywhere for this step.
 bash scripts/validator-only-bootstrap.sh \
   --beneficiary YOUR_NHB_WALLET_ADDRESS \
   --snapshot-url SNAPSHOT_URL \
-  --bootnode BOOTNODE_HOST_PORT
+  --bootnode BOOTNODE_HOST_PORT \
+  --max-snapshot-age 72h
 ```
 
    This generates a fresh validator key **on this machine** the first time
@@ -260,19 +268,24 @@ node from a verified snapshot of the chain database, so you need two things from
 whoever operates the network, neither of which is built into the script: the
 location of a snapshot (`SNAPSHOT_URL`, a directory URL holding `manifest.json`
 and the archive it names) and a bootnode (`BOOTNODE_HOST_PORT`; the "Mainnet P2P
-Bootnode" above is one). Check out the source commit the snapshot's manifest
-names (it has to contain this procedure, `scripts/deployvalidator.sh` and
+Bootnode" above is one). Read the source commit the snapshot's manifest names
+(on a clean machine there is no tool for it yet: it is the `binaryCommit` field of
+the manifest's JSON, `curl -fsS SNAPSHOT_URL/manifest.json | sed -n 's/.*"binaryCommit": *"\([0-9a-f]*\)".*/\1/p'`),
+check that it is a release you recognise (the manifest is not signed), and check
+it out. It has to contain this procedure, `scripts/deployvalidator.sh` and
 `cmd/nhb-snapshot`, because you run the script from it: a snapshot made by a
 validator that still runs an earlier build names a commit whose script syncs from
 genesis, which does not work on this network; see
-[What you need](docs/validators/snapshot-onboarding.md#what-you-need)), then on a
+[What you need](docs/validators/snapshot-onboarding.md#what-you-need). Then on a
 fresh Ubuntu server run:
 
 ```bash
 bash scripts/validator-only-bootstrap.sh \
   --beneficiary YOUR_NHB_WALLET_ADDRESS \
   --snapshot-url SNAPSHOT_URL \
-  --bootnode BOOTNODE_HOST_PORT
+  --bootnode BOOTNODE_HOST_PORT \
+  --max-snapshot-age 72h \
+  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT
 ```
 
 It is safe to run again: what is already in place is left alone, and a node that

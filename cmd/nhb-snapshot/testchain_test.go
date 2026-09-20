@@ -206,18 +206,51 @@ func dbFiles(t testing.TB, dir string) []string {
 	return names
 }
 
-// stageChainFiles copies the allowed files of a closed database into a fresh
-// directory: what scripts/make-snapshot.sh hands to pack.
+// settleDB opens and closes a closed database once more. LevelDB recovers its
+// journals when it opens, writes what they held to a table, starts a new
+// journal, and removes every file the new MANIFEST does not refer to. A
+// database that was closed while a compaction or a flush was in flight (the
+// small buffers of these tests make that likely) can hold a table no MANIFEST
+// lists, files a finished compaction has not removed yet, and a journal newer
+// than the one its MANIFEST names; once settled it holds none of them, whatever
+// the timing was.
+func settleDB(t testing.TB, dir string) {
+	t.Helper()
+	openWritableDB(t, dir, false).Close()
+}
+
+// stageChainFiles settles a closed database and copies the files it refers to
+// into a fresh directory: what scripts/make-snapshot.sh hands to pack. (Copying
+// every file that has a database file's name made a stage that held the leftovers
+// of a compaction that was cut short, and a test built on it failed whenever a
+// compaction had been.)
 func stageChainFiles(t testing.TB, src string) string {
+	t.Helper()
+	settleDB(t, src)
+	return stageReferenced(t, src)
+}
+
+// stageReferenced copies the files a closed database refers to into a fresh
+// directory, without touching the database: CURRENT, the MANIFEST it names, the
+// tables it lists and the journal it names, and nothing else that has a database
+// file's name.
+func stageReferenced(t testing.TB, src string) string {
 	t.Helper()
 	dst := filepath.Join(t.TempDir(), "stage")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range dbFiles(t, src) {
-		if !allowedFileName(name) {
-			continue
+	refs, err := readDBRefs(src)
+	if err != nil {
+		t.Fatalf("read what %s refers to: %v", src, err)
+	}
+	names := append([]string{"CURRENT", refs.Manifest}, refs.tableNames()...)
+	for _, journal := range refs.journalNames() {
+		if _, err := os.Stat(filepath.Join(src, journal)); err == nil {
+			names = append(names, journal)
 		}
+	}
+	for _, name := range names {
 		data, err := os.ReadFile(filepath.Join(src, name))
 		if err != nil {
 			t.Fatal(err)
