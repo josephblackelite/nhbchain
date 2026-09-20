@@ -48,3 +48,12 @@ All mutating endpoints require a bearer token signed with the configured JWT/OAu
 secret. Supply the token via the standard `Authorization: Bearer <token>` header.
 The gateway applies per-route rate limits which can be tuned in the configuration
 file under the `rateLimits` section.
+
+`/rpc` goes through the same chain. It needs a valid bearer token (when
+authentication is enabled), it has its own rate limit (the `compat` entry under
+`rateLimits`), and each call needs the scope of the service that answers it: a
+lending method needs `lending`, a swap method `swap`, a governance method `gov`, the
+same as the `/v1/lending`, `/v1/swap` and `/v1/gov` routes. A call without the scope
+gets the JSON-RPC error `-32004` (`insufficient scope`). The caller's
+`Authorization` header is passed on to the service, and a batch may carry at most 10
+calls.

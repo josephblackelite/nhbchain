@@ -24,3 +24,8 @@ rateLimits:
     burst: 40
     paths:
       - /v1/consensus
+  - id: compat
+    ratePerSecond: 2
+    burst: 20
+    paths:
+      - /rpc
