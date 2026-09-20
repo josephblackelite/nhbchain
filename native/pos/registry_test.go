@@ -1,6 +1,7 @@
 package pos
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -136,5 +137,36 @@ func TestRegistryDeviceNonceTracking(t *testing.T) {
 	}
 	if !otherAuthority.Revoked || otherAuthority.Nonce != 1 || strings.TrimSpace(otherAuthority.ChainID) != "chain-B" {
 		t.Fatalf("unexpected other authority revoke: %+v", otherAuthority)
+	}
+}
+
+// The registry's refusals carry sentinels so the block builder can tell a
+// request that can never succeed from one that can.
+func TestRegistryRefusalsCarrySentinels(t *testing.T) {
+	registry := NewRegistry(newMemoryRegistryState())
+
+	if _, err := registry.UpsertMerchant("admin", "merchant-a", 0, 100, "chain-A"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("zero nonce: got %v, want ErrInvalidRequest", err)
+	}
+	if _, err := registry.UpsertMerchant("", "merchant-a", 1, 100, "chain-A"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("missing authority: got %v, want ErrInvalidRequest", err)
+	}
+	if _, err := registry.UpsertMerchant("admin", " ", 1, 100, "chain-A"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("missing merchant: got %v, want ErrInvalidRequest", err)
+	}
+	if _, err := registry.RegisterDevice("admin", " ", "merchant-a", 1, 100, "chain-A"); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("missing device id: got %v, want ErrInvalidRequest", err)
+	}
+	if _, err := registry.UpsertMerchant("admin", "merchant-a", 2, 100, "chain-A"); err != nil {
+		t.Fatalf("upsert merchant: %v", err)
+	}
+	if _, err := registry.UpsertMerchant("admin", "merchant-a", 2, 100, "chain-A"); !errors.Is(err, ErrStaleNonce) {
+		t.Fatalf("reused nonce: got %v, want ErrStaleNonce", err)
+	}
+	if _, err := registry.RevokeDevice("admin", "device-x", 3, 100, "chain-A"); !errors.Is(err, ErrDeviceNotRegistered) {
+		t.Fatalf("revoking an unknown device: got %v, want ErrDeviceNotRegistered", err)
+	}
+	if _, err := registry.RestoreDevice("admin", "device-x", 4, 100, "chain-A"); !errors.Is(err, ErrDeviceNotRegistered) {
+		t.Fatalf("restoring an unknown device: got %v, want ErrDeviceNotRegistered", err)
 	}
 }
