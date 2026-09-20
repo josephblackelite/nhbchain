@@ -8039,7 +8039,8 @@ func (n *Node) SubmitLendingRefPrice(rateNum, rateDenom *big.Int, timestamp uint
 }
 
 // SwapGetVoucher returns the ledger record for the supplied provider
-// transaction identifier.
+// transaction identifier. It reads a disposable view of the state (see
+// WithStateView), like the other read-only queries.
 func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {
 	trimmed := strings.TrimSpace(providerTxID)
 	if trimmed == "" {
@@ -8049,7 +8050,7 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 		record *swap.VoucherRecord
 		ok     bool
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
 		record, ok, err = ledger.Get(trimmed)
@@ -8064,13 +8065,15 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 	return record.Copy(), true, nil
 }
 
-// SwapListVouchers paginates voucher records for the supplied time range.
+// SwapListVouchers paginates voucher records for the supplied time range. It
+// reads a disposable view of the state (see WithStateView), like the other
+// read-only queries.
 func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) ([]*swap.VoucherRecord, string, error) {
 	var (
 		results    []*swap.VoucherRecord
 		nextCursor string
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		records, cursorOut, err := ledger.List(startTs, endTs, cursor, limit)
 		if err != nil {
@@ -8090,13 +8093,15 @@ func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) 
 }
 
 // SwapExportVouchers produces a base64 encoded CSV export and accompanying totals.
+// It reads a disposable view of the state (see WithStateView), like the other
+// read-only queries.
 func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, error) {
 	var (
 		encoded string
 		count   int
 		total   *big.Int
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
 		encoded, count, total, err = ledger.ExportCSV(startTs, endTs)
