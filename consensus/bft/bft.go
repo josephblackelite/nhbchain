@@ -1589,7 +1589,7 @@ func (e *Engine) startNewRound() {
 	// a single validator's message, and to the highest round that is supported,
 	// not to the lowest one anyone has mentioned.
 	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
-		e.currentState.Round = min(target, maxRound)
+		e.currentState.Round = min(target, maxJumpRound)
 	}
 	// Never start a round this validator has already signed in (or one before
 	// it): the double-sign guard would refuse every vote there, so the round
@@ -1714,8 +1714,9 @@ func roundInRange(round int) bool {
 
 // roundAfter returns the round after round, never above maxRound and never
 // negative, whatever round is (it may come from a record on disk). At maxRound it
-// stays there: the round cannot be left, which after two years of rounds that never
-// committed is no worse than the wrap to a negative round it replaces.
+// stays there: the round cannot be left, which takes more than a hundred years of
+// rounds that never committed to reach (a message cannot take the engine within
+// half of it, see maxJumpRound) and is no worse than the wrap it replaces.
 func roundAfter(round int) int {
 	if round < 0 {
 		return 0
