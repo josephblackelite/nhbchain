@@ -1513,6 +1513,12 @@ type storedLendingMarket struct {
 	TotalFixedTermDepositInterestOwedWei    *big.Int `rlp:"optional"`
 	FixedTermDepositReserveWei              *big.Int `rlp:"optional"`
 	TotalFixedTermLoanInterestReceivableWei *big.Int `rlp:"optional"`
+	// LastUpdateTimestamp is the block time of the last index refresh (see
+	// lending.Market.LastUpdateTimestamp), appended last and optional like the
+	// fields above: a market that carries none encodes exactly as it did before
+	// the field existed, byte for byte, so state written by transactions that
+	// never set it keeps its root.
+	LastUpdateTimestamp uint64 `rlp:"optional"`
 }
 
 type storedLendingFees struct {
@@ -1529,6 +1535,8 @@ func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
 		LastUpdateBlock: market.LastUpdateBlock,
 		ReserveFactor:   market.ReserveFactor,
 		DeveloperFeeBps: market.DeveloperFeeBps,
+
+		LastUpdateTimestamp: market.LastUpdateTimestamp,
 	}
 	if market.DeveloperOwner.Bytes() != nil {
 		copy(stored.DeveloperOwner[:], market.DeveloperOwner.Bytes())
@@ -1586,6 +1594,8 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 		LastUpdateBlock: s.LastUpdateBlock,
 		ReserveFactor:   s.ReserveFactor,
 		DeveloperFeeBps: s.DeveloperFeeBps,
+
+		LastUpdateTimestamp: s.LastUpdateTimestamp,
 	}
 	var zeroAddr [20]byte
 	if !bytes.Equal(s.DeveloperOwner[:], zeroAddr[:]) {

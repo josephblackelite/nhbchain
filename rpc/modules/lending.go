@@ -118,7 +118,18 @@ func (m *LendingModule) projectMarketAccrual(manager *nhbstate.Manager, poolID s
 	engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 	engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 	engine.SetBlockHeight(m.node.GetHeight())
+	engine.SetBlockTimestamp(m.headBlockTimestamp())
 	return engine.ProjectAccrual(market)
+}
+
+// headBlockTimestamp is the header timestamp of the newest committed block, the
+// block time interest is projected to: committed chain data, never the clock of
+// the machine answering the call.
+func (m *LendingModule) headBlockTimestamp() int64 {
+	if chain := m.node.Chain(); chain != nil {
+		return chain.LastTimestamp()
+	}
+	return 0
 }
 
 func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *ModuleError) {
@@ -937,6 +948,7 @@ func (m *LendingModule) withEngine(poolID string, fn func(*lending.Engine, *lend
 		engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 		engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 		engine.SetBlockHeight(m.node.GetHeight())
+		engine.SetBlockTimestamp(m.headBlockTimestamp())
 		engine.SetCollateralRouting(m.node.LendingCollateralRouting())
 		var market *lending.Market
 		stored, ok, err := manager.LendingGetMarket(id)

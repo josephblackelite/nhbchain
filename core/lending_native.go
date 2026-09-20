@@ -146,6 +146,7 @@ func (sp *StateProcessor) ensureLendingMarket(adapter *lendingStateAdapter) (*le
 		DeveloperFeeBps:       sp.lendingDeveloperFeeBps,
 		ReserveFactor:         sp.lendingReserveFactorBps,
 		LastUpdateBlock:       sp.blockHeight(),
+		LastUpdateTimestamp:   sp.lendingBlockUnix(),
 		TotalNHBSupplied:      big.NewInt(0),
 		TotalSupplyShares:     big.NewInt(0),
 		TotalNHBBorrowed:      big.NewInt(0),
@@ -154,6 +155,15 @@ func (sp *StateProcessor) ensureLendingMarket(adapter *lendingStateAdapter) (*le
 		return nil, err
 	}
 	return market, nil
+}
+
+// lendingBlockUnix is the block time in Unix seconds, or zero when the block
+// carries none (a pre-epoch timestamp), which a market reads as "not stamped".
+func (sp *StateProcessor) lendingBlockUnix() uint64 {
+	if ts := sp.blockTimestamp().Unix(); ts > 0 {
+		return uint64(ts)
+	}
+	return 0
 }
 
 func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lending.Market, error) {
@@ -628,6 +638,7 @@ func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*
 	market.TotalNHBBorrowed = sumBigIntLegacy(market.TotalNHBBorrowed, debtAmount)
 	if a.processor != nil {
 		market.LastUpdateBlock = a.processor.blockHeight()
+		market.LastUpdateTimestamp = a.processor.lendingBlockUnix()
 	}
 
 	if err := a.manager.LendingPutMarket(a.poolID, market); err != nil {
@@ -657,6 +668,7 @@ func (a *lendingStateAdapter) defaultMarket() *lending.Market {
 	}
 	if a.processor != nil {
 		market.LastUpdateBlock = a.processor.blockHeight()
+		market.LastUpdateTimestamp = a.processor.lendingBlockUnix()
 		market.ReserveFactor = a.processor.lendingReserveFactorBps
 		market.DeveloperFeeBps = a.processor.lendingDeveloperFeeBps
 		market.DeveloperOwner = cloneAddress(a.processor.lendingModuleAddr)
@@ -942,6 +954,7 @@ func (sp *StateProcessor) applyLendingCreatePoolTransaction(tx *types.Transactio
 		DeveloperFeeCollector: sp.lendingDeveloperCollector,
 		ReserveFactor:         sp.lendingReserveFactorBps,
 		LastUpdateBlock:       sp.blockHeight(),
+		LastUpdateTimestamp:   sp.lendingBlockUnix(),
 		TotalNHBSupplied:      big.NewInt(0),
 		TotalSupplyShares:     big.NewInt(0),
 		TotalNHBBorrowed:      big.NewInt(0),

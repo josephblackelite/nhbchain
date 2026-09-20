@@ -104,7 +104,16 @@ var (
 	ErrInsufficientLiquidity               = errInsufficientLiquidity
 )
 
-const blocksPerYear = 31_536_000
+// secondsPerYear is the length of a year the annual rates are quoted over
+// (365 days). Interest accrues by the block time that has passed, so a rate is
+// the same rate whether blocks come every second or every two.
+const secondsPerYear = 31_536_000
+
+// legacySecondsPerBlock is what a block was taken to be worth before interest
+// accrued by block time. A market that has never been stamped with a block time
+// accrues its first step that way, so its interest carries on from where it
+// was.
+const legacySecondsPerBlock = 1
 
 const moduleName = "lending"
 
@@ -1504,26 +1513,19 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 	}
 
 	if e.interestModel == nil {
-		if e.blockHeight > market.LastUpdateBlock {
-			market.LastUpdateBlock = e.blockHeight
-		}
+		e.markAccrued(market)
 		return fees, false, nil
 	}
 
-	var delta uint64
-	if e.blockHeight > market.LastUpdateBlock {
-		delta = e.blockHeight - market.LastUpdateBlock
-	}
-	if delta == 0 || market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Sign() == 0 {
-		if e.blockHeight > market.LastUpdateBlock {
-			market.LastUpdateBlock = e.blockHeight
-		}
+	elapsed := e.elapsedSeconds(market)
+	if elapsed == 0 || market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Sign() == 0 {
+		e.markAccrued(market)
 		return fees, false, nil
 	}
 
 	borrowAPR := e.interestModel.BorrowAPR(market.TotalNHBBorrowed, market.TotalNHBSupplied)
 	if borrowAPR.Sign() == 0 {
-		market.LastUpdateBlock = e.blockHeight
+		e.markAccrued(market)
 		return fees, false, nil
 	}
 
@@ -1542,13 +1544,13 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 	supplyRate := new(big.Rat).Mul(borrowAPR, utilisation)
 	supplyRate.Mul(supplyRate, oneMinus)
 
-	borrowFactor := rateFactor(borrowAPR, delta)
-	supplyFactor := rateFactor(supplyRate, delta)
+	borrowFactor := rateFactor(borrowAPR, elapsed)
+	supplyFactor := rateFactor(supplyRate, elapsed)
 
 	market.BorrowIndex = rayMul(market.BorrowIndex, borrowFactor)
 	market.SupplyIndex = rayMul(market.SupplyIndex, supplyFactor)
 
-	interestAmount := computeInterest(market.TotalNHBBorrowed, borrowAPR, delta)
+	interestAmount := computeInterest(market.TotalNHBBorrowed, borrowAPR, elapsed)
 	interestApplied := interestAmount.Sign() > 0
 	if interestApplied {
 		reserveShare := new(big.Int).Mul(interestAmount, new(big.Int).SetUint64(reserveBps))
@@ -1565,8 +1567,41 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 		market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, interestAmount)
 	}
 
-	market.LastUpdateBlock = e.blockHeight
+	e.markAccrued(market)
 	return fees, interestApplied, nil
+}
+
+// elapsedSeconds is the block time that has passed since the market's indexes
+// were last refreshed: this block's timestamp less the one recorded on the
+// market, and never negative, so a block that shares its predecessor's second
+// accrues nothing and the recorded time never moves back. A market with no
+// recorded time, or an engine that was given no block time, falls back to the
+// block count at legacySecondsPerBlock, so it neither loses nor invents a step.
+// Everything here comes from block data (the header timestamp the engine is
+// given), never from a clock.
+func (e *Engine) elapsedSeconds(market *Market) uint64 {
+	if e.blockTimestamp > 0 && market.LastUpdateTimestamp > 0 {
+		now := uint64(e.blockTimestamp)
+		if now <= market.LastUpdateTimestamp {
+			return 0
+		}
+		return now - market.LastUpdateTimestamp
+	}
+	if e.blockHeight > market.LastUpdateBlock {
+		return (e.blockHeight - market.LastUpdateBlock) * legacySecondsPerBlock
+	}
+	return 0
+}
+
+// markAccrued records the block the market was refreshed at, and its time when
+// the engine has one, without ever moving either back.
+func (e *Engine) markAccrued(market *Market) {
+	if e.blockHeight > market.LastUpdateBlock {
+		market.LastUpdateBlock = e.blockHeight
+	}
+	if e.blockTimestamp > 0 && uint64(e.blockTimestamp) > market.LastUpdateTimestamp {
+		market.LastUpdateTimestamp = uint64(e.blockTimestamp)
+	}
 }
 
 func (e *Engine) syncDebt(user *UserAccount, market *Market) {
