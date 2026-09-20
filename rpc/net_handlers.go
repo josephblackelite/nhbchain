@@ -2,6 +2,7 @@ package rpc
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -138,6 +139,19 @@ func (s *Server) handleNetBan(w http.ResponseWriter, r *http.Request, req *RPCRe
 }
 
 func writeNetError(w http.ResponseWriter, id any, err error) {
+	// The p2p server reports its own sentinel errors (wrapped with detail), not
+	// gRPC statuses; they map to the typed errors net-rpc.md lists.
+	switch {
+	case errors.Is(err, p2p.ErrPeerUnknown):
+		writeError(w, http.StatusNotFound, id, codeNetUnknownPeer, "unknown_peer", err.Error())
+		return
+	case errors.Is(err, p2p.ErrPeerBanned):
+		writeError(w, http.StatusConflict, id, codeNetPeerBanned, "peer_banned", err.Error())
+		return
+	case errors.Is(err, p2p.ErrDialTargetEmpty), errors.Is(err, p2p.ErrInvalidAddress):
+		writeError(w, http.StatusBadRequest, id, codeNetInvalidParams, "invalid_params", err.Error())
+		return
+	}
 	if st, ok := status.FromError(err); ok {
 		switch st.Code() {
 		case codes.InvalidArgument:

@@ -1070,7 +1070,9 @@ type RPCRequest struct {
 	JSONRPC string            `json:"jsonrpc"`
 	Method  string            `json:"method"`
 	Params  []json.RawMessage `json:"params"`
-	ID      int               `json:"id"`
+	// ID is the request id as it came (an int, a string or a json.Number), and
+	// is echoed in the response; see RPCRequest.UnmarshalJSON.
+	ID interface{} `json:"id"`
 }
 
 type RPCResponse struct {
