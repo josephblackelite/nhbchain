@@ -8464,10 +8464,6 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 		return fmt.Errorf("swap: burn receiptId required")
 	}
 	return n.WithState(func(m *nhbstate.Manager) error {
-		burnLedger := swap.NewBurnLedger(m)
-		if err := burnLedger.Put(receipt); err != nil {
-			return err
-		}
 		var proofIDs []string
 		if len(receipt.VoucherIDs) > 0 {
 			voucherLedger := swap.NewLedger(m)
@@ -8487,9 +8483,15 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 					}
 				}
 			}
+			// MarkReconciled refuses a reversed or unknown voucher without
+			// writing anything, and it runs before the receipt is stored, so a
+			// refused receipt leaves no trace.
 			if err := voucherLedger.MarkReconciled(receipt.VoucherIDs); err != nil {
 				return err
 			}
+		}
+		if err := swap.NewBurnLedger(m).Put(receipt); err != nil {
+			return err
 		}
 		observed := receipt.ObservedAt
 		if observed <= 0 {
