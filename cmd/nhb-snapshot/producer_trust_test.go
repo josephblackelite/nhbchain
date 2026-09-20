@@ -311,6 +311,7 @@ current_uid() { echo "${STUB_UID}"; }
 owner_and_mode() {
   case "$1" in
     */node/data) echo "${STUB_DATA_OWNER:-1000} ${STUB_DATA_MODE:-755}" ;;
+    */node) echo "${STUB_DATA_PARENT_SPEC:-0 755}" ;;
     */elsewhere/nhb-snapshot*) echo "${STUB_TOOL_SPEC:-0 755}" ;;
     */rootparent) echo "${STUB_PARENT_SPEC:-0 755}" ;;
     */elsewhere) echo "${STUB_TOOL_DIR_SPEC:-0 755}" ;;
@@ -363,6 +364,17 @@ func TestMakeSnapshotAsRoot(t *testing.T) {
 	for _, mode := range []string{"775", "757", "777", "770", "2775"} {
 		refused("a directory that is root's but has mode "+mode, run([]string{"STUB_DATA_OWNER=0", "STUB_DATA_MODE=" + mode}, "--tool", slash(rootTool), "--work-dir", slash(work)), "its group or others can write it")
 	}
+	// The directory itself is root's and closed to others, but the one above it is not:
+	// whoever can change that one can rename the data directory away at any moment of a
+	// run that lasts minutes and put a directory of its own under the name.
+	for _, above := range []struct{ name, spec string }{
+		{"belongs to another user", "1000 755"},
+		{"can be written by anyone", "0 777"},
+		{"can be written by its group", "0 775"},
+		{"belongs to another user and cannot be written by others", "1000 700"},
+	} {
+		refused("a data directory whose parent "+above.name, run([]string{"STUB_DATA_OWNER=0", "STUB_DATA_PARENT_SPEC=" + above.spec}, "--tool", slash(rootTool), "--work-dir", slash(work)), "a directory above it can be changed by someone other than root")
+	}
 	refused("no tool", run([]string{"STUB_DATA_OWNER=0"}, "--work-dir", slash(work)), "--tool is required")
 	refused("no work directory", run([]string{"STUB_DATA_OWNER=0"}, "--tool", slash(rootTool)), "--work-dir is required")
 	refused("a tool that another user can write", run([]string{"STUB_DATA_OWNER=0", "STUB_TOOL_SPEC=1000 755"}, "--tool", slash(rootTool), "--work-dir", slash(work)), "can be changed by someone other than root")
@@ -400,6 +412,98 @@ func TestMakeSnapshotAsRoot(t *testing.T) {
 	for _, mode := range []string{"700", "750", "755"} {
 		if res = run([]string{"STUB_DATA_OWNER=0", "STUB_DATA_MODE=" + mode}, "--tool", slash(rootTool), "--work-dir", slash(work)); res.err != nil {
 			t.Fatalf("root was refused a directory of its own with mode %s: %v\n%s", mode, res.err, res.out)
+		}
+	}
+	// A directory above it that anyone can write but where only the owner of an entry can
+	// remove it (sticky, like /tmp) is fine: the entry below it is root's.
+	for _, spec := range []string{"0 1777", "0 755", "0 700"} {
+		if res = run([]string{"STUB_DATA_OWNER=0", "STUB_DATA_PARENT_SPEC=" + spec}, "--tool", slash(rootTool), "--work-dir", slash(work)); res.err != nil {
+			t.Fatalf("root was refused a data directory under a directory with mode %s that is root's: %v\n%s", spec, res.err, res.out)
+		}
+	}
+}
+
+// The data directory is root's and closed to others, but the directory above it
+// belongs to the node's user, who can rename data away and put a directory of its
+// own under the name: root then reads and publishes what that user chose. Root
+// applies to the data directory what it applies to the tool, the work directory
+// and the output directory: the place and every directory above it are root's.
+func TestMakeSnapshotAsRootRefusesADataDirectoryInAPlaceTheNodeUserOwns(t *testing.T) {
+	tool, repo := builtTool(t), repoRoot(t)
+	dir, _ := nodeDataDir(t)
+	toolDir := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.MkdirAll(toolDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootTool := filepath.Join(toolDir, filepath.Base(tool))
+	copyTestFile(t, tool, rootTool)
+	// Every place is root's (0 755) except what the stub of the test says: the data
+	// directory is root's and closed to others, and the directory above it belongs to
+	// the user with id 1000.
+	const stub = `
+current_uid() { echo 0; }
+owner_and_mode() {
+  case "$1" in
+    */node/data) echo "0 755" ;;
+    */node) echo "${STUB_PARENT_SPEC}" ;;
+    */rootwork*) echo "0 700" ;;
+    *) echo "0 755" ;;
+  esac
+}
+owner_name() { echo nhb; }
+`
+	run := func(parent, spec string) (res scriptRun, out, work string) {
+		out, work = filepath.Join(parent, "rootout"), filepath.Join(parent, "rootwork")
+		res = runScriptSnippet(t, stub, []string{"STUB_PARENT_SPEC=" + spec},
+			"--data-dir", slash(dir), "--out-dir", slash(out), "--work-dir", slash(work),
+			"--tool", slash(rootTool), "--node-binary", slash(filepath.Join(repo, "nonexistent")), "--binary-commit", testCommit)
+		return res, out, work
+	}
+
+	parent := t.TempDir()
+	res, out, work := run(parent, "1000 755")
+	if res.err == nil || !strings.Contains(res.out, "refusing to run as root") || !strings.Contains(res.out, "a directory above it can be changed by someone other than root") {
+		t.Fatalf("root accepted a data directory whose parent belongs to another user: err=%v\n%s", res.err, res.out)
+	}
+	// It is refused before anything is made or read: no output, no staging, no lock.
+	for _, made := range []string{out, work} {
+		if _, err := os.Stat(made); err == nil {
+			t.Fatalf("%s was made although the run was refused", made)
+		}
+	}
+	if strings.Contains(res.out, "[snapshot] staging:") {
+		t.Fatalf("the run went on to describe what it would copy:\n%s", res.out)
+	}
+
+	// The same run, with the directory above root's own, publishes: the refusal above
+	// is about that directory and nothing else.
+	res, out, _ = run(t.TempDir(), "0 755")
+	if res.err != nil {
+		t.Fatalf("root was refused a data directory in a place that is root's: %v\n%s", res.err, res.out)
+	}
+	if _, err := readManifestFile(filepath.Join(out, "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The script's own help and the two pages that describe the producer say what root
+// checks about the data directory: the directories above it too, because whoever can
+// change one of them can rename the data directory away.
+func TestProducerPagesSayRootChecksEveryDirectoryAboveTheDataDirectory(t *testing.T) {
+	help := runBashScript(t, e2eBash(t), repoRoot(t), "scripts/make-snapshot.sh", "--help")
+	if help.err != nil {
+		t.Fatalf("--help: %v\n%s", help.err, help.out)
+	}
+	for name, text := range map[string]string{
+		"the script's --help": help.out,
+		"the Making snapshots section of docs/validators/snapshot-onboarding.md": docSection(t, "docs/validators/snapshot-onboarding.md", "## Making snapshots"),
+		"the Producing a snapshot section of docs/ops/snapshots.md":              docSection(t, "docs/ops/snapshots.md", "## Producing a snapshot"),
+	} {
+		text = strings.Join(strings.Fields(text), " ")
+		for _, want := range []string{"rename", "above"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not say what root checks above the data directory (no %q)", name, want)
+			}
 		}
 	}
 }

@@ -490,16 +490,20 @@ against a directory that root does not own, or that root owns but its group or
 others can write (`root:nhb` with mode `0775` lets the node's user put a link in it
 just the same), and says how to run it (`sudo -u <the directory's owner> bash ...`).
 Run as the directory's owner, nothing it reads is more than that user already
-holds. If the node itself runs as root, the directory
-is root's and the script may be run as root; then `--tool`, `--work-dir` and
-`--out-dir` have to be given, and all three have to be places nobody but root can
-change (the script checks that each one, and every directory above it, is root's and
-cannot be written by its group or by others; a directory that does not exist yet is
-made only where the nearest one that does is root's own): as root it executes the
-tool and writes the staging area, and it does not take either from a default place
-next to the node's data. Run as anyone else, the default tool is used only when the user running the
-script, or root, owns it. (`TestMakeSnapshotAsRoot`, `TestRootOnlyPath`,
-`TestMakeSnapshotDefaultToolIsNotTakenFromAnotherUser`)
+holds. If the node itself runs as root, the directory is root's and the script may
+be run as root; then `--tool`, `--work-dir` and `--out-dir` have to be given, and
+the data directory and all three have to be places nobody but root can change. The
+script checks that each one, and every directory above it, is root's and cannot be
+written by its group or by others: a directory that root owns and has closed is not
+safe inside one that belongs to the node's user, who can rename it away in the
+middle of a run and put a directory of its own under the name. A directory that
+does not exist yet is made only where the nearest one that does is root's own. As
+root the script reads the data directory, executes the tool and writes the staging
+area, and it takes neither the tool nor the staging area from a default place next
+to the node's data. Run as anyone else, the default tool is used only when the user
+running the script, or root, owns it. (`TestMakeSnapshotAsRoot`,
+`TestMakeSnapshotAsRootRefusesADataDirectoryInAPlaceTheNodeUserOwns`,
+`TestRootOnlyPath`, `TestMakeSnapshotDefaultToolIsNotTakenFromAnotherUser`)
 
 It writes into `--out-dir`, in this order, an archive
 `nhb-snapshot-<genesis prefix>-h<height>.tar.gz`, its manifest, and the same
@@ -778,13 +782,18 @@ p2p identity or consensus key.
 
 What the script does, without it (Ubuntu; adjust paths). Each block says which
 function of `scripts/deployvalidator.sh` it stands for, where every value and every
-mode below comes from. The steps that unpack, and everything that touches the
-service user's directories, are run **as that user** (`sudo -u nhb`), as the script
-does. Root builds in `/var/cache/nhbchain-build`, a directory only root can write,
-and the tools you run yourself or as root (making the key, checking the config,
-waiting for the tip) are the ones built there, never the copies in
-`/opt/nhbchain`: that tree belongs to the service user, who could have replaced
-them.
+mode below comes from. The steps that unpack, and everything that reads or changes
+what is in the service user's directories, are run **as that user** (`sudo -u nhb`),
+as the script does. Where root has to put a file into one of them (the key, the
+config, the environment file, the tools) it uses `install`, from a file of yours, of
+your checkout or of its own build: `install` replaces whatever is at the name, a link
+included, and never writes through one. Root copies nothing out of them, and reads
+there only to check the config and to print the one line of the RPC secret that
+step 7 needs, as data. Root builds in `/var/cache/nhbchain-build`, a directory
+only root can write, and the tools you run yourself or as root (making the key,
+checking the config, waiting for the tip) are the ones built there, never the
+copies in `/opt/nhbchain`: that tree belongs to the service user, who could have
+replaced them.
 
 ```bash
 # 0. The service user, the directories, the tree and the build
@@ -838,13 +847,35 @@ sudo -u nhb chmod 0700 /var/lib/nhbchain/nhb-data
 #    NetworkName = "nhb-mainnet-validator", and in [p2p] NetworkId = 18346390202490284624,
 #    Bootnodes = ["BOOTNODE-HOST.example:6001"], PersistentPeers = the same, and
 #    ExternalAddress = "<this server's public IP>:6001".
-sudo install -m 0600 -o nhb -g nhb /opt/nhbchain/config.toml /etc/nhbchain/config.toml
+#    Root copies the file from your checkout and not from /opt/nhbchain: that tree
+#    is the service user's, and install reads its source through a link.
+sudo install -m 0600 -o nhb -g nhb $SRC/config.toml /etc/nhbchain/config.toml
 sudo -u nhb nano /etc/nhbchain/config.toml
 sudo $B/bin/nhb-snapshot check-config --config /etc/nhbchain/config.toml --genesis /opt/nhbchain/config/genesis.relaunch.json
 
 # 5. The node's environment: the RPC secret and the key, readable by root only
-#    (write_env; systemd reads it and hands it to the node).
-sudo sh -c 'umask 077; { echo NHB_ENV=prod; echo "NHB_RPC_JWT_SECRET=$(openssl rand -hex 32)"; echo "NHB_VALIDATOR_RAW_KEY=$(od -An -tx1 /etc/nhbchain/validator.key | tr -d " \n")"; } > /etc/nhbchain/node.env'
+#    (write_env; systemd reads it and hands it to the node). /etc/nhbchain is the
+#    service user's, so it can leave a link at either name, and root neither
+#    reads nor writes through them: the key is read AS that user (root's od would
+#    hex-dump whatever a link led to into the node's environment), the file is built
+#    in a private temporary file of yours, and install puts it over the name (it
+#    replaces a link and never writes through one, where a root shell's ">" would
+#    overwrite whatever the link led to). A link at node.env stops the step. Run it
+#    again and it makes a new secret: restart nhb.service so that the node reads it.
+(
+  set -eo pipefail
+  if sudo test -L /etc/nhbchain/node.env; then
+    echo "/etc/nhbchain/node.env is a symbolic link: remove it, and find out who made it" >&2
+    exit 1
+  fi
+  KEY=$(sudo -u nhb od -An -tx1 /etc/nhbchain/validator.key | tr -d ' \n')
+  SECRET=$(openssl rand -hex 32)
+  ENVF=$(mktemp)
+  trap 'rm -f "$ENVF"' EXIT
+  chmod 600 "$ENVF"
+  { echo NHB_ENV=prod; echo "NHB_RPC_JWT_SECRET=$SECRET"; echo "NHB_VALIDATOR_RAW_KEY=$KEY"; } > "$ENVF"
+  sudo install -m 0600 -o root -g root "$ENVF" /etc/nhbchain/node.env
+)
 
 # 6. The service (install_service), from the checkout and not from /opt/nhbchain,
 #    then start the node and wait for the tip.
@@ -1000,7 +1031,12 @@ Tested, on a local network of real `nhb` processes (Windows, Git Bash):
   the recipe for a token reads `node.env` as data; and the script refuses to run
   from inside the service user's directories (through a stand-in for `physical_dir`
   where a link cannot be made). The commands the pages give to sign a transaction
-  are compared with the ones the script prints (`docs_signing_test.go`).
+  are compared with the ones the script prints (`docs_signing_test.go`). "Doing it by
+  hand" is read for what root does to names in the service user's directories (only
+  what creates, replaces or tests a name, and never a shell, a redirect or a read
+  of one) and its step 5, which writes the environment file, is run against a stand-in
+  for `sudo` that records who runs what and answers `test -L` for the names it is told
+  are links (`docs_byhand_test.go`).
 - The deployment script's `main()` run whole, with only the steps that need a real
   server (packages, the build, the service, the node's RPC) stubbed, against a real
   `nhb-snapshot` and a snapshot host on the loopback interface: a fresh install,
@@ -1029,11 +1065,13 @@ Not tested here, and the exact commands to run on Linux:
   they skip with a message there): `TestPackRefusesASymlinkedFile`, the symlink
   target case of `TestExtractRefusesBadTargets`,
   `TestMakeSnapshotNeverFollowsALinkInTheDataDirectory`,
-  `TestMakeSnapshotRefusesAPlantedWorkDirectory`, `TestRefsNeverReadThroughALink/a_real_link`
-  and `TestDeployRestoreIdentityRefusesALink/a_real_link`:
+  `TestMakeSnapshotRefusesAPlantedWorkDirectory`, `TestRefsNeverReadThroughALink/a_real_link`,
+  `TestDeployRestoreIdentityRefusesALink/a_real_link` and
+  `TestDoingItByHandStepFiveBuildsTheEnvironmentFileAsTheScriptDoes/a_real_link`:
   `go test ./cmd/nhb-snapshot -count=1` on Linux runs them. The same refusals are
   tested everywhere with stand-ins for the question "is this a link?" (`file_kind`
-  in `make-snapshot.sh`, `test -L` in `deployvalidator.sh`, the `lstat` of the tool).
+  in `make-snapshot.sh`, `test -L` in `deployvalidator.sh` and in the by-hand step,
+  the `lstat` of the tool).
 - What only real privilege and a real kernel show, which nothing here ran: that
   `cp -P` and `ln -P` copy a link as a link (GNU coreutils behaviour, relied on and
   not observed), that `sudo` keeps the token off its command line when it is given
@@ -1043,10 +1081,18 @@ Not tested here, and the exact commands to run on Linux:
   `-c safe.directory=` on the command line (git 2.35.2 and later) and that a
   checkout another user owns is then read, `chown -h` and `install` replacing a
   link, and `root_only_path` on a real root-owned tree (it is tested against stand-ins
-  for `stat`). On a Linux host: run `sudo bash scripts/make-snapshot.sh` against a
-  node's directory (it must refuse), then as the node's user with a link named
-  `999999.log` aimed at a root-only file in that directory (it must refuse, and
-  publish nothing).
+  for `stat`, for the data directory as for the tool and the two other directories).
+  On a Linux host: run `sudo bash scripts/make-snapshot.sh` against a
+  node's directory (it must refuse), then against a directory that root owns and has
+  closed (`0755`) inside one that the node's user owns (it must refuse, saying that a
+  directory above it can be changed by someone other than root), then as the node's user
+  with a link named `999999.log` aimed at a root-only file in that directory (it must
+  refuse, and publish nothing). Step 5 of "Doing it by hand" (the environment file) is
+  run by a test with a stand-in for `sudo` that answers `test -L` for the names it is
+  told are links, and with a real link where the machine can make one; on a Linux host,
+  put a link at `/etc/nhbchain/node.env` as the service user (remove the file, then
+  `sudo -u nhb ln -s /etc/hostname /etc/nhbchain/node.env`) and run the step: it must
+  stop and leave `/etc/hostname` as it was. Then remove the link and run it again.
 - The build and the installation of the tree, which the tests record and do not run
   (root is stubbed): that `go build` in the operator's checkout, with its caches in
   `/var/cache/nhbchain-build`, makes the same binary as a build in `/opt/nhbchain`
