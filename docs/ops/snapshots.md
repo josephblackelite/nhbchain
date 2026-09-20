@@ -1,35 +1,81 @@
 # Snapshot Operations Guide
 
-Snapshots let operators bootstrap validators and archive historical state efficiently. This guide documents creation, distribution, and restoration procedures.
+A snapshot is a copy of a running node's chain database (blocks, state trie and
+indexes). A new node that starts from one and syncs the blocks after it reaches
+the tip of the network. **This is the only supported way to add a node to the
+network that started on 2026-09-09: block sync from genesis is not supported on
+it.** The full procedure, what it verifies, and the measured limits are in
+[Onboarding a validator from a snapshot](../validators/snapshot-onboarding.md).
+This page is the operator's checklist for producing and publishing snapshots.
 
-## Snapshot cadence
+An earlier version of this page described `nhbchain snapshot export`,
+`consensusd --statesync.snapshot-height` and a snapshot bucket. None of those
+exist in this repository, and the `sync_snapshot_export` / `sync_snapshot_import`
+RPC methods and the `core/sync` package are not used by this procedure (see
+"Why block sync from genesis is not supported" in the onboarding page).
 
-- Produce full snapshots weekly for each network (devnet, staging, mainnet).
-- Generate incremental snapshots daily between full exports.
-- Retain at least four weeks of snapshots to support delayed recovery.
+## Producing a snapshot
 
-## Creation workflow
+Run `scripts/make-snapshot.sh` on a host that runs a validator or a follower, as
+root or as the node's user. It only reads the data directory and never stops,
+signals or locks the node, so there is no need to pause anything first.
 
-1. Pause heavy background jobs to reduce I/O contention.
-2. Run `nhbchain snapshot export --output /data/snapshots/<height>.tar.gz` on a healthy validator.
-3. Record the app hash, block height, and exporter node ID in the snapshot manifest.
-4. Resume background jobs and confirm the validator rejoins consensus.
+```bash
+bash scripts/make-snapshot.sh \
+  --data-dir /var/lib/nhbchain/nhb-data \
+  --out-dir /var/lib/nhbchain/snapshots
+```
+
+It copies the database consistently while the node runs (immutable table files
+by hard link or copy, the MANIFEST and journal last, repeated until two passes
+agree), opens the copy read-only and refuses to go on if it does not open, packs
+it deterministically, unpacks and opens the archive again, and only then writes
+`nhb-snapshot-<genesis prefix>-h<height>.tar.gz`, its manifest and `manifest.json`.
+The manifest carries the chain id, genesis hash, height, tip hash, state root,
+creation time, the binary the snapshot was taken with (sha256, commit, version),
+and the archive's size and sha256.
+
+Only the chain database files are ever read and packed. The node's p2p identity
+and peer list, its vote and lock state, its keys and its logs are not, and the
+consensus key is not in the data directory at all. The script prints which files
+were left out.
+
+## Cadence
+
+Publish a new snapshot regularly and delete old ones: a new node starts from the
+newest, and a follower can only close so large a gap in reasonable time (measured
+figures are in the onboarding page). A daily snapshot is a sensible default; the
+schedule and retention are yours to set. Take snapshots from a node you trust and
+that is at the tip.
 
 ## Distribution
 
-- Upload snapshots to the dedicated object storage bucket with server-side encryption.
-- Generate SHA256 checksums and publish them alongside download URLs.
-- Restrict write access to snapshot buckets and monitor access logs.
+Where snapshots are hosted is your decision and is not part of this repository.
+Whatever you choose:
 
-## Restoration
+- serve `manifest.json` and the archive from one directory URL over `https`,
+  updating `manifest.json` last (the script already writes it last);
+- restrict who can write to the location and monitor its access log;
+- the manifest is not signed: a new node checks the archive against it, and the
+  manifest against the chain id and genesis hash the script pins, so tell
+  operators the location out of band.
 
-1. Download the desired snapshot and verify the checksum.
-2. Extract to the node data directory: `tar -xzf <height>.tar.gz -C $NHB_HOME`.
-3. Start `consensusd` with `--statesync.snapshot-height <height>` if state sync is required.
-4. Monitor logs for fast-sync completion and compare app hash to the manifest.
+## Restoring
+
+Use `scripts/deployvalidator.sh` (see the onboarding page), or the manual steps
+there (`nhb-snapshot verify`, `extract`, `check-config`, `wait-synced`). Do not
+unpack an archive with `tar`: `nhb-snapshot extract` refuses paths outside the
+target, links, devices and files that are not chain database files, and checks
+that what it unpacked opens and matches the manifest.
 
 ## Validation
 
-- After each snapshot cycle, perform a restore test in staging.
-- Track restore duration and document any manual interventions required.
-- Update this guide if tooling or retention policies change.
+After every change to the scripts or the tool, run:
+
+```bash
+go test ./cmd/nhb-snapshot ./tests/scripts ./tests/config -count=1
+NHB_SNAPSHOT_E2E=1 go test ./cmd/nhb-snapshot -run TestSnapshotOnboardingEndToEnd -v -timeout 30m
+```
+
+The second runs a local network end to end (about four minutes) and needs
+`bash`; on Windows set `NHB_TEST_BASH` to a Git Bash.

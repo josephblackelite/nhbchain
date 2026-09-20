@@ -5,6 +5,11 @@ validator on a fresh EC2 instance you have never touched before. It assumes
 nothing except a running Ubuntu server with SSH access and a terminal in
 front of you. Follow it top to bottom in order.
 
+**This network cannot be joined by syncing from genesis.** A new node starts from
+a verified snapshot of the chain database and only then registers; the procedure
+is in [Onboarding a validator from a snapshot](snapshot-onboarding.md), and Step 1
+below is its short form.
+
 If you just want the one-liner and already know what you're doing, see
 ["Join As A Validator In One Command"](../../README.md#join-as-a-validator-in-one-command)
 in the repo README. This document exists for everything that command doesn't
@@ -52,108 +57,120 @@ Do these four things *before* you run anything:
 
 ## Step 1 — Run the bootstrap script
 
-On the fresh server, clone the repo (or otherwise get the source onto the
-box), then run:
+**This network cannot be joined by syncing from genesis.** The script installs
+the node, puts a verified snapshot of the chain database in its data directory,
+starts the node as a follower that does not vote, waits until it is at the
+network tip, and only then registers the validator. The whole procedure, what it
+verifies, how snapshots are made and how old one may be is in
+[Onboarding a validator from a snapshot](snapshot-onboarding.md). Read it first.
+
+You need two things from whoever operates the network, neither of which is built
+into the script: the location of a snapshot (`--snapshot-url`) and a bootnode
+(`--bootnode`). Check out the source commit the snapshot's manifest names, then
+run:
 
 ```bash
 bash scripts/validator-only-bootstrap.sh \
   --beneficiary nhb1youroperatorwalletaddresshere \
-  --email you@example.com \
-  --reset-state
+  --snapshot-url https://SNAPSHOT-HOST.example/PATH \
+  --bootnode BOOTNODE-HOST.example:6001
 ```
 
-`scripts/deployvalidator.sh` is the same script under the hood —
+`scripts/deployvalidator.sh` is the same script under the hood --
 `validator-only-bootstrap.sh` is a 5-line wrapper around it, and both accept
-identical flags.
+identical flags. Every step stops the script with an error when it fails, and
+it is safe to run again: what is already in place is left alone, and a node that
+is already running is restarted only if its binary, config or key changed.
 
-**Only pass `--reset-state` the first time**, on a genuinely fresh machine
-with no existing chain data. It wipes local chain state and is destructive
-if re-run against a node that has already synced or is already validating.
-Drop it on any later run.
+There is no `--reset-state` shortcut for a first run any more. On a fresh machine
+the script installs a snapshot by itself; `--reset-state` now means "this node's
+data directory is broken": it moves the data directory aside (it is never
+deleted), installs a snapshot again, and keeps the node's p2p identity and vote
+state.
 
 ### Flags
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
-| `--email` | *(none)* | Best-effort onboarding notification; failure to send is a warning, not fatal. |
-| `--onboarding-email-endpoint` | `https://nhbcoin.com/api/v1/validators/onboarding-email` | Where the onboarding email is POSTed. |
-| `--bootnode` | `198.51.100.10:6001` | Must be plain `host:port` — see the enode warning below. |
-| `--network-id` | `430060579445266314` | Mainnet network ID. |
+| `--snapshot-url` | *(required, or `NHB_SNAPSHOT_URL`)* | Directory URL that holds `manifest.json` and the archive it names. `https` only. |
+| `--bootnode` | *(required, or `NHB_BOOTNODE`)* | Plain `host:port`, never an `enode://` URI (see below). |
+| `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust, used only to decide when the node has caught up. |
+| `--max-lag-blocks` | `3` | How far behind that node still counts as caught up. |
+| `--sync-timeout` | `7200` | Seconds to wait for the catch-up. |
+| `--max-snapshot-age` | *(any age)* | Refuse a snapshot created longer ago than this, for example `48h`. |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
 | `--rpc-addr` | `127.0.0.1:8545` | Not exposed externally by default. |
 | `--external-address` | *(auto-detected)* | Falls back to EC2 IMDSv2, then `https://ifconfig.me`, if omitted. |
-| `--reset-state` | *(off)* | **Destructive.** Wipes local chain state. Fresh starts only. |
+| `--reset-state` | *(off)* | Move the data directory aside and install a snapshot again. |
+| `--allow-insecure-http` | *(off)* | Accept an `http://` or `file://` snapshot URL. |
+| `--allow-existing-key` | *(off)* | Use a validator key that was already on this host. Only if that key runs nowhere else. |
+| `--allow-binary-mismatch` | *(off)* | Continue although this build is not the snapshot's. |
 | `--help` | | Prints usage. |
 
+The old `--email`, `--onboarding-email-endpoint` and `--network-id` flags are
+gone (the network is pinned to chain id `18346390202490284624`), and there is no
+default bootnode.
+
 **Bootnode format warning:** the bootnode value must be plain `host:port`
-(e.g. `198.51.100.10:6001`), *never* an `enode://nodeid@host:port` URI. This
-codebase's P2P dialer calls `net.Dial("tcp", addr)` directly and never
-parses the `enode://` scheme at all. If you find an `enode://`-style example
-in old docs, a stale screenshot, or notes from elsewhere, ignore it — using
-that form here means the node never even attempts to dial its bootnode, and
-fails with `dial tcp: address enode://...: too many colons in address`.
+(for example `BOOTNODE-HOST.example:6001`), *never* an `enode://nodeid@host:port`
+URI. This codebase's P2P dialer calls `net.Dial("tcp", addr)` directly and never
+parses the `enode://` scheme at all. Using that form means the node never even
+attempts to dial its bootnode, and fails with `dial tcp: address enode://...: too
+many colons in address`. The script refuses it.
 
 ### What the script actually does, in order
 
-1. Installs Go 1.24.3 if it isn't already present.
-2. Adds a 4G swap file automatically on low-RAM/no-swap hosts. This exists
-   because a real `t3.micro`-class box (908MB RAM, no swap) was OOM-killed
-   compiling this dependency tree, even with plenty of disk free.
-3. Creates the `nhb` system user, and creates `/etc/nhbchain` (owned
-   `nhb:nhb`, mode `700`) and `/var/lib/nhbchain`. This directory **must**
-   be owned by `nhb`, not `root` — see Troubleshooting item 3 for what
-   happens if it isn't.
-4. Rsyncs the repo to `/opt/nhbchain`.
-5. Builds `bin/nhb` and `bin/nhb-cli`, using disk-backed
-   `GOCACHE`/`GOPATH`/`GOTMPDIR` under `/opt/nhbchain/.gocache` — because
-   `/tmp` is often a small RAM-backed tmpfs on stock EC2 AMIs, and a real
-   build filled it and failed with "no space left on device" even with 90GB+
-   free on the real disk.
-6. Generates a **fresh** validator key locally at `/etc/nhbchain/validator.key`
-   (mode `0600`, owned `nhb:nhb`) the first time it runs. It never accepts a
-   key via flag or environment variable, and reuses the existing key on
-   later runs.
-7. Writes `/etc/nhbchain/node.env` (mode `600`, owned `root:root`) with a
-   freshly generated `NHB_RPC_JWT_SECRET`.
-8. Auto-detects the server's external IP (EC2 IMDSv2 first, then
-   `https://ifconfig.me`) if `--external-address` wasn't passed.
-9. Patches `config.toml` — `ListenAddress`, `RPCAddress`, `DataDir`,
-   `ValidatorKMSEnv=NHB_VALIDATOR_RAW_KEY`, `NetworkId`, `ExternalAddress`,
-   and `Bootnodes`/`PersistentPeers`. The rest of the file, including
-   `QuorumCertActivationHeight` (see below), is copied through unchanged
-   from the repo's own `config.toml` -- it is not patched per-flag.
-10. Installs `deploy/systemd/nhb.service`, runs `daemon-reload`, enables and
-    restarts it.
-11. Polls the node's own RPC (a **POST** to `nhb_getNetworkStats` — a bare
-    `GET` always returns 400 even on a healthy node, so don't try to
-    health-check this with `curl -f` on a `GET`) for up to 60 seconds, and
-    **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
-    node never comes up.
-12. Runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` as the
-    `nhb` user, using the `--beneficiary` address you passed (the script
-    already exited earlier if you didn't pass one — see Step 1). If this
-    step fails, the script only **warns** and prints the exact retry
-    command — it does not fail the script or block the validator from
-    starting.
-13. If `--email` was given, best-effort POSTs to the onboarding-email
-    endpoint. Failure here is also just a warning, never fatal.
+1. Validates its arguments before touching the system.
+2. Installs Go 1.24.3 if it isn't already present, and `rsync`, `perl`, `curl`.
+3. Adds a 4G swap file automatically on low-RAM/no-swap hosts (a real
+   `t3.micro`-class box was OOM-killed compiling this dependency tree).
+4. Creates the `nhb` system user, `/etc/nhbchain` (owned `nhb:nhb`, mode `700`)
+   and `/var/lib/nhbchain`.
+5. Rsyncs the repo to `/opt/nhbchain`, checks `config/genesis.relaunch.json` is
+   byte for byte the live genesis, and builds `bin/nhb`, `bin/nhb-cli` and
+   `bin/nhb-snapshot` with disk-backed `GOCACHE`/`GOPATH`/`GOTMPDIR` under
+   `/opt/nhbchain` (`/tmp` is often a small RAM-backed tmpfs).
+6. Fetches the snapshot manifest, checks it is for the pinned chain id and genesis
+   hash and that the node just built is the binary the snapshot was taken with.
+7. Generates a **fresh** validator key locally at `/etc/nhbchain/validator.key`
+   (mode `0600`, owned `nhb:nhb`) the first time it runs. It never accepts a key
+   via flag or environment variable, reuses the key on later runs, refuses a key
+   file it did not create on a host with no node data, and refuses to run while
+   another `nhb` process is running outside `nhb.service`.
+8. Downloads the archive, verifies it, checks that the key is not already a
+   validator in the snapshot's state, and unpacks it into
+   `/var/lib/nhbchain/nhb-data` -- never over data that is already there.
+9. Writes `/etc/nhbchain/config.toml` from the repository's `config.toml`,
+   changing only `ListenAddress`, `RPCAddress`, `DataDir`, `GenesisFile`,
+   `ValidatorKMSEnv=NHB_VALIDATOR_RAW_KEY`, `NetworkName`, `NetworkId`,
+   `ExternalAddress`, and `Bootnodes`/`PersistentPeers`, and checks the values
+   consensus depends on (treasuries, `QuorumCertActivationHeight`) with
+   `nhb-snapshot check-config`.
+10. Writes `/etc/nhbchain/node.env` (mode `600`, owned `root:root`; the RPC secret
+    of an earlier run is kept), installs `deploy/systemd/nhb.service`, and starts
+    or restarts it.
+11. Waits for the node's RPC, checks it reports the pinned chain id and genesis
+    hash, and waits until its height is within `--max-lag-blocks` of the network
+    tip. It **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
+    node never comes up, stops making progress, or is on another chain. (Health
+    checks of the RPC must be a **POST**: a bare `GET` always returns 400 even on
+    a healthy node.)
+12. Only then runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` and
+    `nhb-cli register-validator 0 <validator.key>` as the `nhb` user. If a step
+    fails, the script stops with the exact retry commands.
+13. Prints the node address and what to do next.
 
 ### A note on QuorumCertActivationHeight
 
-Mainnet enforces a block-level quorum-certificate check on the P2P sync
-path (NHB-TRIAGE-C1): every block above height `451949` must carry proof
-that a real 2/3+ validator quorum actually voted for it, or a syncing node
-should reject it. This is controlled by `QuorumCertActivationHeight` in
-`config.toml`, which **must match** across every validator. As of
-2026-09-02 the repo's own `config.toml` sets this to `451949` to match
-what both live validators already enforce, and Step 1's rsync copies it
-through unchanged to `/etc/nhbchain/config.toml`. If you're running an
-older checkout where this line is missing (or `0`), your node will still
-sync and validate normally, but it silently skips quorum-certificate
-verification on every synced block -- a real security gap, not a visible
-failure. Confirm the line is present before going live:
-`grep QuorumCertActivationHeight /etc/nhbchain/config.toml`.
+`QuorumCertActivationHeight` in `config.toml` controls a block-level
+quorum-certificate check on the P2P sync path (NHB-TRIAGE-C1). It does not change
+state or any block's validity, and it must be the same on every validator. The
+shipped `config.toml` sets it to `0`, which is what both live validators run
+with: `cmd/nhb/main.go` only applies a value above zero, and the node's default
+is "never verify". (Earlier versions of this guide and of `config.toml` said
+`451949`; that is not what the live validators run.) Do not change it on one
+validator alone.
 
 ## Step 2 — Getting paid
 
@@ -188,7 +205,7 @@ Two steps, both involving this server's own key:
    (`10000000000000000000000` is exactly 10,000 ZNHB in base units --
    raise it if you want extra headroom against the minimum ever being
    raised by governance later.) The bootstrap script already ran this same
-   command once automatically with an amount of `0` right after startup,
+   command once automatically with an amount of `0` once the node reached the network tip,
    purely to flip this validator's on-chain `ValidatorRegistered` flag on
    (that part needs no funds and always succeeds) -- this second call with
    real stake is what actually brings its own stake up to the required
@@ -310,7 +327,7 @@ yourself.
 
 **Cause:** an `enode://` URI was used instead of plain `host:port` for the
 bootnode.
-**Fix:** always use `host:port` form, e.g. `198.51.100.10:6001`. See the
+**Fix:** always use `host:port` form, e.g. `BOOTNODE-HOST.example:6001`. See the
 bootnode format warning in Step 1 above.
 
 ### 5. Validator's heartbeat gets permanently stuck (nonce never advances, node looks alive but never becomes eligible)
@@ -366,7 +383,7 @@ validator's own server key — no third-party delegation transaction can
 set it, by design (so a random wallet can never force-register someone
 as a validator just by delegating to their address without consent). The
 bootstrap script normally flips this automatically via a zero-amount
-`register-validator` call right after first startup (see Step 2) — so if
+`register-validator` call once the node is at the network tip (see Step 2) — so if
 your node went through that script, this is almost certainly already
 done. If it didn't (a manually-migrated or hand-configured node, for
 example), run it yourself once:
