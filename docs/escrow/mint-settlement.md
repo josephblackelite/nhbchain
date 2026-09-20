@@ -3,7 +3,7 @@
 ## Overview
 The `mint_with_sig` JSON-RPC method finalises invoice-backed mints for native assets. On founder mainnet this is used for
 **NHB** settlement mints, while **ZNHB** remains fixed-supply and mint-paused after genesis. The payments gateway
-obtains a signed voucher from an authorised minter (e.g. the NowPayments workflow) and submits it to the node. The node
+obtains a signed voucher from an authorised minter (e.g. an external payment workflow) and submits it to the node. The node
 verifies the signature, packages the payload into a dedicated `TxTypeMint` transaction, and queues it in the mempool so block
 execution credits the recipient while emitting an auditable `mint.settled` event.
 

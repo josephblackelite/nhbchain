@@ -826,10 +826,9 @@ func (v *jwtVerifier) Verify(token string) (*jwt.RegisteredClaims, error) {
 }
 
 // ConfigureStableEngine wires a stable-quote engine into the RPC surface --
-// either the real engine directly (if ever run in-process again) or, since
-// 2026-09-17, an stablequote.HTTPClient calling out to the standalone
-// stable-quote-service (see stablequote package doc comment for why the
-// real engine no longer runs inside this binary). engine must never be a
+// a stablequote.HTTPClient calling out to a standalone quote service, or any
+// other stablequote.Engine (see the stablequote package doc comment).
+// engine must never be a
 // typed nil (e.g. a nil *stablequote.HTTPClient) -- pass a genuinely
 // nil interface value (don't call this at all) if there's no engine to
 // wire up, or the nil checks in swap_stable_handlers.go will see a
@@ -1070,7 +1069,9 @@ type RPCRequest struct {
 	JSONRPC string            `json:"jsonrpc"`
 	Method  string            `json:"method"`
 	Params  []json.RawMessage `json:"params"`
-	ID      int               `json:"id"`
+	// ID is the request id as it came (an int, a string or a json.Number), and
+	// is echoed in the response; see RPCRequest.UnmarshalJSON.
+	ID interface{} `json:"id"`
 }
 
 type RPCResponse struct {
@@ -1187,10 +1188,6 @@ type StakeUnbondResponse struct {
 	Validator   string   `json:"validator"`
 	Amount      *big.Int `json:"amount"`
 	ReleaseTime uint64   `json:"releaseTime"`
-}
-
-type posSweepParams struct {
-	Timestamp *int64 `json:"timestamp,omitempty"`
 }
 
 // POSAuthorizationResult is the JSON shape returned by pos_getAuthorization
@@ -1558,10 +1555,19 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "swap_submitVoucher":
 		s.handleSwapSubmitVoucher(recorder, r, req)
 	case "swap_voucher_get":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherGet(recorder, r, req)
 	case "swap_voucher_list":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherList(recorder, r, req)
 	case "swap_voucher_export":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherExport(recorder, r, req)
 	case "nhb_requestSwapApproval", "nhb_getSwapQuote":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
@@ -1692,10 +1698,6 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleSwapListPendingRedemptions(recorder, r, req)
 	case "pos_sweepVoids":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
 		s.handlePOSSweepVoids(recorder, r, req)
 	case "pos_getAuthorization":
 		s.handlePOSGetAuthorization(recorder, r, req)
@@ -1926,10 +1928,6 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "potso_epoch_payouts":
 		s.handlePotsoEpochPayouts(recorder, r, req)
 	case "potso_reward_claim":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
 		s.handlePotsoRewardClaim(recorder, r, req)
 	case "potso_rewards_history":
 		s.handlePotsoRewardsHistory(recorder, r, req)
@@ -2535,41 +2533,19 @@ func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, _ *http.Request, 
 	writeResult(w, req.ID, result)
 }
 
+// posSweepRPCDisabledMessage: pos_sweepVoids ran the expiry sweep on the one
+// validator that handled the call, at a caller-chosen time, through the live
+// state trie and outside block execution. The sweep changes authorization
+// records, so it made that validator's pending state differ from every other
+// validator's (which never saw the call) and left it to fork the next block
+// it proposed. Every block already voids the authorizations that have passed
+// their expiry as part of its own execution (StateProcessor.FinalizeBlock), so
+// nothing legitimate needs the RPC. pos_getAuthorization and
+// pos_getAuthorizationByIntentRef (read-only) are left live.
+const posSweepRPCDisabledMessage = "this method is disabled -- it changed validator-local state outside the block pipeline, so one validator could disagree with the others about the next block; expired authorizations are voided automatically by every block"
+
 func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if s.node == nil {
-		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
-		return
-	}
-	if len(req.Params) > 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "at most one parameter object expected", nil)
-		return
-	}
-	var params posSweepParams
-	if len(req.Params) == 1 && len(req.Params[0]) > 0 {
-		if err := json.Unmarshal(req.Params[0], &params); err != nil {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-			return
-		}
-	}
-	now := time.Now().UTC()
-	if params.Timestamp != nil {
-		if *params.Timestamp < 0 {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "timestamp must be non-negative", nil)
-			return
-		}
-		now = time.Unix(*params.Timestamp, 0).UTC()
-	}
-	count, err := s.node.SweepExpiredPOSAuthorizations(now)
-	if err != nil {
-		args := []any{slog.Time("timestamp", now), slog.Any("error", err)}
-		if params.Timestamp != nil {
-			args = append(args, slog.Int64("requestedTimestamp", *params.Timestamp))
-		}
-		slog.Error("rpc: sweep expired POS authorizations failed", args...)
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to sweep expired POS authorizations", nil)
-		return
-	}
-	writeResult(w, req.ID, map[string]int{"voided": count})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, posSweepRPCDisabledMessage, nil)
 }
 
 func (s *Server) requireAuth(r *http.Request) (*http.Request, *RPCError) {

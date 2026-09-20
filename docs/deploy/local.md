@@ -78,5 +78,5 @@ command in the Makefile before stopping the services.
 - If `consensusd` or `p2pd` exit immediately, ensure the Docker engine has read
   and write permissions on the named volumes in `docker volume ls`.
 - Swap oracle calls external APIs by default. For fully offline development,
-  remove the NowPayments source from `config/swapd.yaml` and rely on
+  remove the payment provider source from `config/swapd.yaml` and rely on
   the CoinGecko feed or stub data.

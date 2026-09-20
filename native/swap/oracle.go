@@ -339,7 +339,7 @@ type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// NowPaymentsOracle fetches price data from the NOWPayments quote endpoint.
+// NowPaymentsOracle fetches price data from an external payment provider's quote endpoint.
 type NowPaymentsOracle struct {
 	client   HTTPDoer
 	endpoint string
@@ -348,7 +348,7 @@ type NowPaymentsOracle struct {
 
 const defaultNowPaymentsEndpoint = "https://api.nowpayments.io/v1/exchange/rates"
 
-// NewNowPaymentsOracle constructs a NOWPayments oracle adapter. When the client is
+// NewNowPaymentsOracle constructs a payment-provider oracle adapter. When the client is
 // nil http.DefaultClient is used. The API key is optional and only added to the
 // request headers when supplied.
 func NewNowPaymentsOracle(client HTTPDoer, endpoint, apiKey string) *NowPaymentsOracle {

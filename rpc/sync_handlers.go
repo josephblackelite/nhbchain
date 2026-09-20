@@ -1,25 +1,12 @@
 package rpc
 
 import (
-	"encoding/json"
 	"net/http"
-
-	syncmgr "nhbchain/core/sync"
 )
 
 const (
 	codeSyncInvalidParams = -32060
-	codeSyncUnavailable   = -32061
 )
-
-type syncSnapshotExportParams struct {
-	OutDir string `json:"outDir"`
-}
-
-type syncSnapshotImportParams struct {
-	ChunkDir string                   `json:"chunkDir"`
-	Manifest syncmgr.SnapshotManifest `json:"manifest"`
-}
 
 type syncStatusResult struct {
 	ChainHeight    uint64 `json:"chainHeight"`
@@ -27,56 +14,27 @@ type syncStatusResult struct {
 	ManagerReady   bool   `json:"managerReady"`
 }
 
-func (s *Server) handleSyncSnapshotExport(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params syncSnapshotExportParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if params.OutDir == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", "outDir is required")
-		return
-	}
-	manifest, err := s.node.SnapshotExport(r.Context(), params.OutDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeSyncUnavailable, "snapshot_error", err.Error())
-		return
-	}
-	writeResult(w, req.ID, manifest)
+// syncSnapshotRPCDisabledMessage: sync_snapshot_import replaced the state
+// processor's trie with the imported one in place, while the node was running.
+// It kept no backup of the state it overwrote and did not move the chain head,
+// so the imported root matched no block of the node's own chain, and the
+// node's drift guard put the state back at the committed head at the next block
+// or restart, silently discarding the import. Nothing in the node signs a
+// snapshot manifest, and the verification an import needs (a two-thirds
+// validator quorum or a governance anchor over the manifest digest) has
+// nothing to check, so a snapshot exported this way could not be imported by
+// another node either; sync_snapshot_export wrote those unsigned files to a
+// directory the caller named. Both are disabled. A new validator is brought up
+// from a verified snapshot outside the node; see docs/networking/snapshots.md.
+// sync_status (read-only) is left live.
+const syncSnapshotRPCDisabledMessage = "this method is disabled -- the node's snapshot pipeline is incomplete (nothing signs a snapshot manifest, and an import overwrote live state in place with no backup and no chain head update); bring a new validator up from a verified snapshot outside the node instead"
+
+func (s *Server) handleSyncSnapshotExport(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, syncSnapshotRPCDisabledMessage, nil)
 }
 
-func (s *Server) handleSyncSnapshotImport(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
-	if authErr := s.requireAuthInto(&r); authErr != nil {
-		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-		return
-	}
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", "exactly one parameter object expected")
-		return
-	}
-	var params syncSnapshotImportParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", err.Error())
-		return
-	}
-	if params.ChunkDir == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeSyncInvalidParams, "invalid_params", "chunkDir is required")
-		return
-	}
-	root, err := s.node.SnapshotImport(r.Context(), &params.Manifest, params.ChunkDir)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeSyncUnavailable, "snapshot_error", err.Error())
-		return
-	}
-	writeResult(w, req.ID, map[string]string{"stateRoot": root.Hex()})
+func (s *Server) handleSyncSnapshotImport(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, syncSnapshotRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleSyncStatus(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -4707,65 +4706,6 @@ func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, in
 // SyncManager exposes the fast-sync subsystem for RPC handlers.
 func (n *Node) SyncManager() *syncmgr.Manager { return n.syncMgr }
 
-// SnapshotExport produces a snapshot manifest in the supplied directory.
-func (n *Node) SnapshotExport(ctx context.Context, outDir string) (*syncmgr.SnapshotManifest, error) {
-	if n == nil || n.syncMgr == nil {
-		return nil, fmt.Errorf("fast-sync manager not initialised")
-	}
-	root := n.state.CurrentRoot()
-	var checkpointHash []byte
-	height := n.chain.Height()
-	if header := n.chain.CurrentHeader(); header != nil {
-		height = header.Height
-		if len(header.StateRoot) > 0 {
-			root = common.BytesToHash(header.StateRoot)
-		}
-		if hash, err := header.Hash(); err == nil {
-			checkpointHash = hash
-		}
-	}
-	manifest, err := n.syncMgr.ExportSnapshot(ctx, height, root, outDir)
-	if err != nil {
-		return nil, err
-	}
-	if len(checkpointHash) > 0 {
-		manifest.Checkpoint = append([]byte(nil), checkpointHash...)
-		if manifest.Metadata == nil {
-			manifest.Metadata = make(map[string]string)
-		}
-		manifest.Metadata["checkpointHeight"] = strconv.FormatUint(height, 10)
-		manifest.Metadata["checkpointHash"] = hex.EncodeToString(checkpointHash)
-	}
-	return manifest, nil
-}
-
-// SnapshotImport verifies and installs a snapshot manifest/chunk set.
-func (n *Node) SnapshotImport(ctx context.Context, manifest *syncmgr.SnapshotManifest, chunkDir string) (common.Hash, error) {
-	if n == nil || n.syncMgr == nil {
-		return common.Hash{}, fmt.Errorf("fast-sync manager not initialised")
-	}
-	if manifest.ChainID != 0 && manifest.ChainID != n.chain.ChainID() {
-		return common.Hash{}, fmt.Errorf("snapshot chain mismatch: manifest=%d local=%d", manifest.ChainID, n.chain.ChainID())
-	}
-	root, err := n.syncMgr.ImportSnapshot(ctx, manifest, chunkDir)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	n.stateMu.Lock()
-	if err := n.state.ResetToRoot(root); err != nil {
-		n.stateMu.Unlock()
-		return common.Hash{}, err
-	}
-	if err := n.refreshModulePauses(); err != nil {
-		n.stateMu.Unlock()
-		return common.Hash{}, err
-	}
-	n.stateMu.Unlock()
-	n.syncMgr.SetHeight(manifest.Height)
-	n.refreshValidatorSet()
-	return root, nil
-}
-
 func (n *Node) refreshValidatorSet() {
 	if n == nil || n.syncMgr == nil {
 		return
@@ -4804,19 +4744,6 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 		return nil, fmt.Errorf("state unavailable")
 	}
 	return n.state.GetAccount(addr)
-}
-
-// SweepExpiredPOSAuthorizations triggers an on-demand sweep of expired POS authorizations.
-func (n *Node) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
-	if n == nil {
-		return 0, fmt.Errorf("node unavailable")
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	if n.state == nil {
-		return 0, fmt.Errorf("state unavailable")
-	}
-	return n.state.SweepExpiredPOSAuthorizations(now)
 }
 
 // GetPOSAuthorization returns the authorization record for the given ID.
@@ -5178,6 +5105,11 @@ func (n *Node) NetworkSeedsParam() ([]byte, bool, error) {
 	return append([]byte(nil), raw...), true, nil
 }
 
+// PotsoRewardClaim pays one claim-mode reward out of the treasury on the live
+// state trie, outside block execution. No RPC calls it any more (potso_reward_claim
+// is retired, see potsoRewardClaimRPCDisabledMessage in rpc/potso_reward_handlers.go);
+// it is kept for its tests. Do not expose it again: a write made here becomes part
+// of this validator's next proposed block only, so the validators would disagree.
 func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, error) {
 	if err := nativecommon.Guard(n, modulePotso); err != nil {
 		return false, nil, err
@@ -5444,6 +5376,66 @@ func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, erro
 
 func (n *Node) LoyaltyBusinessesByOwner(owner [20]byte) ([]loyalty.BusinessID, error) {
 	return n.state.LoyaltyBusinessesByOwner(owner)
+}
+
+// LoyaltyBudgetStatus is the loyalty engine's base-reward budget for the current
+// UTC day, as the engine itself works it out when it settles a block's rewards.
+type LoyaltyBudgetStatus struct {
+	// Day is the UTC day the figures are for, formatted YYYYMMDD.
+	Day string
+	// BudgetRemainingZNHB is what the engine could still pay out today, in wei.
+	BudgetRemainingZNHB *big.Int
+	// PaidTodayZNHB and ProposedTodayZNHB are the running totals the engine keeps
+	// for the day: what it has paid and what the rewards it settled asked for.
+	PaidTodayZNHB     *big.Int
+	ProposedTodayZNHB *big.Int
+	// ResetAt is when the day rolls over and the budget starts again.
+	ResetAt time.Time
+	// GuardFallback names the fallback the price guard has the budget computed
+	// with ("last_good_price" or "min_emission"), or is empty when it is not
+	// using one.
+	GuardFallback string
+}
+
+// LoyaltyBudgetStatus reads the loyalty engine's budget for the current UTC day.
+// It runs against a disposable view of the state (see WithStateView) and only
+// reads: the budget is worked out by the same function the block executor calls
+// (Manager.GetRemainingDailyBudgetZNHB), and a zero amount asks the day totals
+// for their current value without adding to them.
+func (n *Node) LoyaltyBudgetStatus() (*LoyaltyBudgetStatus, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	now := n.currentTime()
+	status := &LoyaltyBudgetStatus{}
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
+		remaining, fallback, err := m.GetRemainingDailyBudgetZNHB(now)
+		if err != nil {
+			return err
+		}
+		paid, err := m.AddPaidTodayZNHB(now, nil)
+		if err != nil {
+			return err
+		}
+		proposed, err := m.AddProposedTodayZNHB(now, nil)
+		if err != nil {
+			return err
+		}
+		status.BudgetRemainingZNHB = remaining
+		status.PaidTodayZNHB = paid
+		status.ProposedTodayZNHB = proposed
+		if fallback != nil {
+			status.GuardFallback = fallback.Strategy
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	day := now.UTC()
+	status.Day = day.Format("20060102")
+	status.ResetAt = time.Date(day.Year(), day.Month(), day.Day()+1, 0, 0, 0, 0, time.UTC)
+	return status, nil
 }
 
 // SubscriptionsManager returns a fresh state.Manager over the node's
@@ -6510,7 +6502,11 @@ func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, active bool, signa
 }
 
 // ReputationVerifySkill validates the caller's verifier role and records a
-// skill verification.
+// skill verification on the live state trie, outside block execution. No RPC
+// calls it any more (reputation_verifySkill is retired, see
+// reputationRPCDisabledMessage in rpc/reputation_handlers.go); it is kept for its
+// tests. Do not expose it again: a write made here becomes part of this
+// validator's next proposed block only, so the validators would disagree.
 func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, expiresAt int64) (*reputation.SkillVerification, error) {
 	if n == nil {
 		return nil, fmt.Errorf("reputation: node unavailable")
@@ -8103,7 +8099,8 @@ func (n *Node) SubmitLendingRefPrice(rateNum, rateDenom *big.Int, timestamp uint
 }
 
 // SwapGetVoucher returns the ledger record for the supplied provider
-// transaction identifier.
+// transaction identifier. It reads a disposable view of the state (see
+// WithStateView), like the other read-only queries.
 func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {
 	trimmed := strings.TrimSpace(providerTxID)
 	if trimmed == "" {
@@ -8113,7 +8110,7 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 		record *swap.VoucherRecord
 		ok     bool
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
 		record, ok, err = ledger.Get(trimmed)
@@ -8128,13 +8125,15 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 	return record.Copy(), true, nil
 }
 
-// SwapListVouchers paginates voucher records for the supplied time range.
+// SwapListVouchers paginates voucher records for the supplied time range. It
+// reads a disposable view of the state (see WithStateView), like the other
+// read-only queries.
 func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) ([]*swap.VoucherRecord, string, error) {
 	var (
 		results    []*swap.VoucherRecord
 		nextCursor string
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		records, cursorOut, err := ledger.List(startTs, endTs, cursor, limit)
 		if err != nil {
@@ -8154,13 +8153,15 @@ func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) 
 }
 
 // SwapExportVouchers produces a base64 encoded CSV export and accompanying totals.
+// It reads a disposable view of the state (see WithStateView), like the other
+// read-only queries.
 func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, error) {
 	var (
 		encoded string
 		count   int
 		total   *big.Int
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
 		encoded, count, total, err = ledger.ExportCSV(startTs, endTs)
@@ -8216,7 +8217,7 @@ func (n *Node) SwapLimits(addr [20]byte) (*swap.RiskUsage, swap.RiskParameters, 
 // treasury Sale Pool rather than minting new supply (see
 // core/swap_voucher_tx.go's applySwapVoucherMintTransaction), so they carry
 // no external financial risk needing a governance-adjustable circuit
-// breaker -- only the NHB-custody-backed redeem direction does.
+// breaker -- only the redeem direction does.
 func (n *Node) SwapRiskParams() (swap.RedeemRiskParameters, error) {
 	var redeem swap.RedeemRiskParameters
 	err := n.WithState(func(m *nhbstate.Manager) error {

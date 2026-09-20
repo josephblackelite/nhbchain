@@ -29,7 +29,7 @@ type stableStatus struct {
 func main() {
 	dbPath := flag.String("db", "./nhb-data", "path to the consensus data directory")
 	consensusEndpoint := flag.String("consensus", "localhost:9090", "consensus gRPC endpoint")
-	swapdBase := flag.String("swapd", "http://localhost:7074", "base URL for swapd (scheme://host:port)")
+	swapBase := flag.String("swap", "http://localhost:7074", "base URL for the swap service (scheme://host:port)")
 	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -58,7 +58,7 @@ func main() {
 	fmt.Printf("global.pauses.swap: %t\n", swapPaused)
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	stableURL := strings.TrimRight(*swapdBase, "/") + "/v1/stable/status"
+	stableURL := strings.TrimRight(*swapBase, "/") + "/v1/stable/status"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, stableURL, nil)
 	if err != nil {
 		log.Fatalf("build stable status request: %v", err)
@@ -66,13 +66,13 @@ func main() {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("query swapd stable status: %v", err)
+		log.Fatalf("query swap service stable status: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Fatalf("read swapd response: %v", err)
+		log.Fatalf("read swap service response: %v", err)
 	}
 
 	switch resp.StatusCode {
@@ -81,7 +81,7 @@ func main() {
 		if err := json.Unmarshal(body, &status); err != nil {
 			log.Fatalf("decode stable status payload: %v", err)
 		}
-		fmt.Printf("swapd.stable.paused: false (quotes=%d reservations=%d assets=%d)\n", status.Quotes, status.Reservations, status.Assets)
+		fmt.Printf("swap service stable.paused: false (quotes=%d reservations=%d assets=%d)\n", status.Quotes, status.Reservations, status.Assets)
 	case http.StatusNotImplemented:
 		var payload stableError
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -90,8 +90,8 @@ func main() {
 		if payload.Error == "" {
 			payload.Error = string(body)
 		}
-		fmt.Printf("swapd.stable.paused: true (%s)\n", payload.Error)
+		fmt.Printf("swap service stable.paused: true (%s)\n", payload.Error)
 	default:
-		log.Fatalf("unexpected status from swapd: %d %s", resp.StatusCode, string(body))
+		log.Fatalf("unexpected status from the swap service: %d %s", resp.StatusCode, string(body))
 	}
 }

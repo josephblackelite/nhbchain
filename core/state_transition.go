@@ -5364,9 +5364,8 @@ func (sp *StateProcessor) applySwapBurn(tx *types.Transaction, sender []byte, se
 // applySwapVoucherMintTransaction) that move ZNHB out of the Sale Pool, and
 // it is strictly one-directional through THIS function -- there is
 // deliberately no corresponding path that lets a buyer convert ZNHB back
-// into NHB through the admin wallet, since that would let unbacked value
-// leave the system disguised as NHB (which is otherwise always backed 1:1
-// by NOWPayments-custodied USDT/USDC). ZNHB, once purchased, moves
+// into NHB through the admin wallet, since that would let value leave the
+// system disguised as NHB. ZNHB, once purchased, moves
 // peer-to-peer (ordinary TxTypeTransferZNHB) or back into the treasury only
 // via the formulaic buyback -- never through this function.
 //
@@ -5648,8 +5647,8 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 	}
 
 	// Burn: reduce the sender's balance, credit nothing. Only NHB is ever
-	// destroyed this way -- NOWPayments handles the actual off-chain
-	// release, there is no on-chain path back from a stablecoin to NHB.
+	// destroyed this way -- an external settlement service handles the actual
+	// off-chain release, there is no on-chain path back to NHB.
 	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, tx.Value)
 	senderAccount.Nonce++
 	if err := sp.setAccount(sender, senderAccount); err != nil {

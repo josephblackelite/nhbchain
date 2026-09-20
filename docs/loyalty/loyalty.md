@@ -235,6 +235,14 @@ Read operations (business/program lookups, meters) are unaffected and remain ord
 #### `loyalty_paymasterBalance(businessID)`
 * Returns the ZNHB balance of the current paymaster pool and reserved amounts (pending awards).
 
+#### `nhb_getLoyaltyBudgetStatus()`
+* Public, read-only, chain-wide (no parameters, not split per merchant). Reports the base-reward budget for the current UTC day as the loyalty engine works it out when it settles a block's rewards (`Manager.GetRemainingDailyBudgetZNHB`). It used to return the same three literals whatever the chain held.
+* **`budgetRemaining`** (`string`, wei): what the engine could still pay today (the day's budget less what it has paid); `"0"` when loyalty is not configured.
+* **`resetAt`** (integer, Unix seconds): the next UTC midnight, when the day rolls over.
+* **`twapScalingFactor`** (`string`, decimal): the share of the day's proposed base rewards that has been paid so far, `"1.0"` while none was cut and lower once the daily budget or the treasury balance made the engine pro-rate a payout. The key keeps the name the method has always had; it is not read from the price guard.
+* **`day`** (`string`, `YYYYMMDD`), **`paidToday`** and **`proposedToday`** (`string`, wei): the day the figures are for and the running totals the factor is computed from.
+* **`guardFallback`** (`string`, present only while the price guard has the budget computed with a fallback price): `last_good_price` or `min_emission`.
+
 **JSON-RPC cURL example**
 
 ```bash

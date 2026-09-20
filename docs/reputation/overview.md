@@ -2,13 +2,22 @@
 
 The reputation module introduces a minimal skill verification primitive. Verifiers attest that a subject possesses a specific capability. The current release now enforces verifier authorization within the node; calls from wallets that do not hold the `roleReputationVerifier` assignment fail before any state transition.
 
+## Status of the RPC
+
+`reputation_verifySkill` is retired: every call gets HTTP 410 with JSON-RPC error `-32060` and nothing is
+executed. The method wrote the attestation into the state of the one validator that handled the call, outside block
+execution, and it took the verifier's address from the request body without proof that the caller held that key, so that
+validator's next block differed from the others'. A signed-transaction replacement that every validator executes in a block is
+pending; until it exists no attestation can be recorded through the node. The sections below describe the module's design
+(`Node.ReputationVerifySkill` is kept for its tests and is not reachable from any RPC).
+
 ## Verification flow
 
-1. A wallet with verifier privileges calls `reputation_verifySkill`.
-2. The RPC validates addresses, normalises skill strings and forwards the request to the core node.
+1. A wallet with verifier privileges submits the attestation (through the RPC in earlier previews).
+2. The address and skill strings are validated and normalised.
 3. The node enforces role membership, persists the verification and emits `reputation.skillVerified`.
 
-The RPC returns the canonical payload comprising the subject, verifier, skill, issuance timestamp and optional expiry.
+The earlier RPC returned the canonical payload comprising the subject, verifier, skill, issuance timestamp and optional expiry.
 
 ### Error semantics
 

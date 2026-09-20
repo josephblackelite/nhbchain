@@ -44,16 +44,16 @@ the latest block root, decodes `system/pauses`, and prints the module map.【F:e
    a module replace `--state pause` with `--state resume`.
 
 > **ZNHB redemption tip:** Disabling cash-outs cleanly requires pausing both the on-chain
-> swap module (`global.pauses.swap`) and the `swapd` stable engine (`stable.paused` in
+> swap module (`global.pauses.swap`) and the swap service's stable engine (`stable.paused` in
 > the YAML). Pause the service first to drain in-flight requests, then toggle the
-> on-chain flag. When restoring service, unpause `swapd` only after the governance
+> on-chain flag. When restoring service, unpause the swap service only after the governance
 > update clears the module pause so submitted redemptions will execute successfully.
 
 ### Pause playbooks (mints vs. redemptions)
 
 * **Pause minting:** run the helper above with `--module swap --state pause` and
   capture the transaction hash for the incident log.
-* **Pause redemptions:** flip `stable.paused=true` in the active swapd overlay
+* **Pause redemptions:** flip `stable.paused=true` in the active swap service overlay
   while leaving the mint flag untouched. For example:
 
   ```bash
@@ -63,14 +63,14 @@ the latest block root, decodes `system/pauses`, and prints the module map.【F:e
 
   The restart ensures the new flag propagates. Reverting to `stable.paused=false`
   re-opens redemptions once the on-chain pause clears.
-* **Observe toggles:** combine the consensus snapshot with the swapd status
+* **Observe toggles:** combine the consensus snapshot with the swap service status
   endpoint to confirm the desired state landed:
 
   ```bash
   go run ./examples/docs/ops/swap_pause_inspect \
     --db ./nhb-data \
     --consensus localhost:9090 \
-    --swapd https://swapd.internal.example
+    --swap https://swap.internal.example
   ```
 
   The helper prints `global.pauses.swap` and whether `/v1/stable/status` is

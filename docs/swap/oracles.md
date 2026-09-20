@@ -6,7 +6,7 @@ The swap oracle aggregates multiple upstream price feeds and derives a defended 
 
 The service currently ships adapters for:
 
-- **NOWPayments** – integrates the hosted swap quote API, authenticated via API key.
+- **Payment provider quote API** - integrates a hosted swap quote API, authenticated via API key.
 - **CoinGecko** – queries the public `simple/price` endpoint with optional asset symbol remapping.
 
 Additional sources can be added by implementing the `oracle.Source` interface and registering it in the adapter registry.

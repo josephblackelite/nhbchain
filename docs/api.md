@@ -197,7 +197,7 @@ Report the configured provider allow list and the timestamp of the last successf
   "jsonrpc": "2.0",
   "id": 7,
   "result": {
-    "allow": ["nowpayments"],
+    "allow": ["example-provider"],
     "lastOracleHealthCheck": 0
   }
 }

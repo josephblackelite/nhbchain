@@ -80,8 +80,13 @@ run_check() {
     return 1
   fi
 
+  # The exit code is read in the else branch: after "if ! cmd", $? is the
+  # negated status (0 for a command that failed), which recorded every failed
+  # check as passed. pipefail makes the pipeline's status the command's, not tee's.
   local exit_code=0
-  if ! ("${cmd[@]}" 2>&1 | tee "${log_file}"); then
+  if "${cmd[@]}" 2>&1 | tee "${log_file}"; then
+    exit_code=0
+  else
     exit_code=$?
   fi
 
@@ -138,7 +143,7 @@ run_check "docs" "Docs/examples validation" "critical" make bugcheck-docs || tru
 # Emit JSON summary
 {
   printf '{"timestamp":"%s","status":"%s","results":[' "${TIMESTAMP}" "${status_overall}"
-  local first=1
+  first=1
   for entry in "${results_json[@]}"; do
     if [[ ${first} -eq 1 ]]; then
       first=0

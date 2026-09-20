@@ -29,7 +29,8 @@ This guide summarises day-to-day tasks for operating NHB P2P nodes.
   your observability stack.
 * Query `p2p_info` periodically to confirm peer counts, limits, and the local
   node identity (`self`).
-* Query `p2p_peers` to inspect per-peer reputation, direction (inbound/outbound),
+* Query `p2p_peers` (with the RPC bearer token: it takes the same credential as
+  `net_peers`) to inspect per-peer reputation, direction (inbound/outbound),
   first/last seen timestamps, and remote addresses. This is useful for
   identifying abusive peers.
 

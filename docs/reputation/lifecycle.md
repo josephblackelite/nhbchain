@@ -9,7 +9,8 @@ transitions.
 
 ## Issuance
 
-Verifiers call `Node.ReputationVerifySkill` to issue an attestation. The node first
+Issuing an attestation runs `Node.ReputationVerifySkill` (no RPC calls it while
+`reputation_verifySkill` is retired; see the overview). The node first
 confirms the caller holds `roleReputationVerifier`, returning
 `ErrReputationVerifierUnauthorized` if the membership check fails. Once authorized,
 the module normalizes the skill label, validates the payload and persists the record using

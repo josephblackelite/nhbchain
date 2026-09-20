@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -89,18 +90,26 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 		skew = defaultTimestampSkew
 	}
 	if skew > maxAllowedTimestampSkew {
+		// The limit is fixed: an operator who configured more must be able to
+		// see that it is not in force, not find out from requests that fail.
+		slog.Warn("gateway auth: configured timestamp skew exceeds the maximum and is lowered to it",
+			slog.Duration("configured", skew), slog.Duration("effective", maxAllowedTimestampSkew))
 		skew = maxAllowedTimestampSkew
 	}
 	if nonceTTL <= 0 {
 		nonceTTL = defaultNonceWindow
 	}
 	if nonceTTL > maxNonceWindow {
+		slog.Warn("gateway auth: configured nonce TTL exceeds the maximum and is lowered to it",
+			slog.Duration("configured", nonceTTL), slog.Duration("effective", maxNonceWindow))
 		nonceTTL = maxNonceWindow
 	}
 	if nonceCapacity <= 0 {
 		nonceCapacity = defaultNonceCapacity
 	}
 	if nonceCapacity > maxNonceCapacity {
+		slog.Warn("gateway auth: configured nonce capacity exceeds the maximum and is lowered to it",
+			slog.Int("configured", nonceCapacity), slog.Int("effective", maxNonceCapacity))
 		nonceCapacity = maxNonceCapacity
 	}
 	return &Authenticator{

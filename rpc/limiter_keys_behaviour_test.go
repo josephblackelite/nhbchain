@@ -29,7 +29,9 @@ func proxiedServer(t *testing.T, cfg ServerConfig) *Server {
 }
 
 func rateProbe(srv *Server, remote string, headers map[string]string) (int, int) {
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "nhb_getLoyaltyBudgetStatus", "params": []any{}})
+	// A public read that answers without a node behind the server, so the probe
+	// measures the limiter and not the handler.
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "nhb_getNetworkStats", "params": []any{}})
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	req.RemoteAddr = remote
 	for k, v := range headers {

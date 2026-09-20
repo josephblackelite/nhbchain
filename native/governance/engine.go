@@ -1235,7 +1235,7 @@ func parseLendingDepositRateSchedulePayload(payloadJSON string) (*parsedLendingR
 }
 
 // maxSwapPriceSignerProviderLen bounds the provider identifier length. Swap
-// provider identifiers are short slugs (e.g. "nowpayments", "example-provider")
+// provider identifiers are short slugs (e.g. "example-provider")
 // -- this is a generous ceiling to reject obviously-malformed payloads, not
 // a meaningful business constraint.
 const maxSwapPriceSignerProviderLen = 64
