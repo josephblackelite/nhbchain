@@ -8,7 +8,7 @@ This directory documents the audit tooling that exists in the repository. Start 
 | --- | --- | --- |
 | Static analysis, vulnerability scan, protobuf lint and breaking-change check | `make audit:static`, `make bugcheck-static`, `make bugcheck-proto` | [static-analysis.md](./static-analysis.md) |
 | Text-pattern security scan | `make audit:english` | [README.md](./README.md) |
-| Fuzzing | `go test -fuzz` per target (see the page; `make bugcheck-fuzz` names several packages) | [fuzzing.md](./fuzzing.md) |
+| Fuzzing | `make bugcheck-fuzz` (`scripts/fuzz_all.sh`, one target at a time) or `go test -fuzz` for one target | [fuzzing.md](./fuzzing.md) |
 | Unit and package tests | `make audit:tests` (`go test ./...` plus `go test ./...` in `sdk/`) | this page |
 | Determinism and Byzantine-vote tests | `make audit:determinism` (`./tests/determinism/...`, `./tests/consensus/...`) | this page |
 | End-to-end flows | `make audit:e2e`, `make bugcheck-gateway` | [e2e-flows.md](./e2e-flows.md) |
@@ -16,8 +16,8 @@ This directory documents the audit tooling that exists in the repository. Start 
 | Network security tests | `make audit:netsec` (`./tests/netsec/...`) | this page |
 | Performance | `make audit:perf` (`./tests/perf/...` benchmarks) | this page |
 | Ledger and supply fixtures | `make audit:ledger`, `make audit:supply` (`./tests/ledger/...`) | this page |
-| Configuration hashes | `make audit:config` (records `pending` checks and hashes files; currently fails, see below) | this page |
-| Documentation | `make audit:docs` (currently fails at the hashing step, see below) | [docs-quality.md](./docs-quality.md) |
+| Configuration hashes | `make audit:config` (records `pending` checks and hashes `config.toml` and `config/prod.toml`) | this page |
+| Documentation | `make audit:docs` | [docs-quality.md](./docs-quality.md) |
 | Everything in one run | `make bugcheck` (`scripts/bugcheck.sh`) | [index.md](./index.md) |
 
 ## How the phase targets work
@@ -26,7 +26,7 @@ The `determinism`, `e2e`, `netsec`, `ledger`, `supply` and `perf` phase targets 
 
 The second step runs `go run ./tools/audit`, which reads the phase YAML, records every check listed there with the status `pending`, hashes the YAML and any `--hash` files, and writes `artifacts/<phase>/report.json` and `report.md`. It does not execute the checks named in the YAML. The YAML files in `ops/audit/` are plans and fixtures, and the pass/fail evidence comes from the Go tests. `tools/audit` exits with an error when a `--hash` file cannot be read (`hash %s: %v`, `tools/audit/main.go`).
 
-Two phase targets currently fail for that reason. `make audit:config` hashes `config/config.toml`, `config-peer.toml` and `config-local.toml` (`Makefile`), and none of those three paths exists (the repository has a root `config.toml`). `make audit:docs` hashes `docs/security/audit-readiness.md` (present) and `ops/audit-pack/BUILD_STEPS.md` (not present).
+`make audit:config` hashes `config.toml` and `config/prod.toml` (`Makefile`); `make audit:docs` hashes `docs/security/audit-readiness.md`. Both files exist in the repository.
 
 `ops/audit/ledger.yaml` and `ops/audit/supply.yaml` contain sample records and numbers used by the ledger and supply tests, not chain data.
 
@@ -42,5 +42,5 @@ Two phase targets currently fail for that reason. `make audit:config` hashes `co
 
 - `logs/` – tool and test logs.
 - `artifacts/<phase>/` – JSON and Markdown phase summaries and test JSON.
-- `audit/bugcheck-<timestamp>.md` – written by `scripts/bugcheck.sh` as it runs. The script is also meant to write `artifacts/bugcheck-<timestamp>.json`, but it exits before that step (see the caveats in [index.md](./index.md)).
+- `audit/bugcheck-<timestamp>.md` and `artifacts/bugcheck-<timestamp>.json` – written by `scripts/bugcheck.sh` (see [index.md](./index.md)).
 - `docs/audit/english-latest.md` – written by `make audit:english`.
