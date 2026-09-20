@@ -202,7 +202,7 @@ func (fx *arbitrationFixture) relayerNonce(t *testing.T) uint64 {
 }
 
 // TestArbitrationAdvancesTheRelayersNonce covers a relayer that submits
-// several arbitration decisions in a row, as the escrow gateway does: each
+// several arbitration decisions in a row: each
 // successful arbitration, release or refund, must consume the nonce it
 // carried, so the next one is accepted at the next nonce and a resubmission
 // of a spent nonce is refused as too low.
