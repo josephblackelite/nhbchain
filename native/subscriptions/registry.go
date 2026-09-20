@@ -65,8 +65,19 @@ func payerSubIdxKey(p [20]byte) []byte { return append([]byte("subscriptions/pay
 func merchantSubIdxKey(m [20]byte) []byte {
 	return append([]byte("subscriptions/merchantsubs/"), m[:]...)
 }
-func chargeListKey(id SubscriptionID) []byte {
-	return uint64Key("subscriptions/charges/", uint64(id))
+
+// A subscription's charge history is one key per attempt plus a count, so
+// recording an attempt touches two small keys however long the history is.
+// One list holding every attempt would have to be read and rewritten whole by
+// each of them.
+func chargeCountKey(id SubscriptionID) []byte {
+	return uint64Key("subscriptions/chargecount/", uint64(id))
+}
+func chargeKey(id SubscriptionID, attempt uint64) []byte {
+	key := uint64Key("subscriptions/charge/", uint64(id))
+	var seq [8]byte
+	binary.BigEndian.PutUint64(seq[:], attempt)
+	return append(key, seq[:]...)
 }
 
 // appendUint64Idx performs a full read-modify-write append to a uint64
@@ -283,26 +294,50 @@ func (r *Registry) ListSubscriptionsByMerchant(merchant [20]byte) ([]Subscriptio
 }
 
 // AppendCharge records a new settlement-attempt audit record for a
-// subscription. Deliberately a full read-modify-write via KVPut, mirroring
-// core/state's BuybackAppendAsk: two charges can be structurally similar
-// (same amount/status) and must never be deduplicated -- only
-// AttemptNumber distinguishes them.
+// subscription, numbered after the ones already recorded. Never deduplicated:
+// two charges can be structurally similar (same amount/status), and only
+// their position in the history distinguishes them. The work is the same for
+// the first attempt and the thousandth.
 func (r *Registry) AppendCharge(subscriptionID SubscriptionID, charge Charge) error {
-	existing, err := r.ListCharges(subscriptionID)
+	count, err := r.ChargeCount(subscriptionID)
 	if err != nil {
 		return err
 	}
-	existing = append(existing, charge)
-	return r.st.KVPut(chargeListKey(subscriptionID), existing)
+	if err := r.st.KVPut(chargeKey(subscriptionID, count+1), charge); err != nil {
+		return err
+	}
+	return r.st.KVPut(chargeCountKey(subscriptionID), count+1)
+}
+
+// ChargeCount returns how many charge attempts are recorded for a
+// subscription; the next attempt is numbered one more.
+func (r *Registry) ChargeCount(subscriptionID SubscriptionID) (uint64, error) {
+	var count uint64
+	if _, err := r.st.KVGet(chargeCountKey(subscriptionID), &count); err != nil {
+		return 0, fmt.Errorf("subscriptions: load charge count for %d: %w", subscriptionID, err)
+	}
+	return count, nil
 }
 
 // ListCharges returns every charge attempt recorded for a subscription, in
 // chronological (attempt) order. Returns an empty, non-nil slice if none
 // exist.
 func (r *Registry) ListCharges(subscriptionID SubscriptionID) ([]Charge, error) {
-	var charges []Charge
-	if err := r.st.KVGetList(chargeListKey(subscriptionID), &charges); err != nil {
-		return nil, fmt.Errorf("subscriptions: load charges for %d: %w", subscriptionID, err)
+	count, err := r.ChargeCount(subscriptionID)
+	if err != nil {
+		return nil, err
+	}
+	charges := []Charge{}
+	for attempt := uint64(1); attempt <= count; attempt++ {
+		var charge Charge
+		found, err := r.st.KVGet(chargeKey(subscriptionID, attempt), &charge)
+		if err != nil {
+			return nil, fmt.Errorf("subscriptions: load charge %d for %d: %w", attempt, subscriptionID, err)
+		}
+		if !found {
+			return nil, fmt.Errorf("subscriptions: charge %d of %d is missing", attempt, subscriptionID)
+		}
+		charges = append(charges, charge)
 	}
 	return charges, nil
 }

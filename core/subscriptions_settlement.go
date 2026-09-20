@@ -147,11 +147,11 @@ func (sp *StateProcessor) settleOneSubscriptionCharge(manager *nhbstate.Manager,
 		return false, nil
 	}
 
-	existingCharges, err := registry.ListCharges(subID)
+	chargeCount, err := registry.ChargeCount(subID)
 	if err != nil {
 		return false, fmt.Errorf("subscriptions: load charge history for %d: %w", subID, err)
 	}
-	attemptNumber := uint32(len(existingCharges) + 1)
+	attemptNumber := uint32(chargeCount + 1)
 
 	payerAcc, err := sp.getAccount(sub.Payer[:])
 	if err != nil {

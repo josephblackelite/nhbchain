@@ -118,6 +118,9 @@ func TestSubscriptionIsBilledOncePerInterval(t *testing.T) {
 			t.Fatalf("charge %d is attempt %d, want %d", i, charge.AttemptNumber, i+1)
 		}
 	}
+	if count, err := fx.registry.ChargeCount(id); err != nil || count != 6 {
+		t.Fatalf("ChargeCount = %d, %v; want 6", count, err)
+	}
 	if got := fx.balance(fx.merchant); got.Cmp(big.NewInt(600)) != 0 {
 		t.Fatalf("merchant balance = %s, want 600", got)
 	}

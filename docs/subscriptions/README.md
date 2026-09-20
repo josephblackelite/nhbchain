@@ -115,7 +115,8 @@ like every other native module's storage.
 | `subscriptions/sub/<subscriptionId>` | `Subscription` |
 | `subscriptions/payersubs/<payer>` | `[]uint64` subscription ID index |
 | `subscriptions/merchantsubs/<merchant>` | `[]uint64` subscription ID index |
-| `subscriptions/charges/<subscriptionId>` | `[]Charge` full audit history |
+| `subscriptions/charge/<subscriptionId>/<n>` | `Charge`: attempt `n` (1 for the first) of the audit history |
+| `subscriptions/chargecount/<subscriptionId>` | `uint64` number of attempts recorded, so recording one touches two small keys however long the history is |
 | `subscriptions/due/<day>` | `[]uint64` subscription IDs due for a charge attempt on that UTC day |
 | `subscriptions/watermark` | last UTC day number fully closed out |
 | `subscriptions/seq/plan`, `subscriptions/seq/sub` | monotonic ID counters |
