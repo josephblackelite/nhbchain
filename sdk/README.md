@@ -24,7 +24,7 @@ builder guide](../docs/sdk/wallets.md).
 | `internal/dial` | Shared gRPC dial options, re-exported by each client package. |
 | `ts` | `src/wallet.ts` (`WalletClient`) and `src/identityGateway.ts` (`IdentityGatewayClient`), with tests in `test/`. |
 | `examples/lending` | Go and TypeScript lending examples (`go/main.go`, `ts/README.md`). |
-| `pos/examples` | POS examples: `create_intent.go`, `submit_and_watch.ts`, `subscriber.ts`. |
+| `pos/examples` | POS reference examples: `create_intent.go` and `submit_and_watch.ts` call the POS `Tx` gRPC service, which the node no longer registers (they fail with `Unimplemented`; see the note in `create_intent.go` and `Server.Serve` in `rpc/http.go`); `subscriber.ts` uses the finality subscription (`Realtime` gRPC service and the `/ws/pos/finality` WebSocket), which is still served. |
 
 ## gRPC transport defaults
 
