@@ -26,9 +26,13 @@ var (
 	// ErrEvidenceReporterMismatch means Evidence.Reporter is not the account
 	// that signed the transaction. Also a pure function of the transaction.
 	ErrEvidenceReporterMismatch = errors.New("potsoSubmitEvidence: reporter must be the transaction signer")
-	// ErrEvidenceAlreadyRecorded means this exact report is already in state.
-	// It can never become new again (a record only leaves state once it is too
-	// old to be submitted), so the transaction is permanently dead.
+	// ErrEvidenceAlreadyRecorded means this report, or another report of the
+	// same offense (see evidence.Record.Offense: for an equivocation the double
+	// sign at one offender, height, round and vote type, however the proof is
+	// written and whichever other heights the report lists), is already in
+	// state. It can never become new again: a record only leaves state once the
+	// height of its offense is too old for any report of it to be submitted, so
+	// the transaction is permanently dead.
 	ErrEvidenceAlreadyRecorded = errors.New("potsoSubmitEvidence: evidence already recorded")
 	// ErrEvidenceReporterNotBonded means the reporter holds less than the
 	// minimum validator stake bonded. The reporter can bond more later, so
@@ -60,7 +64,8 @@ func decodeSubmitEvidenceTransaction(data []byte) (evidence.Evidence, error) {
 
 // evidenceWindowStart is the oldest height evidence may reference at
 // currentHeight: evidence.ValidateEvidence refuses anything older as expired,
-// and the evidence index drops records that reference anything older.
+// and the evidence index drops records whose offense is older (see
+// evidence.Offense.Height).
 func evidenceWindowStart(currentHeight uint64) uint64 {
 	if currentHeight > evidence.DefaultMaxAgeBlocks {
 		return currentHeight - evidence.DefaultMaxAgeBlocks
@@ -84,16 +89,22 @@ func evidenceWindowStart(currentHeight uint64) uint64 {
 //
 // Beyond that this function does exactly two things: validate the evidence
 // via evidence.ValidateEvidence (the signature-over-conflicting-votes check
-// consensus/potso/penalty relies on, plus the payload size bounds), and -- if
-// valid and not already recorded -- persist it into the state trie via
-// nhbstate.Manager, so every validator that applies this transaction ends up
-// with byte-identical evidence state. It does NOT compute or apply any
-// slashing/weight penalty itself; that is processPendingEvidence below, run
-// from the real block-lifecycle sites (CreateBlock/ValidateBlock/CommitBlock).
-// Keeping penalty application out of this function matters because
-// ApplyTransaction (and therefore this function) is also invoked by ordinary
-// mempool-admission simulation (Node.validateTransaction), whose result is
-// thrown away with its state copy.
+// consensus/potso/penalty relies on, the binding of that proof to the heights
+// the report lists, plus the payload size bounds), and -- if valid and not
+// already recorded -- persist it into the state trie via nhbstate.Manager, so
+// every validator that applies this transaction ends up with byte-identical
+// evidence state. "Already recorded" is decided by the report's offense (see
+// evidence.Record.Offense), not by its hash: the hash covers the heights and
+// the exact bytes the reporter chose to write, so one double-sign written a
+// second way (the two votes swapped, the JSON laid out differently, another
+// height listed beside it) has another hash and would otherwise be a fresh
+// report, slashed again for stake the offender bonded since. It does NOT
+// compute or apply any slashing/weight penalty itself; that is
+// processPendingEvidence below, run from the real block-lifecycle sites
+// (CreateBlock/ValidateBlock/CommitBlock). Keeping penalty application out of
+// this function matters because ApplyTransaction (and therefore this function)
+// is also invoked by ordinary mempool-admission simulation
+// (Node.validateTransaction), whose result is thrown away with its state copy.
 func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, sender []byte) error {
 	if tx == nil {
 		return fmt.Errorf("potsoSubmitEvidence: transaction required")
@@ -123,6 +134,11 @@ func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, 
 	// already implied by height <= currentHeight on a single, height-indexed
 	// chain with no forks, so omitting it here trades a redundant check for
 	// keeping this function free of any dependency on node-local chain state.
+	//
+	// For an equivocation the same call also requires the proof's own height to
+	// be one of the heights listed and not above currentHeight. That is what
+	// makes the window checks apply to the offense itself: a proof for an old
+	// double-sign cannot be carried by a report that lists a recent height.
 	currentHeight := sp.blockHeight()
 	if verr := evidence.ValidateEvidence(&ev, hash, currentHeight, evidence.DefaultMaxAgeBlocks, nil); verr != nil {
 		return verr
@@ -149,8 +165,18 @@ func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, 
 		// still occupy block space and burn a nonce.
 		return ErrEvidenceAlreadyRecorded
 	}
+	record := &evidence.Record{Hash: hash, Evidence: ev.Clone(), ReceivedAt: sp.blockTimestamp().Unix()}
+	// The same offense reported another way is a duplicate too, and equally
+	// dead for good: the record of an offense is kept until the height it was
+	// committed at leaves the window, and a report can be submitted only while
+	// that height (which it must list) is inside it. This is checked before the
+	// reporter's quota, so a duplicate is refused as a duplicate.
+	offense := record.Offense()
 	held := 0
 	for _, entry := range entries {
+		if entry.Offense == offense.Key {
+			return fmt.Errorf("%w: the same offense is already held as report %x", ErrEvidenceAlreadyRecorded, entry.Hash[:8])
+		}
 		if entry.Reporter == ev.Reporter {
 			held++
 		}
@@ -159,7 +185,6 @@ func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, 
 		return evidence.ErrReporterQuota
 	}
 
-	record := &evidence.Record{Hash: hash, Evidence: ev.Clone(), ReceivedAt: sp.blockTimestamp().Unix()}
 	if err := manager.PotsoEvidencePutRecord(record); err != nil {
 		return fmt.Errorf("potsoSubmitEvidence: persist record: %w", err)
 	}
@@ -247,7 +272,10 @@ func (sp *StateProcessor) processPendingEvidence(currentHeight uint64) error {
 	engine := penalty.NewEngine(catalog, ledger, slasher).WithRecords(manager)
 
 	for _, entry := range entries {
-		applied, err := manager.PotsoPenaltyApplied(entry.Hash, entry.Offender)
+		// Applied penalties are recorded against the offense, not the report
+		// (see evidence.Record.Offense), so this report is skipped whenever its
+		// offense was penalised, whichever report did it.
+		applied, err := manager.PotsoPenaltyApplied(entry.Offense, entry.Offender)
 		if err != nil {
 			return fmt.Errorf("load penalty record %x: %w", entry.Hash, err)
 		}

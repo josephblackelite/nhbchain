@@ -1,6 +1,7 @@
 package penalty
 
 import (
+	"encoding/json"
 	"errors"
 	"math/big"
 	"testing"
@@ -179,5 +180,62 @@ func TestEngineWithRecordsSurfacesStateErrors(t *testing.T) {
 	engine, _ = slashingEngine(t, offender, storeFails, &countingSlasher{})
 	if _, err := engine.Apply(record, Context{}); !errors.Is(err, storeFails.storeErr) {
 		t.Fatalf("expected the write failure to surface, got %v", err)
+	}
+}
+
+// doubleSignRecord is the record of a report accusing offender of double-signing
+// at (height, round); only the shape of the proof matters to the engine, which
+// never checks a signature. Reports of one double-sign differ in their hash.
+func doubleSignRecord(offender [20]byte, hash byte, height uint64, round int) *evidence.Record {
+	details, err := json.Marshal(evidence.EquivocationProof{Height: height, Round: round, VoteType: evidence.EquivocationVotePrevote})
+	if err != nil {
+		panic(err)
+	}
+	return &evidence.Record{
+		Hash:     [32]byte{hash},
+		Evidence: evidence.Evidence{Type: evidence.TypeEquivocation, Offender: offender, Heights: []uint64{height}, Details: details},
+	}
+}
+
+// TestEngineRecordsThePenaltyAgainstTheOffenseNotTheReport: two reports of one
+// double-sign have two hashes and are one offense. Once the penalty for it has been
+// applied, applying the other report is idempotent -- the offender is not slashed
+// again for what they bonded in between -- while a report of a different
+// double-sign is a different offense and is applied.
+func TestEngineRecordsThePenaltyAgainstTheOffenseNotTheReport(t *testing.T) {
+	offender := [20]byte{1}
+	records := newMemRecords()
+	slasher := &countingSlasher{}
+	engine, _ := slashingEngine(t, offender, records, slasher)
+
+	first := doubleSignRecord(offender, 0xE1, 10, 1)
+	again := doubleSignRecord(offender, 0xE2, 10, 1)
+	other := doubleSignRecord(offender, 0xE3, 10, 2)
+	if first.Hash == again.Hash || first.Offense() != again.Offense() {
+		t.Fatalf("test premise: two reports, one offense")
+	}
+	if first.Offense() == other.Offense() {
+		t.Fatalf("test premise: another round is another offense")
+	}
+
+	res, err := engine.Apply(first, Context{BlockHeight: 20})
+	if err != nil || res.Idempotent || slasher.calls != 1 {
+		t.Fatalf("expected the first report to be applied once: idempotent=%v calls=%d err=%v", res != nil && res.Idempotent, slasher.calls, err)
+	}
+	if applied, _ := records.PotsoPenaltyApplied(first.Offense().Key, offender); !applied {
+		t.Fatalf("expected the penalty recorded against the offense")
+	}
+	if applied, _ := records.PotsoPenaltyApplied(first.Hash, offender); applied {
+		t.Fatalf("the penalty must not be recorded against the report's own hash")
+	}
+
+	res, err = engine.Apply(again, Context{BlockHeight: 21})
+	if err != nil || !res.Idempotent || slasher.calls != 1 {
+		t.Fatalf("expected the other report of the same offense to find the penalty applied: idempotent=%v calls=%d err=%v", res != nil && res.Idempotent, slasher.calls, err)
+	}
+
+	res, err = engine.Apply(other, Context{BlockHeight: 22})
+	if err != nil || res.Idempotent || slasher.calls != 2 {
+		t.Fatalf("expected a different offense to be applied in its own right: idempotent=%v calls=%d err=%v", res != nil && res.Idempotent, slasher.calls, err)
 	}
 }

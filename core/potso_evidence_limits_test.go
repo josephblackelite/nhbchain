@@ -300,7 +300,7 @@ func TestEvidenceSeveralReportsInOneBlockAgreeAcrossNodes(t *testing.T) {
 		t.Fatalf("index: %v", err)
 	}
 	for _, entry := range entries {
-		if applied, err := manager.PotsoPenaltyApplied(entry.Hash, entry.Offender); err != nil || !applied {
+		if applied, err := manager.PotsoPenaltyApplied(entry.Offense, entry.Offender); err != nil || !applied {
 			f.proposer.stateMu.RUnlock()
 			t.Fatalf("expected every recorded report marked applied: entry %x applied=%v err=%v", entry.Hash[:4], applied, err)
 		}

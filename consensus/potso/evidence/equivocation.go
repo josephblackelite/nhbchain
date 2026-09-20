@@ -3,12 +3,14 @@ package evidence
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"lukechampine.com/blake3"
 )
 
 // NHB-AUDIT-C10 (second half): ValidateEvidence used to verify only the
@@ -127,17 +129,40 @@ func verifyEquivocationSignature(vote EquivocationSignedVote, offender [20]byte,
 // VerifyEquivocationProof decodes and cryptographically verifies an
 // EQUIVOCATION evidence submission's Details payload. Returns a
 // descriptive error (never a panic) for any malformed or unproven claim.
+//
+// It establishes that the offender's own key signed two conflicting votes at
+// the decision point the proof names, and nothing about whether the chain can
+// still act on that decision point: ValidateEvidence binds the proof to the
+// heights the report lists and to the evidence window.
 func VerifyEquivocationProof(offender [20]byte, details []byte) error {
+	proof, err := parseEquivocationProof(details)
+	if err != nil {
+		return err
+	}
+	return verifyEquivocationVotes(proof, offender)
+}
+
+// parseEquivocationProof decodes Details as an EquivocationProof and checks its
+// shape, without looking at a signature. VerifyEquivocationProof, ValidateEvidence
+// and the offense identity (see offense) all read a proof through it, so the
+// decision point that is verified is exactly the one that is keyed.
+func parseEquivocationProof(details []byte) (*EquivocationProof, error) {
 	if len(details) == 0 {
-		return fmt.Errorf("equivocation proof required")
+		return nil, fmt.Errorf("equivocation proof required")
 	}
 	var proof EquivocationProof
 	if err := json.Unmarshal(details, &proof); err != nil {
-		return fmt.Errorf("invalid equivocation proof: %w", err)
+		return nil, fmt.Errorf("invalid equivocation proof: %w", err)
 	}
 	if proof.VoteType != EquivocationVotePrevote && proof.VoteType != EquivocationVotePrecommit {
-		return fmt.Errorf("invalid equivocation vote type %d", proof.VoteType)
+		return nil, fmt.Errorf("invalid equivocation vote type %d", proof.VoteType)
 	}
+	return &proof, nil
+}
+
+// verifyEquivocationVotes checks that both votes were signed by offender for the
+// decision point the proof names and that they disagree on the block.
+func verifyEquivocationVotes(proof *EquivocationProof, offender [20]byte) error {
 	hashA, err := verifyEquivocationSignature(proof.VoteA, offender, proof.Height, proof.Round, proof.VoteType)
 	if err != nil {
 		return fmt.Errorf("vote A: %w", err)
@@ -150,4 +175,54 @@ func VerifyEquivocationProof(offender [20]byte, details []byte) error {
 		return fmt.Errorf("votes A and B are identical -- not a genuine conflict")
 	}
 	return nil
+}
+
+// offenseDomainEquivocation keeps the identity of a double-sign apart from the
+// canonical hash of any report: both are keys of the same penalty record, since
+// a report of any other type is its own offense and is keyed by its hash.
+const offenseDomainEquivocation = "potso_equivocation_offense"
+
+// offense is the double-sign the proof is about. A validator that signs two
+// conflicting votes at one decision point -- one height, one round, one vote
+// type -- has committed one offense, however many ways there are to write the
+// evidence for it down: the two votes in either order, a block hash in another
+// case, the JSON laid out differently, a signature in its other valid encoding
+// (the same recovered key), a third conflicting vote in place of one of the two,
+// other heights listed beside it. The digest a vote signs covers exactly the
+// height, round, vote type and block hash, so no key but the offender's can
+// produce a proof for a decision point the offender did not double-sign, and the
+// identity below depends on the decision point alone.
+func (p *EquivocationProof) offense(offender [20]byte) Offense {
+	key := make([]byte, 0, len(offenseDomainEquivocation)+len(offender)+8+8+1)
+	key = append(key, offenseDomainEquivocation...)
+	key = append(key, offender[:]...)
+	key = binary.BigEndian.AppendUint64(key, p.Height)
+	key = binary.BigEndian.AppendUint64(key, uint64(int64(p.Round)))
+	key = append(key, byte(p.VoteType))
+	return Offense{Key: blake3.Sum256(key), Height: p.Height}
+}
+
+// equivocationOffense reads the double-sign an EQUIVOCATION report accuses its
+// offender of. It reports false for any other type of report and for one whose
+// Details do not decode as a proof; it never looks at a signature, which is
+// ValidateEvidence's job before a report is ever recorded.
+func (e Evidence) equivocationOffense() (Offense, bool) {
+	if e.Type != TypeEquivocation {
+		return Offense{}, false
+	}
+	proof, err := parseEquivocationProof(e.Details)
+	if err != nil {
+		return Offense{}, false
+	}
+	return proof.offense(e.Offender), true
+}
+
+// containsHeight reports whether heights lists height.
+func containsHeight(heights []uint64, height uint64) bool {
+	for _, h := range heights {
+		if h == height {
+			return true
+		}
+	}
+	return false
 }
