@@ -7,9 +7,9 @@ import (
 )
 
 // One settlement pass reads a day's due list, handles some of its entries and
-// may append entries of its own to the same day (a retry or a short billing
-// interval). Only the handled entries leave the list; the appended ones stay,
-// in order, and an emptied list is deleted.
+// may append entries of its own to the same day (a retry). Only the handled
+// entries leave the list; the appended ones stay, in order, and an emptied list
+// is deleted.
 func TestSubscriptionsRemoveDueKeepsEntriesAddedDuringThePass(t *testing.T) {
 	m := newTestManagerForLendingAutoDebit(t)
 	const day = 20_000

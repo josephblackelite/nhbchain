@@ -157,34 +157,3 @@ func TestSubscriptionRetryOnTheSameDayIsKeptAndMadeWhenDue(t *testing.T) {
 		t.Fatalf("expected the day's bucket to be empty once the retry was made, got %v", due)
 	}
 }
-
-// A billing interval shorter than a day puts the next charge in the same
-// day's bucket. Each cycle must be billed once, an interval apart: the bucket
-// used to be cleared (so the second cycle never came), and clearing only what
-// was processed without waiting for the charge time would bill every block.
-func TestSubscriptionShortIntervalIsBilledOncePerInterval(t *testing.T) {
-	fx := newSameDayFixture(t, subscriptions.Config{MaxRetries: 3, RetryIntervalSeconds: 86400})
-	start := time.Date(2026, 9, 19, 6, 0, 0, 0, time.UTC)
-	fx.setBalance(fx.payer, 1_000_000)
-	id := fx.subscribe(start, 100, 3600)
-
-	const stepSeconds = 30
-	for elapsed := 0; elapsed <= 5*3600; elapsed += stepSeconds {
-		fx.settle(start.Add(time.Duration(elapsed) * time.Second))
-	}
-	charges := fx.charges(id)
-	if len(charges) != 6 {
-		t.Fatalf("expected one charge at the start and one every hour for five hours (6), got %d", len(charges))
-	}
-	for i, charge := range charges {
-		if charge.Status != subscriptions.ChargeStatusPaid {
-			t.Fatalf("charge %d status = %v, want paid", i, charge.Status)
-		}
-		if want := uint64(start.Unix()) + uint64(i)*3600; charge.ChargedAt < want || charge.ChargedAt >= want+stepSeconds {
-			t.Fatalf("charge %d made at %d, want within one pass of %d", i, charge.ChargedAt, want)
-		}
-	}
-	if got := fx.balance(fx.merchant); got.Cmp(big.NewInt(600)) != 0 {
-		t.Fatalf("merchant balance = %s, want 600", got)
-	}
-}

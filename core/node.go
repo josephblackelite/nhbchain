@@ -3444,6 +3444,9 @@ const (
 //     is not 64 hex characters is decided by the payload alone.
 //   - ErrBuybackAskTooSmall: an ask below the fixed minimum is decided by its
 //     own amount.
+//   - subscriptions.ErrInvalidPlan: plan terms outside the fixed bounds (a
+//     price or interval under the minimum, an interval or trial over the
+//     maximum, no name, an unknown asset) are decided by the payload alone.
 //   - ErrPOSRegistryInvalidPayload, pos.ErrInvalidRequest, pos.ErrStaleNonce: a
 //     registry transaction that does not decode, names no registry message,
 //     claims an authority other than its signer or breaks a rule of the
@@ -3753,6 +3756,9 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrPOSRegistryInvalidPayload),
 		// A buyback ask under the minimum is a pure function of its own amount.
 		errors.Is(err, ErrBuybackAskTooSmall),
+		// Plan terms are checked against constants, so a plan that breaks a
+		// bound can never be created by the same transaction later.
+		errors.Is(err, subscriptions.ErrInvalidPlan),
 		errors.Is(err, pos.ErrInvalidRequest),
 		errors.Is(err, pos.ErrStaleNonce),
 		// An owner naming a wallet other than its own as the loyalty paymaster

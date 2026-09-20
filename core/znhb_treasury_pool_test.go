@@ -57,6 +57,14 @@ const treasuryFixtureSupply = 10_000_000
 
 func newTreasuryFixture(t *testing.T) *treasuryFixture {
 	t.Helper()
+	return newTreasuryFixtureWithSupply(t, big.NewInt(treasuryFixtureSupply))
+}
+
+// newTreasuryFixtureWithSupply is newTreasuryFixture with the admin wallet
+// holding supply ZNHB instead of the small default, for tests whose amounts
+// are larger than that.
+func newTreasuryFixtureWithSupply(t *testing.T, supply *big.Int) *treasuryFixture {
+	t.Helper()
 	f := &treasuryFixture{
 		t:       t,
 		sp:      newStakingStateProcessor(t),
@@ -80,7 +88,7 @@ func newTreasuryFixture(t *testing.T) *treasuryFixture {
 	}
 	if err := f.sp.setAccount(f.admin[:], &types.Account{
 		BalanceNHB:  big.NewInt(0),
-		BalanceZNHB: big.NewInt(treasuryFixtureSupply),
+		BalanceZNHB: new(big.Int).Set(supply),
 		Stake:       big.NewInt(0),
 	}); err != nil {
 		t.Fatalf("seed admin wallet: %v", err)

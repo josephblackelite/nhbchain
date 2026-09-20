@@ -316,6 +316,9 @@ func sanitizePlan(p *Plan) (*Plan, error) {
 	if copyPlan.PriceWei == nil || copyPlan.PriceWei.Sign() <= 0 {
 		return nil, fmt.Errorf("%w: priceWei must be positive", ErrInvalidPlan)
 	}
+	if copyPlan.PriceWei.Cmp(minPlanPriceWei) < 0 {
+		return nil, fmt.Errorf("%w: priceWei must be at least %s", ErrInvalidPlan, minPlanPriceWei)
+	}
 	switch copyPlan.Asset {
 	case AssetNHB, AssetZNHB:
 	default:
@@ -323,6 +326,12 @@ func sanitizePlan(p *Plan) (*Plan, error) {
 	}
 	if copyPlan.IntervalSeconds == 0 {
 		return nil, fmt.Errorf("%w: intervalSeconds must be positive", ErrInvalidPlan)
+	}
+	if copyPlan.IntervalSeconds < MinPlanIntervalSeconds || copyPlan.IntervalSeconds > MaxPlanIntervalSeconds {
+		return nil, fmt.Errorf("%w: intervalSeconds must be between %d and %d", ErrInvalidPlan, MinPlanIntervalSeconds, MaxPlanIntervalSeconds)
+	}
+	if copyPlan.TrialPeriodSeconds > MaxTrialPeriodSeconds {
+		return nil, fmt.Errorf("%w: trialPeriodSeconds must be at most %d", ErrInvalidPlan, MaxTrialPeriodSeconds)
 	}
 	copyPlan.PriceWei = cloneBigInt(copyPlan.PriceWei)
 	return &copyPlan, nil

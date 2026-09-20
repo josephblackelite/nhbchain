@@ -127,10 +127,10 @@ func runSubscriptionsCreatePlan(args []string, stdout, stderr io.Writer) int {
 		key          string
 	)
 	fs.StringVar(&name, "name", "", "plan name (e.g. \"Pro Monthly\")")
-	fs.StringVar(&price, "price", "", "price per cycle (supports scientific notation, e.g. 10e18 for 10 tokens)")
+	fs.StringVar(&price, "price", "", "price per cycle, at least 1e18 (one token); supports scientific notation, e.g. 10e18 for 10 tokens")
 	fs.StringVar(&asset, "asset", "NHB", "asset to charge: NHB or ZNHB")
-	fs.Uint64Var(&intervalSecs, "interval-seconds", 2_592_000, "billing cycle length in seconds (default: 30 days)")
-	fs.Uint64Var(&trialSecs, "trial-seconds", 0, "trial period before the first charge, in seconds")
+	fs.Uint64Var(&intervalSecs, "interval-seconds", 2_592_000, "billing cycle length in seconds, from 86400 (one day) to 315360000 (ten years) (default: 30 days)")
+	fs.Uint64Var(&trialSecs, "trial-seconds", 0, "trial period before the first charge, in seconds (at most 315360000)")
 	fs.StringVar(&key, "key", "wallet.key", "path to the signing key (generate with ./nhb-cli generate-key)")
 	if err := fs.Parse(args); err != nil {
 		return 1
