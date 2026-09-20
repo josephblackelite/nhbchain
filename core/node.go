@@ -115,6 +115,7 @@ type Node struct {
 	txSimulationEnabled   bool
 	bftEngine             *bft.Engine
 	stateMu               sync.RWMutex
+	eventLog              *eventLog // events of committed blocks, bounded (event_log.go)
 	// selfProposedHash is the header hash of the block CreateBlock most
 	// recently built from the current, possibly-drifted n.state (guarded by
 	// stateMu). ValidateBlock/commitBlock skip the committed-head drift
@@ -627,6 +628,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
 		paymasterLimits:      PaymasterLimits{},
 		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
+		eventLog:             newEventLog(maxRetainedEvents, maxPinnedEvents),
 		timestampTolerance:   DefaultBlockTimestampTolerance,
 		timeSource:           func() time.Time { return time.Now().UTC() },
 		// Disabled by default (see the field doc comment): every existing
@@ -4322,6 +4324,10 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		}
 	}
 	n.state = stateCopy
+	// The committed state carries the events of every block still to be handed
+	// over; move them to the node's bounded log so the next copy of the state
+	// starts with an empty one.
+	n.retainCommittedEventsLocked()
 	if err := n.refreshModulePauses(); err != nil {
 		return fmt.Errorf("refresh module pauses: %w", err)
 	}
@@ -8582,11 +8588,30 @@ func (n *Node) HasRole(role string, addr []byte) bool {
 	return n.state.HasRole(role, addr)
 }
 
+// retainCommittedEventsLocked moves the events the live state has logged into
+// the node's bounded event log. Callers must hold stateMu for writing.
+func (n *Node) retainCommittedEventsLocked() {
+	if n == nil || n.state == nil || n.eventLog == nil {
+		return
+	}
+	n.eventLog.append(n.state.takeEvents())
+}
+
+// Events returns the events the node has seen, oldest first: the most recent of
+// those committed blocks produced (see event_log.go for how many are kept),
+// then the ones the live state has logged since the last commit. It is read
+// under the state lock so an event is never missed or counted twice while a
+// block is being committed.
 func (n *Node) Events() []types.Event {
-	if n == nil || n.state == nil {
+	if n == nil {
 		return nil
 	}
-	return n.state.Events()
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil
+	}
+	return append(n.eventLog.snapshot(), n.state.Events()...)
 }
 
 func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
