@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"sort"
 	"time"
@@ -59,15 +60,26 @@ const (
 	maxFutureRounds = 8
 
 	// maxRound is the highest round this engine will be in, or take a message
-	// for, or record a validator as being in. A round that does not commit lasts
-	// commitTimeout (4 s by default) and no round is ever shorter than that
-	// unless more than a third of the voting power is somewhere later, so 1<<24
-	// rounds is more than two years of a height that never commits: no honest
-	// validator gets near it, and a message above it is not evidence of anything
-	// but a validator (or a coalition below a third) that is faulty. Without a
-	// cap one signed vote for round math.MaxInt64 was adopted as a position, and
-	// the next increment of the round wrapped to a negative one (roundAfter).
-	maxRound = 1 << 24
+	// for. It is far beyond what any healthy network reaches (a round that does not
+	// commit lasts commitTimeout, 4 s by default: 2^31 rounds is over 270 years),
+	// so it exists only so that no round number can overflow: without it one
+	// signed vote for round math.MaxInt64 was adopted as a position, and the next
+	// increment of the round wrapped to a negative one (roundAfter). A message
+	// above it is not evidence of anything but a validator that is faulty.
+	maxRound = math.MaxInt32
+
+	// maxJumpRound is the highest round a message can take this engine to: a round
+	// a validator says it is in is counted only up to here (recordRoundClaimLocked).
+	// It is half of maxRound, so that a jump can never land within reach of the top
+	// round. That matters because the top round cannot be left: the round number
+	// stops there, and this validator signs a nil prevote in every round it times
+	// out in, which the vote guard (sign_state.go) then holds against a prevote for
+	// a block in the same round. One signed vote for maxRound used to be enough to
+	// take a validator there, and its height was over for good, across restarts
+	// (the round floor is durable). From maxJumpRound the same vote costs nothing
+	// that the next round does not repair: the engine signs nil there, times out
+	// and goes on to the next round, with more than a hundred years of them left.
+	maxJumpRound = maxRound / 2
 
 	// maxVoteHashLen is the longest Vote.BlockHash the engine accepts: the size
 	// of the hash of a block header (sha256), which is all an honest validator
@@ -178,6 +190,12 @@ func (e *Engine) ownPowerLocked() *big.Int {
 func (e *Engine) recordRoundClaimLocked(signer []byte, height uint64, round int) {
 	if len(signer) == 0 || bytes.Equal(signer, e.selfAddr) {
 		return
+	}
+	// However far above it the message was, a validator is only ever seen at
+	// maxJumpRound at most: what a claim can move this engine to is bounded there
+	// (see maxJumpRound), not by what the message says.
+	if round > maxJumpRound {
+		round = maxJumpRound
 	}
 	if e.roundClaims == nil {
 		e.roundClaims = make(map[string]roundClaim)
