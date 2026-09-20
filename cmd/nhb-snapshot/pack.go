@@ -34,7 +34,8 @@ type stagedFile struct {
 // listStaged returns the files of dir that go into a snapshot, sorted by name.
 // LevelDB housekeeping files are skipped; anything else that is not a plain
 // chain database file is an error, so a directory that still holds a key, a
-// peer list or a lock file never gets packed by accident.
+// peer list or a lock file never gets packed by accident. (Whether each of these
+// is a file the database refers to is verifyStage's question.)
 func listStaged(dir string) ([]stagedFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -49,12 +50,12 @@ func listStaged(dir string) ([]stagedFile, error) {
 		if !allowedFileName(name) {
 			return nil, fmt.Errorf("refusing to pack %s: %q is not a chain database file (only CURRENT, MANIFEST-*, *.log, *.ldb and *.sst are ever packed)", dir, name)
 		}
-		info, err := os.Lstat(filepath.Join(dir, name))
+		info, err := lstatFile(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
 		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("refusing to pack %s: %q is not a regular file", dir, name)
+			return nil, fmt.Errorf("refusing to pack %s: %q is %s, not a regular file", dir, name, describeMode(info.Mode()))
 		}
 		files = append(files, stagedFile{name: name, size: info.Size()})
 	}
@@ -79,31 +80,23 @@ func packSnapshot(opts packOptions) (*manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := openChainDB(opts.DataDir)
+	// Every file of the staged copy has to be one its own MANIFEST refers to: a
+	// table nothing lists, a journal the MANIFEST does not name, or a journal
+	// that is not one, is refused, never packed and never skipped. The copy is
+	// made from a directory the node's own user controls, and what is packed is
+	// published. Every table has to read in full, too.
+	db, err := openStaged(opts.DataDir)
 	if err != nil {
 		return nil, err
 	}
 	id, err := db.readIdentity(opts.Check)
-	live := db.tables
 	db.close()
 	if err != nil {
 		return nil, err
 	}
 	// The read-only open may have created an empty LOCK file; it is not packed.
 	_ = os.Remove(filepath.Join(opts.DataDir, "LOCK"))
-
-	// Only the tables the database's current version refers to are packed: a
-	// copy taken from a running node may also hold a table that was still
-	// being written, which nothing refers to and which may still be growing.
-	files := all[:0:0]
-	for _, f := range all {
-		if num, isTable := tableNumber(f.name); isTable {
-			if _, isLive := live[num]; !isLive {
-				continue
-			}
-		}
-		files = append(files, f)
-	}
+	files := all
 
 	// Take the file list again after the open: the staged copy must be still.
 	after, err := listStaged(opts.DataDir)
@@ -218,15 +211,13 @@ func packSnapshot(opts packOptions) (*manifest, error) {
 }
 
 func writeTarFile(tw *tar.Writer, path string, f stagedFile) (fileEntry, error) {
-	src, err := os.Open(path)
+	// A link is never followed here either: the file has to be the regular file
+	// it was when it was listed.
+	src, info, err := openPlain(path)
 	if err != nil {
 		return fileEntry{}, err
 	}
 	defer src.Close()
-	info, err := src.Stat()
-	if err != nil {
-		return fileEntry{}, err
-	}
 	if info.Size() != f.size {
 		return fileEntry{}, fmt.Errorf("the staged file %s changed size while it was checked", f.name)
 	}

@@ -12,6 +12,7 @@
 // database a running node holds open cannot be read (its lock is taken).
 //
 //	nhb-snapshot info        --data-dir DIR
+//	nhb-snapshot refs        --data-dir DIR
 //	nhb-snapshot pack        --data-dir DIR --out-dir DIR
 //	nhb-snapshot verify      --manifest FILE --archive FILE --chain-id N --genesis-hash HEX
 //	nhb-snapshot extract     --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX
@@ -48,6 +49,8 @@ func usage(w io.Writer) {
 Commands:
   info         open a chain database read-only and print its chain id, genesis
                hash, height, tip hash and state root (checking it as it goes)
+  refs         print the files the MANIFEST of a chain database refers to: the
+               MANIFEST CURRENT names, the tables it lists and the journal it names
   pack         pack a staged copy of a chain database into a deterministic
                archive and write its manifest
   verify       check an archive and its manifest without writing anything
@@ -73,6 +76,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "info":
 		err = cmdInfo(rest, stdout, stderr)
+	case "refs":
+		err = cmdRefs(rest, stdout, stderr)
 	case "pack":
 		err = cmdPack(rest, stdout, stderr)
 	case "verify":
@@ -182,17 +187,55 @@ func cmdInfo(args []string, stdout, stderr io.Writer) error {
 	format := fs.String("format", "text", "output format: text or json")
 	window := fs.Uint64("header-window", defaultHeaderWindow, "how many of the newest blocks to decode, hash and link (0 = every block back to genesis)")
 	noState := fs.Bool("no-state-check", false, "skip re-hashing every node of the tip's state trie")
+	staged := fs.Bool("staged", false, "the directory is a staged copy made for a snapshot: refuse it when it holds any file its own MANIFEST does not refer to, or a journal that does not read as one")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if *dataDir == "" {
 		return usagef("--data-dir is required")
 	}
-	id, err := openAndReadIdentity(*dataDir, checkOptions{HeaderWindow: *window, SkipState: *noState})
+	opts := checkOptions{HeaderWindow: *window, SkipState: *noState}
+	var id *chainIdentity
+	var err error
+	if *staged {
+		id, err = openAndReadStaged(*dataDir, opts)
+	} else {
+		id, err = openAndReadIdentity(*dataDir, opts)
+	}
 	if err != nil {
 		return err
 	}
 	return printIdentity(stdout, id, *format)
+}
+
+// cmdRefs prints the files a chain database is made of according to its own
+// MANIFEST, one per line: "manifest NAME", "journal NAME" (the journal it names),
+// "prev-journal NAME" (only when it names a second, older one) and "table NAME".
+// Only CURRENT and the MANIFEST have to be in the directory, so
+// scripts/make-snapshot.sh can ask what else to copy after it has copied those two.
+func cmdRefs(args []string, stdout, stderr io.Writer) error {
+	fs := newFlagSet("refs", stderr)
+	dataDir := fs.String("data-dir", "", "directory holding CURRENT and the MANIFEST it names (a copy of those two is enough)")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if *dataDir == "" {
+		return usagef("--data-dir is required")
+	}
+	refs, err := readDBRefs(*dataDir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "manifest %s\n", refs.Manifest)
+	names := refs.journalNames()
+	fmt.Fprintf(stdout, "journal %s\n", names[0])
+	for _, name := range names[1:] {
+		fmt.Fprintf(stdout, "prev-journal %s\n", name)
+	}
+	for _, name := range refs.tableNames() {
+		fmt.Fprintf(stdout, "table %s\n", name)
+	}
+	return nil
 }
 
 func cmdPack(args []string, stdout, stderr io.Writer) error {

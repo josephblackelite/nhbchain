@@ -170,8 +170,10 @@ func TestMakeSnapshotPublishesNothingFromABrokenDatabase(t *testing.T) {
 	}
 }
 
-// A database with a table file the MANIFEST refers to missing is refused
-// by the checks after the copy, even though every pass was consistent.
+// A database with a table file the MANIFEST refers to missing is refused, and
+// nothing is published. The copy asks the MANIFEST which tables to take, so a
+// table that is listed and not there fails the pass itself, and the message that
+// ends the run says which one.
 func TestMakeSnapshotRefusesACopyThatLacksATable(t *testing.T) {
 	bash, tool, repo := e2eBash(t), builtTool(t), repoRoot(t)
 	dir := filepath.Join(t.TempDir(), "node", "data")
@@ -180,16 +182,16 @@ func TestMakeSnapshotRefusesACopyThatLacksATable(t *testing.T) {
 		b.addBlock(12)
 	}
 	b.close()
-	var table string
-	for _, name := range dbFiles(t, dir) {
-		if strings.HasSuffix(name, ".ldb") {
-			table = name
-			break
-		}
+	// A table the MANIFEST lists: a closed database can hold tables it does not.
+	refs, err := readDBRefs(dir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if table == "" {
+	listed := refs.tableNames()
+	if len(listed) == 0 {
 		t.Fatal("the fixture has no table file")
 	}
+	table := listed[0]
 	if err := os.Remove(filepath.Join(dir, table)); err != nil {
 		t.Fatal(err)
 	}
@@ -197,8 +199,8 @@ func TestMakeSnapshotRefusesACopyThatLacksATable(t *testing.T) {
 	res := runBashScript(t, bash, repo, "scripts/make-snapshot.sh",
 		"--data-dir", slash(dir), "--out-dir", slash(out), "--work-dir", slash(filepath.Join(t.TempDir(), "work")),
 		"--tool", slash(tool), "--binary-commit", testCommit, "--max-passes", "3")
-	if res.err == nil || !strings.Contains(res.out, "does not open") {
-		t.Fatalf("expected the copy to be refused, got err=%v\n%s", res.err, res.out)
+	if res.err == nil || !strings.Contains(res.out, "table "+table+", which the MANIFEST lists, could not be copied") || !strings.Contains(res.out, "the last trouble: table "+table) {
+		t.Fatalf("expected the copy to be refused, naming the table that is missing, got err=%v\n%s", res.err, res.out)
 	}
 	if entries, _ := os.ReadDir(out); len(entries) > 0 {
 		t.Fatalf("a refused copy left %d files in the output directory", len(entries))

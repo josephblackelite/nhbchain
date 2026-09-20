@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -111,6 +113,9 @@ type deployHarness struct {
 	tmp     string
 	log     string
 	script  string
+	// timeout, when set, kills a run that lasts longer: a script that has to give
+	// up on something must do so before it.
+	timeout time.Duration
 }
 
 func copyTestFile(t *testing.T, from, to string) {
@@ -164,17 +169,31 @@ func (h *deployHarness) run(snippet string, env ...string) (string, int) {
 	if err := os.WriteFile(path, []byte(program), 0o755); err != nil {
 		h.t.Fatal(err)
 	}
-	cmd := exec.Command(h.bash, slash(path))
+	ctx := context.Background()
+	if h.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, h.bash, slash(path))
 	cmd.Dir = h.root
 	cmd.Env = append(os.Environ(),
 		"FAKE_BIN="+slash(h.bin), "FAKE_LOG="+slash(h.log), "SCRIPT="+slash(h.script),
 		"NHB_INSTALL_ROOT="+slash(h.install), "NHB_CONFIG_DIR="+slash(h.config), "NHB_STATE_DIR="+slash(h.state),
 		"TMPDIR="+slash(h.tmp), "CLI_RETRY_DELAY=0", "NHB_MASTER_TREASURY=",
+		// The lock of a run lives in the state directory of the user who runs the
+		// script: a temporary one here, never the tester's own.
+		"HOME="+slash(h.root), "XDG_STATE_HOME="+slash(filepath.Join(h.root, "xdgstate")),
 		// The fakes come first on the path, in the form the platform's bash
 		// converts (a drive letter's colon would break a list built inside bash).
 		"PATH="+h.bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	cmd.Env = append(cmd.Env, env...)
+	if h.timeout > 0 {
+		// A program the script started (a curl that is still being fed) can outlive
+		// the script the timeout killed and keep its output open: do not wait for it.
+		cmd.WaitDelay = 5 * time.Second
+	}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		return string(out), 0
@@ -291,7 +310,16 @@ func TestDeployScriptNamesNoHostAndPinsTheLiveNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := string(raw)
-	for _, forbidden := range []string{"198.51.100.10", "198.51.100.11", "nhbcoin.com", "amazonaws.com", "s3://"} {
+	// No address that leads to a machine of its own: a loopback, private or
+	// link-local address is fine, a public one is not.
+	for _, addr := range regexp.MustCompile(`\b[0-9]{1,3}(?:\.[0-9]{1,3}){3}\b`).FindAllString(script, -1) {
+		ip := net.ParseIP(addr)
+		if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsPrivate() {
+			continue
+		}
+		t.Fatalf("scripts/deployvalidator.sh names the public address %s", addr)
+	}
+	for _, forbidden := range []string{"nhbcoin.com", "amazonaws.com", "s3://"} {
 		if strings.Contains(script, forbidden) {
 			t.Fatalf("scripts/deployvalidator.sh names %q", forbidden)
 		}

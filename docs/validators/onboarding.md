@@ -35,25 +35,27 @@ Do these four things *before* you run anything:
      `127.0.0.1` by default (not externally reachable). Only open this if
      you deliberately want direct external RPC/MetaMask access — leaving it
      internal-only is the safer default.
-3. **At least `10,000 ZNHB` ready to send to this validator's OWN node
-   address** once you know it (printed at the end of Step 1). Validator
-   eligibility is now based on this validator's own self-stake only --
-   ZNHB delegated in from a separate wallet does **not** count toward
-   eligibility at all (see "Staking" under Step 2 below). You'll send the
-   ZNHB to the server's own address and self-stake it directly on the
-   server; this is *not* a portal delegation.
+3. **At least `10,000 ZNHB` of stake behind this validator's OWN node
+   address**, which you learn at the end of Step 1. Validator eligibility
+   rests on that address's total stake: ZNHB **delegated to it from any
+   other wallet counts**, and so does ZNHB it stakes itself (see "Staking"
+   under Step 2 below; the rule is `validatorEligibilityBasis` in
+   `core/state_transition.go`). Either route is enough. If you delegate,
+   you do it from your own wallet once you have the address. If you would
+   rather self-stake, you send the ZNHB to the server's own address and
+   stake it directly on the server; that is *not* a portal delegation.
 4. **Understand gas vs. stake before you start** — this is the single most
    common point of confusion:
-   - **ZNHB for staking** needs to end up on *this server's own validator
-     key* (send it there once the key exists, then self-stake it) — a
-     separate wallet's stake never counts toward this validator's own
-     eligibility, no matter how much is delegated.
+   - **ZNHB for staking** has to end up as stake on *this validator's node
+     address*: delegated to it from any wallet, or sent to it and
+     self-staked on the server with the validator's own key. Both count
+     toward the same minimum.
    - **NHB for gas** is *not* required to run this validator's heartbeat or
      to set its reward beneficiary — see "Getting paid" below for why.
 
    Don't send NHB to the server's validator key expecting it to be needed
-   for either of those operations; it currently isn't. ZNHB, unlike NHB, IS
-   needed there now — see item 3 above.
+   for either of those operations; it currently isn't. ZNHB is what counts
+   as stake; item 3 above says how it gets there.
 
 ## Step 1 — Run the bootstrap script
 
@@ -66,19 +68,40 @@ verifies, how snapshots are made and how old one may be is in
 
 You need two things from whoever operates the network, neither of which is built
 into the script: the location of a snapshot (`--snapshot-url`) and a bootnode
-(`--bootnode`). Check out the source commit the snapshot's manifest names, then
-run. (The script you run is the one in that commit, so the commit has to contain
-this procedure, `scripts/deployvalidator.sh` as described here and
-`cmd/nhb-snapshot`: a snapshot made by a validator that still runs an earlier
-build names a commit whose script syncs from genesis, which does not work on this
-network. See [What you need](snapshot-onboarding.md#what-you-need).)
+(`--bootnode`). The snapshot's manifest names the source commit the node has to
+be built from. On a clean machine `nhb-snapshot` does not exist yet, so read it
+from the manifest, which is JSON, with `curl` (the field is
+`producer.binaryCommit`):
+
+```bash
+curl -fsS https://SNAPSHOT-HOST.example/PATH/manifest.json | sed -n 's/.*"binaryCommit": *"\([0-9a-f]*\)".*/\1/p'
+```
+
+**Check that this commit is a release you recognise before you check it out.**
+The manifest is not signed: whoever hosts it chooses the commit, and an old
+commit is old consensus code. Compare it with what the people who run the network
+announce, and pass the oldest release you accept as `--min-release-commit`, so
+that the script refuses a manifest that names anything older or on another
+branch. Then check the commit out and run. (The script you run is the one in that
+commit, so the commit has to contain this procedure,
+`scripts/deployvalidator.sh` as described here and `cmd/nhb-snapshot`: a snapshot
+made by a validator that still runs an earlier build names a commit whose script
+syncs from genesis, which does not work on this network. See
+[What you need](snapshot-onboarding.md#what-you-need).)
 
 ```bash
 bash scripts/validator-only-bootstrap.sh \
   --beneficiary nhb1youroperatorwalletaddresshere \
   --snapshot-url https://SNAPSHOT-HOST.example/PATH \
-  --bootnode BOOTNODE-HOST.example:6001
+  --bootnode BOOTNODE-HOST.example:6001 \
+  --max-snapshot-age 72h \
+  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT
 ```
+
+`--max-snapshot-age 72h` refuses a snapshot whose newest block is older than three
+days: a follower has to execute every block after its snapshot, and an old one is
+the usual cause of a catch-up that never finishes. `--min-release-commit` needs the
+full history (a plain `git clone`, not `--depth 1`).
 
 `scripts/deployvalidator.sh` is the same script under the hood --
 `validator-only-bootstrap.sh` is a 5-line wrapper around it, and both accept
@@ -103,11 +126,12 @@ validator; a snapshot that does not check out changes nothing.
 | `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
 | `--snapshot-url` | *(required, or `NHB_SNAPSHOT_URL`)* | Directory URL that holds `manifest.json` and the archive it names. `https` only. |
 | `--bootnode` | *(required, or `NHB_BOOTNODE`)* | Plain `host:port`, never an `enode://` URI (see below). |
+| `--min-release-commit` | *(none, or `NHB_MIN_RELEASE_COMMIT`; advised)* | The full commit id of the oldest release you accept. The script refuses a manifest whose commit is neither that commit nor a descendant of it, so a snapshot host cannot steer you to old consensus code. Needs both commits in your checkout (`git fetch` first). |
 | `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust. Used to decide when the node has caught up, and to refuse a node whose newest blocks are not that node's. |
 | `--max-lag-blocks` | `3` | How far from that node (either side) still counts as caught up; at most 15. |
 | `--sync-timeout` | `7200` | Seconds to wait for the catch-up. |
 | `--rpc-timeout` | `180` | Seconds the node's RPC may stay silent after the service starts. A node that never answers is not running or is crash-looping: the script stops after this long with the commands that show why, and does not wait out `--sync-timeout`. |
-| `--max-snapshot-age` | *(any age)* | Refuse a snapshot whose newest block is older than this, for example `48h`. The limit rests on the date of the newest block, which is checked against the unpacked database; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. |
+| `--max-snapshot-age` | *(any age; use `72h`)* | Refuse a snapshot whose newest block is older than this, for example `72h`. The limit rests on the date of the newest block, which is checked against the unpacked database; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. Without it a snapshot of any age is accepted and a stale one fails only later, with a stall. |
 | `--tip-hash`, `--state-root` | *(none)* | The tip hash and state root the snapshot must have (32 bytes of hex), as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
 | `--max-snapshot-gib` | `16` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
@@ -195,20 +219,32 @@ validator alone.
 
 There are two separate things, and they are not the same operation:
 
-### Staking (self-stake, on this server, not a portal delegation)
+### Staking (delegation or self-stake)
 
-Validator eligibility requires **>= 10,000 ZNHB of this validator's own
-self-stake** (`staking.minimumValidatorStake`, governance-adjustable,
-currently unchanged from its default). This is a real, load-bearing
-distinction from how staking used to work: ZNHB delegated in from a
-*separate* wallet through the portal's Validator Hub -> Delegate flow is
-tracked separately and does **not** count toward this validator's own
-eligibility at all, no matter the amount. Only stake sitting on the
-validator's own key, self-staked directly, counts (see
-`core/state_transition.go`'s `stakeRewardBasis` if you want the exact
-mechanics).
+Validator eligibility requires **>= 10,000 ZNHB of total stake on this
+validator's node address** (`staking.minimumValidatorStake`,
+governance-adjustable, currently unchanged from its default). That total is
+the account's whole stake, **including the ZNHB other wallets have delegated
+to it** (through the portal's Validator Hub -> Delegate flow, or any stake
+transaction that names the address) and the ZNHB the address staked itself:
+`validatorEligibilityBasis` in `core/state_transition.go` reads the
+account's `Stake`, which already includes delegated-in amounts, and there is
+no separate self-stake requirement. One more condition: the address must not
+itself be delegating its own stake to a different validator.
 
-Two steps, both involving this server's own key:
+Staking *yield* is a different question and works the other way round:
+`stakeRewardBasis`, the basis for what a stake earns, leaves delegated-in ZNHB
+out, so ZNHB you delegate to a validator earns for you, the delegator, not
+for the validator. Do not read that function as the eligibility rule.
+
+There are two ways to get the stake there, and either is enough:
+
+**A. Delegate** at least 10,000 ZNHB to this validator's node address (the
+`nhb1...` address printed at the end of Step 1) from any wallet, for example
+the portal's Validator Hub -> Delegate tab. Nothing has to be done on the
+server.
+
+**B. Self-stake**, in two steps that both involve this server's own key:
 
 1. **Send >= 10,000 ZNHB directly to this validator's own node address**
    (the `nhb1...` address printed at the end of Step 1) from wherever you
@@ -266,8 +302,9 @@ own key does **not** require any NHB balance on that key. Both transaction
 types go through the default native-transaction handling path and are not
 debited against `BalanceNHB`, unlike an ordinary transfer. You do not need
 to pre-fund the validator server's key with NHB gas for either operation.
-The only real "bring money" step in this whole process is the ZNHB
-self-stake onto this server's own validator key, described above.
+The only real "bring money" step in this whole process is the ZNHB stake
+behind this validator's node address, by delegation or by self-stake,
+described above.
 
 ## Step 3 — Checking status and eligibility
 
@@ -297,7 +334,8 @@ best available combination:
   validator count.
 
 Once registered (the bootstrap script already did this automatically) and
-self-staked to the minimum, your node becomes a validator **candidate**. It
+staked to the minimum (delegated to it or self-staked), your node becomes a
+validator **candidate**. It
 joins the **active** set only after (1) it is online and synced, and (2) it
 has begun submitting heartbeats successfully — at the start of the next
 epoch boundary after both conditions are met. Epoch length is 120 blocks
@@ -380,8 +418,8 @@ No. Neither `TxTypeHeartbeat` nor `TxTypeSetRewardBeneficiary` debits
 server's key expecting it to be required for either.
 
 **"I staked ZNHB, why isn't my validator active yet?"**
-Self-staking (on the server, via `register-validator`) makes your validator
-a *candidate*. It only becomes *active* at the next epoch boundary
+Staking it (delegated to the node address, or self-staked on the server via
+`register-validator`) makes your validator a *candidate*. It only becomes *active* at the next epoch boundary
 (120-block increments) after it is online, synced, and successfully
 submitting heartbeats. There's no exact wall-clock number to give you
 here — watch block height via `nhb_getNetworkStats` or the explorer.

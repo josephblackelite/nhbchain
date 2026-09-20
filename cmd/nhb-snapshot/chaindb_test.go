@@ -97,7 +97,8 @@ func TestOpenRefusesWhatIsNotAChainDatabase(t *testing.T) {
 func TestTornJournalTailStillOpens(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "db")
 	buildChainDir(t, dir, 60, 4)
-	stage := stageChainFiles(t, dir)
+	// Not settled: the point is a journal that still holds blocks.
+	stage := stageReferenced(t, dir)
 
 	var journal string
 	for _, name := range dbFiles(t, stage) {

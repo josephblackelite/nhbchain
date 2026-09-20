@@ -41,9 +41,15 @@ GENESIS_SHA256='10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
+# Where this script remembers, between runs, that it installed a snapshot and how
+# high it was: the node has not been seen past that height until a run has waited
+# for it (see wait_until_synced), and an interrupted run must not forget it.
+SNAPSHOT_MARKER="${STATE_DIR}/.snapshot-height"
+
 BOOTNODE="${NHB_BOOTNODE:-}"
 SNAPSHOT_URL="${NHB_SNAPSHOT_URL:-}"
 TIP_RPC="${NHB_TIP_RPC_URL:-}"
+MIN_RELEASE_COMMIT="${NHB_MIN_RELEASE_COMMIT:-}"
 NETWORK_ID="${NETWORK_ID_DEFAULT}"
 LISTEN_ADDR="${LISTEN_ADDR_DEFAULT}"
 RPC_ADDR="${RPC_ADDR_DEFAULT}"
@@ -91,6 +97,14 @@ Required:
                            May be given as NHB_BOOTNODE instead.
 
 Options:
+  --min-release-commit <c> The full commit id (40 hex digits) of the oldest release
+                           you accept. The snapshot's manifest is not signed and
+                           names the commit the node is built from; with this the
+                           script refuses a manifest whose commit is not this
+                           commit or a descendant of it, so a snapshot host cannot
+                           steer you to old consensus code. Needs that commit and
+                           the manifest's in this checkout (git fetch first). May
+                           be given as NHB_MIN_RELEASE_COMMIT. Strongly advised.
   --tip-rpc <url>          RPC URL of a node you trust. Used to decide when this
                            node has caught up: its newest blocks are compared
                            with that node's, and a node whose blocks differ from
@@ -106,7 +120,9 @@ Options:
                            answers is not running or is crash-looping; the
                            script says so and shows how to see why.
   --max-snapshot-age <d>   Refuse a snapshot whose newest block is older than
-                           this, for example 48h. The limit rests on the block's
+                           this; 72h is advised (without it a snapshot of any
+                           age is accepted and a stale one fails only later,
+                           with a stall). The limit rests on the block's
                            date, which is checked against the unpacked database;
                            the creation time the manifest states is not signed
                            by anyone. A follower can catch up only so many
@@ -149,8 +165,9 @@ What it does, in order (each step stops the script if it fails):
      --reset-state; a node that already holds the chain needs none, and then
      nothing is fetched): fetches the snapshot manifest and checks it is for
      the pinned network (chain id 18346390202490284624, the genesis of
-     config/genesis.relaunch.json) and for the same node binary as the one
-     built here;
+     config/genesis.relaunch.json), that the commit it names is the release
+     given with --min-release-commit or built on it (if one was given), and
+     that it is for the same node binary as the one built here;
   3. creates this validator's key ON THIS MACHINE (never pass a key in) and
      refuses to go on if that key could already be running elsewhere;
   4. downloads the snapshot (within the size limits above), verifies its sha256
@@ -190,6 +207,7 @@ parse_args() {
       --snapshot-url) SNAPSHOT_URL="${2:-}"; shift 2 ;;
       --bootnode) BOOTNODE="${2:-}"; shift 2 ;;
       --tip-rpc) TIP_RPC="${2:-}"; shift 2 ;;
+      --min-release-commit) MIN_RELEASE_COMMIT="${2:-}"; shift 2 ;;
       --max-lag-blocks) MAX_LAG_BLOCKS="${2:-}"; shift 2 ;;
       --sync-timeout) SYNC_TIMEOUT_SECS="${2:-}"; shift 2 ;;
       --rpc-timeout) RPC_UP_TIMEOUT_SECS="${2:-}"; shift 2 ;;
@@ -250,6 +268,9 @@ validate_inputs() {
   if [[ -n "${TIP_RPC}" ]]; then
     [[ "${TIP_RPC}" =~ ^https?://[A-Za-z0-9._:/-]+$ ]] || die "--tip-rpc '${TIP_RPC}' is not an http(s) URL"
   fi
+  if [[ -n "${MIN_RELEASE_COMMIT}" ]]; then
+    [[ "${MIN_RELEASE_COMMIT}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || die "--min-release-commit must be a full commit id (40 lower-case hex digits, as git rev-parse HEAD prints it)"
+  fi
   [[ "${LISTEN_ADDR}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "--listen-addr '${LISTEN_ADDR}' is not host:port"
   [[ "${RPC_ADDR}" =~ ^[A-Za-z0-9._:-]+:[0-9]{1,5}$ ]] || die "--rpc-addr '${RPC_ADDR}' is not host:port"
   [[ "${MAX_LAG_BLOCKS}" =~ ^[0-9]+$ ]] || die "--max-lag-blocks must be a number"
@@ -279,16 +300,23 @@ validate_inputs() {
 # Snapshot helpers
 # ---------------------------------------------------------------------------
 
+# A transfer slower than FETCH_SPEED_LIMIT bytes a second for FETCH_SPEED_TIME
+# seconds is given up: a host that trickles bytes cannot hold a download for the
+# whole of --max-time (and, with the retries, for hours).
+FETCH_SPEED_LIMIT=10240
+FETCH_SPEED_TIME=60
+
 # fetch_file <url> <destination> <max bytes>
-# curl stops at <max bytes> whatever the server sends, and what it wrote is
-# removed when the download fails.
+# curl stops at <max bytes> whatever the server sends, gives up on a host that
+# sends too slowly, and what it wrote is removed when the download fails.
 fetch_file() {
   local url=$1 dest=$2 max=$3
   as_service curl --fail --silent --show-error --location \
     --proto "${CURL_PROTO}" --proto-redir "${CURL_PROTO}" \
     --retry 3 --retry-delay 3 --connect-timeout 30 --max-time 7200 \
+    --speed-limit "${FETCH_SPEED_LIMIT}" --speed-time "${FETCH_SPEED_TIME}" \
     --max-filesize "${max}" --output "${dest}" "${url}" \
-    || { as_service rm -f "${dest}"; die "could not download ${url} (at most ${max} bytes are accepted)"; }
+    || { as_service rm -f "${dest}"; die "could not download ${url} (at most ${max} bytes are accepted, and the host has to send at least ${FETCH_SPEED_LIMIT} bytes a second)"; }
 }
 
 tool() { "${INSTALL_ROOT}/bin/nhb-snapshot" "$@"; }
@@ -312,9 +340,22 @@ check_binary_identity() {
   echo "[ERROR] the node built here is not the one the snapshot was taken with." >&2
   echo "        snapshot: commit ${m_commit:-unknown}, binary sha256 ${m_sha:-unknown}" >&2
   echo "        here:     commit ${l_commit:-unknown}, binary sha256 ${l_sha:-unknown}" >&2
+  if [[ "${l_commit}" == "unknown" && -n "${LOCAL_COMMIT_WHY:-}" ]]; then
+    echo "        This checkout's commit could not be read: ${LOCAL_COMMIT_WHY}" >&2
+  fi
   echo "        A node that executes blocks with different consensus code forks off the network." >&2
   if [[ -n "${m_commit}" && "${m_commit}" != "unknown" ]]; then
-    echo "        Check out the commit above (git checkout ${m_commit}) and run this script again." >&2
+    if [[ "${l_commit}" == "unknown" ]]; then
+      echo "        The commit of this checkout is not known, so the script cannot tell whether it is ${m_commit}." >&2
+      echo "        Fix what git says above (for a checkout another user owns: git config --global --add safe.directory ${REPO_ROOT})," >&2
+      echo "        or check out ${m_commit} with a git that can read it, and run this script again." >&2
+    else
+      echo "        Check out the commit above (git checkout ${m_commit}) and run this script again." >&2
+    fi
+    echo "        But first check that ${m_commit} is a release you recognise, from the people who run the" >&2
+    echo "        network: the manifest is not signed, and whoever hosts it chooses this commit. An old commit" >&2
+    echo "        is old consensus code. --min-release-commit makes the script refuse a commit older than the" >&2
+    echo "        release you name." >&2
   else
     echo "        The snapshot does not say which commit it was made with, so there is nothing to check out." >&2
     echo "        Ask whoever published it for a snapshot that does (make-snapshot.sh refuses to make one that does not)." >&2
@@ -326,10 +367,67 @@ check_binary_identity() {
   return 1
 }
 
+# checkout_git runs git in the checkout this script runs from. That checkout may
+# belong to another user than the one running the script (as root after "sudo -i",
+# from a checkout the operator owns): git refuses such a directory ("dubious
+# ownership") and the commit would read as unknown. It is the checkout this script
+# itself is running from, so git is told it may read it, for this one path and
+# this one command.
+checkout_git() { git -c "safe.directory=${REPO_ROOT}" -C "${REPO_ROOT}" "$@"; }
+
+# detect_local_commit sets LOCAL_COMMIT to the commit of this checkout ("<id>-dirty"
+# when tracked files have changes, which is not that commit: only an identical
+# binary then matches) or "unknown", and, when it is unknown, LOCAL_COMMIT_WHY to
+# what git said.
+LOCAL_COMMIT=unknown
+LOCAL_COMMIT_WHY=''
+detect_local_commit() {
+  local out
+  LOCAL_COMMIT=unknown
+  LOCAL_COMMIT_WHY=''
+  if ! command -v git >/dev/null 2>&1; then
+    LOCAL_COMMIT_WHY='git is not installed'
+    return 0
+  fi
+  if ! out=$(checkout_git rev-parse HEAD 2>&1); then
+    LOCAL_COMMIT_WHY="git said: $(printf '%s' "${out}" | head -n 1)"
+    return 0
+  fi
+  LOCAL_COMMIT=${out}
+  if [[ -n "$(checkout_git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    LOCAL_COMMIT="${LOCAL_COMMIT}-dirty"
+  fi
+}
+
+# check_release_commit <manifest commit> stops the script when --min-release-commit
+# was given and the commit the manifest names is not that commit or one built on
+# it. The manifest is not signed: the commit it names is only as good as whoever
+# hosts it, and an old commit is old consensus code.
+check_release_commit() {
+  local m_commit=$1 rc=0
+  [[ -n "${MIN_RELEASE_COMMIT}" ]] || return 0
+  if [[ ! "${m_commit}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    die "the snapshot's manifest names no commit (${m_commit:-none}), so it cannot be checked against --min-release-commit ${MIN_RELEASE_COMMIT}"
+  fi
+  checkout_git cat-file -e "${MIN_RELEASE_COMMIT}^{commit}" 2>/dev/null \
+    || die "the release you pinned (${MIN_RELEASE_COMMIT}) is not in this checkout: run 'git fetch' in ${REPO_ROOT}, and check that you copied the id right"
+  checkout_git cat-file -e "${m_commit}^{commit}" 2>/dev/null \
+    || die "the commit the manifest names (${m_commit}) is not in this checkout, so it cannot be compared with the release you pinned: run 'git fetch' in ${REPO_ROOT}; if it is still not there, the snapshot's host names a commit that is not part of the project's history: do not use it"
+  checkout_git merge-base --is-ancestor "${MIN_RELEASE_COMMIT}" "${m_commit}" || rc=$?
+  case "${rc}" in
+    0) log "the commit the snapshot names (${m_commit}) is the release you pinned or built on it" ;;
+    1) die "the commit the snapshot's manifest names (${m_commit}) is neither the release you pinned (${MIN_RELEASE_COMMIT}) nor built on it: it is older, or on another branch. The manifest is not signed; do not use a snapshot that sends you there." ;;
+    *) die "git could not tell whether ${m_commit} is built on ${MIN_RELEASE_COMMIT} (exit ${rc})" ;;
+  esac
+}
+
 # fetch_manifest downloads the manifest and stops unless it is for the pinned
 # network. It sets MANIFEST_FILE.
 fetch_manifest() {
-  as_root install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${DOWNLOAD_DIR}"
+  # As the service user, which owns the state directory: root does not touch a
+  # path that user can replace.
+  as_service mkdir -p -- "${DOWNLOAD_DIR}" || die "cannot create ${DOWNLOAD_DIR}"
+  as_service chmod 0700 -- "${DOWNLOAD_DIR}" || die "cannot use ${DOWNLOAD_DIR}: it is not the service user's"
   MANIFEST_FILE="${DOWNLOAD_DIR}/manifest.json"
   as_service rm -f "${MANIFEST_FILE}"
   fetch_file "${SNAPSHOT_URL%/}/manifest.json" "${MANIFEST_FILE}" 4194304
@@ -414,8 +512,36 @@ install_snapshot() {
     ${own[@]+"${own[@]}"} ${pins[@]+"${pins[@]}"} ${age[@]+"${age[@]}"} \
     || { as_service rm -f "${archive}"; die "the snapshot could not be installed; nothing was changed (${DATA_DIR} and nhb.service are as they were)"; }
   as_service rm -f "${archive}"
-  as_root chmod 0700 "${target}"
+  # The service user made ${target} and owns it: it sets its mode itself. (Root
+  # would follow a link the service user put there in the meantime.)
+  as_service chmod 0700 -- "${target}" || die "could not close ${target} to other users"
   SNAPSHOT_HEIGHT=$(manifest_field "${MANIFEST_FILE}" height) || die "the manifest is not valid"
+  remember_snapshot_height "${SNAPSHOT_HEIGHT}"
+}
+
+# remember_snapshot_height records that a snapshot of this height was installed and
+# that the node has not been seen past it yet. An interrupted run would otherwise
+# forget it, and the next run, which fetches no manifest for a node that has data,
+# would not require the node to get past the snapshot's height: the one thing a
+# snapshot that is not part of the network's chain cannot do.
+remember_snapshot_height() {
+  printf '%s\n' "$1" | as_service tee "${SNAPSHOT_MARKER}" >/dev/null || die "could not record the snapshot height in ${SNAPSHOT_MARKER}"
+}
+
+# forget_snapshot_height is for a run that has seen the node past that height.
+forget_snapshot_height() { as_service rm -f -- "${SNAPSHOT_MARKER}"; }
+
+# recover_snapshot_height sets SNAPSHOT_HEIGHT from the record of an earlier run
+# that installed a snapshot and did not finish waiting for the node, and does
+# nothing when there is none. A record that does not hold a height stops the run.
+recover_snapshot_height() {
+  local raw
+  as_service test -e "${SNAPSHOT_MARKER}" || return 0
+  raw=$(as_service cat -- "${SNAPSHOT_MARKER}" 2>/dev/null) || die "could not read ${SNAPSHOT_MARKER}, which an earlier run left: it says that run installed a snapshot and did not see the node get past its height. Remove it only if you know that node is at the network tip, or run again with --reset-state"
+  raw=${raw//[[:space:]]/}
+  [[ "${raw}" =~ ^[0-9]{1,18}$ ]] || die "${SNAPSHOT_MARKER} does not hold a block height, so the script cannot tell which height the node has to get past. Remove it only if you know that node is at the network tip, or run again with --reset-state"
+  SNAPSHOT_HEIGHT=${raw}
+  log "an earlier run installed a snapshot at height ${raw} and did not finish waiting for the node: it has to get past that height this time"
 }
 
 # ---------------------------------------------------------------------------
@@ -520,12 +646,19 @@ install_config() {
 # does not change what the node reads.
 write_env() {
   local secret key_hex tmp
+  # The secret is taken from the file an earlier run wrote, in a directory the
+  # service user owns: a link put there would make root read another file.
+  if as_root test -L "${CONFIG_DIR}/node.env"; then
+    die "${CONFIG_DIR}/node.env is a symbolic link, not the environment file this script wrote: refusing to read the RPC secret from it or to install over it. Remove it (and, if you did not make it, find out who did)."
+  fi
   secret=$(as_root grep '^NHB_RPC_JWT_SECRET=' "${CONFIG_DIR}/node.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
   if [[ -z "${secret}" ]]; then
     secret=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
   fi
   JWT_SECRET="${secret}"
-  key_hex=$(as_root od -An -tx1 "${VALIDATOR_KEY_FILE}" | tr -d ' \n')
+  # Read as the service user, who owns the key: root would read whatever a link in
+  # its place led to, and the node (which reads node.env) would then hold it.
+  key_hex=$(as_service od -An -tx1 "${VALIDATOR_KEY_FILE}" | tr -d ' \n')
   tmp=$(mktemp)
   chmod 600 "${tmp}"
   {
@@ -563,16 +696,32 @@ snapshot_needed() { [[ "${RESET_STATE}" == "1" ]] || ! data_dir_has_data; }
 # restore_identity <from> <to> copies the files that make the node the node it
 # was, its p2p identity and what it has voted, from the data directory <from>
 # into <to>.
+#
+# Both directories belong to the service user, who can put anything in them, so
+# the copy is made AS that user: root would follow a link the user had planted
+# (a "bft_sign_state.json" that points at a file only root can read) and hand
+# the target's content to the node in its own data directory. A file that is a
+# link is refused, not followed, and so is a p2p directory that is one, in
+# either place.
 restore_identity() {
   local from=$1 to=$2 f
   for f in p2p/node_key.json bft_sign_state.json polc_lock.json; do
-    if as_root test -f "${from}/${f}"; then
-      as_root mkdir -p "$(dirname "${to}/${f}")" || return 1
-      as_root cp -p "${from}/${f}" "${to}/${f}" || return 1
+    if [[ "${f}" == p2p/* ]]; then
+      if as_service test -L "${from}/p2p" || as_service test -L "${to}/p2p"; then
+        echo "[ERROR] p2p in ${from} or in ${to} is a symbolic link, not the directory the node wrote: refusing to copy through it." >&2
+        return 1
+      fi
+    fi
+    if as_service test -L "${from}/${f}"; then
+      echo "[ERROR] ${from}/${f} is a symbolic link, not the file the node wrote: refusing to copy it (the node's identity and vote state are regular files)." >&2
+      return 1
+    fi
+    if as_service test -f "${from}/${f}"; then
+      as_service mkdir -p -- "$(dirname "${to}/${f}")" || return 1
+      as_service cp -p -P -- "${from}/${f}" "${to}/${f}" || return 1
       log "kept ${f} from the previous data directory"
     fi
   done
-  as_root chown -R "${SERVICE_USER}:${SERVICE_USER}" "${to}" || return 1
 }
 
 # replace_data_dir puts a fresh snapshot in place of this node's own data
@@ -658,13 +807,51 @@ prepare_data_dir() {
 # Installation
 # ---------------------------------------------------------------------------
 
+# The Go toolchain this script installs when the host has none, and the sha256 of
+# that exact tarball as go.dev publishes it (https://go.dev/dl/, and
+# https://dl.google.com/go/go1.24.3.linux-amd64.tar.gz.sha256). A download that
+# does not match is never unpacked, and it is unpacked as root. Change the two
+# together.
+GO_VERSION='1.24.3'
+GO_TARBALL_SHA256='3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8'
+
+# verify_go_tarball <file> succeeds only for the tarball GO_TARBALL_SHA256 names.
+verify_go_tarball() {
+  local file=$1 got
+  got=$(sha256sum "${file}" | cut -d' ' -f1)
+  if [[ "${got}" != "${GO_TARBALL_SHA256}" ]]; then
+    echo "[ERROR] the Go ${GO_VERSION} tarball has sha256 ${got}, not the ${GO_TARBALL_SHA256} go.dev publishes: it is not being unpacked." >&2
+    echo "        A damaged or replaced download. Run this script again; if it happens again, do not go on." >&2
+    return 1
+  fi
+}
+
+# install_go_toolchain downloads Go, checks it against the pinned sha256, and only
+# then unpacks it into /usr/local/go.
+install_go_toolchain() {
+  local go_tarball="go${GO_VERSION}.linux-amd64.tar.gz" tmp_go
+  tmp_go=$(mktemp -d)
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 30 --max-time 1800 \
+    --speed-limit "${FETCH_SPEED_LIMIT}" --speed-time "${FETCH_SPEED_TIME}" --max-filesize 209715200 \
+    "https://go.dev/dl/${go_tarball}" -o "${tmp_go}/${go_tarball}"; then
+    rm -rf "${tmp_go}"
+    die "could not download https://go.dev/dl/${go_tarball}"
+  fi
+  if ! verify_go_tarball "${tmp_go}/${go_tarball}"; then
+    rm -rf "${tmp_go}"
+    exit 1
+  fi
+  as_root rm -rf /usr/local/go
+  as_root tar -C /usr/local -xzf "${tmp_go}/${go_tarball}"
+  rm -rf "${tmp_go}"
+}
+
 install_prerequisites() {
   # "Open a fresh EC2 Ubuntu server, git pull, run this script" is the whole
   # promise -- a stock Ubuntu AMI has neither Go, rsync, nor perl installed, so
   # failing here with "command not found" instead of just installing them
   # would break that promise on literally the first run.
-  local go_version="1.24.3" go_tarball apt_missing=()
-  go_tarball="go${go_version}.linux-amd64.tar.gz"
+  local apt_missing=()
   command -v rsync >/dev/null 2>&1 || apt_missing+=(rsync)
   command -v perl >/dev/null 2>&1 || apt_missing+=(perl)
   command -v curl >/dev/null 2>&1 || apt_missing+=(curl)
@@ -675,13 +862,8 @@ install_prerequisites() {
   fi
 
   if [[ ! -x /usr/local/go/bin/go ]]; then
-    log "Go not found at /usr/local/go/bin/go -- installing Go ${go_version}"
-    local tmp_go
-    tmp_go=$(mktemp -d)
-    curl -fsSL "https://go.dev/dl/${go_tarball}" -o "${tmp_go}/${go_tarball}"
-    as_root rm -rf /usr/local/go
-    as_root tar -C /usr/local -xzf "${tmp_go}/${go_tarball}"
-    rm -rf "${tmp_go}"
+    log "Go not found at /usr/local/go/bin/go -- installing Go ${GO_VERSION}"
+    install_go_toolchain
   fi
 
   require_cmd rsync
@@ -741,19 +923,28 @@ install_tree_and_build() {
 # ensure_key makes the validator key on this machine the first time and reuses
 # it afterwards. Never pass a key in: it would end up in shell history.
 ensure_key() {
+  # The key file is in a directory the service user owns, so that user can replace
+  # it by a link to any file. Root takes ownership of nothing a link points at,
+  # and reads none of it: a link is refused; the ownership is set on the name, not
+  # on what it leads to (chown -h), and the mode by the service user itself.
+  if as_root test -L "${VALIDATOR_KEY_FILE}"; then
+    die "${VALIDATOR_KEY_FILE} is a symbolic link, not a key file: refusing to go on. Remove it (and, if you did not make it, find out who did)."
+  fi
   if ! as_root test -f "${VALIDATOR_KEY_FILE}"; then
     log "generating a fresh validator key on this machine"
     local tmp_key_dir
     tmp_key_dir=$(mktemp -d)
     ( cd "${tmp_key_dir}" && "${INSTALL_ROOT}/bin/nhb-cli" generate-key > "${tmp_key_dir}/generate-key.out" )
     as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp_key_dir}/wallet.key" "${VALIDATOR_KEY_FILE}"
-    as_root touch "${CONFIG_DIR}/.validator.key.created-here"
+    # install replaces what is at the name (a link included), where touch would
+    # write to what a link at that name leads to.
+    as_root install -m 0600 -o root -g root /dev/null "${CONFIG_DIR}/.validator.key.created-here"
     rm -rf "${tmp_key_dir}"
   else
     log "reusing existing validator key at ${VALIDATOR_KEY_FILE}"
   fi
-  as_root chown "${SERVICE_USER}:${SERVICE_USER}" "${VALIDATOR_KEY_FILE}"
-  as_root chmod 600 "${VALIDATOR_KEY_FILE}"
+  as_root chown -h "${SERVICE_USER}:${SERVICE_USER}" "${VALIDATOR_KEY_FILE}"
+  as_service chmod 600 "${VALIDATOR_KEY_FILE}"
   # Deriving the address from the key file needs to read it: only the CLI, as
   # the service user, does that. The raw key is never printed.
   VALIDATOR_ADDRESS=$(as_service "${INSTALL_ROOT}/bin/nhb-cli" address "${VALIDATOR_KEY_FILE}" 2>/dev/null | grep -o 'nhb1[a-z0-9]*' | head -1 || true)
@@ -801,15 +992,24 @@ install_service() {
     as_root systemctl daemon-reload
   fi
   as_root systemctl enable nhb.service
-  local fingerprint_file="${STATE_DIR}/.deploy-fingerprint" now old
+  start_or_leave_running "${unit}"
+}
+
+# start_or_leave_running (re)starts nhb.service unless it is running with the
+# binary, config, environment and unit that were last started. What was last
+# started is a fingerprint kept in the state directory, which belongs to the
+# service user: it is read and written as that user, never by root, who would
+# follow a link put in its place.
+start_or_leave_running() {
+  local unit=$1 fingerprint_file="${STATE_DIR}/.deploy-fingerprint" now old
   now=$( { sha256sum "${INSTALL_ROOT}/bin/nhb"; as_root cat "${CONFIG_DIR}/config.toml"; as_root cat "${CONFIG_DIR}/node.env"; cat "${unit}"; } | sha256sum | cut -d' ' -f1)
-  old=$(as_root cat "${fingerprint_file}" 2>/dev/null || true)
+  old=$(as_service head -c 128 -- "${fingerprint_file}" 2>/dev/null | tr -d '[:space:]' || true)
   if service_active && [[ "${old}" == "${now}" ]]; then
     log "nhb.service is running with the current binary and configuration; leaving it as it is"
   else
     log "starting nhb.service"
     as_root systemctl restart nhb.service
-    printf '%s\n' "${now}" | as_root tee "${fingerprint_file}" >/dev/null
+    printf '%s\n' "${now}" | as_service tee "${fingerprint_file}" >/dev/null
   fi
 }
 
@@ -856,6 +1056,9 @@ wait_until_synced() {
     echo "=================================================================="
     exit 1
   fi
+  # The node has been seen at the network tip, past the snapshot's height: what a
+  # snapshot has to prove is proven, and a later run need not prove it again.
+  forget_snapshot_height
 }
 
 # --- begin validator CLI helpers (exercised by tests/scripts) ---
@@ -868,16 +1071,22 @@ mint_rpc_token() {
     "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
 }
 
+# run_cli runs nhb-cli as the service user with the token in its environment. The
+# token goes to the child on a pipe and is put into the environment there: a
+# command line ("sudo -u nhb env NHB_RPC_TOKEN=... nhb-cli", which stays in the
+# process list, where any user can read it, for as long as sudo waits for the
+# command) never holds it.
 run_cli() {
-  sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" NHB_RPC_TOKEN="${RPC_TOKEN}" \
-    "${INSTALL_ROOT}/bin/nhb-cli" "$@"
+  printf '%s' "${RPC_TOKEN}" | sudo -u "${SERVICE_USER}" sh -c \
+    'NHB_RPC_TOKEN=$(cat); RPC_URL=$1; shift; export NHB_RPC_TOKEN RPC_URL; exec "$@"' \
+    nhb-cli-token-wrapper "http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" "$@"
 }
 
 # How an operator runs a signing command later (the messages below print
 # these): the command needs a fresh token exactly like the steps in this script.
 TOKEN_RECIPE="TOKEN=\$(sudo sh -c '. ${CONFIG_DIR}/node.env && printf %s \"\$NHB_RPC_JWT_SECRET\"' | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
 cli_recipe() {
-  echo "sudo -u ${SERVICE_USER} env RPC_URL=http://${RPC_ADDR} NHB_RPC_TOKEN=\"\$TOKEN\" ${INSTALL_ROOT}/bin/nhb-cli $*"
+  echo "NHB_RPC_TOKEN=\"\$TOKEN\" RPC_URL=http://${RPC_ADDR} sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli $*"
 }
 
 # The node may still be finishing its own startup, so try a few times.
@@ -983,20 +1192,34 @@ print_next_steps() {
   echo "=================================================================="
 }
 
-# take_lock allows one run of this script at a time (mkdir is atomic).
-LOCK_DIR="${TMPDIR:-/tmp}/nhb-deploy.lock.d"
+# take_lock allows one run of this script at a time. The lock is a directory
+# (mkdir is atomic) in a state directory that belongs to the user who runs the
+# script and that nobody else can write. It used to be a fixed name in /tmp, which
+# any local user could make first: that either stopped every run for good or,
+# because a user cannot signal another user's process, made a lock that was still
+# held look stale and be taken over. Here only the user who runs the script can
+# make it, and the process that holds it is one that user can signal, so kill -0
+# says whether it is still there.
+LOCK_STATE_DIR="${XDG_STATE_HOME:-${HOME:-}/.local/state}/nhbchain"
+LOCK_DIR="${LOCK_STATE_DIR}/deploy.lock.d"
 take_lock() {
-  if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
+  [[ -n "${XDG_STATE_HOME:-}" || -n "${HOME:-}" ]] || die "cannot tell where to keep the lock that keeps two runs of this script apart: neither XDG_STATE_HOME nor HOME is set"
+  ( umask 077; mkdir -p -- "${LOCK_STATE_DIR}" ) || die "cannot create ${LOCK_STATE_DIR}"
+  if [[ -L "${LOCK_STATE_DIR}" || ! -d "${LOCK_STATE_DIR}" || ! -O "${LOCK_STATE_DIR}" ]]; then
+    die "${LOCK_STATE_DIR} has to be a directory of the user who runs this script (not a link, not another user's): it holds the lock that keeps two runs apart"
+  fi
+  if ! ( umask 077; mkdir -- "${LOCK_DIR}" ) 2>/dev/null; then
     local holder
     holder=$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)
-    if [[ -n "${holder}" ]] && kill -0 "${holder}" 2>/dev/null; then
+    if [[ "${holder}" =~ ^[0-9]+$ ]] && kill -0 "${holder}" 2>/dev/null; then
       die "another run of this script (pid ${holder}) is in progress"
     fi
-    rm -rf "${LOCK_DIR}"
-    mkdir "${LOCK_DIR}" || die "cannot take the lock ${LOCK_DIR}"
+    warn "removing a stale lock left by pid ${holder:-unknown}"
+    rm -rf -- "${LOCK_DIR}"
+    ( umask 077; mkdir -- "${LOCK_DIR}" ) || die "cannot take the lock ${LOCK_DIR}"
   fi
   echo "$$" > "${LOCK_DIR}/pid"
-  trap 'rm -rf "${LOCK_DIR}"' EXIT
+  trap 'rm -rf -- "${LOCK_DIR}"' EXIT
 }
 
 main() {
@@ -1020,20 +1243,22 @@ main() {
   # given one, so it never depends on the snapshot host: not on what it now
   # publishes, and not on its answering at all.
   if snapshot_needed; then
-    local local_sha local_commit
+    local local_sha manifest_commit
     local_sha=$(sha256sum "${INSTALL_ROOT}/bin/nhb" | cut -d' ' -f1)
     # The commit of the checkout this script runs from. A checkout with local
     # changes to tracked files is not that commit: only an identical binary matches.
-    local_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)
-    if [[ "${local_commit}" != "unknown" && -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
-      local_commit="${local_commit}-dirty"
-    fi
+    detect_local_commit
 
     fetch_manifest
-    check_binary_identity "$(manifest_field "${MANIFEST_FILE}" producer.binarySha256)" "$(manifest_field "${MANIFEST_FILE}" producer.binaryCommit)" \
-      "${local_sha}" "${local_commit}" || exit 1
+    manifest_commit=$(manifest_field "${MANIFEST_FILE}" producer.binaryCommit)
+    check_release_commit "${manifest_commit}"
+    check_binary_identity "$(manifest_field "${MANIFEST_FILE}" producer.binarySha256)" "${manifest_commit}" \
+      "${local_sha}" "${LOCAL_COMMIT}" || exit 1
   else
     log "the data directory already holds data: no snapshot is needed, so none is fetched"
+    # A run that installed a snapshot and was interrupted before it saw the node
+    # get past the snapshot's height must still require that of this run.
+    recover_snapshot_height
   fi
 
   ensure_key
