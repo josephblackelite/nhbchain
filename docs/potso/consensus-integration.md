@@ -19,14 +19,14 @@ Votes are tracked per type (prevote, precommit) and per validator address. A sec
 
 ### Quorum threshold
 
-`hasTwoThirdsPowerLocked` (and `verifyPolkaProofLocked` for proofs) uses:
+A quorum is strictly more than two thirds of the voting power. `hasTwoThirdsPowerLocked` (live rounds), `verifyPolkaProof` (polka proofs, `consensus/bft/bft.go`) and the round-synchronisation checks (`consensus/bft/round_sync.go`) all call `types.HasQuorum` (`core/types/quorum.go`):
 
 ```
-threshold = floor((2 * totalVotingPower + 2) / 3)
-reached   = accumulatedPower >= threshold
+threshold = floor(2 * totalVotingPower / 3) + 1      (QuorumThreshold)
+reached   = accumulatedPower >= threshold             (HasQuorum)
 ```
 
-If `totalVotingPower` is 0 or unset, no quorum is ever reached.
+Exactly two thirds is therefore not enough: with three validators of equal power all three must sign. If `totalVotingPower` is 0 or unset, no quorum is ever reached.
 
 ## Proposer selection
 
@@ -54,4 +54,4 @@ When rotation is enabled, `computeEpochWeights` ranks eligible validators by `ep
 ## What POTSO state does feed elsewhere
 
 - The reward-epoch weight snapshot (`snapshots/potso/<epoch>/weights`) is read by governance vote casting, not by BFT. See [weights](weights.md) and [config](config.md).
-- `TxTypeSubmitEvidence` records and their penalty processing run in block execution. See [evidence-and-penalties](evidence-and-penalties.md).
+- `TxTypeSubmitEvidence` records and their penalty processing run in block execution. The only lasting effect of a penalty is the slash of an `EQUIVOCATION` report (locked ZNHB and `Stake` of the offender); the slasher writes the accounts through the state manager (`state/bank/slash.go`), not through `StateProcessor.setAccount`, so the removal rule for `ValidatorSet` described above is not run by the slash itself. See [evidence-and-penalties](evidence-and-penalties.md).
