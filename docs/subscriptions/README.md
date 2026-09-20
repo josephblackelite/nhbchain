@@ -14,20 +14,24 @@ and RPC reference for the chain module (`native/subscriptions`,
 
 1. **Create a plan.** The merchant signs `TxTypeSubscriptionCreatePlan`. The
    pricing terms (`PriceWei`, `Asset`, `IntervalSeconds`,
-   `TrialPeriodSeconds`) are never modified afterwards; only `Name` and
-   `Active` can change (see [Plan updates](#plan-updates)).
+   `TrialPeriodSeconds`) are bounded at creation (see
+   [Plan validation](#plan-validation)) and never modified afterwards; only
+   `Name` and `Active` can change (see [Plan updates](#plan-updates)).
 2. **Subscribe.** A payer signs `TxTypeSubscriptionSubscribe` naming a
    `PlanID`. The transaction moves no funds and does not check the payer's
    balance. It copies the plan's price, asset and interval onto a new
    `Subscription` record, sets `NextChargeAt = block time + TrialPeriodSeconds`,
    and schedules the subscription in the due index. It fails if the plan does
-   not exist, is not `Active`, or the node has no subscriptions engine
-   configured.
+   not exist, is not `Active`, the node has no subscriptions engine
+   configured, or the payer is the plan's own merchant
+   (`subscriptions: payer cannot subscribe to its own plan`).
 3. **Charge.** At settlement the chain debits the payer's live balance of the
    plan asset by `PriceWei`, credits the merchant `PriceWei` minus the
    management fee, and credits the fee to the configured treasury. If the
    payer's balance is below `PriceWei` the attempt fails (see
-   [Retry and dunning](#retry-and-dunning)).
+   [Retry and dunning](#retry-and-dunning)). After a successful charge the
+   next one is scheduled at least one day (86,400 s) later, so a subscription
+   is charged at most once a day.
 4. **Cancel.** The payer, the plan's merchant, or a holder of
    `ROLE_SUBSCRIPTIONS_ADMIN` signs `TxTypeSubscriptionCancel`. A subscription
    that is already `cancelled` or `suspended` cannot be cancelled again
@@ -37,7 +41,8 @@ and RPC reference for the chain module (`native/subscriptions`,
 ## Bounded standing mandate
 
 The subscribe signature authorizes the chain to debit exactly the snapshotted
-`PriceWei`, once per `IntervalSeconds`, from the payer's spendable balance,
+`PriceWei`, once per `IntervalSeconds` (never sooner than a day after the
+last charge), from the payer's spendable balance,
 until the subscription is cancelled or suspended. Nothing is locked or
 escrowed at subscribe time. Each charge reads the payer's balance at that
 moment and either succeeds in full or records a failed attempt. The only code
@@ -51,9 +56,24 @@ trimming) and `Active`. It can be sent by the plan's merchant or a holder of
 subscriptions continue to charge. Existing subscriptions hold their own copy of
 price, asset and interval, so no plan update can reprice them.
 
-Plan validation (`native/subscriptions/registry.go` `sanitizePlan`): `Name`
-non-empty, `PriceWei > 0`, `Asset` exactly `NHB` or `ZNHB`, `IntervalSeconds >
-0`.
+## Plan validation
+
+`sanitizePlan` (`native/subscriptions/registry.go`) checks a plan when it is
+created. The bounds are constants in `native/subscriptions/params.go`, not
+configuration, so every node applies the same ones:
+
+| Field | Rule |
+| --- | --- |
+| `Name` | non-empty after trimming |
+| `PriceWei` | at least `1000000000000000000` (one whole token of either asset) |
+| `Asset` | exactly `NHB` or `ZNHB` |
+| `IntervalSeconds` | from `86400` (one day) to `315360000` (ten years of 365 days) |
+| `TrialPeriodSeconds` | at most `315360000` |
+
+A plan that breaks a rule is refused with `subscriptions: invalid plan: ...`
+and the message names the field. Times computed from a stored duration
+saturate at the largest `uint64` instead of wrapping to the past
+(`subscriptions.AddSeconds`).
 
 ## State model
 
@@ -68,7 +88,8 @@ every key before it reaches the trie. Values are RLP-encoded. IDs in keys are
 | `subscriptions/sub/<subscriptionId>` | `Subscription` |
 | `subscriptions/payersubs/<payer>` | list of subscription IDs |
 | `subscriptions/merchantsubs/<merchant>` | list of subscription IDs |
-| `subscriptions/charges/<subscriptionId>` | list of `Charge` (full attempt history) |
+| `subscriptions/charge/<subscriptionId><attempt>` | one `Charge` per attempt (attempt is an 8-byte big-endian integer starting at 1) |
+| `subscriptions/chargecount/<subscriptionId>` | number of attempts recorded, so recording one touches two keys however long the history is |
 | `subscriptions/due/<day>` | list of subscription IDs to attempt on that UTC day (day = unix seconds / 86400) |
 | `subscriptions/watermark` | last UTC day number closed out |
 | `subscriptions/seq/plan`, `subscriptions/seq/sub` | ID counters |
@@ -115,16 +136,27 @@ type Subscription struct {
 on every block, independent of epoch boundaries. It processes the due bucket
 of every UTC day from the day after the stored watermark (day 0 when no
 watermark exists yet) up to and including the current day, then advances the
-watermark to the previous day. Charging is therefore **day-granular**: a subscription is
-attempted on the first block that processes the UTC day containing its
-`NextChargeAt`, at that block's timestamp, not at the exact second in
-`NextChargeAt`. With no trial period `NextChargeAt` is set to the subscribe block's timestamp
-and the subscription is added to that day's due bucket, so the first attempt
-happens at the end of the subscribe transaction's own block:
-`ProcessBlockLifecycle` runs after the block's transactions and re-scans
-today's bucket on every block. When a charge succeeds, the next
-`NextChargeAt` is the charging block's time plus `IntervalSeconds`, so the
-schedule drifts with settlement time.
+watermark to the previous day. A bucket is a calendar day, a charge time is a
+second, so an entry whose `NextChargeAt` is still ahead of the block time (a
+trial or a retry that ends later today) is left in its bucket and is looked at
+again on the next block. Every other entry is charged and removed from its
+bucket (an entry whose subscription is gone, cancelled or suspended is just
+removed). A subscription is therefore charged by the first block whose timestamp
+is at or after its `NextChargeAt`, at that block's timestamp. With no trial
+period `NextChargeAt` is set to the subscribe block's timestamp and the
+subscription is added to that day's due bucket, so the first attempt happens
+at the end of the subscribe transaction's own block: `ProcessBlockLifecycle`
+runs after the block's transactions and re-scans today's bucket on every
+block. When a charge succeeds, the next `NextChargeAt` is the charging block's
+time plus `IntervalSeconds` (or plus one day if the stored interval is
+shorter), so the schedule drifts with settlement time. Billing is timed by
+block timestamps, so the block interval does not change it.
+
+A ZNHB charge can move ZNHB onto or off the treasury wallet (the fee treasury,
+or a payer or merchant that is that wallet). Settlement runs inside the step
+that books such net movement into the Reward Pool ledger, drawing on the Sale
+Pool if the Reward Pool cannot cover an outflow
+(`core/epochs.go`, `core/znhb_treasury_pool.go` `withTreasuryPoolBooking`).
 
 Settlement does nothing when the node has no subscriptions engine configured.
 
@@ -138,12 +170,19 @@ Each successful charge splits `PriceWei`:
 
 This is applied directly to account balances in the settlement hook; it does
 not go through the transfer-fee path (`native/fees`) that applies to
-`TxTypeTransfer`/`TxTypeTransferZNHB`.
+`TxTypeTransfer`/`TxTypeTransferZNHB`. Payer, merchant and treasury are
+independent roles that may be the same address (for example a merchant that is
+also the fee treasury); settlement loads one account object per address and
+applies every delta to it, so no amount is lost or created in that case.
 
 Configuration (`config.toml` `[subscriptions]`, validated by
 `subscriptions.Config.Validate`): `ManagementFeeBps` (shipped `100`, 1%),
 `ManagementFeeCapBps` (shipped `500`, 5%), `Treasury`, `MaxRetries` (shipped
-`3`), `RetryIntervalSeconds` (shipped `86400`). Validation requires
+`3`), `RetryIntervalSeconds` (shipped `86400`). When a `config.toml` leaves a
+key unset, `Subscriptions.EnsureDefaults` (`config/types.go`) fills `100` for
+`ManagementFeeBps` only if a `Treasury` is set, `500` for
+`ManagementFeeCapBps`, `3` for `MaxRetries` and `86400` for
+`RetryIntervalSeconds`. Validation requires
 `ManagementFeeCapBps <= 10000`, `ManagementFeeBps <= ManagementFeeCapBps`, a
 non-zero treasury whenever `ManagementFeeBps > 0`, `MaxRetries > 0` and
 `RetryIntervalSeconds > 0`. `cmd/nhb/main.go` panics at startup if the treasury

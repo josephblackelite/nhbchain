@@ -25,7 +25,7 @@ are accepted (`StableAsset` in `native/swap/types.go`). Intent statuses are
 1. **`PutDepositVoucher`** - rejects a duplicate `InvoiceID`, requires positive
    stable and NHB amounts, stores the voucher and adds the stable amount to the
    soft inventory. Not reachable: `TxTypeSwapMint` (`0x11`) is stubbed to
-   return "native on-chain swap mint is disabled" and the only callers of
+   return `swap: native on-chain swap mint is disabled -- use the buyZNHB transaction type instead` and the only callers of
    `PutDepositVoucher` are tests.
 2. **`CreateCashOutIntent`** - requires enough soft inventory, stores a
    `pending` intent and an escrow lock (burn deferred). Not reachable:

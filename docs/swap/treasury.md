@@ -21,11 +21,14 @@ Each receipt is rendered with `receiptId`, `providerTxId`, `token`,
 
 ## `SwapRecordBurn`
 
-`Node.SwapRecordBurn` (`core/node.go` line 8374):
+`Node.SwapRecordBurn` (`core/node.go`):
 
 * fails when the `swap` module is paused, or when `receiptId` is empty;
+* moves each listed voucher from `minted` to `reconciled` before it stores the
+  receipt (`Ledger.MarkReconciled`; a voucher that is already `reconciled` is
+  left as it is). A listed voucher that is unknown or reversed makes the call
+  fail, and then neither the receipt nor any status change is written;
 * writes the receipt to the burn ledger;
-* sets each listed voucher's status to `reconciled`;
 * appends these events:
   * `swap.burn.recorded` - `receiptId`, `providerTxId`, `token`, `amountWei`, and when set `burnTx`, `treasuryTx`, `vouchers`, `observedAt`;
   * `swap.treasury.reconciled` - `vouchers`, `receiptId`, `observedAt` (only when the receipt lists vouchers);
@@ -41,9 +44,10 @@ other way.
 ## Reconciliation of vouchers
 
 The reachable reconciliation path is `swap_markReconciled`, a signed
-`TxTypeSwapMarkReconciled` transaction that sets vouchers to `reconciled` and
-emits `swap.treasury.reconciled` ([admin.md](admin.md#swap_markreconciled)).
-A reconciled voucher can no longer be reversed.
+`TxTypeSwapMarkReconciled` transaction that moves `minted` vouchers to
+`reconciled` (unknown or reversed vouchers make the batch fail) and emits
+`swap.treasury.reconciled` ([admin.md](admin.md#swap_markreconciled)). A
+reconciled voucher can no longer be reversed.
 
 ## Redemption (swap-out) records
 

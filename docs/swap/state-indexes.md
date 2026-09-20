@@ -1,6 +1,6 @@
 # Swap state keys and query paths
 
-Keys written by the swap module (before the trie applies its own hashing;
+Keys written by the swap flows (before the trie applies its own hashing;
 `core/state/manager.go` `kvKey` Keccak-256-hashes every KV key):
 
 | Key | Stored value | Source |
@@ -15,6 +15,7 @@ Keys written by the swap module (before the trie applies its own hashing;
 | `swap/sanctions/audit/<hex address>` | list of sanctions failures | `native/swap/sanctions.go` |
 | `swap/burn/<receiptId>`, `swap/burn/index` | burn receipts | `native/swap/redeem.go` |
 | `swap/stable/...` | stable ledger records ([stable-ledger.md](stable-ledger.md)) | `native/swap/keys.go` |
+| `redemption:request:<requestId>`, `redemption:pending:index` | NHB redemption (swap-out) requests, and the IDs of the ones still `pending` | `core/state/redemption.go` |
 
 ## Consensus query router
 

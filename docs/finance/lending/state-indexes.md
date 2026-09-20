@@ -6,9 +6,10 @@ Keccak-256-hashes every KV key before storing it):
 
 | Key | Stored value |
 | --- | --- |
-| `lending/market/<poolId>` | market record |
+| `lending/market/<poolId>` | market record (includes `LastUpdateBlock` and `LastUpdateTimestamp`, the block time interest has been accrued to) |
 | `lending/pools/index` | list of pool IDs |
 | `lending/user/<poolId>:<20-byte address>` | user account (shares, collateral, debt, scaled debt, last supply block) |
+| `lending/legacy-reconciled/<poolId>` | marker that the one-time sweep of lending positions still recorded on plain accounts into the pool's own records has finished for that pool (`LendingLegacyReconciled`, `core/state/manager.go`) |
 | `lending/fees/<poolId>` | fee accrual (protocol and developer fees) |
 | `lending/loan/<loanId>` | fixed-term loan |
 | `lending/loanactive/...` | the borrower's active fixed-term loan ID per pool |

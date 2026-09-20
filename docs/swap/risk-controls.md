@@ -80,8 +80,9 @@ identically.
    the mint authority.
 9. Slippage of the voucher amount vs the proof-derived amount.
 10. `orderId` not already used; `providerTxId` not already recorded.
-11. Sale Pool curve cost vs USD budget (same `SlippageBps` tolerance), Sale
-    Pool and admin wallet balances.
+11. Sale Pool curve cost vs USD budget (same `SlippageBps` tolerance), an
+    admin wallet must be configured, the recipient must not be the admin wallet
+    itself, then Sale Pool and admin wallet balances.
 12. State updates: record the price proof, transfer ZNHB, mark nonce, write the
     ledger record, record the mint against the risk counters, emit
     `swap.minted` and `swap.mint.proof`.
@@ -100,7 +101,7 @@ appended before a returned error are retained for rejected transactions.
 | `swap.alert.sanction` | `provider`, `providerTxId`, `address` |
 
 `allowedMints` is never populated by `emitSwapRiskViolation`, so it is always
-`0` (`core/swap_voucher_tx.go` lines 622-631).
+`0` (`emitSwapRiskViolation` in `core/swap_voucher_tx.go`).
 
 ## Cash-out caps are not enforced
 
@@ -125,7 +126,10 @@ transaction with `redeemNHB: <message>`, for example `amount ... below minimum
 `policy.swapRiskParams` payload fields: `redeemPerTxMinWei`,
 `redeemPerTxMaxWei`, `redeemPerAddressDailyCapWei`,
 `redeemPerAddressMonthlyCapWei`, `memo` (`native/governance/types.go`). The
-governance validator requires min <= max <= daily <= monthly.
+governance validator requires min <= max <= daily <= monthly. The stored
+redeem cap values are read with `nativecommon.ParamDecimal`
+(`core/swap_risk_params.go` `readGovernedSwapRiskWei`), so a value stored as a
+bare number or as a quoted decimal string is read the same way.
 
 ## Pauses
 
