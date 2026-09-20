@@ -20,13 +20,31 @@ code that reads each key back.
   parameter "<key>" missing validation rule`), and the value must pass it.
 
 On execution the raw JSON text of each value is written to the param store
-(`ParamStoreSet(key, raw)`), exactly as submitted. Validators accept an
-integer either as a JSON number or as a decimal string, but a quoted string is
-stored **with its quotes**, and the readers that consume the stored value
-(for example the staking reward engine and `staking.minimumValidatorStake`)
-parse it as a bare integer. Submit integer values as unquoted JSON numbers,
-for example `{"staking.aprBps": 1250}`. Integer validators also reject
-decimals and exponents, and `uint64` values are limited to `2^53 - 1`.
+(`ParamStoreSet(key, raw)`), exactly as submitted, so a quoted string is stored
+with its quotes and a leading `+` is stored as written. Validators accept an
+integer either as a JSON number or as a decimal string (one leading `+` is
+tolerated; decimals, exponents and negative numbers are rejected), and every
+reader that consumes a governed numeric value first passes the stored text
+through `nativecommon.ParamDecimal` (`native/common/paramvalue.go`), which trims
+whitespace, removes the JSON quotes when the whole value is a JSON string and
+drops leading `+` characters. `1250` and `"1250"` therefore behave identically.
+Booleans and the reward asset go through `ParamText`, which does the same
+without the `+` handling. The readers that use these helpers are the staking
+reward engine (`core/state/staking_rewards.go`), `Node.SyncStakingParams`, the
+staking payout, unbonding and emission-cap readers and the mint cap reader in
+`core/state_transition.go`, `MinimumValidatorStakeFromParam`
+(`native/governance/types.go`), the escrow realm bounds
+(`native/escrow/engine.go`), and the market flat fee and paymaster top-up fee
+readers (`core/swap_risk_params.go`, `rpc/market_handlers.go`). Queries that
+return stored values (`QueryState("gov", "params")`) return the text as stored,
+quotes included. `uint64` values are limited to `2^53 - 1`.
+
+A stored value that a reader cannot parse cannot be produced by these
+validators. If it happens anyway, `Node.SyncStakingParams` keeps the configured
+value and `MinimumValidatorStakeFromParam` falls back to the default, both
+logging `governed parameter has a malformed stored value`
+(`nativecommon.ReportMalformedParam`); the payout-period, unbonding-period and
+emission-cap readers in `core/state_transition.go` return an error instead.
 
 ## Default `AllowedParams`
 
@@ -65,8 +83,8 @@ store, so setting it has no effect on chain behavior.
 | `staking.compoundDefault` | boolean (or the strings `true`/`false`) | `false` | Merged into the node's staking config by `SyncStakingParams` |
 | `mint.nhb.maxEmissionPerYearWei` | integer `>= 0` | none (`0` or unset means no cap) | `applyMintTransaction` (`core/state_transition.go`): a mint that would push the calendar-year NHB total over a positive cap fails with `ErrMintEmissionCapExceeded` |
 | `mint.znhb.maxEmissionPerYearWei` | integer `>= 0` | none | Only reachable from the ZNHB branch of `applyMintTransaction`, which is preceded by an unconditional `ErrMintZNHBNotMintable` rejection |
-| `market.flatFeeWei` | non-negative integer | none | `core/market_native.go` (`readGovernedMarketFlatFeeWei`), `rpc/market_handlers.go` |
-| `paymaster.topUpFeeWei` | non-negative integer | `0` (no fee) | `core/sponsorship.go` (`readGovernedPaymasterTopUpFeeWei`) |
+| `market.flatFeeWei` | non-negative integer | `100000000000000000` (0.1 NHB, `defaultMarketFlatFeeWei` in `core/market_native.go`) | `core/market_native.go` (`readGovernedMarketFlatFeeWei`, the buyer-side flat fee on a listing fill), `rpc/market_handlers.go` |
+| `paymaster.topUpFeeWei` | non-negative integer | `0` (no fee) | `core/sponsorship.go` (`readGovernedPaymasterTopUpFeeWei`); the fee is in the top-up asset, which is NHB unless the top-up policy names ZNHB (`paymasterSponsoredAsset`) |
 | `network.seeds` | non-empty, must parse with `seeds.Parse` | none | `core/node.go` (`ParamStoreGet("network.seeds")`), `cmd/p2pd/main.go` |
 | `fees.baseFee` | integer `<= 1000000000000000` (1e15) | none | No reader found |
 | `potso.weights.AlphaStakeBps` | integer `<= 10000` | none | No reader found |
