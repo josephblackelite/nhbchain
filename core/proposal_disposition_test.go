@@ -87,6 +87,8 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		{"pos registry invalid payload", ErrPOSRegistryInvalidPayload, proposalDispositionPrune},
 		{"pos registry invalid request", pos.ErrInvalidRequest, proposalDispositionPrune},
 		{"pos registry stale nonce", pos.ErrStaleNonce, proposalDispositionPrune},
+		// PRUNE: a buyback ask under the minimum is decided by its own amount.
+		{"buyback ask too small", ErrBuybackAskTooSmall, proposalDispositionPrune},
 		// PRUNE: a reversed voucher never becomes reconcilable.
 		{"swap voucher not reconcilable", swap.ErrVoucherNotReconcilable, proposalDispositionPrune},
 		// PRUNE, added with the loyalty and invariant branches: an owner naming
@@ -136,6 +138,8 @@ func TestClassifyProposalErrorDispositions(t *testing.T) {
 		// be registered.
 		{"pos registry unauthorized", ErrPOSRegistryUnauthorized, proposalDispositionSkip},
 		{"pos registry device not registered", pos.ErrDeviceNotRegistered, proposalDispositionSkip},
+		// SKIP: the epoch's ask list is full, and the count starts again next epoch.
+		{"buyback ask limit", ErrBuybackAskLimit, proposalDispositionSkip},
 		// SKIP: the voucher a reconciliation names can still be minted.
 		{"swap voucher not found", swap.ErrVoucherNotFound, proposalDispositionSkip},
 		// SKIP, added with the loyalty branch: the named wallet can still opt
