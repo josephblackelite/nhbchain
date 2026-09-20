@@ -70,7 +70,8 @@ const (
 	// height in all, one for each round of the window. A proposal can be as
 	// large as the transport's message limit (1 MiB by default), so this count
 	// is what bounds the memory: about 8 MiB however many validators or rounds
-	// are sending.
+	// are sending, since what is kept for a height is forgotten when the height
+	// moves on (purgeBufferedBelowLocked).
 	maxBufferedProposals = maxFutureRounds
 
 	// maxBufferedVotesPerValidator is how many future-round votes are kept per
@@ -517,9 +518,22 @@ func (e *Engine) applyEarlyVotes() bool {
 }
 
 // purgeBufferedBelowLocked forgets every buffered message for a round before
-// round at height: this validator has passed them (or jumped over them) and they
-// can no longer be replayed. Must be called with e.mu held.
+// round at height, and every one for an earlier height: this validator has passed
+// them (or jumped over them, or committed the height) and they can no longer be
+// replayed. Without the heights, what one peer sent for the rounds this validator
+// never reached would stay for as long as the process runs, at every height it
+// was sent at. Must be called with e.mu held.
 func (e *Engine) purgeBufferedBelowLocked(height uint64, round int) {
+	for h := range e.bufferedProposal {
+		if h < height {
+			delete(e.bufferedProposal, h)
+		}
+	}
+	for h := range e.bufferedVotes {
+		if h < height {
+			delete(e.bufferedVotes, h)
+		}
+	}
 	if rounds := e.bufferedProposal[height]; rounds != nil {
 		for r := range rounds {
 			if r < round {
@@ -542,19 +556,42 @@ func (e *Engine) purgeBufferedBelowLocked(height uint64, round int) {
 	}
 }
 
+// proposerKey is what a proposer is chosen for. The choice depends on the chain
+// state at the height (the hash of the last block, the stakes) as well as on the
+// round, so the proposer of a round is not the proposer of the same round at
+// another height.
+type proposerKey struct {
+	height uint64
+	round  int
+}
+
+// resetProposerCacheLocked forgets the proposers worked out so far, and makes any
+// that is being worked out at this moment (proposerFor) unstorable. Must be called
+// with e.mu held whenever what the choice is made from may have changed: the
+// height moves on (the chain has a new last block), or the validator set is
+// replaced.
+func (e *Engine) resetProposerCacheLocked() {
+	e.proposerCache = nil
+	e.proposerEpoch++
+}
+
 // proposerFor returns the proposer of round at height -- what selectProposer
 // chooses -- or nil when it cannot be told (another height than the engine's, or
 // the accounts it is chosen from cannot be read). The choice depends only on the
-// chain state of the height, so it is worked out once per round start and kept
-// until the next (startNewRound clears it, after it has refreshed the validator
-// set the choice is made from), instead of once per message.
+// chain state of the height, so it is worked out once for a height and round and
+// kept, instead of once per message, until resetProposerCacheLocked forgets it:
+// when a round starts, once the validator set the choice is made from has been
+// refreshed, and whenever the height moves on. It is kept by height as well as by
+// round, so that the proposer of a round at one height is never taken for the
+// proposer of the same round at another.
 func (e *Engine) proposerFor(height uint64, round int) []byte {
+	key := proposerKey{height: height, round: round}
 	e.mu.RLock()
 	if height != e.currentState.Height {
 		e.mu.RUnlock()
 		return nil
 	}
-	if proposer, ok := e.proposerCache[round]; ok {
+	if proposer, ok := e.proposerCache[key]; ok {
 		e.mu.RUnlock()
 		return proposer
 	}
@@ -570,9 +607,9 @@ func (e *Engine) proposerFor(height uint64, round int) []byte {
 	e.mu.Lock()
 	if e.proposerEpoch == epoch && e.currentState.Height == height {
 		if e.proposerCache == nil {
-			e.proposerCache = make(map[int][]byte)
+			e.proposerCache = make(map[proposerKey][]byte)
 		}
-		e.proposerCache[round] = proposer
+		e.proposerCache[key] = proposer
 	}
 	e.mu.Unlock()
 	return proposer
