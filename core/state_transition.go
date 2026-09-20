@@ -5288,7 +5288,7 @@ func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt,
 	return receipt, nil
 }
 
-func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *types.Account, releaseToBuyer bool) error {
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, senderAccount *types.Account, releaseToBuyer bool) error {
 	_ = releaseToBuyer
 	var payload struct {
 		EscrowID   string   `json:"escrowId"`
@@ -5336,7 +5336,11 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *typ
 	if err := sp.EscrowEngine.ResolveWithSignatures(id, []byte(payload.Decision), sigs); err != nil {
 		return err
 	}
-	return nil
+	// The sender only relays the arbitrators' signed decision, but it still
+	// owns this transaction's nonce: every sibling escrow handler advances it
+	// on success, and without this the relayer's next transaction would carry
+	// the nonce this one just used.
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 // applySwapMint and applySwapBurn are deliberately disabled -- see
