@@ -80,13 +80,17 @@ bash scripts/validator-only-bootstrap.sh \
 `validator-only-bootstrap.sh` is a 5-line wrapper around it, and both accept
 identical flags. Every step stops the script with an error when it fails, and
 it is safe to run again: what is already in place is left alone, and a node that
-is already running is restarted only if its binary, config or key changed.
+is already running is restarted only if its binary, config or key changed. A node
+that already holds the chain is not given a snapshot, so a run that installs none
+does not fetch a manifest and does not depend on the snapshot host at all.
 
 There is no `--reset-state` shortcut for a first run any more. On a fresh machine
 the script installs a snapshot by itself; `--reset-state` now means "this node's
-data directory is broken": it moves the data directory aside (it is never
-deleted), installs a snapshot again, and keeps the node's p2p identity and vote
-state.
+data directory is broken": it downloads, verifies and unpacks a snapshot next to
+the old data directory first, and only then stops the node, moves the old data
+directory aside (it is never deleted) and puts the snapshot in its place, keeping
+the node's p2p identity and vote state. It works on a node that is already a
+validator; a snapshot that does not check out changes nothing.
 
 ### Flags
 
@@ -95,14 +99,16 @@ state.
 | `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
 | `--snapshot-url` | *(required, or `NHB_SNAPSHOT_URL`)* | Directory URL that holds `manifest.json` and the archive it names. `https` only. |
 | `--bootnode` | *(required, or `NHB_BOOTNODE`)* | Plain `host:port`, never an `enode://` URI (see below). |
-| `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust, used only to decide when the node has caught up. |
-| `--max-lag-blocks` | `3` | How far behind that node still counts as caught up. |
+| `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust. Used to decide when the node has caught up, and to refuse a node whose newest blocks are not that node's. |
+| `--max-lag-blocks` | `3` | How far from that node (either side) still counts as caught up; at most 15. |
 | `--sync-timeout` | `7200` | Seconds to wait for the catch-up. |
 | `--max-snapshot-age` | *(any age)* | Refuse a snapshot created longer ago than this, for example `48h`. |
+| `--tip-hash`, `--state-root` | *(none)* | The tip hash and state root the snapshot must have (32 bytes of hex), as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
+| `--max-snapshot-gib` | `16` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
 | `--rpc-addr` | `127.0.0.1:8545` | Not exposed externally by default. |
 | `--external-address` | *(auto-detected)* | Falls back to EC2 IMDSv2, then `https://ifconfig.me`, if omitted. |
-| `--reset-state` | *(off)* | Move the data directory aside and install a snapshot again. |
+| `--reset-state` | *(off)* | Replace the data directory with a snapshot: unpack it first, then stop the node, move the old directory aside and put the new one in its place. |
 | `--allow-insecure-http` | *(off)* | Accept an `http://` or `file://` snapshot URL. |
 | `--allow-existing-key` | *(off)* | Use a validator key that was already on this host. Only if that key runs nowhere else. |
 | `--allow-binary-mismatch` | *(off)* | Continue although this build is not the snapshot's. |
@@ -131,16 +137,21 @@ many colons in address`. The script refuses it.
    byte for byte the live genesis, and builds `bin/nhb`, `bin/nhb-cli` and
    `bin/nhb-snapshot` with disk-backed `GOCACHE`/`GOPATH`/`GOTMPDIR` under
    `/opt/nhbchain` (`/tmp` is often a small RAM-backed tmpfs).
-6. Fetches the snapshot manifest, checks it is for the pinned chain id and genesis
-   hash and that the node just built is the binary the snapshot was taken with.
+6. When it will install a snapshot (an empty data directory, or `--reset-state`;
+   a node that already holds the chain needs none, and then nothing is fetched),
+   fetches the snapshot manifest, checks it is for the pinned chain id and genesis
+   hash (and the tip you pinned, if you did) and that the node just built is the
+   binary the snapshot was taken with.
 7. Generates a **fresh** validator key locally at `/etc/nhbchain/validator.key`
    (mode `0600`, owned `nhb:nhb`) the first time it runs. It never accepts a key
    via flag or environment variable, reuses the key on later runs, refuses a key
    file it did not create on a host with no node data, and refuses to run while
    another `nhb` process is running outside `nhb.service`.
-8. Downloads the archive, verifies it, checks that the key is not already a
-   validator in the snapshot's state, and unpacks it into
-   `/var/lib/nhbchain/nhb-data` -- never over data that is already there.
+8. Downloads the archive (refusing one larger than `--max-snapshot-gib`, or that
+   the disk has no room for, before it downloads anything), verifies it, checks
+   that the key is not already a validator in the snapshot's state (a first run
+   only), and unpacks it into `/var/lib/nhbchain/nhb-data` -- never over data that
+   is already there, except through `--reset-state`.
 9. Writes `/etc/nhbchain/config.toml` from the repository's `config.toml`,
    changing only `ListenAddress`, `RPCAddress`, `DataDir`, `GenesisFile`,
    `ValidatorKMSEnv=NHB_VALIDATOR_RAW_KEY`, `NetworkName`, `NetworkId`,
@@ -151,8 +162,10 @@ many colons in address`. The script refuses it.
     of an earlier run is kept), installs `deploy/systemd/nhb.service`, and starts
     or restarts it.
 11. Waits for the node's RPC, checks it reports the pinned chain id and genesis
-    hash, and waits until its height is within `--max-lag-blocks` of the network
-    tip. It **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
+    hash, and waits until it is at the network tip: connected to a peer, past the
+    snapshot's height (when this run installed one) and, with `--tip-rpc`, within
+    `--max-lag-blocks` of that node and holding the same newest blocks as it. It
+    **hard-fails** with diagnostics (`systemctl status`, `journalctl`) if the
     node never comes up, stops making progress, or is on another chain. (Health
     checks of the RPC must be a **POST**: a bare `GET` always returns 400 even on
     a healthy node.)

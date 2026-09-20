@@ -806,7 +806,7 @@ echo reached`, "NHB_SYNC_INTERVAL=100ms")
 func TestDeployScriptMentionsTheDocumentedOperatorFlow(t *testing.T) {
 	raw := mustRead(t, filepath.Join(repoRoot(t), "scripts", "deployvalidator.sh"))
 	var have = map[string]bool{}
-	for _, f := range []string{"--snapshot-url", "--bootnode", "--tip-rpc", "--reset-state", "--allow-binary-mismatch", "--allow-existing-key", "--max-snapshot-age", "--allow-insecure-http"} {
+	for _, f := range []string{"--snapshot-url", "--bootnode", "--tip-rpc", "--reset-state", "--allow-binary-mismatch", "--allow-existing-key", "--max-snapshot-age", "--allow-insecure-http", "--tip-hash", "--state-root", "--max-snapshot-gib"} {
 		have[f] = strings.Contains(string(raw), f)
 	}
 	for f, ok := range have {

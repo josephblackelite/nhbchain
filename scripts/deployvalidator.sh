@@ -11,7 +11,10 @@
 #
 # Every step stops the script with an error when it fails; nothing is skipped
 # quietly. It is safe to run again: what is already in place is left alone, and
-# a node that is already running is not restarted unless something changed.
+# a node that is already running is not restarted unless something changed. A
+# node whose data directory already holds this network's chain is never given a
+# snapshot, so a run that installs none does not fetch a manifest at all: what
+# the snapshot host publishes, or whether it answers, cannot change that run.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -52,6 +55,11 @@ ALLOW_INSECURE_HTTP=0
 ALLOW_BINARY_MISMATCH=0
 ALLOW_EXISTING_KEY=0
 MAX_SNAPSHOT_AGE=''
+TIP_HASH=''
+STATE_ROOT=''
+MAX_SNAPSHOT_GIB=16
+# The height of the snapshot this run installed; empty when it installed none.
+SNAPSHOT_HEIGHT=''
 MAX_LAG_BLOCKS=3
 SYNC_INTERVAL="${NHB_SYNC_INTERVAL:-5s}"
 SYNC_TIMEOUT_SECS=7200
@@ -79,27 +87,41 @@ Required:
                            May be given as NHB_BOOTNODE instead.
 
 Options:
-  --tip-rpc <url>          RPC URL of a node you trust. Used only to decide when
-                           this node has caught up (its height is compared with
-                           that node's); without it the age of the newest block
-                           is used. May be given as NHB_TIP_RPC_URL.
-  --max-lag-blocks <n>     How far behind the network tip still counts as caught
-                           up (default 3; needs --tip-rpc).
+  --tip-rpc <url>          RPC URL of a node you trust. Used to decide when this
+                           node has caught up: its newest blocks are compared
+                           with that node's, and a node whose blocks differ from
+                           that node's is refused. Without it the age of the
+                           newest block is used. May be given as NHB_TIP_RPC_URL.
+  --max-lag-blocks <n>     How far from the network tip (either side) still
+                           counts as caught up (default 3, at most 15; needs
+                           --tip-rpc).
   --sync-timeout <secs>    Give up waiting for the catch-up after this long
                            (default 7200).
   --max-snapshot-age <d>   Refuse a snapshot created longer ago than this, for
                            example 48h. A follower can catch up only so many
                            blocks; see the documentation for the measured limit.
+  --tip-hash <hex>         The tip hash the snapshot must have (32 bytes of hex),
+                           as read from nodes you trust. A snapshot with another
+                           tip is refused before it is downloaded.
+  --state-root <hex>       The state root the snapshot must have, likewise.
+  --max-snapshot-gib <n>   Refuse a snapshot whose archive, or whose unpacked
+                           database, is larger than this many GiB (default 16),
+                           or that the disk has no room for.
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
   --external-address <ip>  This node's own publicly-dialable IP (the address
                            peers should use to reconnect to it). Default:
                            auto-detected from this machine's public IP.
-  --reset-state            Move the existing data directory aside (it is never
-                           deleted) and install a snapshot again. The node's
-                           p2p identity and its consensus vote/lock state are
-                           carried over, so a validator never forgets what it
-                           voted. Use it only when the data directory is broken.
+  --reset-state            Replace the existing data directory with a snapshot.
+                           The snapshot is downloaded, verified and unpacked
+                           first, next to the old directory, which is not
+                           touched until then; only after that is the node
+                           stopped and the old directory moved aside (it is
+                           never deleted). The node's p2p identity and its
+                           consensus vote/lock state are carried over, so a
+                           validator never forgets what it voted; it works on
+                           a node that is already a validator. Use it only
+                           when the data directory is broken.
   --allow-insecure-http    Accept an http:// or file:// snapshot URL.
   --allow-existing-key     Run with a validator key that is already in
                            /etc/nhbchain/validator.key although this script did
@@ -112,17 +134,22 @@ Options:
 
 What it does, in order (each step stops the script if it fails):
   1. installs Go and the build tools, builds nhb, nhb-cli and nhb-snapshot;
-  2. fetches the snapshot manifest and checks it is for the pinned network
-     (chain id 18346390202490284624, the genesis of config/genesis.relaunch.json)
-     and for the same node binary as the one built here;
+  2. when it will install a snapshot (an empty data directory, or
+     --reset-state; a node that already holds the chain needs none, and then
+     nothing is fetched): fetches the snapshot manifest and checks it is for
+     the pinned network (chain id 18346390202490284624, the genesis of
+     config/genesis.relaunch.json) and for the same node binary as the one
+     built here;
   3. creates this validator's key ON THIS MACHINE (never pass a key in) and
      refuses to go on if that key could already be running elsewhere;
-  4. downloads the snapshot, verifies its sha256 and structure, checks the
-     unpacked database opens and matches the manifest, and puts it in the data
-     directory (never over data that is already there);
+  4. downloads the snapshot (within the size limits above), verifies its sha256
+     and structure, checks the unpacked database opens and matches the
+     manifest, and puts it in the data directory (never over data that is
+     already there, except through --reset-state);
   5. writes the node's config from the shipped config.toml (only paths, ports
      and peers change) and checks the values consensus depends on;
-  6. starts nhb.service as a follower and waits until it is at the network tip;
+  6. starts nhb.service as a follower and waits until it is at the network tip:
+     connected to a peer, and (after a snapshot) past the snapshot's height;
   7. only then registers the validator and prints the next steps.
 
 Getting paid:
@@ -155,6 +182,9 @@ parse_args() {
       --max-lag-blocks) MAX_LAG_BLOCKS="${2:-}"; shift 2 ;;
       --sync-timeout) SYNC_TIMEOUT_SECS="${2:-}"; shift 2 ;;
       --max-snapshot-age) MAX_SNAPSHOT_AGE="${2:-}"; shift 2 ;;
+      --tip-hash) TIP_HASH="${2:-}"; shift 2 ;;
+      --state-root) STATE_ROOT="${2:-}"; shift 2 ;;
+      --max-snapshot-gib) MAX_SNAPSHOT_GIB="${2:-}"; shift 2 ;;
       --network-id) network_id_arg="${2:-}"; shift 2 ;;
       --listen-addr) LISTEN_ADDR="${2:-}"; shift 2 ;;
       --rpc-addr) RPC_ADDR="${2:-}"; shift 2 ;;
@@ -211,9 +241,21 @@ validate_inputs() {
   [[ "${LISTEN_ADDR}" =~ ^[A-Za-z0-9._:-]+$ ]] || die "--listen-addr '${LISTEN_ADDR}' is not host:port"
   [[ "${RPC_ADDR}" =~ ^[A-Za-z0-9._:-]+:[0-9]{1,5}$ ]] || die "--rpc-addr '${RPC_ADDR}' is not host:port"
   [[ "${MAX_LAG_BLOCKS}" =~ ^[0-9]+$ ]] || die "--max-lag-blocks must be a number"
+  if [[ -n "${TIP_RPC}" ]] && (( 10#${MAX_LAG_BLOCKS} > 15 )); then
+    die "--max-lag-blocks ${MAX_LAG_BLOCKS} is more than the 15 blocks that can be compared with --tip-rpc's"
+  fi
   [[ "${SYNC_TIMEOUT_SECS}" =~ ^[0-9]+$ ]] || die "--sync-timeout must be a number of seconds"
   if [[ -n "${MAX_SNAPSHOT_AGE}" ]]; then
     [[ "${MAX_SNAPSHOT_AGE}" =~ ^[0-9]+(h|m|s)$ ]] || die "--max-snapshot-age must look like 48h"
+  fi
+  [[ "${MAX_SNAPSHOT_GIB}" =~ ^[1-9][0-9]{0,3}$ ]] || die "--max-snapshot-gib must be a whole number of GiB, at least 1"
+  if [[ -n "${TIP_HASH}" ]]; then
+    [[ "${TIP_HASH}" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "--tip-hash must be 32 bytes of hex (64 digits, 0x optional)"
+    TIP_HASH="0x$(printf '%s' "${TIP_HASH#0x}" | tr 'A-F' 'a-f')"
+  fi
+  if [[ -n "${STATE_ROOT}" ]]; then
+    [[ "${STATE_ROOT}" =~ ^(0x)?[0-9a-fA-F]{64}$ ]] || die "--state-root must be 32 bytes of hex (64 digits, 0x optional)"
+    STATE_ROOT="0x$(printf '%s' "${STATE_ROOT#0x}" | tr 'A-F' 'a-f')"
   fi
   if [[ -n "${NHB_MASTER_TREASURY:-}" ]]; then
     die "NHB_MASTER_TREASURY is set in this environment; a node that overrides the treasury computes different state from the network. Unset it."
@@ -225,13 +267,15 @@ validate_inputs() {
 # ---------------------------------------------------------------------------
 
 # fetch_file <url> <destination> <max bytes>
+# curl stops at <max bytes> whatever the server sends, and what it wrote is
+# removed when the download fails.
 fetch_file() {
   local url=$1 dest=$2 max=$3
   as_service curl --fail --silent --show-error --location \
     --proto "${CURL_PROTO}" --proto-redir "${CURL_PROTO}" \
     --retry 3 --retry-delay 3 --connect-timeout 30 --max-time 7200 \
     --max-filesize "${max}" --output "${dest}" "${url}" \
-    || die "could not download ${url}"
+    || { as_service rm -f "${dest}"; die "could not download ${url} (at most ${max} bytes are accepted)"; }
 }
 
 tool() { "${INSTALL_ROOT}/bin/nhb-snapshot" "$@"; }
@@ -277,32 +321,83 @@ fetch_manifest() {
   if [[ "${chain}" != "${NETWORK_ID_DEFAULT}" || "${genesis}" != "${GENESIS_HASH_DEFAULT}" ]]; then
     die "the snapshot is for chain ${chain} (genesis ${genesis}), not the pinned network ${NETWORK_ID_DEFAULT} (genesis ${GENESIS_HASH_DEFAULT})"
   fi
+  # What the operator pinned to nodes they trust is checked here, before the
+  # archive is downloaded; verify and extract check it again.
+  local tip root
+  if [[ -n "${TIP_HASH}" ]]; then
+    tip=$(manifest_field "${MANIFEST_FILE}" tipHash) || die "the manifest is not valid"
+    [[ "${tip}" == "${TIP_HASH}" ]] || die "the snapshot's tip hash is ${tip}, not the ${TIP_HASH} pinned with --tip-hash"
+  fi
+  if [[ -n "${STATE_ROOT}" ]]; then
+    root=$(manifest_field "${MANIFEST_FILE}" stateRoot) || die "the manifest is not valid"
+    [[ "${root}" == "${STATE_ROOT}" ]] || die "the snapshot's state root is ${root}, not the ${STATE_ROOT} pinned with --state-root"
+  fi
   log "snapshot manifest: chain ${chain}, height $(manifest_field "${MANIFEST_FILE}" height), created $(manifest_field "${MANIFEST_FILE}" createdAt)"
 }
 
-# install_snapshot downloads the archive the manifest names, verifies it and
-# unpacks it into DATA_DIR, which must not hold anything yet.
+# free_kib prints how much room is left, in KiB, on the disk the node's data
+# lives on.
+free_kib() { df -Pk "${STATE_DIR}" 2>/dev/null | awk 'NR==2 {print $4}'; }
+
+# check_snapshot_size <archive bytes> <unpacked bytes> stops the script, before
+# anything is downloaded, when the snapshot is larger than this run accepts or
+# than the disk has room for. The manifest's sizes are nobody's signed word, so
+# the bound is the operator's (--max-snapshot-gib), never the manifest's own.
+check_snapshot_size() {
+  local size=$1 unpacked=$2 limit free need
+  [[ "${size}" =~ ^[0-9]+$ && "${unpacked}" =~ ^[0-9]+$ ]] || die "the manifest's archive sizes are not numbers"
+  limit=$((MAX_SNAPSHOT_GIB * 1073741824))
+  if (( size > limit )); then
+    die "the snapshot archive is ${size} bytes, more than the ${MAX_SNAPSHOT_GIB} GiB this run accepts (--max-snapshot-gib); nothing was downloaded"
+  fi
+  if (( unpacked > limit )); then
+    die "the snapshot unpacks to ${unpacked} bytes, more than the ${MAX_SNAPSHOT_GIB} GiB this run accepts (--max-snapshot-gib); nothing was downloaded"
+  fi
+  free=$(free_kib || true)
+  [[ "${free}" =~ ^[0-9]+$ ]] || die "could not tell how much disk space is free in ${STATE_DIR}"
+  # The archive and the copy unpacked from it exist side by side, and the node
+  # needs room to grow afterwards.
+  need=$(( (size + unpacked) / 1024 + 1048576 ))
+  if (( free < need )); then
+    die "not enough free disk space in ${STATE_DIR}: ${need} KiB are needed (the ${size} byte archive, the ${unpacked} bytes it unpacks to, and 1 GiB for the node) and ${free} KiB are free; nothing was downloaded"
+  fi
+}
+
+# install_snapshot <target> <refuse own key> downloads the archive the manifest
+# names, verifies it and unpacks it into <target>, a directory that does not
+# exist yet (or is empty). Nothing else on the host is touched. With <refuse own
+# key> set to 1, a snapshot in which this host's own key is already a validator
+# is refused: a new node must never start with a key that is validating.
 install_snapshot() {
-  local name size
-  name=$(manifest_field "${MANIFEST_FILE}" archive.name)
-  size=$(manifest_field "${MANIFEST_FILE}" archive.size)
+  local target=$1 refuse_own_key=$2 name size unpacked limit
+  [[ -n "${MANIFEST_FILE:-}" ]] || die "internal error: a snapshot is to be installed but no manifest was fetched"
+  name=$(manifest_field "${MANIFEST_FILE}" archive.name) || die "the manifest is not valid"
+  size=$(manifest_field "${MANIFEST_FILE}" archive.size) || die "the manifest is not valid"
+  unpacked=$(manifest_field "${MANIFEST_FILE}" archive.uncompressedSize) || die "the manifest is not valid"
   [[ "${name}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz$ ]] || die "the manifest names an archive '${name}' that is not a plain file name"
   local archive="${DOWNLOAD_DIR}/${name}"
   as_service rm -f "${archive}"
+  check_snapshot_size "${size}" "${unpacked}"
+  limit=$((MAX_SNAPSHOT_GIB * 1073741824))
   log "downloading ${name} (${size} bytes)"
   fetch_file "${SNAPSHOT_URL%/}/${name}" "${archive}" "${size}"
-  local age=()
+  local age=() pins=() own=()
   if [[ -n "${MAX_SNAPSHOT_AGE}" ]]; then age=(--max-age "${MAX_SNAPSHOT_AGE}"); fi
-  log "verifying the archive and unpacking it into ${DATA_DIR}"
+  if [[ -n "${TIP_HASH}" ]]; then pins+=(--tip-hash "${TIP_HASH}"); fi
+  if [[ -n "${STATE_ROOT}" ]]; then pins+=(--state-root "${STATE_ROOT}"); fi
+  if [[ "${refuse_own_key}" == "1" ]]; then own=(--reject-validator "${VALIDATOR_ADDRESS}"); fi
+  log "verifying the archive and unpacking it into ${target}"
   as_service "${INSTALL_ROOT}/bin/nhb-snapshot" verify --manifest "${MANIFEST_FILE}" --archive "${archive}" \
-    --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}" ${age[@]+"${age[@]}"} \
-    || die "the snapshot did not verify; nothing was installed"
+    --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}" --max-bytes "${limit}" \
+    ${pins[@]+"${pins[@]}"} ${age[@]+"${age[@]}"} \
+    || { as_service rm -f "${archive}"; die "the snapshot did not verify; nothing was installed"; }
   as_service "${INSTALL_ROOT}/bin/nhb-snapshot" extract --manifest "${MANIFEST_FILE}" --archive "${archive}" \
-    --target "${DATA_DIR}" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}" \
-    --reject-validator "${VALIDATOR_ADDRESS}" ${age[@]+"${age[@]}"} \
-    || die "the snapshot could not be installed (the data directory was left as it was)"
+    --target "${target}" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}" --max-bytes "${limit}" \
+    ${own[@]+"${own[@]}"} ${pins[@]+"${pins[@]}"} ${age[@]+"${age[@]}"} \
+    || { as_service rm -f "${archive}"; die "the snapshot could not be installed; nothing was changed (${DATA_DIR} and nhb.service are as they were)"; }
   as_service rm -f "${archive}"
-  as_root chmod 0700 "${DATA_DIR}"
+  as_root chmod 0700 "${target}"
+  SNAPSHOT_HEIGHT=$(manifest_field "${MANIFEST_FILE}" height) || die "the manifest is not valid"
 }
 
 # ---------------------------------------------------------------------------
@@ -337,9 +432,11 @@ refuse_second_node() {
 # script and nothing on this host shows it belongs to this node.
 refuse_foreign_key() {
   local marker="${CONFIG_DIR}/.validator.key.created-here"
-  if [[ ! -f "${VALIDATOR_KEY_FILE}" ]]; then return 0; fi
-  if [[ -f "${marker}" ]]; then return 0; fi
-  if [[ -d "${DATA_DIR}" && -n "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]]; then return 0; fi   # a node of this host already used it
+  # As root: /etc/nhbchain belongs to the service user and is closed to the
+  # user who runs this script, who would otherwise see no key there.
+  if ! as_root test -f "${VALIDATOR_KEY_FILE}"; then return 0; fi
+  if as_root test -f "${marker}"; then return 0; fi
+  if data_dir_has_data; then return 0; fi   # a node of this host already used it
   if [[ "${ALLOW_EXISTING_KEY}" == "1" ]]; then
     warn "using the validator key that was already at ${VALIDATOR_KEY_FILE} because --allow-existing-key was given"
     return 0
@@ -434,45 +531,93 @@ write_env() {
 
 service_active() { systemctl is-active --quiet nhb.service 2>/dev/null; }
 
-data_dir_has_data() { [[ -d "${DATA_DIR}" && -n "$(ls -A "${DATA_DIR}" 2>/dev/null)" ]]; }
+# data_dir_has_data asks as root: the data directory belongs to the service user
+# and is closed to the user who runs this script, which would otherwise see a
+# directory full of chain data as an empty one.
+data_dir_has_data() { as_root test -d "${DATA_DIR}" && [[ -n "$(as_root ls -A "${DATA_DIR}" 2>/dev/null)" ]]; }
 
-# reset_state moves the data directory aside. Nothing is deleted. The files
-# that make the node the node it was (its p2p identity, and what it has voted)
-# are kept for the new directory.
-reset_state() {
-  data_dir_has_data || { log "--reset-state: there is no data to move aside"; return 0; }
-  local stamp aside
-  stamp=$(date -u +%Y%m%dT%H%M%SZ)
-  aside="${DATA_DIR}.replaced-${stamp}"
-  if service_active; then
-    log "stopping nhb.service"
-    as_root systemctl stop nhb.service || die "could not stop nhb.service"
-  fi
-  as_root mv "${DATA_DIR}" "${aside}" || die "could not move ${DATA_DIR} aside"
-  KEEP_DIR="${aside}"
-  log "the old data directory is at ${aside}; delete it yourself when you no longer need it"
-}
+# snapshot_needed succeeds when this run will install a snapshot: the data
+# directory holds nothing, or --reset-state asked for a fresh one. A node that
+# already holds this network's chain needs none, so nothing the snapshot host
+# publishes, or whether it answers at all, can matter to that run.
+snapshot_needed() { [[ "${RESET_STATE}" == "1" ]] || ! data_dir_has_data; }
 
-# restore_identity puts the identity and vote state of an old data directory
-# into the new one.
+# restore_identity <from> <to> copies the files that make the node the node it
+# was, its p2p identity and what it has voted, from the data directory <from>
+# into <to>.
 restore_identity() {
-  [[ -n "${KEEP_DIR:-}" ]] || return 0
-  local f
+  local from=$1 to=$2 f
   for f in p2p/node_key.json bft_sign_state.json polc_lock.json; do
-    if as_root test -f "${KEEP_DIR}/${f}"; then
-      as_root mkdir -p "$(dirname "${DATA_DIR}/${f}")"
-      as_root cp -p "${KEEP_DIR}/${f}" "${DATA_DIR}/${f}"
+    if as_root test -f "${from}/${f}"; then
+      as_root mkdir -p "$(dirname "${to}/${f}")" || return 1
+      as_root cp -p "${from}/${f}" "${to}/${f}" || return 1
       log "kept ${f} from the previous data directory"
     fi
   done
-  as_root chown -R "${SERVICE_USER}:${SERVICE_USER}" "${DATA_DIR}"
+  as_root chown -R "${SERVICE_USER}:${SERVICE_USER}" "${to}" || return 1
+}
+
+# replace_data_dir puts a fresh snapshot in place of this node's own data
+# directory. The snapshot is downloaded, verified and unpacked next to the old
+# directory first, while the node runs on the old one, so a snapshot that does
+# not check out changes nothing. Only then is the node stopped, what it has
+# voted copied over (it can no longer change), the old directory moved aside
+# (it is never deleted) and the new one moved into its place.
+#
+# It is the node's own data directory, so the node's own key may well be a
+# validator in the snapshot (a registered validator is one): the check that
+# refuses a new node's key is not made here.
+replace_data_dir() {
+  local stamp staged aside stopped=0 why='' rc=0
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  staged="${DATA_DIR}.new-${stamp}"
+  aside="${DATA_DIR}.replaced-${stamp}"
+  install_snapshot "${staged}" 0
+  # The node is stopped whatever state it is in. One whose data directory is
+  # broken is often not "active" but restarting every few seconds
+  # (Restart=on-failure), and a restart in the middle of the swap would start it
+  # on whatever the data directory holds at that moment. (Exit status 5 is a unit
+  # systemd does not know: there is no service to stop.)
+  log "stopping nhb.service"
+  as_root systemctl stop nhb.service || rc=$?
+  if [[ "${rc}" == "0" ]]; then
+    stopped=1
+  elif [[ "${rc}" != "5" ]]; then
+    die "could not stop nhb.service: ${DATA_DIR} is as it was, and the unpacked snapshot is at ${staged}"
+  fi
+  if ! restore_identity "${DATA_DIR}" "${staged}"; then
+    why="could not copy the node's identity and vote state into the new data directory"
+  elif ! as_root mv "${DATA_DIR}" "${aside}"; then
+    why="could not move ${DATA_DIR} aside"
+  elif ! as_root mv "${staged}" "${DATA_DIR}"; then
+    if as_root mv "${aside}" "${DATA_DIR}"; then
+      why="could not move the new data directory into place (the old one was put back)"
+    else
+      echo "[ERROR] could not move the new data directory into place, and could not put the old one back." >&2
+      echo "        The old data directory is at ${aside} and the new one at ${staged}." >&2
+      echo "        Put the old one back with: sudo mv ${aside} ${DATA_DIR}" >&2
+      exit 1
+    fi
+  fi
+  if [[ -n "${why}" ]]; then
+    echo "[ERROR] ${why}." >&2
+    echo "        ${DATA_DIR} is as it was, and the unpacked snapshot is at ${staged}." >&2
+    if [[ "${stopped}" == "1" ]]; then echo "        nhb.service is stopped; start it again with: sudo systemctl start nhb.service" >&2; fi
+    exit 1
+  fi
+  log "the old data directory is at ${aside}; delete it yourself when you no longer need it"
 }
 
 # prepare_data_dir leaves DATA_DIR holding this network's chain database, and
-# never overwrites one that is there.
+# never overwrites one that is there except when --reset-state says to.
 prepare_data_dir() {
-  KEEP_DIR=''
-  if [[ "${RESET_STATE}" == "1" ]]; then reset_state; fi
+  if [[ "${RESET_STATE}" == "1" ]]; then
+    if data_dir_has_data; then
+      replace_data_dir
+      return 0
+    fi
+    log "--reset-state: there is no data to move aside"
+  fi
   if data_dir_has_data; then
     if service_active; then
       log "the data directory already holds data and nhb.service is running; not installing a snapshot"
@@ -487,8 +632,8 @@ prepare_data_dir() {
     log "the data directory already holds this network's chain; not installing a snapshot"
     return 0
   fi
-  install_snapshot
-  restore_identity
+  # A new node: its key must not already be validating.
+  install_snapshot "${DATA_DIR}" 1
 }
 
 # ---------------------------------------------------------------------------
@@ -578,7 +723,7 @@ install_tree_and_build() {
 # ensure_key makes the validator key on this machine the first time and reuses
 # it afterwards. Never pass a key in: it would end up in shell history.
 ensure_key() {
-  if [[ ! -f "${VALIDATOR_KEY_FILE}" ]]; then
+  if ! as_root test -f "${VALIDATOR_KEY_FILE}"; then
     log "generating a fresh validator key on this machine"
     local tmp_key_dir
     tmp_key_dir=$(mktemp -d)
@@ -651,11 +796,15 @@ install_service() {
 }
 
 # wait_until_synced waits for the node's RPC, checks it reports the pinned
-# network, and waits until it is at the network tip.
+# network, and waits until it is at the network tip: connected to a peer and, when
+# this run installed a snapshot, past that snapshot's height, which a snapshot that
+# is not part of the network's chain can never be. With --tip-rpc the node's newest
+# blocks must also be the ones that node has.
 wait_until_synced() {
   local args=(wait-synced --rpc "http://${RPC_ADDR}/" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}"
     --interval "${SYNC_INTERVAL}" --timeout "${SYNC_TIMEOUT_SECS}s" --stall-timeout 15m --max-lag-blocks "${MAX_LAG_BLOCKS}")
   if [[ -n "${TIP_RPC}" ]]; then args+=(--tip-rpc "${TIP_RPC}"); fi
+  if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then args+=(--min-height "${SNAPSHOT_HEIGHT}"); fi
   log "waiting for the node to reach the network tip (this follows its progress; a few minutes to a few hours depending on the snapshot's age)"
   local rc=0
   "${INSTALL_ROOT}/bin/nhb-snapshot" "${args[@]}" || rc=$?
@@ -666,12 +815,15 @@ wait_until_synced() {
       3) echo "[ERROR] the node did not reach the network tip within ${SYNC_TIMEOUT_SECS} seconds." ;;
       4) echo "[ERROR] the node has stopped making progress." ;;
       5) echo "[ERROR] the node is not on the pinned network (chain id ${NETWORK_ID_DEFAULT})." ;;
+      6) echo "[ERROR] the node's newest blocks are not the ones the --tip-rpc node has: the snapshot it started from is not part of the network's chain." ;;
       *) echo "[ERROR] the node could not be checked (exit ${rc})." ;;
     esac
     echo
     echo "Check what is actually wrong with:"
     echo "  sudo systemctl status nhb.service"
     echo "  sudo journalctl -u nhb.service -n 80 --no-pager"
+    echo "A node that is at the tip has a peer and has applied blocks past its snapshot:"
+    echo "check the --bootnode address, and that the snapshot is one of the network's."
     echo "A snapshot that is too old for the node to catch up is the usual cause of a"
     echo "stall; fetch a newer one and run this script again with --reset-state."
     echo "=================================================================="
@@ -835,18 +987,27 @@ main() {
   refuse_foreign_key || exit 1
   install_tree_and_build
 
-  local local_sha local_commit
-  local_sha=$(sha256sum "${INSTALL_ROOT}/bin/nhb" | cut -d' ' -f1)
-  # The commit of the checkout this script runs from. A checkout with local
-  # changes to tracked files is not that commit: only an identical binary matches.
-  local_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)
-  if [[ "${local_commit}" != "unknown" && -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
-    local_commit="${local_commit}-dirty"
-  fi
+  # Only a run that installs a snapshot has any use for a manifest, or for the
+  # question whether the node built here is the one that made the snapshot. A
+  # node that already holds this network's chain (the ordinary re-run) is not
+  # given one, so it never depends on the snapshot host: not on what it now
+  # publishes, and not on its answering at all.
+  if snapshot_needed; then
+    local local_sha local_commit
+    local_sha=$(sha256sum "${INSTALL_ROOT}/bin/nhb" | cut -d' ' -f1)
+    # The commit of the checkout this script runs from. A checkout with local
+    # changes to tracked files is not that commit: only an identical binary matches.
+    local_commit=$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo unknown)
+    if [[ "${local_commit}" != "unknown" && -n "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+      local_commit="${local_commit}-dirty"
+    fi
 
-  fetch_manifest
-  check_binary_identity "$(manifest_field "${MANIFEST_FILE}" producer.binarySha256)" "$(manifest_field "${MANIFEST_FILE}" producer.binaryCommit)" \
-    "${local_sha}" "${local_commit}" || exit 1
+    fetch_manifest
+    check_binary_identity "$(manifest_field "${MANIFEST_FILE}" producer.binarySha256)" "$(manifest_field "${MANIFEST_FILE}" producer.binaryCommit)" \
+      "${local_sha}" "${local_commit}" || exit 1
+  else
+    log "the data directory already holds data: no snapshot is needed, so none is fetched"
+  fi
 
   ensure_key
   detect_external_address

@@ -40,6 +40,13 @@ and peer list, its vote and lock state, its keys and its logs are not, and the
 consensus key is not in the data directory at all. The script prints which files
 were left out.
 
+The tool refuses to publish, and consumers refuse to use, a snapshot larger than
+64 GiB (archive or unpacked) or one that unpacks to more than 64 times its archive:
+the live chain's is a few hundred megabytes. A new node's script also refuses, by
+default, an archive or an unpacked database above 16 GiB (`--max-snapshot-gib`). If
+the chain ever approaches those limits, tell operators to raise the flag, and raise
+the tool's own bounds in `cmd/nhb-snapshot/manifest.go` in the next release.
+
 ## Cadence
 
 Publish a new snapshot regularly and delete old ones: a new node starts from the

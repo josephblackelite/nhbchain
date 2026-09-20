@@ -270,10 +270,13 @@ bash scripts/validator-only-bootstrap.sh \
   --bootnode BOOTNODE_HOST_PORT
 ```
 
-It is safe to run again: what is already in place is left alone. `--reset-state`
-is only for a node whose data directory is broken; it moves that directory aside
-(never deletes it), installs a snapshot again, and keeps the node's p2p identity
-and vote state.
+It is safe to run again: what is already in place is left alone, and a node that
+already holds the chain is not given a snapshot (so it does not depend on the
+snapshot host). `--reset-state` is only for a node whose data directory is broken
+(a node that is already a validator included): it unpacks a verified snapshot
+next to that directory first, then stops the node, moves the old directory aside
+(never deletes it) and puts the snapshot in its place, keeping the node's p2p
+identity and vote state.
 
 Never pass a private key to this script -- it generates one for you, on
 this machine, the first time it runs. `--beneficiary` is **required**: it

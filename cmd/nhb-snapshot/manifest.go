@@ -21,6 +21,25 @@ const (
 
 	// maxManifestBytes bounds how much of a manifest file is read.
 	maxManifestBytes = 4 << 20
+
+	// A manifest may not describe a snapshot larger than these. The live
+	// chain's is a few hundred megabytes; the bounds leave room for years of
+	// growth and stop a manifest (which nobody signs) from asking a consumer
+	// for an absurd download or unpack. A consumer applies its own, lower,
+	// limit as well (deployvalidator.sh does).
+	maxArchiveBytes  int64 = 64 << 30
+	maxUnpackedBytes       = defaultMaxBytes
+	// maxExpansion is how many times larger than the archive a snapshot may
+	// unpack. A chain database gzips to between half and all of its size (the
+	// chains built for the tests and the local network's snapshot unpack to 1.2
+	// to 2.2 times their archive), so an archive announcing more than this is a
+	// decompression bomb.
+	maxExpansion int64 = 64
+
+	// maxTipFutureSkew is how far ahead of this host's clock a snapshot's
+	// newest block may be dated. A block cannot be in a snapshot before it
+	// exists, so more than clock error means the snapshot was made up.
+	maxTipFutureSkew = 5 * time.Minute
 )
 
 // A snapshot holds only the files of the chain database. Nothing else that
@@ -151,6 +170,9 @@ func (m *manifest) validate() error {
 	if a.Size <= 0 {
 		return fmt.Errorf("manifest archive size %d is not positive", a.Size)
 	}
+	if a.Size > maxArchiveBytes {
+		return fmt.Errorf("manifest archive size %d is above the %d bytes a snapshot may have", a.Size, maxArchiveBytes)
+	}
 	if _, err := parseSha256(a.Sha256); err != nil {
 		return fmt.Errorf("manifest archive sha256: %w", err)
 	}
@@ -191,6 +213,12 @@ func (m *manifest) validate() error {
 	}
 	if total != a.UncompressedSize {
 		return fmt.Errorf("manifest file sizes add up to %d but uncompressedSize is %d", total, a.UncompressedSize)
+	}
+	if total > maxUnpackedBytes {
+		return fmt.Errorf("manifest files add up to %d bytes, above the %d bytes a snapshot may unpack to", total, maxUnpackedBytes)
+	}
+	if total > a.Size*maxExpansion {
+		return fmt.Errorf("manifest says the %d byte archive unpacks to %d bytes, more than %d times its size: a chain database does not compress that far, so this is not a snapshot but a decompression bomb", a.Size, total, maxExpansion)
 	}
 	return nil
 }
@@ -276,6 +304,11 @@ func checkManifest(m *manifest, e expectations, now time.Time) error {
 	if m.Height < e.MinHeight {
 		return fmt.Errorf("the snapshot is at height %d, below the required minimum %d", m.Height, e.MinHeight)
 	}
+	if !now.IsZero() {
+		if ahead := time.Unix(m.TipTimestamp, 0).Sub(now); ahead > maxTipFutureSkew {
+			return fmt.Errorf("the snapshot's newest block is dated %s ahead of this host's clock: a block cannot be in a snapshot before it exists, so the snapshot was made up (or this host's clock is wrong)", ahead.Round(time.Second))
+		}
+	}
 	if e.MaxAge > 0 {
 		created, _ := time.Parse(time.RFC3339, m.CreatedAt)
 		if age := now.Sub(created); age > e.MaxAge {
@@ -318,6 +351,8 @@ func manifestField(m *manifest, name string) (string, error) {
 		return m.Archive.Name, nil
 	case "archive.size":
 		return strconv.FormatInt(m.Archive.Size, 10), nil
+	case "archive.uncompressedSize":
+		return strconv.FormatInt(m.Archive.UncompressedSize, 10), nil
 	case "archive.sha256":
 		return m.Archive.Sha256, nil
 	}
