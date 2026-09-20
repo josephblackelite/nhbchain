@@ -24,6 +24,17 @@ Every validator needs a disciplined clock (for example chrony or ntpd) so its
 error's `now=` value and check the last accepted timestamp in state before
 re-enabling signing.
 
+## Block pace
+
+How often a validator starts the next round is set by `[consensus] MinBlockInterval`
+in its own `config.toml` (default `1s` when the key is absent, `0s` turns the wait
+off, at most half the commit timeout; the repository `config.toml` sets `2s`). It is
+local to the validator and is not a rule blocks are checked against, but everything
+counted in blocks follows it, so block time is a function of that setting and not a
+constant. See [Runtime Configuration Guardrails](./configuration.md#block-pace-consensus-minblockinterval)
+and [Block cadence](../consensus/block-cadence.md). The node logs the effective
+value at start (`consensus: minimum block interval`).
+
 ## RPC hardening and transaction quotas
 
 Settings are top-level keys in `config.toml` (`config/config.go`). Defaults come
@@ -34,6 +45,12 @@ from `config.Load`.
 MaxTxPerWindow = 3
 MaxTxPerIP = 3
 ```
+- Behind a reverse proxy, list the proxy's address in `RPCTrustedProxies`;
+  `RPCTrustProxyHeaders = true` alone trusts no peer. See
+  [Gateway and RPC Security Settings](./security.md#rpc-hardening-cmdnhb).
+- Public reads that scan blocks or hold the state lock are admitted through a small
+  pool and are refused with HTTP 429 (`-32020`) or 503 (`-32021`) when it is full;
+  see [RPC query limits](./rpc-query-limits.md).
 - Align `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout`, and
   `RPCIdleTimeout` with upstream load-balancer/ingress settings to avoid idle
   disconnects. Document the final values in the deployment checklist.

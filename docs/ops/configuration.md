@@ -4,9 +4,12 @@
 calls `config.ValidateConfig` on the `[global]` block before opening the state
 database. A violation stops the process. Sources: `config/config.go`,
 `config/validate.go`, `cmd/consensusd/main.go`. `cmd/nhb` (the binary the
-`nhb.service` unit runs) loads the same file with `config.Load` but does not call
-`ValidateConfig` or `ValidateConsensus`, so the checks below are not applied at
-its startup.
+`nhb.service` unit runs) loads the same file with `config.Load` and, instead of
+stopping, calls `checkConfiguration` (`cmd/nhb/config_check.go`), which logs a
+`configuration problem` WARN for every problem the checks below find (in the
+`global` section, and in the `consensus` section as the node uses the values,
+with the built-in timer defaults in place of `0s`) and never stops the node.
+`ValidateConfig` and `ValidateConsensus` are called only by `cmd/consensusd`.
 
 ## Key spelling matters
 
@@ -63,7 +66,27 @@ column is the exact error text):
 `ValidateConsensus` separately requires the four `[consensus]` timeouts
 (`ProposalTimeout`, `PrevoteTimeout`, `PrecommitTimeout`, `CommitTimeout`) to be
 positive after defaults (`2s`, `2s`, `2s`, `4s`) and after the
-`--consensus-timeout-*` flags and `NHB_CONSENSUS_TIMEOUT_*` variables are applied.
+`--consensus-timeout-*` flags and `NHB_CONSENSUS_TIMEOUT_*` variables are applied,
+and requires `MinBlockInterval` to be neither negative nor longer than half the
+commit timeout (`config.ConsensusProblems`). `cmd/consensusd` reports these with
+`log.Fatal("invalid consensus timeouts", "err", err)`. On `cmd/nhb` a timer
+written as `0s` is not a problem: the BFT engine keeps its built-in value for a
+timer that is not positive, and the startup check judges the effective values
+(`config.EffectiveConsensus`).
+
+## Block pace: `[consensus] MinBlockInterval`
+
+`MinBlockInterval` is the least time a validator lets pass between seeing a block
+commit and starting the round of the next height. It is local to the validator
+and is not a rule that blocks are checked against. Default `1s` when the key is
+absent (`defaultMinBlockInterval`, `ensureConsensusDefaults` in
+`config/config.go`); `0s` turns the wait off; a value above half the commit
+timeout is refused by `consensusd` at start and lowered to that bound by the
+engine (`config/types.go`, `config/validate.go`). The repository `config.toml`
+sets `2s`. Every quantity counted in blocks (epoch length, emission per epoch)
+follows this setting, so block times are a function of it, not a constant; see
+[Block cadence](../consensus/block-cadence.md). `cmd/nhb` and `cmd/consensusd`
+log the effective value at start (`consensus: minimum block interval`).
 
 `cmd/consensusd` reports a failure with `log.Fatal("invalid configuration",
 "err", err)`. Because the standard-library logger concatenates those operands,
@@ -82,7 +105,7 @@ go build -o /tmp/consensusd ./cmd/consensusd
 mkdir -p /tmp/cfgtest && cp config.toml /tmp/cfgtest/config.toml && cd /tmp/cfgtest
 sed -i 's/QuorumBPS = 6000/QuorumBPS = 4000/' config.toml
 NHB_VALIDATOR_PASS=test-passphrase /tmp/consensusd --config ./config.toml \
-  --genesis <repo>/config/genesis.json
+  --genesis <repo>/config/genesis.relaunch.json
 ```
 
 The run stops at the governance check. Restore `QuorumBPS = 6000` and change
@@ -101,6 +124,16 @@ The run stops at the governance check. Restore `QuorumBPS = 6000` and change
   `AllowUnlimited = true` and `MaxTransactions = 0`
   (`ensureMempoolDefaults`, `Node.SetMempoolLimit`). When the pool already holds
   more than the limit, the oldest entries are dropped.
+
+## RPC limits and other keys
+
+The RPC keys `RPCQueryMaxConcurrent`, `RPCQueryMaxPerClient`, `RPCQueryQueueDepth`,
+`RPCQueryQueueWaitMS`, `RPCQueryTimeoutSeconds` and `RPCDisableExplorerLoop` are
+described in [RPC query limits](rpc-query-limits.md). `RPCWebSocketOrigins`,
+`RPCWebSocketMaxConnections` and `RPCWebSocketMaxPerIP` are top-level keys read
+by `config.Config` and passed to the RPC server (`cmd/nhb/main.go`). The paymaster
+auto top-up asset `[global.Paymaster.AutoTopUp] Token` defaults to `NHB` and
+accepts `NHB` or `ZNHB` (`config/global.go`, `PaymasterAutoTopUpConfig`).
 
 ## Pauses and quotas
 

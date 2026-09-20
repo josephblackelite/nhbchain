@@ -1,8 +1,9 @@
 # Gateway Overview
 
 > [!WARNING]
-> The `/rpc` JSON-RPC compatibility endpoint is on a staged removal plan
-> (`gateway/compat/deprecations.yaml`, `currentPhase: phase-a`). See the
+> The `/rpc` JSON-RPC compatibility endpoint follows a phase table in
+> `gateway/compat/deprecations.yaml` (`currentPhase: phase-a`); see
+> [Compatibility mode](#compatibility-mode) and the
 > [JSON-RPC decommission timeline](../migrate/deprecation-timeline.md).
 
 `cmd/gateway` is an HTTP reverse proxy built on `chi`. It authenticates and
@@ -165,7 +166,9 @@ then the remote address. Exceeding a bucket returns `429`. `requestsPerMinute`
 is converted to a per-second rate; `ratePerSecond` takes precedence when both
 are set. If `rateLimits` is empty, the gateway uses these built-in limits:
 `lending` 2/s burst 20, `swap` 1/s burst 10, `gov` 1/s burst 10, `consensus`
-4/s burst 40. A route whose key has no entry is not limited.
+4/s burst 40. Whether or not `rateLimits` is empty, the `compat` key (used by
+`/rpc`) gets 2/s burst 20 when no entry with the id `compat` exists
+(`cmd/gateway/main.go`). A route whose key has no entry is not limited.
 
 ### Transport security
 
@@ -188,17 +191,27 @@ The gateway checks these rules at startup (`cmd/gateway/main.go`):
 
 ## Compatibility mode
 
-`/rpc` accepts JSON-RPC (single or batch, body limit 1 MiB) and translates
-selected method names to backend REST calls through the table in
-`gateway/compat/mapping.go` (for example `lending_getMarket`, `swap_limits`,
-`gov_getProposal`, `consensus_status`). Unknown methods return `-32601`.
+`/rpc` accepts JSON-RPC (single or batch, body limit 1 MiB, at most 10 calls in a
+batch, otherwise `-32600`) and translates selected method names to backend REST
+calls through the table in `gateway/compat/mapping.go` (for example
+`lending_getMarket`, `swap_limits`, `gov_getProposal`, `consensus_status`).
+Unknown methods return `-32601`.
 
 - `--compat-mode` / `NHB_COMPAT_MODE` accept `enabled`, `disabled` or `auto`.
   `auto` follows the active phase in `deprecations.yaml`; `phase-a` enables it.
 - Responses carry `Warning`, `Link` and `X-NHB-Compat-Phase` headers.
-- The `/rpc` handler is registered outside the per-route authentication and
-  rate-limit middleware, and it does not forward the caller's headers to the
-  backend.
+- `/rpc` sits behind the rate limiter (key `compat`) and the same authenticator
+  as the other routes (`gateway/routes/router.go`): with `auth.enabled: true` a
+  request needs a valid bearer token unless its path is one of `auth.optionalPaths`
+  with `auth.allowAnonymous: true`. The route itself requires no scope, but the
+  dispatcher holds each call to the scopes of the service that would answer it:
+  `lending` for `lendingd`, `swap` for `swapd`, `gov` for `governd`, none for
+  `consensusd`. A caller whose token lacks the scope gets the JSON-RPC error
+  `-32004 insufficient scope`. A request that came in without a token
+  (authentication off, or an open path) is not held to scopes
+  (`gateway/compat/compat.go`, `ScopeGuard`).
+- The caller's `Authorization` header is forwarded to the backend with each call;
+  no other caller header is.
 
 ## Observability
 

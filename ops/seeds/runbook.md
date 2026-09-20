@@ -111,8 +111,12 @@ that fail `seeds.Parse` are rejected by the governance engine
 
 ## 5. Check the result
 
-- `net_info` shows the node's own `nodeId` and `listenAddrs`; `net_peers` lists
-  connected peers. Both are unauthenticated JSON-RPC methods.
+- `net_info` shows the node's own `nodeId` and `listenAddrs` and needs no
+  credential. `net_peers` lists the node's peers and needs a JWT (or a verified
+  client certificate) like `net_dial`, and so does `p2p_peers`, which returns the
+  same list (`rpc/net_handlers.go`, `rpc/p2p_query_handlers.go`). See
+  [Gateway and RPC Security Settings](../../docs/ops/security.md) and, for a
+  token, `nhb-cli rpc-token`.
 - `net_dial` with `{"target": "<target>"}` dials a peer (`Server.DialPeer` in
   `p2p/server.go` accepts a node ID or an address) and needs a JWT.
 - The node re-resolves the registry every `refreshSeconds` (`p2p/server.go`).
@@ -122,4 +126,6 @@ that fail `seeds.Parse` are rejected by the governance engine
 ## Files and directories
 
 - `<DataDir>/p2p/node_key.json`: node identity.
-- `<DataDir>/p2p/peerstore`: peerstore database.
+- `<DataDir>/p2p/peerstore`: peerstore database. It holds at most 2,048 peers
+  (least recently seen are evicted first) and prunes peers not seen for 14 days
+  (`p2p/peerstore.go`: `defaultPeerstoreMaxEntries`, `defaultPeerstoreTTL`).
