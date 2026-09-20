@@ -281,7 +281,7 @@ func defaultGlobalConfig() Global {
 			MerchantDailyCapWei: "0",
 			GlobalDailyCapWei:   "0",
 			AutoTopUp: PaymasterAutoTopUp{
-				Token:          "ZNHB",
+				Token:          "NHB",
 				MinBalanceWei:  "0",
 				TopUpAmountWei: "0",
 				DailyCapWei:    "0",
