@@ -1554,10 +1554,19 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "swap_submitVoucher":
 		s.handleSwapSubmitVoucher(recorder, r, req)
 	case "swap_voucher_get":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherGet(recorder, r, req)
 	case "swap_voucher_list":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherList(recorder, r, req)
 	case "swap_voucher_export":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherExport(recorder, r, req)
 	case "nhb_requestSwapApproval", "nhb_getSwapQuote":
 		if authErr := s.requireAuthInto(&r); authErr != nil {

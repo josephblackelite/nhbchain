@@ -46,3 +46,12 @@ Swap HMAC authentication retains the existing defaults (±120 seconds skew,
 10-minute nonce TTL) but can be tuned via the `swapAuth` block in `config.toml`
 to match partner integration requirements. Keep nonce caches large enough to
 handle burst traffic while preventing replay amplification.
+
+The reads of the swap voucher ledger (`swap_voucher_get`, `swap_voucher_list`,
+`swap_voucher_export`) are not public. With `RPCSwapAuth` configured they take
+the signed partner request; without it they take the bearer token (or client
+certificate) that the privileged swap methods take, so a partner integration
+that reads the ledger needs `RPCSwapAuth` set. `swap_voucher_list` returns at
+most 200 records per call (follow `nextCursor` for the rest), and the list and
+export reads take a slot in the heavy-query pool described above. The peer list
+(`net_peers`, `p2p_peers`) takes the bearer token as well.

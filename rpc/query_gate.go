@@ -96,7 +96,8 @@ func isGatedQueryMethod(method string) bool {
 		"nhb_getTransactionHistory", "nhb_getAddressActivity", "nhb_getExplorerSnapshot",
 		"nhb_getLatestTransactions", "nhb_txWindowStats",
 		"lending_getMarket", "lend_getPools", "lending_getUserAccount",
-		"market_listOpenListings", "market_getMyListings", "market_getMyFills":
+		"market_listOpenListings", "market_getMyListings", "market_getMyFills",
+		"swap_voucher_list", "swap_voucher_export":
 		return true
 	}
 	return false

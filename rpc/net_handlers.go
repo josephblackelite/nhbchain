@@ -59,6 +59,13 @@ func (s *Server) handleNetInfo(w http.ResponseWriter, r *http.Request, req *RPCR
 }
 
 func (s *Server) handleNetPeers(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	// The peer list names every peer's address, score and ban state, which is
+	// what an attacker needs to pick a target: it takes the same credential as
+	// net_dial and net_ban.
+	if authErr := s.requireAuthInto(&r); authErr != nil {
+		writeError(w, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
+		return
+	}
 	if len(req.Params) != 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeNetInvalidParams, "invalid_params", "net_peers takes no parameters")
 		return
