@@ -133,9 +133,9 @@ To slow the chain to the 2.5 s a block that the reward schedule was written for,
 ## What counts blocks
 
 Every quantity below is counted in blocks, so it moves with the pace. Rules counted in
-time (staking APR and index, unbonding, governance voting periods, loyalty epochs, quota
-epochs, sponsorship days, subscription and fixed-term billing days, heartbeat spacing,
-swap and escrow expiry) read the block timestamp and do not.
+time (staking APR and index, lending interest, unbonding, governance voting periods,
+loyalty epochs, quota epochs, sponsorship days, subscription and fixed-term billing
+days, heartbeat spacing, swap and escrow expiry) read the block timestamp and do not.
 
 | quantity | where | at 1 block/s | at 0.8 | at 2.5 |
 | --- | --- | --- | --- | --- |
@@ -143,7 +143,6 @@ swap and escrow expiry) read the block timestamp and do not.
 | emission per epoch (200 ZNHB to validators, stakers and engagement); the halving era is 500,000 epochs, written for 2.5 s a block (4 years) | `core/rewards/halving.go` `HalvingEmissionForEpoch`; `core/rewards_logic.go` `accrueEpochRewards`, `settleEpochRewards` | 7,200 ZNHB an hour, era 1.6 years | 5,760, 2.0 years | 18,000, 0.6 years |
 | POTSO reward epoch (120 blocks, 50 ZNHB budget) | `core/state_transition.go` `maybeProcessPotsoRewards`; `native/potso/rewards.go` `RewardConfig.EpochLengthBlocks` | 120 s | 150 s | 48 s |
 | buyback settlement, and the signed reference price it needs, per validator epoch | `core/buyback_settlement.go` `currentBuybackEpoch`, `settleBuybackEpoch` | 100 s | 125 s | 40 s |
-| lending interest: `blocksPerYear` (31,536,000) counts a block as a second | `native/lending/engine.go` `accrueInterest`; `native/lending/math.go` `rateFactor`, `computeInterest` | as written | 20% under | 2.5 times over |
 | lending oracle staleness bound (1,000 blocks); borrow cap per block | `native/lending/engine.go` (`MaxAgeBlocks`); `native/lending/params.go` `BorrowCaps.PerBlock` | 17 min | 21 min | 6.7 min |
 | equivocation evidence window (8,640 blocks, a day at 10 s a block) | `consensus/potso/evidence/types.go` `DefaultMaxAgeBlocks`; `core/potso_evidence_tx.go` | 2.4 h | 3.0 h | 58 min |
 | epoch snapshots kept (64 epochs) | `core/epochs.go` `pruneEpochHistory` | 1.8 h | 2.2 h | 43 min |

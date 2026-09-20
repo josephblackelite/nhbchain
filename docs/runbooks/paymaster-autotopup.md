@@ -1,8 +1,11 @@
 # Paymaster Automatic Top-up Runbook
 
-Automatic paymaster top-ups transfer `ZNHB` from a configured funding wallet
-into sponsored paymaster balances when those balances dip below the configured
-floor. The flow is treasury-funded, not inflationary.
+Automatic paymaster top-ups transfer the top-up asset from a configured funding
+wallet into sponsored paymaster balances when those balances dip below the
+configured floor. The asset is `NHB` unless the policy names `ZNHB`: sponsored
+gas is paid in NHB, so NHB is the asset a sponsor runs out of. The balance check,
+the funding debit, the paymaster credit and the governed fee all use that one
+asset. The flow is treasury-funded, not inflationary.
 
 ## Monitoring Signals
 
@@ -24,7 +27,7 @@ floor. The flow is treasury-funded, not inflationary.
 1. Confirm whether the spike is organic sponsored demand or a runaway
    configuration.
 2. Compare the funded 24h total against `DailyCapWei`.
-3. Verify the configured funding wallet still holds enough `ZNHB`.
+3. Verify the configured funding wallet still holds enough of the top-up asset (`NHB` by default).
 4. Confirm the execution operator and approver identities still hold the
    expected governance roles.
 5. Review recent merchant/device sponsorship activity for abuse or loops.

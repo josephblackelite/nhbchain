@@ -1,8 +1,9 @@
 # Paymaster Top-up Controls
 
-The paymaster auto top-up pathway transfers `ZNHB` from a designated funding
-wallet into sponsorship accounts when balances fall below the configured floor.
-It is not a mint path.
+The paymaster auto top-up pathway transfers the top-up asset (`NHB`, the asset
+sponsored gas is paid in, unless the policy names `ZNHB`) from a designated
+funding wallet into sponsorship accounts when their balance of that asset falls
+below the configured floor. It is not a mint path.
 
 ## Governance Requirements
 

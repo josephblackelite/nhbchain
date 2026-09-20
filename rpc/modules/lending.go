@@ -118,7 +118,18 @@ func (m *LendingModule) projectMarketAccrual(manager *nhbstate.Manager, poolID s
 	engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 	engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 	engine.SetBlockHeight(m.node.GetHeight())
+	engine.SetBlockTimestamp(m.headBlockTimestamp())
 	return engine.ProjectAccrual(market)
+}
+
+// headBlockTimestamp is the header timestamp of the newest committed block, the
+// block time interest is projected to: committed chain data, never the clock of
+// the machine answering the call.
+func (m *LendingModule) headBlockTimestamp() int64 {
+	if chain := m.node.Chain(); chain != nil {
+		return chain.LastTimestamp()
+	}
+	return 0
 }
 
 func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *ModuleError) {
@@ -600,6 +611,15 @@ func (m *LendingModule) reconcileLegacyPoolStateInto(manager *nhbstate.Manager, 
 	if id == "" {
 		id = defaultLendingPoolID
 	}
+	// Once a lending transaction has completed the sweep for this pool, every
+	// account that held a legacy position has been migrated already (see
+	// core/lending_native.go's reconcileLegacyPoolState), and listing them all
+	// again would find nothing.
+	if done, err := manager.LendingLegacyReconciled(id); err != nil {
+		return err
+	} else if done {
+		return nil
+	}
 	accounts, err := manager.AccountList()
 	if err != nil {
 		return err
@@ -937,6 +957,7 @@ func (m *LendingModule) withEngine(poolID string, fn func(*lending.Engine, *lend
 		engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 		engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 		engine.SetBlockHeight(m.node.GetHeight())
+		engine.SetBlockTimestamp(m.headBlockTimestamp())
 		engine.SetCollateralRouting(m.node.LendingCollateralRouting())
 		var market *lending.Market
 		stored, ok, err := manager.LendingGetMarket(id)

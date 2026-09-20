@@ -62,7 +62,8 @@ This runbook covers the operational tooling for tracking staking reward emission
 ## Interpret staking events
 
 * `stake.delegated` / `stake.undelegated`: Validate that the `amount` lines up with transaction intents and the `validator` matches the expected operator. Spikes in delegation volume without matching announcements may signal compromised accounts.
-* `stake.claimed`: Cross-check with emission YTD to ensure the minted rewards reconcile with the reward index advance for the period.
+* `stake.rewardsClaimed` (and its legacy alias `stake.claimed`): Cross-check with emission YTD to ensure the minted rewards reconcile with the reward index advance for the period.
+* `stake.unbondClaimed`: A matured unbond returned to the delegator. Match the `unbondingId` and `amount` against the `stake.undelegated` event that opened it.
 * `stake.rewardIndexAdvanced`: Fired at every 30-day payout. Confirm that the delta equals `(targetAprBps/12) * rewardIndexScale` and that no validators are paused.
 * `stake.emissionCapHit`: Triggers the "Emission Cap 100%" alert. Escalate to treasury immediately and follow the cap saturation runbook section above.
 * `stake.paused`: Indicates governance toggled the module. Verify the `reason` attribute and correlate with the pause handling checklist.

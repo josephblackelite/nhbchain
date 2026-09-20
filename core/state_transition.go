@@ -264,7 +264,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		potsoWeightConfig:        potso.DefaultWeightParams(),
 		paymasterEnabled:         true,
 		paymasterLimits:          PaymasterLimits{},
-		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
 		quotaConfig:              make(map[string]nativecommon.Quota),
 		intentTTL:                defaultIntentTTL,
 		feePolicy:                fees.Policy{Domains: map[string]fees.DomainPolicy{}},
@@ -2896,7 +2896,11 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	}
 	if err != nil {
-		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) {
+		// A rejection that is itself reported by an event keeps that event: the
+		// two transfer pauses, a refused sponsorship and a paused staking
+		// module (the stake.paused event StakeDelegate and its siblings emit
+		// before they refuse the request).
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) && !errors.Is(err, ErrStakePaused) {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -3178,7 +3182,9 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 					}
 				}
 			}
-			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc)
+			// The sender and the recipient are written after this call from the
+			// objects loaded above, so the top-up may not touch their accounts.
+			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc, from, tx.To)
 			if err != nil {
 				return nil, err
 			}
@@ -5288,7 +5294,7 @@ func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt,
 	return receipt, nil
 }
 
-func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *types.Account, releaseToBuyer bool) error {
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, senderAccount *types.Account, releaseToBuyer bool) error {
 	_ = releaseToBuyer
 	var payload struct {
 		EscrowID   string   `json:"escrowId"`
@@ -5336,7 +5342,11 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *typ
 	if err := sp.EscrowEngine.ResolveWithSignatures(id, []byte(payload.Decision), sigs); err != nil {
 		return err
 	}
-	return nil
+	// The sender only relays the arbitrators' signed decision, but it still
+	// owns this transaction's nonce: every sibling escrow handler advances it
+	// on success, and without this the relayer's next transaction would carry
+	// the nonce this one just used.
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 // applySwapMint and applySwapBurn are deliberately disabled -- see
@@ -6177,17 +6187,17 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 		return nil, err
 	}
 
-	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, entry.Validator)
-	sp.AppendEvent(&types.Event{
-		Type: "stake.claimed",
-		Attributes: map[string]string{
-			"delegator":   delegatorAddr.String(),
-			"validator":   validatorAddr.String(),
-			"amount":      entry.Amount.String(),
-			"unbondingId": strconv.FormatUint(entry.ID, 10),
-		},
-	})
+	// Not "stake.claimed": that name belongs to the legacy alias of the
+	// rewards claim event (events.TypeStakeRewardsClaimedLegacy), which carries
+	// different attributes.
+	if evt := (events.StakeUnbondClaimed{
+		Delegator:   bytesToAddress(delegator),
+		Validator:   bytesToAddress(entry.Validator),
+		Amount:      entry.Amount,
+		UnbondingID: entry.ID,
+	}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
 
 	return &entry, nil
 }

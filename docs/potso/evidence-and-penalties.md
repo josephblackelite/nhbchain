@@ -102,11 +102,11 @@ Decay percentages are expressed in basis points and applied against the offender
 
 Every application is idempotent: the pair `{offense, offender}` is recorded in chain state together with the penalty it guards, so the record is versioned with the block that applied it. The offense is the identity described under [Canonical hash & replay guard](#canonical-hash--replay-guard), not the hash of whichever report brought it to light, so no other way of writing the same double-sign is penalised again. Every node computes the same result whether it is building, validating, committing or replaying a block, and a trial build that is discarded leaves nothing behind. The record is removed together with the evidence record when that ages out of the window.
 
-A slash moves the offender's locked ZNHB to the treasury (the chain's admin wallet). Because that wallet's balance is covered by the sale and reward pools, the forfeited amount is added to the reward pool in the same step, so the ZNHB supply invariant holds across a slash.
+A slash moves the offender's locked ZNHB to the treasury (the chain's admin wallet). What is forfeited is bounded by what the offender really has: the penalty never exceeds its recorded stake or the ZNHB it holds locked itself, so stake that other accounts delegated to the offender is not reached by a slash. Because that wallet's balance is covered by the sale and reward pools, the forfeited amount is added to the reward pool in the same step, so the ZNHB supply invariant holds across a slash.
 
 ### Penalty events
 
-Successful executions emit `potso.penalty.applied { hash, type, offender, decayPct, slashAmt, newWeight, block, idempotent }`. `decayPct` is rendered as a percentage with two decimal places (basis-point precision) and `slashAmt` reflects the amount routed to the slashing subsystem (zero when disabled). `newWeight` reports the post-penalty participation weight for observability.
+Successful executions emit `potso.penalty.applied { hash, type, offender, decayPct, slashAmt, newWeight, block, idempotent }`. `decayPct` is rendered as a percentage with two decimal places (basis-point precision) and `slashAmt` is the amount actually forfeited to the treasury, which can be less than the penalty asked for (zero when disabled or when the offender has nothing bonded). `newWeight` reports the post-penalty participation weight for observability.
 
 ## Appeals & remediation process
 

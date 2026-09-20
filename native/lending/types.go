@@ -41,6 +41,12 @@ type Market struct {
 	// LastUpdateBlock records the block height when indexes were last
 	// refreshed.
 	LastUpdateBlock uint64
+	// LastUpdateTimestamp records the block time, in Unix seconds, of the block
+	// that last refreshed the indexes. Interest accrues by the time elapsed since
+	// it, so it does not depend on how fast blocks arrive. It is zero on a market
+	// that has not been stamped yet, which accrues by the block count once (one
+	// second per block, as before) and is stamped by that accrual.
+	LastUpdateTimestamp uint64
 	// ReserveFactor defines the share of interest routed to protocol reserves
 	// expressed in basis points for deterministic accounting.
 	ReserveFactor uint64

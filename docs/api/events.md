@@ -148,6 +148,21 @@ while also reporting the unbond release metadata.
 }
 ```
 
+## `stake.unbondClaimed`
+
+Claiming a matured unbonding entry returns the unbonded ZNHB to the delegator's liquid balance.
+This event used to be named `stake.claimed`, the name the legacy alias of `stake.rewardsClaimed`
+(below) still carries, so the two could not be told apart by type.
+
+### Attributes
+
+| Attribute | Type | Description |
+| --- | --- | --- |
+| `delegator` | `string` | Delegator address that claimed the unbond. |
+| `validator` | `string` | Validator the stake was bonded to. |
+| `amount` | `string` | Amount of ZNHB returned (wei). |
+| `unbondingId` | `string` | Identifier of the unbonding entry that was claimed. |
+
 ## `stake.rewardsClaimed`
 
 Claiming staking rewards pays ZNHB from the configured rewards treasury to the delegator,

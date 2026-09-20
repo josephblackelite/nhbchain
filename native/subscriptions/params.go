@@ -1,6 +1,10 @@
 package subscriptions
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+	"math/big"
+)
 
 // Default configuration values. ManagementFeeBps is deliberately modest --
 // a small fraction of a subscription payment, positioned well under card
@@ -15,6 +19,52 @@ const (
 	DefaultMaxRetries           = uint32(3)
 	DefaultRetryIntervalSeconds = uint64(24 * 60 * 60) // 1 day between dunning retries
 )
+
+// Bounds on the terms of a plan. The chain charges every subscription by
+// itself, in the lifecycle of a block, with no transaction paying for the work
+// (balances change and a history record and an event are added), so how often
+// a subscription is charged bounds the work one subscribe transaction can
+// cause. They are constants, not configuration: a node whose bounds differed
+// from its peers' would accept a plan they refuse.
+const (
+	// MinPlanIntervalSeconds is the shortest billing interval a plan may have,
+	// one day. A shorter one would have the chain charge the same payer on
+	// every block for the price of one transaction, and settlement never
+	// schedules a subscription's next charge sooner than this after the last one
+	// whatever the stored interval says.
+	MinPlanIntervalSeconds = uint64(24 * 60 * 60)
+	// MaxPlanIntervalSeconds is the longest billing interval and
+	// MaxTrialPeriodSeconds the longest trial, ten years of 365 days each. They
+	// keep "now plus the interval" far from the end of the uint64 range, where
+	// it would wrap around to a time in the past and make the subscription due
+	// again at once.
+	MaxPlanIntervalSeconds = uint64(10 * 365 * 24 * 60 * 60)
+	MaxTrialPeriodSeconds  = MaxPlanIntervalSeconds
+)
+
+// minPlanPriceWei is the smallest price a plan may charge per cycle: one whole
+// token of either asset, the same dust floor the buyback ask and the lending
+// deposit use. A charge only moves its price from the payer to the merchant,
+// so two accounts of one owner can run a subscription at the cost of the
+// management fee alone: a hundredth of a token per charge at the default rate,
+// and nothing at all at a price of one wei.
+var minPlanPriceWei = big.NewInt(1_000_000_000_000_000_000)
+
+// MinPlanPriceWei returns the smallest price, in wei, a plan may charge per
+// cycle. The caller gets its own copy.
+func MinPlanPriceWei() *big.Int {
+	return new(big.Int).Set(minPlanPriceWei)
+}
+
+// AddSeconds returns t+d, or the largest uint64 when the sum does not fit. A
+// time computed from a stored duration must never wrap around to the past: an
+// entry scheduled in the past is due again on the very next block.
+func AddSeconds(t, d uint64) uint64 {
+	if d > math.MaxUint64-t {
+		return math.MaxUint64
+	}
+	return t + d
+}
 
 // Config captures the subscriptions engine's deployment-configured
 // parameters. Mirrors native/lending's Config/RiskParameters split: wired
