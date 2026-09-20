@@ -64,8 +64,9 @@ identifier is required.
   without executing it: `status`, `reason`, `sponsor`, `gasPriceWei`,
   `requiredBudgetWei`, `moduleEnabled` and a `throttle` object with the same
   fields as the event. `tx_getSponsorshipConfig` returns `enabled` and
-  `adminRole`. `tx_setSponsorshipEnabled` (JWT required) takes `caller` and
-  `enabled` (`rpc/modules/transactions.go`, `rpc/http.go`).
+  `adminRole`. `tx_setSponsorshipEnabled` is retired: it answers HTTP 410 with code
+  `-32060` (`handleTxSetSponsorshipEnabled`, `rpc/http.go`) and sponsorship stays enabled on
+  every node.
 - Auto top-ups are counted by `nhb_paymaster_autotopups_total{outcome}` and
   `nhb_paymaster_autotopup_amount_wei_total{outcome}`.
 

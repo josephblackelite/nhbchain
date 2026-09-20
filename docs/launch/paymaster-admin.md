@@ -1,7 +1,7 @@
 # Paymaster Sponsorship Administration
 
 This guide documents the paymaster (gas sponsorship) module as the code implements it:
-the role that may toggle it, the three RPC methods, the sponsorship statuses and the events.
+the two live RPC methods (and the retired third), the sponsorship statuses and the events.
 Sources: `core/sponsorship.go`, `core/node.go`, `rpc/modules/transactions.go`,
 `rpc/http.go`, `core/events/sponsorship.go`.
 
@@ -20,7 +20,7 @@ status is neither `ready` nor `none` is rejected with
 
 * The chain ID of every transaction is `0x4e4842` (decimal `5130306`, ASCII `NHB`)
   (`core/types/transaction.go`).
-* The role that may toggle the module is `ROLE_PAYMASTER_ADMIN`. Roles are assigned in the
+* `tx_getSponsorshipConfig` reports `ROLE_PAYMASTER_ADMIN` as `adminRole` (`rpc/modules/transactions.go`), but no live RPC method checks it: the only method that did, `tx_setSponsorshipEnabled`, is retired (section 3). The module's enabled flag has no runtime setter (`core/node.go`). The same role name is the default of `[global.Paymaster.AutoTopUp.Governance] ApproverRole` (`config/config.go`). Roles are assigned in the
   `roles` object of the genesis file, which maps a role name to a list of bech32 addresses
   (`core/genesis/spec.go`):
 
@@ -54,29 +54,13 @@ with the module enabled (`core/state_transition.go`).
 
 ## 3. Enable or disable sponsorship
 
-`tx_setSponsorshipEnabled` requires RPC authentication (a bearer token) and one parameter
-object:
-
-```bash
-curl -s -X POST <rpc-endpoint> -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tx_setSponsorshipEnabled",
-       "params":[{"caller":"<bech32 address holding ROLE_PAYMASTER_ADMIN>","enabled":false}]}'
-```
-
-`NHB_RPC_TOKEN` is the variable `nhb-cli` reads for the token. On success the result is the
-same object as `tx_getSponsorshipConfig`. If `caller` does not hold the role the response is
-HTTP 403 with the message `paymaster: caller lacks ROLE_PAYMASTER_ADMIN`. A missing `caller`
-returns `caller required`.
-
-Behaviour to be aware of (`SetPaymasterModuleEnabled` in `core/node.go`):
-
-* The call changes a flag in the memory of the node that received it. It is not a
-  transaction and nothing is written to chain state, so it does not reach other nodes and it
-  is not kept across a restart (a restarted node is enabled again).
-* `caller` is a plain address string in the request. It is checked against the role, but no
-  signature proves that the requester controls that address. Access control therefore rests on
-  the RPC bearer token.
+`tx_setSponsorshipEnabled` is retired. Whatever the request or credential, the server answers
+HTTP 410 with error code `-32060` (`handleTxSetSponsorshipEnabled`, `rpc/http.go`). The method
+took a `caller` address from the request body without any proof that the requester held that key,
+and it flipped a flag in the memory of the one node that received it. Because that flag decides
+whether a sponsored transaction is valid at all, different validators could disagree on which
+blocks were acceptable. Sponsorship therefore stays enabled on every node, and
+`tx_getSponsorshipConfig` (section 2) and `tx_previewSponsorship` (section 4) remain live.
 
 ## 4. Preview sponsorship
 

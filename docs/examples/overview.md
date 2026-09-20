@@ -70,12 +70,12 @@ The `x-nhb-*` request headers are a convention of these examples. No server in t
 
 | Variable | Default in `.env.example` | Read by |
 | --- | --- | --- |
-| `NHB_RPC_URL` | `https://api.nhbcoin.net/rpc` | dashboard, monitor, wallet-lite, p2p-mini-market, creator-studio, loyalty console |
-| `NHB_RPC_TOKEN` | `demo-token` | Next.js server routes, sent as `Authorization: Bearer` |
+| `NHB_RPC_URL` | `https://api.nhbcoin.net/rpc` | dashboard, monitor, wallet-lite, p2p-mini-market, creator-studio, loyalty console; also the cookbook (`examples/cookbook/go`, `examples/cookbook/js`) and `cmd/nhb/escrowcmd` |
+| `NHB_RPC_TOKEN` | `demo-token` | Next.js server routes, sent as `Authorization: Bearer`; also `cmd/nhb-cli`, `cmd/nhb/escrowcmd` and `bench/posloader` |
 | `NHB_WS_URL` | `wss://api.nhbcoin.net/ws` | monitor (echo only); wallet-lite and p2p-mini-market parse it but do not open a socket |
 | `NHB_API_URL` | `https://gw.nhbcoin.net` | monitor (echo only); wallet-lite profile route |
-| `NHB_CHAIN_ID` | `14699254016670310680` | forwarded as a header by dashboard, wallet-lite, p2p-mini-market |
-| `NHB_API_KEY`, `NHB_API_SECRET` | `demo-key`, `demo-secret` | dashboard, monitor (HMAC demo) |
+| `NHB_CHAIN_ID` | `18346390202490284624` | forwarded as a header by dashboard, wallet-lite, p2p-mini-market |
+| `NHB_API_KEY`, `NHB_API_SECRET` | `demo-key`, `demo-secret` | dashboard, monitor (HMAC demo); also the cookbook examples and `examples/escrow-checkout/merchant-demo` |
 | `NHB_WALLET_PRIVATE_KEY`, `NHB_WALLET_ADDRESS` | placeholders | monitor (`walletSig`), dashboard (`/demo-signature`) |
 | `STATUS_DASHBOARD_PORT`, `NETWORK_MONITOR_PORT` | `4300`, `4301` | dashboard, monitor |
 
