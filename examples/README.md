@@ -33,9 +33,9 @@ Other directories: `cookbook/` (Go and JS RPC scripts), `docs/` (Go and TS snipp
 Go programs in `examples/docs/ops`. Run them from the repository root. `read_pauses`, `pause_toggle`, `quota_dump` and `swap_pause_inspect` open the node's data directory directly (`--db`, default `./nhb-data`) and read the latest block over gRPC (`--consensus`, default `localhost:9090`).
 
 - `go run ./examples/docs/ops/read_pauses` prints the `system/pauses` parameter: `lending`, `swap`, `escrow`, `trade`, `loyalty`, `potso`, `transfer_nhb`, `transfer_znhb`, `staking`. If the parameter is unset it prints `no pause overrides set (all modules active)`.
-- `go run ./examples/docs/ops/pause_toggle --authority <address> --module <name> --state pause|resume` builds a `gov.v1 MsgSetPauses` and submits it to governd (`--governance`, default `localhost:50061`). `--authority` and `--module` are required. `--state` accepts `pause`/`paused`/`on` and `resume`/`unpause`/`off`. The message type (`govv1.Pauses`) carries only `lending`, `swap`, `escrow`, `trade`, `loyalty` and `potso`.
+- `go run ./examples/docs/ops/pause_toggle --authority <address> --module <name> --state pause|resume` builds a `gov.v1 MsgSetPauses` and submits it to the governance service (`--governance`, default `localhost:50061`). `--authority` and `--module` are required. `--state` accepts `pause`/`paused`/`on` and `resume`/`unpause`/`off`. The message type (`govv1.Pauses`) carries only `lending`, `swap`, `escrow`, `trade`, `loyalty` and `potso`.
 - `go run ./examples/docs/ops/quota_dump --module <name> --address <nhb1...>` prints the quota counters for one address in one epoch. Optional `--epoch` (defaults to the current epoch) and `--epoch-seconds` (default 60).
-- `go run ./examples/docs/ops/swap_pause_inspect` prints `global.pauses.swap` from the pause parameter and the outcome of a status request to the service URL given by `--swapd` (default `http://localhost:7074`).
+- `go run ./examples/docs/ops/swap_pause_inspect` prints `global.pauses.swap` from the pause parameter and the outcome of a `GET /v1/stable/status` request to the swap service URL given by `--swap` (default `http://localhost:7074`): HTTP 200 prints the quote, reservation and asset counts, HTTP 501 is reported as paused with the error text, any other status exits with an error.
 
 ## Developing new examples
 

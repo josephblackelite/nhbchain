@@ -22,9 +22,11 @@ So the UI can load balances and display trades or escrows that already exist, bu
 - The **quote** escrow: payer is the buyer, payee is the seller, holds the quote token.
 - The **base** escrow: payer is the seller, payee is the buyer, holds the base token.
 
-The demo's "SELL_NHB" direction sets base = NHB and quote = ZNHB; "SELL_ZNHB" is the reverse (`mini-market-app.tsx`). The funding deadline in the UI defaults to 6 hours. The trade ID is a Keccak-256 hash of the offer ID, buyer, seller and a nonce, so re-creating the same definition is idempotent, and reusing an ID with a different definition is an error (`trade: identifier already exists with different definition`). Amounts must be positive; the deadline must not be in the past.
+The demo's "SELL_NHB" direction sets base = NHB and quote = ZNHB; "SELL_ZNHB" is the reverse (`mini-market-app.tsx`). The funding deadline in the UI defaults to 6 hours. The trade ID is a Keccak-256 hash of the offer ID, buyer, seller and a nonce, so re-creating the same definition is idempotent, and reusing an ID with a different definition is an error (`trade: identifier already exists with different definition`). Amounts must be positive (`trade: quote amount must be positive`, `trade: base amount must be positive`); a deadline earlier than the current time is rejected (`trade: deadline before creation time`).
 
 ### Trade states
+
+When the engine runs inside the block pipeline, every time it reads or stores (`createdAt`, `fundedAt`, deadline and 900-second checks, and the escrow legs' own timestamps) is the block timestamp, not the wall clock (`configureTradeEngine` in `core/state_transition.go`).
 
 `p2p_getTrade` reports `status` as one of these strings (`tradeStatusString` in `rpc/p2p_handlers.go`):
 
