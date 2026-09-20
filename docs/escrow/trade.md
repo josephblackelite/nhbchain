@@ -7,7 +7,7 @@ The trade engine (`native/escrow/trade_engine.go`, `native/escrow/trade_types.go
 * **Read:** `p2p_getTrade` is live.
 * **Write RPCs are disabled.** `p2p_createTrade`, `p2p_settle`, `p2p_dispute` and `p2p_resolve` answer HTTP 410 with code `-32060` (`rpc/p2p_handlers.go`, `p2pRPCDisabledMessage`).
 * **No transaction type drives the trade engine.** The escrow transaction handlers in `core/state_transition.go` call only the escrow engine (`applyLockEscrow` calls `Engine.Fund` and does not notify the trade engine), and nothing in the block pipeline calls `CreateTrade`, `SettleAtomic`, `TradeDispute`, `TradeResolve`, `TradeTryExpire` or `OnFundingProgress`. The `Node.P2P*` methods in `core/node.go` that call them are reachable only from the disabled RPC handlers.
-* The `nhb-cli p2p` subcommands (`create-trade`, `settle`, `dispute`, `resolve`) call those disabled RPC methods and therefore fail; `nhb-cli p2p get` works (`cmd/nhb-cli/p2p_cmd.go`).
+* The `nhb-cli p2p` subcommands `create-trade`, `settle`, `dispute` and `resolve` do not contact the node: each prints that the command is retired and exits with status 1 (`p2pRetiredMethods`, `cmd/nhb-cli/p2p_cmd.go`; `reportRetired`, `cmd/nhb-cli/retired_cmd.go`). `nhb-cli p2p get --id <trade id>` calls `p2p_getTrade` and works.
 * The chain's listing-based peer-to-peer market uses separate transaction types (`TxTypeMarketCreateListing` `0x35`, `TxTypeMarketFillListing` `0x36`, `TxTypeMarketCancelListing` `0x37`; `native/market`), not this engine.
 
 The remainder of this document describes what the engine code does when it is invoked, for reference.
@@ -80,8 +80,8 @@ Request: `{"jsonrpc":"2.0","id":1,"method":"p2p_getTrade","params":[{"tradeId":"
 
 Result (`tradeJSON`): `id`, `offerId`, `buyer`, `seller` (bech32), `quoteToken`, `quoteAmount`, `escrowQuoteId`, `baseToken`, `baseAmount`, `escrowBaseId`, `deadline`, `createdAt`, `fundedAt`, `slippageBps`, `status`. An unknown trade returns HTTP 404 with code `-32022`. Error codes for the `p2p_*` trade methods reuse `-32021` to `-32025` (`rpc/p2p_handlers.go`).
 
-`p2p_info` and `p2p_peers` are unrelated to trades: they return the node's peer-to-peer network view (`rpc/p2p_query_handlers.go`).
+`p2p_info` and `p2p_peers` are unrelated to trades: they return the node's peer-to-peer network view (`rpc/p2p_query_handlers.go`). `p2p_peers` (like `net_peers`) requires RPC authentication; `p2p_info` does not.
 
 ## Pause switch
 
-The trade engine checks the `trade` module pause flag on every operation (`nativecommon.Guard(e.pauses, "trade")`), and the escrow engine it drives checks the `escrow` flag. The helper programs in `examples/docs/ops` (`read_pauses`, `pause_toggle`) read and stage pause flags.
+The engine's clock is the block timestamp (`SetNowFunc` in `configureTradeEngine`, `core/state_transition.go`). The trade engine checks the `trade` module pause flag on every operation (`nativecommon.Guard(e.pauses, "trade")`), and the escrow engine it drives checks the `escrow` flag. The helper programs in `examples/docs/ops` (`read_pauses`, `pause_toggle`) read and stage pause flags.

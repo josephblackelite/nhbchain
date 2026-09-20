@@ -67,4 +67,4 @@ Errors use their own code family: `-32041` invalid params (HTTP 400), `-32042` n
 
 ## CLI
 
-`nhb-cli id resolve --alias <name>` and `nhb-cli id reverse --addr <bech32>` call the live methods. The other `nhb-cli id` subcommands call disabled methods; see [`identity-cli.md`](./identity-cli.md).
+`nhb-cli id resolve --alias <name>` and `nhb-cli id reverse --addr <bech32>` call the live methods. The other `nhb-cli id` subcommands are retired: they exit non-zero without contacting the node; see [`identity-cli.md`](./identity-cli.md).
