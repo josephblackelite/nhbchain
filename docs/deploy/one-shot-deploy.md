@@ -86,6 +86,13 @@ The script does not generate secrets; it only checks that the two files exist.
 If `DataDir` in your `config.toml` points elsewhere, that directory is not
 touched.
 
+A node that starts with an empty data directory (a fresh host, or after
+`--reset-state`) does not sync the live network from block 1: block sync from
+genesis is not supported on that chain. Bring a new node up with
+`scripts/deployvalidator.sh` from a verified snapshot instead; see
+[Onboarding a validator from a snapshot](../validators/snapshot-onboarding.md)
+and [Snapshot operations](../ops/snapshots.md).
+
 ## After the run
 
 The script ends by printing the checks `sudo systemctl status nhb.service` and

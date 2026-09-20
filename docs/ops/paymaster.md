@@ -30,9 +30,16 @@ GlobalDailyCapWei = "1000e18"
 `[global.Paymaster.AutoTopUp]` configures automatic replenishment (`Enabled`,
 `Token`, `MinBalanceWei`, `TopUpAmountWei`, `DailyCapWei`, `CooldownSeconds`, and
 `[global.Paymaster.AutoTopUp.Governance]` with `FundingAccount`, `Minter`,
-`Approver`, `MinterRole`, `ApproverRole`). `Token` may only be `ZNHB`, and
-`DailyCapWei` must be positive when `Enabled` is true (`config/global.go`). See
-the [auto top-up runbook](../runbooks/paymaster-autotopup.md).
+`Approver`, `MinterRole`, `ApproverRole`). `Token` is `NHB` (the default, and
+what an empty value means) or `ZNHB`, and `DailyCapWei` must be positive when
+`Enabled` is true (`config/global.go`, `PaymasterAutoTopUpConfig`). A top-up uses
+one asset, the policy's `Token`: the balance check, the funding-account debit,
+the paymaster credit and the flat fee all use that asset
+(`core/sponsorship.go`, `maybeAutoTopUpPaymaster`). A top-up does not run, and
+records a failure event with reason `funding_account_in_use` or
+`treasury_account_in_use`, when the funding account (or, if a fee is due, the
+fee treasury) is one of the accounts the same transfer is already updating.
+See the [auto top-up runbook](../runbooks/paymaster-autotopup.md).
 
 ## How the caps are enforced
 
@@ -64,8 +71,9 @@ identifier is required.
   without executing it: `status`, `reason`, `sponsor`, `gasPriceWei`,
   `requiredBudgetWei`, `moduleEnabled` and a `throttle` object with the same
   fields as the event. `tx_getSponsorshipConfig` returns `enabled` and
-  `adminRole`. `tx_setSponsorshipEnabled` (JWT required) takes `caller` and
-  `enabled` (`rpc/modules/transactions.go`, `rpc/http.go`).
+  `adminRole`. `tx_setSponsorshipEnabled` is disabled: it answers HTTP 410 with
+  code `-32060`, and sponsorship stays enabled on every node
+  (`handleTxSetSponsorshipEnabled` in `rpc/http.go`).
 - Auto top-ups are counted by `nhb_paymaster_autotopups_total{outcome}` and
   `nhb_paymaster_autotopup_amount_wei_total{outcome}`.
 

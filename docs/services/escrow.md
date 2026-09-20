@@ -12,7 +12,10 @@ server's per-source rate limit (`RPCMaxTxPer*` in `config.toml`).
 
 The mutating methods `escrow_create`, `escrow_fund`, `escrow_release`,
 `escrow_refund`, `escrow_dispute`, `escrow_expire` and `escrow_resolve` are
-disabled: each returns HTTP `410` with JSON-RPC code `-32060` and a message
+disabled, as are `escrow_milestoneCreate`, `escrow_milestoneFund`,
+`escrow_milestoneRelease`, `escrow_milestoneCancel` and
+`escrow_milestoneSubscriptionUpdate` (`rpc/escrow_milestone_handlers.go`;
+`escrow_milestoneGet` stays and needs a JWT): each returns HTTP `410` with JSON-RPC code `-32060` and a message
 beginning `this method is disabled` (`rpc/escrow_handlers.go`,
 `escrowRPCDisabledMessage`). Escrow state changes go through signed transactions.
 
@@ -100,9 +103,14 @@ Params: none, or `[{"prefix": "<event type prefix>", "limit": <int>}]`. Both key
 are optional. `prefix` defaults to `escrow.` and is matched case-insensitively.
 `limit` keeps the first N matching events (a negative value becomes 0).
 
-The events come from the node's in-memory event buffer (`Node.Events()`), in
-buffer order. `sequence` is the 1-based position in the returned list, not a
-persistent identifier.
+The events come from the node's in-memory event log (`Node.Events()`), oldest
+first. The log is not persisted, so it is empty after a restart. It keeps the
+most recent 20,000 events of other kinds, and separately up to 100,000 events of
+the kinds `escrow.*`, `fees.applied` and the POTSO penalty event, so busy events
+of other kinds do not push escrow events out (`core/event_log.go`,
+`maxRetainedEvents`, `maxPinnedEvents`). `sequence` is the 1-based position in the
+returned list, not a persistent identifier; it restarts at 1 from the oldest event
+still held.
 
 Result:
 
@@ -160,5 +168,7 @@ The CLI also has `open` (flags `--payer`, `--payee`, `--token` (default `NHB`),
 
 `services/escrow-gateway` stores idempotency keys, audit entries and P2P
 offers/trades in SQLite (`services/escrow-gateway/storage.go`) and reads escrow
-state from the node with `escrow_get` and `escrow_getRealm`. See
+state from the node with `escrow_get` and `escrow_getRealm`. The gateway's `GET /escrow/{id}`, `GET /p2p/offers` and `GET /p2p/trades/{id}`
+routes require the API key and request signature, like its write routes
+(`authenticateRead`, `services/escrow-gateway/server.go`). See
 [Escrow gateway](../escrow/nhbchain-escrow-gateway.md) for its behaviour.

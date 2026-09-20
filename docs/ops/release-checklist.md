@@ -12,46 +12,46 @@ bash scripts/verify_prod_config.sh -c config/prod.toml
 ```
 
 The script prints each violation as `[verify_prod_config] <message>` on stderr
-and exits non-zero. Key names are matched exactly as written below (TOML keys are
-case-sensitive).
+and exits non-zero. It looks a key up the way the node's loader matches it: by
+exact name first, then case-insensitively, and only in the places listed below.
+`scripts/bugcheck.sh` also runs it against `config/prod.toml`.
 
 ### TLS must stay enabled
 
-- `network_security.AllowInsecure` must be `false`.
-- `RPCAllowInsecure` must be `false`. The script looks for it at the top level,
-  under `[global]`, under `[network_security]`, and under `[global.Staking]`, and
-  uses the first one found.
+- `network_security.AllowInsecure` must be present and `false`.
 - These must be non-empty strings: `network_security.ServerTLSCertFile`,
   `ServerTLSKeyFile`, `ClientTLSCertFile`, `ClientTLSKeyFile`, `ClientCAFile`,
   `ServerCAFile`.
-- RPC TLS paths must be set, at the top level (`RPCTLSCertFile`, `RPCTLSKeyFile`,
-  `RPCTLSClientCAFile`) or in one of the other places the script checks
-  (`global.RPC.TLSCertFile` / `TLSKeyFile` / `TLSClientCAFile`,
-  `global.Staking.RPCTLS*`, `network_security.RPCTLS*`).
-- `ListenAddress` and `RPCAddress` must not bind to an unspecified address
-  (`0.0.0.0`, `::` or `*`).
+- `ListenAddress` and `RPCAddress` (top-level keys) must not bind to an
+  unspecified address (`0.0.0.0`, `::`, `*` or empty).
+- The RPC listener must be one of two shapes, judged from the top-level keys:
+  - `RPCAllowInsecure = true`: only when `RPCAddress` is a loopback address
+    (TLS then terminates in a reverse proxy in front of the node), and
+    `RPCAllowInsecureUnspecified` must not be `true`;
+  - otherwise `RPCTLSCertFile`, `RPCTLSKeyFile` and `RPCTLSClientCAFile` must
+    be non-empty strings (the node terminates TLS itself).
+
+  The node itself refuses plaintext RPC on any other address (`rpc/http.go`).
 
 ### Pro-rate guardrails cannot be disabled
 
 - `global.Loyalty.Dynamic.EnforceProRate` must be `true`.
-- `global.Loyalty.Dynamic.enableprorate` (lower case, as the script spells it)
-  must be `true`.
+- `global.Loyalty.Dynamic.EnableProRate` must be `true`.
 
 In the node, `SetGlobalConfig` refuses to start when `NHB_ENV` is `prod` (the
 default when `NHB_ENV` is unset) with `EnforceProRate` true and `EnableProRate`
-false (`core/node.go`). The loader reads the key as `EnableProRate`.
+false (`core/node.go`).
 
 ### Fee routing wallets must be set
 
-- `global.Fees.owner_wallet` must be a non-empty string.
+- `global.Fees.OwnerWallet` must be a non-empty string.
 - `global.Fees.Assets` must be a non-empty list, and every entry must have a
-  non-empty `owner_wallet`.
+  non-empty `OwnerWallet`.
 
-The script checks the snake_case spelling `owner_wallet`. The node's loader
-(`config.Fees`, `config.FeeAsset`) reads `OwnerWallet`, and it ignores keys it
-does not recognise, so a file can satisfy the script without setting the value
-the node uses. `defaultGlobalConfig` supplies non-empty default wallets when
-`OwnerWallet` is absent.
+The script checks that a value is present, not that it is a valid address;
+`config.ValidateConfig`, `Node.SetGlobalConfig` and the fee policy builder decide
+what the node accepts (a malformed wallet stops startup, see [Fee operations
+runbook](./fees.md)).
 
 ### Staking emission cap must be positive
 
