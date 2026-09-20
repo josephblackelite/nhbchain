@@ -449,6 +449,7 @@ func TestDeployBinaryIdentityPolicy(t *testing.T) {
 	h := newDeployHarness(t)
 	same := strings.Repeat("a", 64)
 	other := strings.Repeat("b", 64)
+	fullCommit := strings.Repeat("c", 40)
 	cases := []struct {
 		name, args, env string
 		wantCode        int
@@ -457,7 +458,10 @@ func TestDeployBinaryIdentityPolicy(t *testing.T) {
 		{"the same binary", same + " c1 " + same + " c2", "", 0, "byte for byte"},
 		{"the same commit", other + " c1 " + same + " c1", "", 0, "the commit the snapshot was taken with"},
 		{"no record of either", "'' unknown " + same + " c1", "", 1, "not the one the snapshot was taken with"},
-		{"another binary and commit", same + " c1 " + other + " c2", "", 1, "git checkout c1"},
+		{"another binary and commit", same + " " + fullCommit + " " + other + " c2", "", 1, "git checkout " + fullCommit},
+		// The manifest is unsigned: what it names as a commit is data, and is never
+		// offered to the operator as a command to type unless it is a full commit id.
+		{"a commit that is not an id is not offered as a command", same + " c1 " + other + " c2", "", 1, "not a full commit id"},
 		{"the override", same + " c1 " + other + " c2", "ALLOW_BINARY_MISMATCH=1;", 0, "--allow-binary-mismatch"},
 		{"an unknown commit is not a match", other + " unknown " + same + " unknown", "", 1, "not the one"},
 	}
@@ -469,6 +473,12 @@ func TestDeployBinaryIdentityPolicy(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a hostile commit string is never printed as a checkout command", func(t *testing.T) {
+		out, code := h.run("check_binary_identity '' 'main; touch pwned' " + same + " c1")
+		if code != 1 || strings.Contains(out, "git checkout") {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+	})
 	// A manifest that names no commit gives the operator nothing to check out, and
 	// must not send them to "git checkout unknown".
 	t.Run("a snapshot that names no commit is not a commit to check out", func(t *testing.T) {

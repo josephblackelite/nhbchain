@@ -363,8 +363,13 @@ check_binary_identity() {
       echo "        The commit of this checkout is not known, so the script cannot tell whether it is ${m_commit}." >&2
       echo "        Fix what git says above (for a checkout another user owns: git config --global --add safe.directory ${REPO_ROOT})," >&2
       echo "        or check out ${m_commit} with a git that can read it, and run this script again." >&2
-    else
+    elif [[ "${m_commit}" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
       echo "        Check out the commit above (git checkout ${m_commit}) and run this script again." >&2
+    else
+      # The manifest is unsigned: what it names as a commit is printed as data, never as a
+      # command to type.
+      echo "        The snapshot names its commit as '${m_commit}', which is not a full commit id, so no checkout" >&2
+      echo "        command is suggested: ask whoever published it which release it was made with." >&2
     fi
     echo "        But first check that ${m_commit} is a release you recognise, from the people who run the" >&2
     echo "        network: the manifest is not signed, and whoever hosts it chooses this commit. An old commit" >&2
@@ -683,7 +688,7 @@ install_config() {
   if [[ -f "${CONFIG_DIR}/config.toml" ]] && cmp -s "${tmp}" "${CONFIG_DIR}/config.toml"; then
     CONFIG_CHANGED=0
   else
-    as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp}" "${CONFIG_DIR}/config.toml"
+    as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp}" "${CONFIG_DIR}/config.toml" || { rm -f "${tmp}"; die "could not install ${CONFIG_DIR}/config.toml"; }
     CONFIG_CHANGED=1
   fi
   rm -f "${tmp}"
@@ -717,7 +722,8 @@ write_env() {
   if as_root test -f "${CONFIG_DIR}/node.env" && as_root cmp -s "${tmp}" "${CONFIG_DIR}/node.env"; then
     ENV_CHANGED=0
   else
-    as_root install -m 0600 -o root -g root "${tmp}" "${CONFIG_DIR}/node.env"
+    # The file holds the validator key: a failed install must not leave it behind.
+    as_root install -m 0600 -o root -g root "${tmp}" "${CONFIG_DIR}/node.env" || { rm -f "${tmp}"; die "could not install ${CONFIG_DIR}/node.env"; }
     ENV_CHANGED=1
   fi
   rm -f "${tmp}"

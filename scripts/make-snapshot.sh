@@ -556,6 +556,11 @@ main() {
     done
   fi
   [[ -n "${TOOL}" && -x "${TOOL}" ]] || die "the nhb-snapshot binary was not found; build it with 'go build -o bin/nhb-snapshot ./cmd/nhb-snapshot' and pass --tool"
+  # Resolve the tool once, here, and use the resolved path from now on: what is vetted
+  # below (as root) has to be the file that is executed, not a link, in a directory
+  # someone else can write, that leads to a file that is vetted.
+  TOOL=$(readlink -f -- "${TOOL}") || die "cannot resolve the path of the nhb-snapshot binary ${TOOL}"
+  [[ -n "${TOOL}" && -x "${TOOL}" ]] || die "the nhb-snapshot binary ${TOOL} is not an executable file"
 
   if [[ -z "${WORK_DIR}" ]]; then
     if [[ "${run_uid}" == "0" ]]; then
