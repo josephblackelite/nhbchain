@@ -209,6 +209,31 @@ func TestValidatorStepFailureIsReportedNotHidden(t *testing.T) {
 	}
 }
 
+// What the script prints for the operator to run a step again reads the node's RPC
+// secret out of node.env as data. The file is in /etc/nhbchain, a directory the
+// service user owns, so that user can replace it; a root shell that ran it ("sudo sh
+// -c '. node.env'") would run whatever it found there.
+func TestPrintedRetryCommandsReadTheNodeSecretAsData(t *testing.T) {
+	run := runHarness(t, "register-validator", "the-node-secret")
+	if run.status != 1 {
+		t.Fatalf("expected the failing step to be reported, status %d:\n%s", run.status, run.output)
+	}
+	var recipe string
+	for _, line := range strings.Split(run.output, "\n") {
+		if strings.Contains(line, "TOKEN=$(") {
+			recipe = strings.TrimSpace(line)
+		}
+	}
+	if !strings.HasPrefix(recipe, `TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb `) || !strings.HasSuffix(recipe, ` rpc-token --secret-stdin)`) {
+		t.Fatalf("the printed command that makes a token does not read node.env as data:\n%s", run.output)
+	}
+	for _, line := range strings.Split(run.output, "\n") {
+		if strings.Contains(line, ". /etc/nhbchain/node.env") || strings.Contains(line, "sh -c") {
+			t.Fatalf("the script tells the operator to run node.env as a script: %s", line)
+		}
+	}
+}
+
 // Without a token nothing is submitted: a secret the CLI cannot mint from
 // stops the script before any step runs. (The fake CLI only mints a token for
 // its own secret, so a different one models a secret the script does not know.)

@@ -28,6 +28,18 @@ VALIDATOR_KEY_FILE="${CONFIG_DIR}/validator.key"
 DATA_DIR="${STATE_DIR}/nhb-data"
 DOWNLOAD_DIR="${STATE_DIR}/.snapshot-download"
 
+# Where root builds, and the tools this script runs itself. INSTALL_ROOT, STATE_DIR
+# and CONFIG_DIR are handed to the service user (nhb.service runs as it, and it is
+# the network-facing part of the host), so it can rewrite anything in them: a tool
+# it replaced would run as root, and a Go build cache it planted would be compiled
+# into the binaries root builds next. Nothing root or the operator runs, installs
+# or builds with therefore comes from those three. BUILD_DIR holds the Go caches
+# and the tools (check-config and wait-synced of nhb-snapshot, generate-key of
+# nhb-cli): a directory only root can write, on the real disk. INSTALL_ROOT/bin
+# holds copies, which the service user runs, as itself.
+BUILD_DIR="${NHB_BUILD_DIR:-/var/cache/nhbchain-build}"
+TOOL_DIR="${BUILD_DIR}/bin"
+
 # The network this release is pinned to. The chain id is the first 8 bytes of
 # the genesis block hash, and the genesis hash follows from the genesis file, so
 # the three values below agree with each other and with the live network.
@@ -160,7 +172,11 @@ Options:
   --help                   Show this help message.
 
 What it does, in order (each step stops the script if it fails):
-  1. installs Go and the build tools, builds nhb, nhb-cli and nhb-snapshot;
+  1. installs Go and the build tools, builds nhb, nhb-cli and nhb-snapshot from
+     this checkout as root, in /var/cache/nhbchain-build (only root can write it),
+     and copies them to /opt/nhbchain/bin for the service user. It runs this
+     script's own tools from the first place and never from the second, which
+     belongs to the service user, and installs nhb.service from this checkout too;
   2. when it will install a snapshot (an empty data directory, or
      --reset-state; a node that already holds the chain needs none, and then
      nothing is fetched): fetches the snapshot manifest and checks it is for
@@ -318,8 +334,6 @@ fetch_file() {
     --max-filesize "${max}" --output "${dest}" "${url}" \
     || { as_service rm -f "${dest}"; die "could not download ${url} (at most ${max} bytes are accepted, and the host has to send at least ${FETCH_SPEED_LIMIT} bytes a second)"; }
 }
-
-tool() { "${INSTALL_ROOT}/bin/nhb-snapshot" "$@"; }
 
 # manifest_field <manifest> <field>
 manifest_field() { as_service "${INSTALL_ROOT}/bin/nhb-snapshot" manifest show --manifest "$1" --field "$2"; }
@@ -572,6 +586,37 @@ refuse_second_node() {
   return 0
 }
 
+# physical_dir <dir> prints the directory with every link in its path resolved, and
+# nothing when it is not there. (One function for the question, so that a test can
+# answer it for a link it has no privilege to make.)
+physical_dir() { ( cd "$1" 2>/dev/null && pwd -P ); }
+
+# refuse_service_owned_checkout stops the script when it is running from inside a
+# directory that belongs to the service user: INSTALL_ROOT (the copy an earlier run
+# made, run again from there) or the state or config directory. As root it would
+# then build, install a systemd unit from and run files that user can rewrite, this
+# script included. It runs from a checkout of the operator's own, which it copies to
+# INSTALL_ROOT.
+refuse_service_owned_checkout() {
+  local here place resolved
+  here=$(physical_dir "${REPO_ROOT}") || here=''
+  [[ -n "${here}" ]] || { echo "[ERROR] cannot read ${REPO_ROOT}" >&2; return 1; }
+  for place in "${INSTALL_ROOT}" "${STATE_DIR}" "${CONFIG_DIR}"; do
+    resolved=$(physical_dir "${place}") || resolved=''
+    [[ -n "${resolved}" ]] || resolved=${place}
+    case "${here}/" in
+      "${resolved}/"*|"${place}/"*)
+        echo "[ERROR] this script is running from ${here}, which is inside ${place}." >&2
+        echo "        ${place} belongs to the service user (${SERVICE_USER}), who can rewrite anything in it, this script" >&2
+        echo "        included: run as root it would build, install a systemd unit from and run what that user chose." >&2
+        echo "        Run it from a checkout of your own outside ${INSTALL_ROOT}, ${STATE_DIR} and ${CONFIG_DIR}" >&2
+        echo "        (git clone into your home directory); it copies that checkout to ${INSTALL_ROOT}." >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 # refuse_foreign_key stops the script when the key file was not made by this
 # script and nothing on this host shows it belongs to this node.
 refuse_foreign_key() {
@@ -623,9 +668,11 @@ render_config() {
   ' < "${template}" > "${out}" || return 1
 }
 
-# check_config <config>: the values consensus depends on are the network's.
+# check_config <config>: the values consensus depends on are the network's. It is
+# what decides whether the config is installed, so it runs the tool root built (see
+# TOOL_DIR), never the copy in the service user's tree.
 check_config() {
-  "${INSTALL_ROOT}/bin/nhb-snapshot" check-config --config "$1" --genesis "${INSTALL_ROOT}/${GENESIS_FILE_REL}"
+  "${TOOL_DIR}/nhb-snapshot" check-config --config "$1" --genesis "${INSTALL_ROOT}/${GENESIS_FILE_REL}"
 }
 
 install_config() {
@@ -889,13 +936,16 @@ install_prerequisites() {
 
 install_tree_and_build() {
   as_root useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
-  as_root mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}/bin"
+  as_root mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}"
   # The service runs as ${SERVICE_USER}: the config directory must be its own,
   # or it cannot even traverse into it to read config.toml.
   as_root chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
   as_root chmod 700 "${CONFIG_DIR}"
 
-  as_root rsync -a --delete --exclude '/.gocache' --exclude '/.gopath' --exclude '/.gotmp' "${REPO_ROOT}/" "${INSTALL_ROOT}/"
+  # No build cache is excluded from the copy: an earlier version of this script
+  # built inside INSTALL_ROOT, and what is left of that is the service user's to
+  # write and nobody's to use. It is removed here.
+  as_root rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 
   # A node started from a modified or different genesis file writes it into its
   # database and can never peer with the live network, so stop before anything
@@ -905,16 +955,27 @@ install_tree_and_build() {
   fi
 
   log "building nhb, nhb-cli and nhb-snapshot"
-  # Go's module cache for this dependency tree needs well over a gigabyte, and
-  # /tmp is a small RAM-backed tmpfs on many hosts: build under INSTALL_ROOT,
-  # which is on the real disk.
-  local gocache="${INSTALL_ROOT}/.gocache" gopath="${INSTALL_ROOT}/.gopath" gotmp="${INSTALL_ROOT}/.gotmp"
-  as_root mkdir -p "${gocache}" "${gopath}" "${gotmp}"
+  # Root builds from the checkout this script runs from, not from the copy in
+  # INSTALL_ROOT (which the service user can rewrite while a build that takes
+  # minutes reads it), and keeps everything the build reads and writes, and what it
+  # produces, in BUILD_DIR, where only root can write (see there). Go's module
+  # cache for this dependency tree needs well over a gigabyte, and /tmp is a small
+  # RAM-backed tmpfs on many hosts: BUILD_DIR is on the real disk.
+  local gocache="${BUILD_DIR}/go-cache" gopath="${BUILD_DIR}/go-path" gotmp="${BUILD_DIR}/go-tmp"
+  as_root install -d -m 0755 -o root -g root "${BUILD_DIR}" "${TOOL_DIR}"
+  as_root install -d -m 0700 -o root -g root "${gocache}" "${gopath}" "${gotmp}"
   local pkg
   for pkg in nhb nhb-cli nhb-snapshot; do
-    ( cd "${INSTALL_ROOT}" && as_root env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${gocache}" GOPATH="${gopath}" GOTMPDIR="${gotmp}" TMPDIR="${gotmp}" HOME=/root \
-      /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${INSTALL_ROOT}/bin/${pkg}" "./cmd/${pkg}" ) \
+    ( cd "${REPO_ROOT}" && as_root env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE="${gocache}" GOPATH="${gopath}" GOTMPDIR="${gotmp}" TMPDIR="${gotmp}" HOME=/root \
+      /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -buildvcs=false -o "${TOOL_DIR}/${pkg}" "./cmd/${pkg}" ) \
       || die "building ${pkg} failed"
+  done
+  # The copies the service user runs: nhb.service starts bin/nhb, and the commands
+  # the operator is told to run as that user (sudo -u nhb .../bin/nhb-cli ...) and
+  # the steps below that this script runs as it (as_service) use the other two.
+  as_root mkdir -p "${INSTALL_ROOT}/bin"
+  for pkg in nhb nhb-cli nhb-snapshot; do
+    as_root install -m 0755 "${TOOL_DIR}/${pkg}" "${INSTALL_ROOT}/bin/${pkg}" || die "could not install ${pkg} into ${INSTALL_ROOT}/bin"
   done
   as_root chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_ROOT}"
   as_root chown "${SERVICE_USER}:${SERVICE_USER}" "${STATE_DIR}"
@@ -934,7 +995,10 @@ ensure_key() {
     log "generating a fresh validator key on this machine"
     local tmp_key_dir
     tmp_key_dir=$(mktemp -d)
-    ( cd "${tmp_key_dir}" && "${INSTALL_ROOT}/bin/nhb-cli" generate-key > "${tmp_key_dir}/generate-key.out" )
+    # Run by this script's own user, who then gives the key to root's install: with
+    # the tool root built, never the copy the service user can replace (it would
+    # write the key that then becomes the validator's).
+    ( cd "${tmp_key_dir}" && "${TOOL_DIR}/nhb-cli" generate-key > "${tmp_key_dir}/generate-key.out" )
     as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp_key_dir}/wallet.key" "${VALIDATOR_KEY_FILE}"
     # install replaces what is at the name (a link included), where touch would
     # write to what a link at that name leads to.
@@ -984,7 +1048,11 @@ detect_external_address() {
 }
 
 install_service() {
-  local unit="${INSTALL_ROOT}/deploy/systemd/nhb.service"
+  # The unit runs as root's systemd, so it comes from the checkout this script runs
+  # from: the copy in INSTALL_ROOT is the service user's, and by the time this step
+  # runs (after the download, the verification and the key) it could have been
+  # rewritten (User=root, ExecStartPre=...) and would then be started as root.
+  local unit="${REPO_ROOT}/deploy/systemd/nhb.service"
   UNIT_CHANGED=1
   if [[ -f /etc/systemd/system/nhb.service ]] && cmp -s "${unit}" /etc/systemd/system/nhb.service; then UNIT_CHANGED=0; fi
   if [[ "${UNIT_CHANGED}" == "1" ]]; then
@@ -1027,7 +1095,9 @@ wait_until_synced() {
   if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then args+=(--min-height "${SNAPSHOT_HEIGHT}"); fi
   log "waiting for the node to reach the network tip (this follows its progress; a few minutes to a few hours depending on the snapshot's age)"
   local rc=0
-  "${INSTALL_ROOT}/bin/nhb-snapshot" "${args[@]}" || rc=$?
+  # Its verdict is what lets the registration go ahead: the tool root built, not the
+  # copy the service user (the node) could have replaced by one that always says yes.
+  "${TOOL_DIR}/nhb-snapshot" "${args[@]}" || rc=$?
   if [[ "${rc}" != "0" ]]; then
     echo
     echo "=================================================================="
@@ -1067,8 +1137,7 @@ wait_until_synced() {
 # JWT secret this run wrote to node.env. The secret reaches nhb-cli on stdin,
 # not on a command line, and neither it nor the token is ever printed.
 mint_rpc_token() {
-  printf '%s' "${JWT_SECRET}" | sudo -u "${SERVICE_USER}" \
-    "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
+  printf '%s' "${JWT_SECRET}" | sudo -u "${SERVICE_USER}" "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
 }
 
 # run_cli runs nhb-cli as the service user with the token in its environment. The
@@ -1077,14 +1146,17 @@ mint_rpc_token() {
 # process list, where any user can read it, for as long as sudo waits for the
 # command) never holds it.
 run_cli() {
-  printf '%s' "${RPC_TOKEN}" | sudo -u "${SERVICE_USER}" sh -c \
-    'NHB_RPC_TOKEN=$(cat); RPC_URL=$1; shift; export NHB_RPC_TOKEN RPC_URL; exec "$@"' \
-    nhb-cli-token-wrapper "http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" "$@"
+  local wrapper='NHB_RPC_TOKEN=$(cat); RPC_URL=$1; shift; export NHB_RPC_TOKEN RPC_URL; exec "$@"'
+  printf '%s' "${RPC_TOKEN}" | sudo -u "${SERVICE_USER}" sh -c "${wrapper}" nhb-cli-token-wrapper "http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" "$@"
 }
 
 # How an operator runs a signing command later (the messages below print
 # these): the command needs a fresh token exactly like the steps in this script.
-TOKEN_RECIPE="TOKEN=\$(sudo sh -c '. ${CONFIG_DIR}/node.env && printf %s \"\$NHB_RPC_JWT_SECRET\"' | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
+# Root reads the node's secret as data (sed prints the value of one line) and never
+# runs the file: node.env is in /etc/nhbchain, a directory the service user owns,
+# so the user can replace the file, and a shell that sourced it as root would run
+# whatever it found there.
+TOKEN_RECIPE="TOKEN=\$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' ${CONFIG_DIR}/node.env | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
 cli_recipe() {
   echo "NHB_RPC_TOKEN=\"\$TOKEN\" RPC_URL=http://${RPC_ADDR} sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli $*"
 }
@@ -1230,6 +1302,7 @@ main() {
   require_cmd systemctl
   require_cmd sha256sum
 
+  refuse_service_owned_checkout || exit 1
   take_lock
   refuse_second_node || exit 1
   install_prerequisites

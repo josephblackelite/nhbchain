@@ -116,6 +116,10 @@ type deployHarness struct {
 	// timeout, when set, kills a run that lasts longer: a script that has to give
 	// up on something must do so before it.
 	timeout time.Duration
+	// build is where root builds and keeps the tools the script runs itself
+	// (BUILD_DIR), tools the directory of those tools (TOOL_DIR).
+	build string
+	tools string
 }
 
 func copyTestFile(t *testing.T, from, to string) {
@@ -139,10 +143,12 @@ func newDeployHarness(t *testing.T) *deployHarness {
 	h.install = filepath.Join(h.root, "opt", "nhbchain")
 	h.config = filepath.Join(h.root, "etc", "nhbchain")
 	h.state = filepath.Join(h.root, "var", "lib", "nhbchain")
+	h.build = filepath.Join(h.root, "var", "cache", "nhbchain-build")
+	h.tools = filepath.Join(h.build, "bin")
 	h.tmp = filepath.Join(h.root, "tmp")
 	h.log = filepath.Join(h.root, "calls.log")
 	h.script = filepath.Join(h.repo, "scripts", "deployvalidator.sh")
-	for _, d := range []string{h.bin, h.install, h.config, h.state, h.tmp, filepath.Join(h.install, "bin")} {
+	for _, d := range []string{h.bin, h.install, h.config, h.state, h.tmp, filepath.Join(h.install, "bin"), h.tools} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -155,6 +161,9 @@ func newDeployHarness(t *testing.T) *deployHarness {
 	copyTestFile(t, filepath.Join(h.repo, "config.toml"), filepath.Join(h.install, "config.toml"))
 	copyTestFile(t, filepath.Join(h.repo, "config", "genesis.relaunch.json"), filepath.Join(h.install, "config", "genesis.relaunch.json"))
 	copyTestFile(t, filepath.Join(h.repo, "deploy", "systemd", "nhb.service"), filepath.Join(h.install, "deploy", "systemd", "nhb.service"))
+	// The tool is in both places: root's own copy, which the script runs itself, and
+	// the service user's, which it runs as that user.
+	copyTestFile(t, builtTool(t), filepath.Join(h.tools, filepath.Base(builtTool(t))))
 	copyTestFile(t, builtTool(t), filepath.Join(h.install, "bin", filepath.Base(builtTool(t))))
 	return h
 }
@@ -179,7 +188,7 @@ func (h *deployHarness) run(snippet string, env ...string) (string, int) {
 	cmd.Dir = h.root
 	cmd.Env = append(os.Environ(),
 		"FAKE_BIN="+slash(h.bin), "FAKE_LOG="+slash(h.log), "SCRIPT="+slash(h.script),
-		"NHB_INSTALL_ROOT="+slash(h.install), "NHB_CONFIG_DIR="+slash(h.config), "NHB_STATE_DIR="+slash(h.state),
+		"NHB_INSTALL_ROOT="+slash(h.install), "NHB_CONFIG_DIR="+slash(h.config), "NHB_STATE_DIR="+slash(h.state), "NHB_BUILD_DIR="+slash(h.build),
 		"TMPDIR="+slash(h.tmp), "CLI_RETRY_DELAY=0", "NHB_MASTER_TREASURY=",
 		// The lock of a run lives in the state directory of the user who runs the
 		// script: a temporary one here, never the tester's own.
@@ -253,7 +262,7 @@ func TestDeployArgumentChecksRunBeforeAnythingIsTouched(t *testing.T) {
 			cmd := exec.Command(h.bash, append([]string{slash(h.script)}, tc.args...)...)
 			cmd.Dir = h.root
 			cmd.Env = append(os.Environ(), "PATH="+slash(h.bin)+string(os.PathListSeparator)+os.Getenv("PATH"),
-				"FAKE_LOG="+slash(h.log), "NHB_INSTALL_ROOT="+slash(h.install), "NHB_CONFIG_DIR="+slash(h.config), "NHB_STATE_DIR="+slash(h.state),
+				"FAKE_LOG="+slash(h.log), "NHB_INSTALL_ROOT="+slash(h.install), "NHB_CONFIG_DIR="+slash(h.config), "NHB_STATE_DIR="+slash(h.state), "NHB_BUILD_DIR="+slash(h.build),
 				"NHB_SNAPSHOT_URL=", "NHB_BOOTNODE=", "NHB_TIP_RPC_URL=", "NHB_MASTER_TREASURY=")
 			cmd.Env = append(cmd.Env, tc.env...)
 			out, err := cmd.CombinedOutput()

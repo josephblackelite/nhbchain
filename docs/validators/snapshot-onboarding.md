@@ -183,7 +183,11 @@ quietly, and no secret is printed.
    When the host has no Go, it installs Go 1.24.3, and it unpacks that tarball (as
    root) only after its sha256 has matched the one go.dev publishes for the file
    (`3333f6ea53afa971e9078895eaa4ac7204a8c6b5c68c10e6bc9a33e8e391bdd8`, pinned in
-   the script). (`TestDeployGoToolchainIsCheckedBeforeItIsUnpacked`)
+   the script). (`TestDeployGoToolchainIsCheckedBeforeItIsUnpacked`) It builds as
+   root from your checkout, in `/var/cache/nhbchain-build` (only root can write
+   it), and runs its own tools from there, never from `/opt/nhbchain`, which
+   belongs to the service user (see
+   [below](#what-a-snapshot-host-cannot-make-the-script-do)).
 3. **When it will install a snapshot** (the data directory holds nothing, or
    `--reset-state` was given), **fetches only the manifest first** and checks that
    it is for the pinned chain id and genesis hash (and for the tip hash and state
@@ -387,6 +391,33 @@ host can ask for:
   whether the data directory is empty) that disclose nothing.
   (`TestDeployRestoreIdentityRefusesALink`, `TestDeployKeyIsNeverHandledThroughALink`,
   `TestDeployRootTouchesNothingTheServiceUserCanReplace`)
+- Root and the operator run, install and build with nothing the service user can
+  replace. `/opt/nhbchain`, `/var/lib/nhbchain` and `/etc/nhbchain` are that user's
+  (`nhb.service` runs as it, and it is the network-facing part of the host), so
+  the script takes nothing from them that it then runs as root or as you. It builds
+  from the checkout it runs from, with its Go caches and its own copy of the tools
+  in `/var/cache/nhbchain-build`, a directory only root can write (a cache under
+  `/opt/nhbchain` could be filled with entries that root's next build compiles into
+  what it runs). The tools it runs itself come from there, and their answers
+  decide things: `nhb-cli` makes the key the validator has (`generate-key`),
+  `nhb-snapshot` says whether a config is installed (`check-config`) and lets the
+  registration go ahead (`wait-synced`). The copies in `/opt/nhbchain/bin` are run
+  by the service user only. `nhb.service` is installed from the checkout, not from
+  the copy in `/opt/nhbchain`, which could have been rewritten in the minutes to
+  hours between the build and that step. The script refuses to run from inside one
+  of the service user's directories (a second run from `/opt/nhbchain` would run a
+  script that user can rewrite). The command the script prints for you to make an
+  RPC token reads the node's secret as data (`sed`) and never runs `node.env`,
+  which that user can replace. What remains: root still copies the checkout into
+  `/opt/nhbchain` and hands it to the service user (`rsync`, `chown -R`), the one
+  place where root writes into that user's tree; a service user that is already
+  compromised and racing those calls is not excluded by anything here.
+  (`TestDeployRunsTheToolsRootBuiltAndNeverTheServiceUsersCopies`,
+  `TestDeployBuildsAsRootInADirectoryOnlyRootCanWrite`,
+  `TestDeployInstallsTheUnitFromTheCheckoutNotFromTheServiceUsersTree`,
+  `TestDeployScriptRunsNothingOfTheInstallDirectoryAsRootOrTheOperator`,
+  `TestDeployRefusesToRunFromInsideTheServiceUsersDirectories`,
+  `TestDeployTokenRecipeReadsTheNodeSecretAsDataNotAsCode`)
 - The short-lived RPC token that submits the registration goes to `nhb-cli` on a
   pipe and into its environment, never on a command line: `sudo -u nhb env
   NHB_RPC_TOKEN=... nhb-cli` stays in the process list, where any user can read it,
@@ -455,9 +486,11 @@ owns its data directory, so whatever that user puts there is an input of this
 script, and what the script copies is published. Run as root, it would read
 whatever the user pointed a link at (a link called `999999.log`, aimed at a file
 only root can read) and publish it. The script therefore refuses to run as root
-against a directory that root does not own, and says how to run it (`sudo -u <the
-directory's owner> bash ...`). Run as the directory's owner, nothing it reads is
-more than that user already holds. If the node itself runs as root, the directory
+against a directory that root does not own, or that root owns but its group or
+others can write (`root:nhb` with mode `0775` lets the node's user put a link in it
+just the same), and says how to run it (`sudo -u <the directory's owner> bash ...`).
+Run as the directory's owner, nothing it reads is more than that user already
+holds. If the node itself runs as root, the directory
 is root's and the script may be run as root; then `--tool`, `--work-dir` and
 `--out-dir` have to be given, and all three have to be places nobody but root can
 change (the script checks that each one, and every directory above it, is root's and
@@ -747,28 +780,38 @@ What the script does, without it (Ubuntu; adjust paths). Each block says which
 function of `scripts/deployvalidator.sh` it stands for, where every value and every
 mode below comes from. The steps that unpack, and everything that touches the
 service user's directories, are run **as that user** (`sudo -u nhb`), as the script
-does.
+does. Root builds in `/var/cache/nhbchain-build`, a directory only root can write,
+and the tools you run yourself or as root (making the key, checking the config,
+waiting for the tip) are the ones built there, never the copies in
+`/opt/nhbchain`: that tree belongs to the service user, who could have replaced
+them.
 
 ```bash
 # 0. The service user, the directories, the tree and the build
-#    (install_tree_and_build). Run it in a checkout of the commit the manifest names.
+#    (install_tree_and_build). Run it in a checkout of the commit the manifest names,
+#    and stay in it: root builds from the checkout, with its caches and its own copy
+#    of the tools in /var/cache/nhbchain-build, and /opt/nhbchain gets copies.
+SRC=$PWD; B=/var/cache/nhbchain-build
 sudo useradd --system --home /opt/nhbchain --shell /usr/sbin/nologin nhb
 sudo install -d -m 0700 -o nhb -g nhb /etc/nhbchain
 sudo install -d -o nhb -g nhb /var/lib/nhbchain
-sudo mkdir -p /opt/nhbchain/bin
-sudo rsync -a --delete --exclude '/.gocache' --exclude '/.gopath' --exclude '/.gotmp' ./ /opt/nhbchain/
+sudo mkdir -p /opt/nhbchain
+sudo rsync -a --delete ./ /opt/nhbchain/
 echo "10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b  /opt/nhbchain/config/genesis.relaunch.json" | sha256sum -c
-cd /opt/nhbchain
-sudo mkdir -p .gocache .gopath .gotmp
+sudo install -d -m 0755 -o root -g root $B $B/bin
+sudo install -d -m 0700 -o root -g root $B/go-cache $B/go-path $B/go-tmp
 for p in nhb nhb-cli nhb-snapshot; do
-  sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE=$PWD/.gocache GOPATH=$PWD/.gopath \
-    GOTMPDIR=$PWD/.gotmp TMPDIR=$PWD/.gotmp HOME=/root \
-    go build -trimpath -ldflags="-s -w" -buildvcs=false -o bin/$p ./cmd/$p
+  sudo env PATH=/usr/local/go/bin:/usr/bin:/bin GOCACHE=$B/go-cache GOPATH=$B/go-path \
+    GOTMPDIR=$B/go-tmp TMPDIR=$B/go-tmp HOME=/root \
+    go build -trimpath -ldflags="-s -w" -buildvcs=false -o $B/bin/$p ./cmd/$p
 done
+sudo mkdir -p /opt/nhbchain/bin
+sudo install -m 0755 $B/bin/nhb $B/bin/nhb-cli $B/bin/nhb-snapshot /opt/nhbchain/bin/
 sudo chown -R nhb:nhb /opt/nhbchain
 
-# 1. This validator's key, made on this machine and never passed in (ensure_key).
-( cd "$(mktemp -d)" && /opt/nhbchain/bin/nhb-cli generate-key >/dev/null && \
+# 1. This validator's key, made on this machine and never passed in (ensure_key),
+#    with the tool root built.
+( cd "$(mktemp -d)" && $B/bin/nhb-cli generate-key >/dev/null && \
   sudo install -m 0600 -o nhb -g nhb wallet.key /etc/nhbchain/validator.key )
 
 # 2. Fetch the manifest, then the archive it names (https), as the service user,
@@ -797,24 +840,25 @@ sudo -u nhb chmod 0700 /var/lib/nhbchain/nhb-data
 #    ExternalAddress = "<this server's public IP>:6001".
 sudo install -m 0600 -o nhb -g nhb /opt/nhbchain/config.toml /etc/nhbchain/config.toml
 sudo -u nhb nano /etc/nhbchain/config.toml
-sudo -u nhb /opt/nhbchain/bin/nhb-snapshot check-config --config /etc/nhbchain/config.toml --genesis /opt/nhbchain/config/genesis.relaunch.json
+sudo $B/bin/nhb-snapshot check-config --config /etc/nhbchain/config.toml --genesis /opt/nhbchain/config/genesis.relaunch.json
 
 # 5. The node's environment: the RPC secret and the key, readable by root only
 #    (write_env; systemd reads it and hands it to the node).
 sudo sh -c 'umask 077; { echo NHB_ENV=prod; echo "NHB_RPC_JWT_SECRET=$(openssl rand -hex 32)"; echo "NHB_VALIDATOR_RAW_KEY=$(od -An -tx1 /etc/nhbchain/validator.key | tr -d " \n")"; } > /etc/nhbchain/node.env'
 
-# 6. The service (install_service), then start the node and wait for the tip.
-sudo install -m 0644 /opt/nhbchain/deploy/systemd/nhb.service /etc/systemd/system/nhb.service
+# 6. The service (install_service), from the checkout and not from /opt/nhbchain,
+#    then start the node and wait for the tip.
+sudo install -m 0644 $SRC/deploy/systemd/nhb.service /etc/systemd/system/nhb.service
 sudo systemctl daemon-reload
 sudo systemctl enable nhb.service
 sudo systemctl start nhb.service
-/opt/nhbchain/bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 $PIN \
+$B/bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 $PIN \
   --min-height "$(sudo -u nhb /opt/nhbchain/bin/nhb-snapshot manifest show --manifest $D/manifest.json --field height)" \
   --tip-rpc https://TRUSTED-RPC-HOST.example
 
 # 7. Only then register (submit_validator_steps): a short-lived token, which goes
 #    through the environment and never on a command line.
-TOKEN=$(sudo sh -c '. /etc/nhbchain/node.env && printf %s "$NHB_RPC_JWT_SECRET"' | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
 NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb \
   /opt/nhbchain/bin/nhb-cli set-reward-beneficiary nhb1YOUR_WALLET /etc/nhbchain/validator.key
 NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb \
@@ -948,6 +992,15 @@ Tested, on a local network of real `nhb` processes (Windows, Git Bash):
   root touching nothing the service user can replace, a host that trickles, the
   lock, the pinned Go tarball, the local commit, the minimum release commit, and the
   record that makes an interrupted run keep its guard.
+- What the deployment script builds, installs and runs as root
+  (`deploy_build_trust_test.go`): the unit comes from the checkout; the tools it
+  runs itself come from root's build directory, with copies in the service user's
+  tree planted to say a config is right, to write the key and to say the node is at
+  the tip; the build reads and writes only root's directory and builds the checkout;
+  the recipe for a token reads `node.env` as data; and the script refuses to run
+  from inside the service user's directories (through a stand-in for `physical_dir`
+  where a link cannot be made). The commands the pages give to sign a transaction
+  are compared with the ones the script prints (`docs_signing_test.go`).
 - The deployment script's `main()` run whole, with only the steps that need a real
   server (packages, the build, the service, the node's RPC) stubbed, against a real
   `nhb-snapshot` and a snapshot host on the loopback interface: a fresh install,
@@ -994,6 +1047,21 @@ Not tested here, and the exact commands to run on Linux:
   node's directory (it must refuse), then as the node's user with a link named
   `999999.log` aimed at a root-only file in that directory (it must refuse, and
   publish nothing).
+- The build and the installation of the tree, which the tests record and do not run
+  (root is stubbed): that `go build` in the operator's checkout, with its caches in
+  `/var/cache/nhbchain-build`, makes the same binary as a build in `/opt/nhbchain`
+  (`-trimpath` and `-buildvcs=false` leave no path in it; the two were not
+  compared), that `install -d -m 0700 -o root -g root` sets the mode and the owner of
+  a directory that already exists (GNU coreutils behaviour, relied on for a second
+  run), that `rsync -a --delete` without the cache excludes removes what an earlier
+  version left in `/opt/nhbchain` (some gigabytes: the first run after an upgrade
+  takes the time that takes), and that the command that makes an RPC token works
+  under a real sudoers policy (the test runs it with a fake sudo and a stand-in
+  CLI). On a Linux host: run the script twice, then check that `ls -ld
+  /var/cache/nhbchain-build /var/cache/nhbchain-build/*` shows root as the owner
+  (modes 755 and 700), that `ls -a /opt/nhbchain` shows no `.gocache`, and that
+  `sha256sum /var/cache/nhbchain-build/bin/nhb /opt/nhbchain/bin/nhb` prints the
+  same hash twice.
 - The producer on ext4 or xfs (hard links were exercised on NTFS):
   `bash scripts/make-snapshot.sh --data-dir DIR --out-dir OUT` against a running node.
 - git's refusal of a checkout that another user owns (`detected dubious ownership`,

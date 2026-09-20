@@ -214,13 +214,19 @@ bash scripts/validator-only-bootstrap.sh \
    - **Self-stake:** send ZNHB to the validator's own node address, then run
      step 3 on the server.
 3. **If you chose to self-stake:** stake it on the server itself, using the
-   validator's own key:
+   validator's own key. The key belongs to the service user, so the command runs
+   as that user, and the node's RPC only accepts a signed transaction with a
+   short-lived token (`NHB_RPC_TOKEN`): the first line makes one from the node's
+   own secret, the second signs and sends the stake:
 
 ```bash
-sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
 ```
 
-   `10000000000000000000000` is 10,000 ZNHB in base units.
+   `10000000000000000000000` is 10,000 ZNHB in base units. The token lasts ten
+   minutes: make a new one for the next command. (The bootstrap script prints
+   these same two lines when a step of its own fails.)
 
 A validator is eligible when all three of these are true:
 
@@ -333,20 +339,32 @@ Getting paid:
   it stakes itself. To delegate, send a stake transaction targeting the
   validator's node address (the NHBCoin wallet's Validator Hub -> Delegate
   tab does this). To self-stake, send ZNHB to the node address this script
-  printed, then run
-  `sudo -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key`
-  on the server (`10000000000000000000000` is 10,000 ZNHB in base units; the
-  script already ran the same command once with amount `0` to register the
-  validator, which needs no funds).
+  printed, then run these two lines on the server. The key belongs to the
+  service user, so the command runs as that user, and the node's RPC only
+  accepts a signed transaction with a short-lived token (`NHB_RPC_TOKEN`): the
+  first line makes one from the node's own secret, the second signs and sends
+  the stake (`10000000000000000000000` is 10,000 ZNHB in base units; the script
+  already ran the same command once with amount `0` to register the validator,
+  which needs no funds):
+
+  ```bash
+  TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+  NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli register-validator 10000000000000000000000 /etc/nhbchain/validator.key
+  ```
 - **Staking yield**: accrues against each account's own stake. ZNHB you
   delegate to a validator accrues to you, the delegator; the validator's own
   accrual excludes what others delegated to it.
 - **Epoch reward payouts**: paid to the validator's own address unless a
   beneficiary is set. `--beneficiary` sets it automatically; you can set or
   change it later, signed with the validator's own key file on the server,
-  without rerunning the whole script:
-  `nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key`
-  (the beneficiary cannot be the validator's own address).
+  without rerunning the whole script. Only the service user can read that key
+  file, so the command runs as that user, with a short-lived token like the one
+  above (the beneficiary cannot be the validator's own address):
+
+  ```bash
+  TOKEN=$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | sudo -u nhb /opt/nhbchain/bin/nhb-cli rpc-token --secret-stdin)
+  NHB_RPC_TOKEN="$TOKEN" RPC_URL=http://127.0.0.1:8545 sudo --preserve-env=NHB_RPC_TOKEN,RPC_URL -u nhb /opt/nhbchain/bin/nhb-cli set-reward-beneficiary <your-wallet-address> /etc/nhbchain/validator.key
+  ```
 
 Operational model:
 

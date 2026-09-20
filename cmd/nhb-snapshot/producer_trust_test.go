@@ -310,7 +310,7 @@ const rootStubSnippet = `
 current_uid() { echo "${STUB_UID}"; }
 owner_and_mode() {
   case "$1" in
-    */node/data) echo "${STUB_DATA_OWNER:-1000} 755" ;;
+    */node/data) echo "${STUB_DATA_OWNER:-1000} ${STUB_DATA_MODE:-755}" ;;
     */elsewhere/nhb-snapshot*) echo "${STUB_TOOL_SPEC:-0 755}" ;;
     */rootparent) echo "${STUB_PARENT_SPEC:-0 755}" ;;
     */elsewhere) echo "${STUB_TOOL_DIR_SPEC:-0 755}" ;;
@@ -358,6 +358,11 @@ func TestMakeSnapshotAsRoot(t *testing.T) {
 	if !strings.Contains(res.out, "sudo -u nhb bash") {
 		t.Fatalf("the refusal does not say how to run it:\n%s", res.out)
 	}
+	// A directory that is root's but that others can write is theirs in every way that
+	// matters here (root:nhb 0775 lets the node's user put a link or a file in it).
+	for _, mode := range []string{"775", "757", "777", "770", "2775"} {
+		refused("a directory that is root's but has mode "+mode, run([]string{"STUB_DATA_OWNER=0", "STUB_DATA_MODE=" + mode}, "--tool", slash(rootTool), "--work-dir", slash(work)), "its group or others can write it")
+	}
 	refused("no tool", run([]string{"STUB_DATA_OWNER=0"}, "--work-dir", slash(work)), "--tool is required")
 	refused("no work directory", run([]string{"STUB_DATA_OWNER=0"}, "--tool", slash(rootTool)), "--work-dir is required")
 	refused("a tool that another user can write", run([]string{"STUB_DATA_OWNER=0", "STUB_TOOL_SPEC=1000 755"}, "--tool", slash(rootTool), "--work-dir", slash(work)), "can be changed by someone other than root")
@@ -390,6 +395,12 @@ func TestMakeSnapshotAsRoot(t *testing.T) {
 	}
 	if _, err := readManifestFile(filepath.Join(out, "manifest.json")); err != nil {
 		t.Fatal(err)
+	}
+	// A directory that only root can write is accepted whatever else its mode says.
+	for _, mode := range []string{"700", "750", "755"} {
+		if res = run([]string{"STUB_DATA_OWNER=0", "STUB_DATA_MODE=" + mode}, "--tool", slash(rootTool), "--work-dir", slash(work)); res.err != nil {
+			t.Fatalf("root was refused a directory of its own with mode %s: %v\n%s", mode, res.err, res.out)
+		}
 	}
 }
 

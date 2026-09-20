@@ -14,9 +14,10 @@
 # directory is an input of this script, and what the script copies is published.
 # Run as root, it would read whatever the user pointed a link at (a link named
 # like a journal, aimed at a file only root can read) and publish it. The script
-# therefore refuses to run as root against a directory root does not own; run it
-# as the directory's owner and nothing it reads is more than that user already
-# holds. (When the node itself runs as root, the directory is root's and it may
+# therefore refuses to run as root against a directory root does not own, or that
+# root owns but its group or others can write; run it as the directory's owner and
+# nothing it reads is more than that user already holds. (When the node itself
+# runs as root, the directory is root's and it may
 # be run as root: then --tool, --work-dir and --out-dir have to be given, and all
 # three have to be places nobody but root can change; they are checked (a
 # directory that does not exist yet is made only where the nearest one that does is
@@ -482,7 +483,7 @@ cleanup() {
 }
 
 main() {
-  local pass sig prev_sig agreed run_uid data_uid owner found candidate
+  local pass sig prev_sig agreed run_uid data_uid data_mode owner found candidate
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --data-dir) DATA_DIR="${2:-}"; shift 2 ;;
@@ -519,10 +520,20 @@ main() {
   # Who runs this, and whose directory it is.
   run_uid=$(current_uid)
   data_uid=$(owner_and_mode "${DATA_DIR}") || die "cannot tell who owns ${DATA_DIR}"
+  data_mode=${data_uid##* }
   data_uid=${data_uid%% *}
   if [[ "${run_uid}" == "0" && "${data_uid}" != "0" ]]; then
     owner=$(owner_name "${DATA_DIR}")
     die "refusing to run as root: ${DATA_DIR} belongs to ${owner}, who can put anything in it, and what this script copies is published. Run it as that user instead: sudo -u ${owner} bash ${BASH_SOURCE[0]} <the same arguments>"
+  fi
+  # A directory that is root's but that its group or others can write (root:nhb
+  # 0775, say) is the node user's in every way that matters here: it can put a link
+  # or a file of its own choosing in it, and root would read it.
+  if [[ "${run_uid}" == "0" ]]; then
+    [[ "${data_mode}" =~ ^[0-7]+$ ]] || die "cannot tell who can write ${DATA_DIR}"
+    if (( (8#${data_mode} & 8#022) != 0 )); then
+      die "refusing to run as root: ${DATA_DIR} is root's, but its group or others can write it (mode ${data_mode}), so a user other than root can put anything in it, and what this script copies is published. Make it writable by root alone (chmod go-w ${DATA_DIR}), or run this as the user that runs the node."
+    fi
   fi
 
   if [[ -z "${TOOL}" && "${run_uid}" == "0" ]]; then
