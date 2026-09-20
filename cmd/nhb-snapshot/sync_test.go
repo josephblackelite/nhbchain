@@ -24,16 +24,30 @@ type fakeNode struct {
 	height    uint64
 	step      uint64 // how much the height grows on each nhb_getLatestBlocks
 	max       uint64
-	timestamp func() int64
-	chainID   uint64
-	genesis   string
-	down      int32 // net_info fails while > 0
+	timestamp func() int64 // the newest block's timestamp
+	// blockTime, when set, is the timestamp of every block, the newest included,
+	// so that two nodes holding the same height hold the same block.
+	blockTime func(h uint64) int64
+	// salt is part of every block, so that two nodes can hold different blocks
+	// at one height (a node on another chain).
+	salt  byte
+	peers *int // connected peers net_info reports (2 when nil)
+	// newestOnly makes the node answer nhb_getLatestBlocks with its newest block
+	// alone, whatever it is asked for.
+	newestOnly bool
+	chainID    uint64
+	genesis    string
+	down       int32 // net_info fails while > 0
 }
+
+// sameChainTime is the block time of a chain that every fakeNode shares.
+func sameChainTime(h uint64) int64 { return 1_700_000_000 + int64(h) }
 
 func (n *fakeNode) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Method string `json:"method"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
@@ -43,8 +57,19 @@ func (n *fakeNode) handler() http.Handler {
 				http.Error(w, "starting", http.StatusServiceUnavailable)
 				return
 			}
-			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"nodeId":"0xabc","chainId":%d,"genesisHash":%q,"peerCounts":{"total":2}}}`, n.chainID, n.genesis)
+			peers := 2
+			if n.peers != nil {
+				peers = *n.peers
+			}
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"nodeId":"0xabc","chainId":%d,"genesisHash":%q,"peerCounts":{"total":%d}}}`, n.chainID, n.genesis, peers)
 		case "nhb_getLatestBlocks":
+			count := 1
+			if len(req.Params) > 0 {
+				_ = json.Unmarshal(req.Params[0], &count)
+			}
+			if n.newestOnly {
+				count = 1
+			}
 			n.mu.Lock()
 			if n.height < n.max {
 				n.height += n.step
@@ -54,8 +79,18 @@ func (n *fakeNode) handler() http.Handler {
 			}
 			h := n.height
 			n.mu.Unlock()
-			block := types.NewBlock(&types.BlockHeader{Height: h, Timestamp: n.timestamp(), PrevHash: []byte{1}, StateRoot: []byte{2}}, nil)
-			out, _ := json.Marshal([]*types.Block{block})
+			var blocks []*types.Block
+			for i := 0; i < count && uint64(i) <= h; i++ {
+				height := h - uint64(i)
+				var ts int64
+				if n.blockTime != nil {
+					ts = n.blockTime(height)
+				} else {
+					ts = n.timestamp() - int64(i)*4
+				}
+				blocks = append(blocks, types.NewBlock(&types.BlockHeader{Height: height, Timestamp: ts, PrevHash: []byte{1, n.salt}, StateRoot: []byte{2}}, nil))
+			}
+			out, _ := json.Marshal(blocks)
 			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":%s}`, out)
 		default:
 			http.Error(w, "unknown method", http.StatusNotFound)
@@ -80,8 +115,8 @@ func fastOptions(out *bytes.Buffer) waitOptions {
 }
 
 func TestWaitSyncedAgainstAReferenceNode(t *testing.T) {
-	local := &fakeNode{height: 100, step: 40, max: 1000, timestamp: func() int64 { return time.Now().Unix() }, chainID: 7, genesis: "aa"}
-	ref := &fakeNode{height: 1000, max: 1000, timestamp: func() int64 { return time.Now().Unix() }, chainID: 7, genesis: "aa"}
+	local := &fakeNode{height: 100, step: 40, max: 1000, blockTime: sameChainTime, chainID: 7, genesis: "aa"}
+	ref := &fakeNode{height: 1000, max: 1000, blockTime: sameChainTime, chainID: 7, genesis: "aa"}
 	var out bytes.Buffer
 	opts := fastOptions(&out)
 	opts.RPC, opts.TipRPC = local.serve(t), ref.serve(t)

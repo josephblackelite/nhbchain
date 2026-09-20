@@ -496,7 +496,8 @@ func TestWrongChecksumIsRefused(t *testing.T) {
 
 func TestNotAGzipStreamIsRefused(t *testing.T) {
 	f := newFixture(t)
-	manifestPath, archivePath := f.hostile("notgzip", []byte("this is not an archive"), nil)
+	// Long enough that its size is a believable one for the manifest to give.
+	manifestPath, archivePath := f.hostile("notgzip", bytes.Repeat([]byte("this is not an archive"), 2000), nil)
 	target := filepath.Join(t.TempDir(), "data")
 	if err := f.extractFrom(manifestPath, archivePath, target); err == nil || !strings.Contains(err.Error(), "gzip") {
 		t.Fatalf("got: %v", err)

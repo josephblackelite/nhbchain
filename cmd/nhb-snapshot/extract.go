@@ -17,6 +17,20 @@ import (
 // defaultMaxBytes bounds the uncompressed size a manifest may announce.
 const defaultMaxBytes int64 = 64 << 30
 
+// checkUnpackSize refuses a manifest that announces more uncompressed bytes than
+// maxBytes (defaultMaxBytes when it is not positive). verify and extract both
+// call it before they read the archive, so an archive is never unpacked, or even
+// decompressed, on the strength of a size nobody bounded.
+func checkUnpackSize(m *manifest, maxBytes int64) error {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxBytes
+	}
+	if m.Archive.UncompressedSize > maxBytes {
+		return fmt.Errorf("the manifest announces %d bytes, above the allowed %d", m.Archive.UncompressedSize, maxBytes)
+	}
+	return nil
+}
+
 // hashRegularFile returns the size and sha256 of the regular file at path. A
 // symbolic link or any other kind of file is refused.
 func hashRegularFile(path string) (int64, string, error) {
@@ -278,15 +292,14 @@ func extractSnapshot(o extractOptions) (*manifest, *chainIdentity, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	if o.Now.IsZero() {
+		o.Now = time.Now()
+	}
 	if err := checkManifest(m, o.Expect, o.Now); err != nil {
 		return nil, nil, err
 	}
-	maxBytes := o.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = defaultMaxBytes
-	}
-	if m.Archive.UncompressedSize > maxBytes {
-		return nil, nil, fmt.Errorf("the manifest announces %d bytes, above the allowed %d", m.Archive.UncompressedSize, maxBytes)
+	if err := checkUnpackSize(m, o.MaxBytes); err != nil {
+		return nil, nil, err
 	}
 	if err := verifyArchiveFile(o.ArchivePath, m); err != nil {
 		return nil, nil, err

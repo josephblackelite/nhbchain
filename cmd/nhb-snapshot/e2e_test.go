@@ -300,7 +300,10 @@ func TestSnapshotOnboardingEndToEnd(t *testing.T) {
 	// ---- 3. the follower ---------------------------------------------------
 	follower := e.newNode("follower", e.keys["follower"], folData, src, e2eTimeout(), "")
 	follower.start()
-	syncArgs := append([]string{"wait-synced", "--rpc", follower.rpcURL(), "--tip-rpc", src.rpcURL(),
+	// As the deployment script runs it: the follower is at the tip only once it
+	// has applied a block past its snapshot, has a peer, and holds the same
+	// blocks as the source.
+	syncArgs := append([]string{"wait-synced", "--rpc", follower.rpcURL(), "--tip-rpc", src.rpcURL(), "--min-height", strconv.FormatUint(m.Height, 10),
 		"--max-lag-blocks", "8", "--interval", "1s", "--timeout", "4m", "--stall-timeout", "90s"}, e.pinArgs()...)
 	started := time.Now()
 	out, code := e.runTool(syncArgs...)

@@ -16,7 +16,7 @@
 //	nhb-snapshot verify      --manifest FILE --archive FILE --chain-id N --genesis-hash HEX
 //	nhb-snapshot extract     --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX
 //	nhb-snapshot manifest    show --manifest FILE [--field NAME]
-//	nhb-snapshot wait-synced --rpc URL [--tip-rpc URL]
+//	nhb-snapshot wait-synced --rpc URL [--tip-rpc URL] [--min-height N]
 package main
 
 import (
@@ -315,6 +315,7 @@ func cmdVerify(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("verify", stderr)
 	manifestPath := fs.String("manifest", "", "manifest file")
 	archivePath := fs.String("archive", "", "archive file")
+	maxBytes := fs.Int64("max-bytes", defaultMaxBytes, "refuse a manifest announcing more uncompressed bytes than this")
 	exp := addExpectFlags(fs)
 	if err := parseFlags(fs, args); err != nil {
 		return err
@@ -331,6 +332,9 @@ func cmdVerify(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if err := checkManifest(m, want, time.Now()); err != nil {
+		return err
+	}
+	if err := checkUnpackSize(m, *maxBytes); err != nil {
 		return err
 	}
 	if err := verifyArchiveFile(*archivePath, m); err != nil {
@@ -384,7 +388,7 @@ func cmdManifest(args []string, stdout, stderr io.Writer) error {
 	}
 	fs := newFlagSet("manifest show", stderr)
 	manifestPath := fs.String("manifest", "", "manifest file")
-	field := fs.String("field", "", "print only this field (chainId, genesisHash, height, tipHash, stateRoot, tipTimestamp, createdAt, producer.binaryVersion, producer.binaryCommit, producer.binarySha256, archive.name, archive.size, archive.sha256)")
+	field := fs.String("field", "", "print only this field (chainId, genesisHash, height, tipHash, stateRoot, tipTimestamp, createdAt, producer.binaryVersion, producer.binaryCommit, producer.binarySha256, archive.name, archive.size, archive.uncompressedSize, archive.sha256)")
 	if err := parseFlags(fs, args[1:]); err != nil {
 		return err
 	}
@@ -438,8 +442,9 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	tipRPC := fs.String("tip-rpc", "", "RPC URL of a node you trust, measured against (optional)")
 	chain := fs.String("chain-id", "", "expected chain id (or "+envChainID+")")
 	genesis := fs.String("genesis-hash", "", "expected genesis hash (or "+envGenesisHash+")")
-	lagBlocks := fs.Uint64("max-lag-blocks", 3, "with --tip-rpc: how many blocks behind still counts as synced")
-	lagSecs := fs.Int64("max-lag-seconds", 60, "without --tip-rpc: how old the newest block may be, by this host's clock")
+	minHeight := fs.Uint64("min-height", 0, "the node must have applied a block above this height, the height of the snapshot it started from (0 = no such requirement)")
+	lagBlocks := fs.Uint64("max-lag-blocks", 3, fmt.Sprintf("with --tip-rpc: how many blocks either side of that node still counts as synced (at most %d)", maxReferenceLag))
+	lagSecs := fs.Int64("max-lag-seconds", 60, "without --tip-rpc: how far from this host's clock, either side, the newest block may be dated")
 	interval := fs.Duration("interval", 5*time.Second, "time between polls")
 	timeout := fs.Duration("timeout", 2*time.Hour, "give up after this long")
 	stall := fs.Duration("stall-timeout", 15*time.Minute, "give up when the height has not advanced for this long")
@@ -450,8 +455,11 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	if *rpc == "" {
 		return usagef("--rpc is required")
 	}
+	if strings.TrimSpace(*tipRPC) != "" && *lagBlocks > maxReferenceLag {
+		return usagef("--max-lag-blocks %d is more than the %d blocks that can be compared with the reference node's", *lagBlocks, maxReferenceLag)
+	}
 	opts := waitOptions{
-		RPC: *rpc, TipRPC: *tipRPC,
+		RPC: *rpc, TipRPC: *tipRPC, MinHeight: *minHeight,
 		MaxLagBlocks: *lagBlocks, MaxLagSeconds: *lagSecs,
 		Interval: *interval, Timeout: *timeout, StallTimeout: *stall, Stable: *stable,
 		Out: stderr,
@@ -480,6 +488,7 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 		"height":    res.Height,
 		"tipHash":   hex0x(res.TipHash),
 		"stateRoot": hex0x(res.Root),
+		"peers":     res.Peers,
 		"seconds":   int64(res.Duration.Seconds()),
 	}
 	if res.TipRPC != 0 {

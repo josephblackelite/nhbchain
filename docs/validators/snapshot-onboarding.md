@@ -17,6 +17,8 @@ named where it is used. What could not be tested is listed in
 - [Quick start](#quick-start)
 - [The identifiers everything is pinned to](#the-identifiers-everything-is-pinned-to)
 - [What the script does and checks](#what-the-script-does-and-checks)
+- [Running it again, and --reset-state](#running-it-again-and---reset-state)
+- [What a snapshot host cannot make the script do](#what-a-snapshot-host-cannot-make-the-script-do)
 - [What a snapshot proves, and what it does not](#what-a-snapshot-proves-and-what-it-does-not)
 - [Making snapshots](#making-snapshots)
 - [Snapshot age and how large a gap a follower can close](#snapshot-age-and-how-large-a-gap-a-follower-can-close)
@@ -59,7 +61,8 @@ bash scripts/validator-only-bootstrap.sh \
 `SNAPSHOT-HOST.example`, `BOOTNODE-HOST.example` and `TRUSTED-RPC-HOST.example`
 are placeholders. `scripts/validator-only-bootstrap.sh` is a five-line wrapper
 around `scripts/deployvalidator.sh`; both take the same flags. Run it again at
-any time: it is safe to repeat (see below).
+any time: it is safe to repeat (see
+[Running it again](#running-it-again-and---reset-state)).
 
 When it finishes the node is running as a follower at the network tip, its
 registration has been submitted, and it prints what to do next (delegate or
@@ -73,12 +76,14 @@ The flags:
 | `--beneficiary` | Required. Wallet that receives this validator's epoch reward payouts. |
 | `--snapshot-url` | Required (or `NHB_SNAPSHOT_URL`). Directory URL holding `manifest.json` and the archive. `https` only unless `--allow-insecure-http`. |
 | `--bootnode` | Required (or `NHB_BOOTNODE`). Plain `host:port`, never an `enode://` URI. |
-| `--tip-rpc` | Optional (or `NHB_TIP_RPC_URL`). A node you trust; only used to decide when you have caught up. |
-| `--max-lag-blocks` | How far behind that node still counts as caught up. Default 3. |
+| `--tip-rpc` | Optional (or `NHB_TIP_RPC_URL`). A node you trust. Used to decide when you have caught up, and to refuse a node whose newest blocks are not that node's. |
+| `--max-lag-blocks` | How far from that node (either side) still counts as caught up. Default 3, at most 15. |
 | `--sync-timeout` | Seconds to wait for the catch-up. Default 7200. |
 | `--max-snapshot-age` | Refuse a snapshot created longer ago than this, for example `48h`. |
+| `--tip-hash`, `--state-root` | Optional. The tip hash and state root the snapshot must have, 32 bytes of hex each, as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
+| `--max-snapshot-gib` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. Default 16. |
 | `--listen-addr`, `--rpc-addr`, `--external-address` | As before. |
-| `--reset-state` | Move the data directory aside (never deleted) and install a snapshot again. Keeps the node's p2p identity and vote state. |
+| `--reset-state` | Replace the data directory with a snapshot: the snapshot is downloaded, verified and unpacked first, and only then is the node stopped and the old directory moved aside (never deleted). Keeps the node's p2p identity and vote state. Works on a node that is already a validator. |
 | `--allow-insecure-http` | Accept an `http://` or `file://` snapshot URL. |
 | `--allow-existing-key` | Use a key that was already in `/etc/nhbchain/validator.key` but was not made by this script. |
 | `--allow-binary-mismatch` | Continue although the node built here is not the one the snapshot was taken with. |
@@ -147,18 +152,24 @@ quietly, and no secret is printed.
    (`TestDeployArgumentChecksRunBeforeAnythingIsTouched`)
 2. **Installs the tools and builds** `nhb`, `nhb-cli` and `nhb-snapshot`, after
    checking that `config/genesis.relaunch.json` is byte for byte the live genesis.
-3. **Fetches only the manifest first** and checks that it is for the pinned chain
-   id and genesis hash and that the node built here is the one the snapshot was
-   taken with. (`TestDeployInstallsAVerifiedSnapshotAndRefusesTheRest`,
-   `TestDeployBinaryIdentityPolicy`)
+3. **When it will install a snapshot** (the data directory holds nothing, or
+   `--reset-state` was given), **fetches only the manifest first** and checks that
+   it is for the pinned chain id and genesis hash (and for the tip hash and state
+   root you pinned, if you did) and that the node built here is the one the
+   snapshot was taken with. A node that already holds the chain gets none of this
+   (see [Running it again](#running-it-again-and---reset-state)).
+   (`TestDeployInstallsAVerifiedSnapshotAndRefusesTheRest`,
+   `TestDeployBinaryIdentityPolicy`, `TestDeployPinsTheSnapshotsTipAndStateRoot`)
 4. **Makes this validator's key on this machine** and never accepts one. It
    refuses to go on when another `nhb` process is running outside `nhb.service`,
    or when the key file was not made by this script and this host has no node data
    (`--allow-existing-key` overrides the second, at your responsibility).
    (`TestDeployRefusesASecondNodeAndAForeignKey`)
-5. **Downloads and verifies the snapshot**, then unpacks it (see the checks
-   below), and refuses to do so when the key is already a validator in the
-   snapshot's state. It never writes into a data directory that already has data.
+5. **Downloads and verifies the snapshot** within the
+   [size limits](#what-a-snapshot-host-cannot-make-the-script-do), then unpacks it
+   (see the checks below), and refuses to do so when the key is already a
+   validator in the snapshot's state (a first run only: see `--reset-state`). It
+   never writes into a data directory that already has data.
 6. **Writes the node config** from the shipped `config.toml`, changing only the
    listen and RPC addresses, the data directory, the genesis path, the key
    source, the network name, the external address and the peers, and runs
@@ -166,11 +177,25 @@ quietly, and no secret is printed.
    (`TestDeployRenderConfigChangesOnlyNodeLocalValues`,
    `TestDeployRenderConfigFailsLoudlyOnAStaleTemplateAndRefusesDrift`)
 7. **Starts `nhb.service`** as a follower, or leaves it running when nothing
-   changed, and **waits until the node reports a height within `--max-lag-blocks`
-   of the network tip**, checking on the first answer that it reports the pinned
-   chain id and genesis hash. It stops with a diagnosis when the node makes no
-   progress for 15 minutes or the timeout passes.
-   (`TestDeployWaitUntilSynced`, `TestWaitSynced*`)
+   changed, and **waits until the node is at the network tip**, checking on the
+   first answer that it reports the pinned chain id and genesis hash. At the tip
+   means all of these, on two polls in a row:
+   - the node is connected to at least one peer;
+   - when this run installed a snapshot, the node has applied a block **above the
+     snapshot's height**. A snapshot that is not part of the network's chain can
+     never be followed past, so this is what a forged snapshot cannot fake, and a
+     node that never reached a peer (a wrong `--bootnode`) cannot either;
+   - with `--tip-rpc`, its height is within `--max-lag-blocks` of that node's on
+     either side, and the newest blocks the two nodes hold are **the same
+     blocks** (a different block hash at a height both hold ends the run: the
+     node is on another chain);
+   - without `--tip-rpc`, its newest block is dated within a minute of this
+     host's clock, on either side (a block dated in the future says nothing).
+
+   It stops with a diagnosis when the node makes no progress for 15 minutes or
+   the timeout passes.
+   (`TestDeployWaitUntilSynced`, `TestDeployWaitUntilSyncedNeedsBlocksPastTheSnapshot`,
+   `TestWaitSynced*`, `TestAForgedSnapshotIsRefusedAndAnUnconnectedNodeOnItIsNeverAtTheTip`)
 8. **Only then** submits the reward beneficiary and the zero-value registration
    and prints the next steps.
 
@@ -199,6 +224,93 @@ in `cmd/nhb-snapshot/snapshot_test.go`):
   refused); and the chain id, genesis hash, height, tip hash, state root and tip
   time equal what the manifest claims.
 
+## Running it again, and --reset-state
+
+The script is meant to be run again: after a `git pull`, after a reboot, or
+because an earlier run stopped part of the way.
+
+- **A node whose data directory already holds this network's chain is never
+  given a snapshot**, so such a run does not fetch a manifest, does not compare
+  the node built here with the snapshot's binary, and does not need the snapshot
+  host at all. What the host publishes now (a release, or the daily refresh,
+  replaces `manifest.json` with a snapshot of another binary), or whether it
+  answers, cannot change that run. It builds, checks the config, restarts the
+  node only when its binary, config or key changed, waits for the tip and
+  registers, as always.
+  (`TestDeployRerunDoesNotDependOnTheSnapshotHost`)
+- A run that does install a snapshot (an empty data directory, or `--reset-state`)
+  fetches the manifest and checks the binary before anything else on the host
+  changes: the key, the config, the data and the service are all untouched until
+  that check has passed. (It follows the build, because it compares the binary the
+  build made.) (`TestDeployResetStateChecksTheBinaryBeforeItTouchesTheNode`)
+- Whether the data directory and the key are there is asked as root. Both belong
+  to the service user and are closed to the user who runs the script, who would
+  otherwise see an empty directory and no key.
+  (`TestDeployLooksForTheDataAndTheKeyAsRoot`)
+
+`--reset-state` is for a node whose data directory is broken, and that includes
+a node that is already a registered validator. It works in this order:
+
+1. The snapshot is downloaded, verified and unpacked into a new directory next to
+   the old one (`nhb-data.new-<time>-<pid>`) while the node keeps running on the
+   old one. Whatever is wrong with the snapshot ends the run there, with nothing
+   changed: the node is not stopped, no directory is moved, and the message says
+   so. (`TestDeployResetStateWithASnapshotThatDoesNotCheckOutChangesNothing`)
+2. Only then is the node stopped, whatever state it is in (a node whose data
+   directory is broken is often restarting every few seconds rather than running,
+   and a restart in the middle of the swap would start it on whatever the
+   directory holds then), and its p2p identity and its vote and lock state
+   (`p2p/node_key.json`, `bft_sign_state.json`, `polc_lock.json`) copied into the
+   new directory. They are read after the stop, so what the node voted while it
+   stopped is what carries over.
+3. The old directory is moved aside to `nhb-data.replaced-<time>-<pid>` (it is
+   never deleted; delete it yourself when you no longer need it) and the new one
+   is moved into its place.
+   (`TestDeployResetStateOfARegisteredValidator`)
+
+The node's own key is, by then, a validator in every snapshot, so the check that
+refuses a new node's key is not made for the node's own data directory. A first
+run on a host with no data still makes it, with or without `--reset-state`
+(`TestDeployResetStateWithNoDataStillRefusesAKeyThatIsAlreadyAValidator`).
+
+If a step of the swap fails, the old directory is put back and the message says
+where every directory is and whether `nhb.service` is stopped, with the command to
+start it. If the old directory cannot be put back, the message says where it is and
+prints the command that moves it back.
+(`TestDeployResetStateSwapFailureIsReportedTruthfully`)
+
+## What a snapshot host cannot make the script do
+
+A manifest is not signed, so nothing in it is trusted, including its sizes. The
+real snapshot is a few hundred megabytes; the script and the tool bound what a
+host can ask for:
+
+- The script accepts an archive of at most `--max-snapshot-gib` GiB (default 16)
+  and one that unpacks to at most that, and refuses the rest **before it
+  downloads anything**. curl is given the declared size as its cap, so a host
+  that sends more is cut off at it, and what was written is removed.
+- Before the download it checks that the disk holds the archive, what it unpacks
+  to, and 1 GiB for the node. `verify` and `extract` are both given the same
+  unpack bound (`--max-bytes`), so neither reads or writes more than the operator
+  allowed.
+- The tool refuses a manifest that describes an archive over 64 GiB, one that
+  unpacks to over 64 GiB, or one that claims to unpack to more than 64 times its
+  size. The snapshots measured while testing (chains built for the tests, and the
+  local network's, 862 kB unpacking to 1.67 MB) unpack to 1.2 to 2.2 times their
+  archive, and the live chain's was not measured here: an archive of a few
+  megabytes that says it holds gigabytes is a decompression bomb, and it is
+  refused for what it says before a byte of it is unpacked.
+- It refuses a snapshot whose newest block is dated more than five minutes ahead
+  of this host's clock: a block cannot be in a snapshot before it exists.
+
+(`TestDeployRefusesASnapshotBeyondWhatTheOperatorAccepts`,
+`TestDeployChecksThereIsRoomForTheSnapshotBeforeItDownloadsIt`,
+`TestDeployBoundsWhatVerifyAndExtractUnpack`,
+`TestDeployDoesNotKeepMoreThanTheManifestDeclaredFromAHostThatSendsMore`,
+`TestManifestBoundsWhatItCanAskAConsumerFor`,
+`TestExtractRefusesADecompressionBombBeforeWritingAnything`,
+`TestExtractToleratesClockSkewButNotAnInventedFuture`)
+
 ## What a snapshot proves, and what it does not
 
 - **The state is checked against the header.** Whoever hosts the snapshot cannot
@@ -207,13 +319,24 @@ in `cmd/nhb-snapshot/snapshot_test.go`):
   link to the snapshot's tip hash, and every block after it must reproduce the
   state root in its header. A snapshot that is not a prefix of the real chain
   cannot sync; one that is, is verified from then on by executing the chain.
+  That is why the script does not accept a node's own word that it is at the tip:
+  it requires the node to have a peer and to have applied a block above the
+  snapshot's height, and, with `--tip-rpc`, to hold the same newest blocks as that
+  node. A forged snapshot (the live genesis, valid links, a new state and no
+  signatures of anyone: there is nothing in a snapshot to check a signature of) is
+  accepted by `extract`, and then never gets there.
+  (`TestAForgedSnapshotIsRefusedAndAnUnconnectedNodeOnItIsNeverAtTheTip`)
 - **History below the tip is trusted.** Old blocks and old state are checked for
   consistency (headers link and hash for the newest 256 blocks, the whole height
   index is present), not against the network. Use a snapshot from a source you
   trust, and compare its `tipHash` and `stateRoot` with two nodes you trust
   before you register (`nhb_getLatestBlocks` shows the newest blocks; a
   snapshot's tip is normally beyond that window by the time you read it, so
-  compare after your follower has synced the blocks in between).
+  compare after your follower has synced the blocks in between). Or pin them
+  before the download: read the tip hash and state root of the snapshot's block
+  from nodes you trust and pass them as `--tip-hash` and `--state-root`; the
+  script refuses a snapshot that is not that block before it downloads it, and
+  `verify` and `extract` check them again.
 - **Quorum certificates are not verified on the sync path** with the shipped
   configuration (see above). Sync from a bootnode you trust.
 - The manifest is not signed. Fetch it over `https` from a location you control
@@ -380,8 +503,10 @@ p2p identity or consensus key.
   A copied `p2p/node_key.json` makes two nodes indistinguishable to their peers.
   Use a snapshot made by `make-snapshot.sh`.
 - `--reset-state` keeps the identity and vote state of the node it is run on,
-  because that is the same node. It moves the old data directory aside and never
-  deletes it.
+  because that is the same node, and is the one case where the snapshot may list
+  the node's own key as a validator. It unpacks the new snapshot first, stops the
+  node, copies the identity and vote state over, moves the old data directory
+  aside (it never deletes it) and moves the new one into place.
 
 ## Doing it by hand
 
@@ -423,9 +548,17 @@ bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 --tip-rpc https://TRUST
 | `the archive sha256 is ... the manifest says ...` or `a truncated or replaced download` | A damaged or replaced download. Fetch it again. |
 | `the archive entry ... is not a chain database file name` and similar | The archive is not a snapshot made by `make-snapshot.sh`. Do not use it. |
 | `the unpacked snapshot does not open` | The archive is genuine but the database inside is damaged or incomplete. Ask for another snapshot. |
-| `... is a validator in this snapshot's state` | The key on this host is already a validator. It must not start a second node. |
+| `... is a validator in this snapshot's state` | On a first run: the key on this host is already a validator. It must not start a second node. (`--reset-state` on a node's own data directory does not make this check.) |
 | `the node did not reach the network tip within ...` | Still catching up: raise `--sync-timeout`, or the snapshot is too old (see the measured gap above). |
 | `the node has stopped making progress` | No new block for 15 minutes while behind. Check `journalctl -u nhb.service`, the bootnode, and that this host's clock is right. |
+| `connected to no peer` or `no block above the snapshot's height N has been applied yet` in the wait output | The node has not heard from the network, or has not applied one block past its snapshot. Check the `--bootnode` address and the firewall (6001 TCP and UDP), and that the snapshot is one of the network's. |
+| `the node's newest blocks are not the ones the --tip-rpc node has` | The node's chain and the reference node's differ: the snapshot is not part of the network's chain, or one of the two nodes is on a fork. Do not register. Get a snapshot from a source you trust. |
+| `the snapshot archive is ... more than the ... GiB this run accepts`, or `the snapshot unpacks to ...` | The manifest asks for more than `--max-snapshot-gib` allows. Nothing was downloaded. If the network's snapshot has really grown that large, raise the flag; otherwise do not use that host. |
+| `not enough free disk space in ...` | The disk cannot hold the archive, what it unpacks to and 1 GiB. Nothing was downloaded. |
+| `the snapshot's newest block is dated ... ahead of this host's clock` | The snapshot's tip is in the future: this host's clock is wrong, or the snapshot is made up. |
+| `... a decompression bomb` | The manifest says the archive unpacks to more than 64 times its size. It is not a snapshot. |
+| `the snapshot's tip hash is ..., not the ... pinned with --tip-hash` (or `--state-root`) | The snapshot is not the block you pinned. Nothing was downloaded. |
+| `the snapshot could not be installed; nothing was changed` | The unpacked database did not open or match its manifest (or, on a first run, the key is already a validator). The data directory and `nhb.service` are exactly as they were. |
 | `state root mismatch` in the node's log | The node computes different state than the network: a config that differs in a consensus-relevant value, a different build, or `NHB_MASTER_TREASURY`. Run `nhb-snapshot check-config`. |
 | `Dropping chain data requests from a peer over its budget` in the serving node's log, and your follower stops after a few thousand blocks | The serving node's request budget (see the gap section). Expected. The follower goes on with the next block the chain produces; a halted network produces none. |
 | The node is at height 0 and the log shows no progress after an earlier attempt to sync from genesis | That attempt could not sync (see below). Run the script again with `--reset-state`. |
@@ -478,9 +611,11 @@ Tested, on a local network of real `nhb` processes (Windows, Git Bash):
   table files; a snapshot made from the running node with
   `scripts/make-snapshot.sh`; a second node with another key, other ports and a
   fresh data directory started from it as a follower with the shipped
-  `config.toml`; the follower caught up, followed the chain, survived a crash and
-  restart, its votes were rejected by the validator, and its block hash and state
-  root equalled the validator's at every one of the 2,597 heights.
+  `config.toml`; the follower caught up (by the wait the script runs: a peer, a
+  block above the snapshot's height, and the validator's newest blocks compared
+  hash for hash), followed the chain, survived a crash and restart, its votes were
+  rejected by the validator, and its block hash and state root equalled the
+  validator's at every height from 0 to 2,585 in the latest run.
 - `TestFollowerWithDriftedConfigDiverges` (`NHB_SNAPSHOT_E2E_DRIFT=1`): a follower
   with the shipped config synced from a snapshot at height 1,044; a follower with
   `config.toml` as it was before this change (the treasury of the previous network)
@@ -491,6 +626,14 @@ Tested, on a local network of real `nhb` processes (Windows, Git Bash):
   writes with compactions (`TestMakeSnapshotUnderChurn`), and of the deployment
   script's functions against fake `sudo`, `systemctl` and `ps` and a snapshot of a
   chain with the live genesis.
+- The deployment script's `main()` run whole, with only the steps that need a real
+  server (packages, the build, the service, the node's RPC) stubbed, against a real
+  `nhb-snapshot` and a snapshot host on the loopback interface: a fresh install,
+  running it again with the publisher's snapshot replaced or gone, `--reset-state`
+  of a node whose own key is a validator, a snapshot that does not check out, a
+  failing swap, the size, disk-space and pin refusals, and the sync check
+  (`deploy_rerun_test.go`, `deploy_limits_test.go`, `sync_forged_test.go`,
+  `snapshot_limits_test.go`).
 
 Not tested here, and the exact commands to run on Linux:
 
@@ -518,18 +661,24 @@ Not tested here, and the exact commands to run on Linux:
 ```
 nhb-snapshot info         --data-dir DIR [--format text|json] [--header-window N] [--no-state-check]
 nhb-snapshot pack         --data-dir DIR --out-dir DIR [--binary-version S] [--binary-commit S] [--binary-sha256 HEX] [--latest]
-nhb-snapshot verify       --manifest FILE --archive FILE --chain-id N --genesis-hash HEX [--min-height N] [--max-age D] [--tip-hash HEX] [--state-root HEX]
-nhb-snapshot extract      --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX [--reject-validator ADDR] [--max-bytes N]
+nhb-snapshot verify       --manifest FILE --archive FILE --chain-id N --genesis-hash HEX [--min-height N] [--max-age D] [--tip-hash HEX] [--state-root HEX] [--max-bytes N]
+nhb-snapshot extract      --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX [--reject-validator ADDR] [--max-bytes N] [--tip-hash HEX] [--state-root HEX]
 nhb-snapshot manifest show --manifest FILE [--field NAME]
 nhb-snapshot check-config --config FILE --genesis FILE
-nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--stall-timeout D]
+nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--stall-timeout D]
 ```
 
 `--chain-id` and `--genesis-hash` may come from `NHB_SNAPSHOT_CHAIN_ID` and
 `NHB_SNAPSHOT_GENESIS_HASH`; the tool has no default for either. It only ever opens
 a database read-only, and only a copy: a data directory that a running node holds
 open cannot be read (its lock is taken), which is why a snapshot is made from a copy.
-`wait-synced` exits 0 when the node is within the lag, 3 on timeout, 4 when the node
-stopped advancing, 5 when the node or the reference RPC is on another chain. Without
-`--tip-rpc` it compares the age of the newest block with this host's clock
-(`--max-lag-seconds`, default 60), so keep the clock synchronised.
+`wait-synced` exits 0 when the node is at the tip (see step 7 above: it has a peer;
+with `--min-height` it has applied a block above that height; with `--tip-rpc` it is
+within `--max-lag-blocks`, at most 15, of that node and holds the same newest
+blocks), 3 on timeout, 4 when the node stopped advancing, 5 when the node or the
+reference RPC is on another chain, and 6 when the node's blocks differ from the
+reference node's. Without `--tip-rpc` it compares the date of the newest block with
+this host's clock (`--max-lag-seconds`, default 60, either side), so keep the clock
+synchronised. `verify` and `extract` refuse a manifest announcing more than
+`--max-bytes` uncompressed bytes (default 64 GiB; the script passes its own, lower,
+bound).

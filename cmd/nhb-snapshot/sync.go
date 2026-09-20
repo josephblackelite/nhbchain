@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,20 @@ const (
 	exitTimeout = 3
 	exitStalled = 4
 	exitChain   = 5
+	exitFork    = 6
+)
+
+const (
+	// minPeers is how many peers a node must be connected to before it counts
+	// as being at the network tip: a node that hears from nobody has not
+	// followed the network to anywhere.
+	minPeers = 1
+	// blocksPerReply is the most blocks one nhb_getLatestBlocks call returns.
+	blocksPerReply = 20
+	// maxReferenceLag is the largest --max-lag-blocks that can be honoured
+	// against a reference node: the two nodes' newest blocks are compared, so
+	// the lists each returns must still overlap.
+	maxReferenceLag = blocksPerReply - 5
 )
 
 type exitError struct {
@@ -108,21 +123,38 @@ type nodeStatus struct {
 	Timestamp int64
 }
 
-// latestBlock reads the newest block the node has, through nhb_getLatestBlocks.
-func (c *rpcClient) latestBlock(ctx context.Context) (*nodeStatus, error) {
+// latestBlocks reads up to count of the newest blocks the node has, newest
+// first, through nhb_getLatestBlocks.
+func (c *rpcClient) latestBlocks(ctx context.Context, count int) ([]*nodeStatus, error) {
 	var blocks []*types.Block
-	if err := c.call(ctx, "nhb_getLatestBlocks", []any{1}, &blocks); err != nil {
+	if err := c.call(ctx, "nhb_getLatestBlocks", []any{count}, &blocks); err != nil {
 		return nil, err
 	}
-	if len(blocks) == 0 || blocks[0] == nil || blocks[0].Header == nil {
+	var out []*nodeStatus
+	for _, b := range blocks {
+		if b == nil || b.Header == nil {
+			continue
+		}
+		hash, err := b.Header.Hash()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, &nodeStatus{Height: b.Header.Height, TipHash: hash, StateRoot: b.Header.StateRoot, Timestamp: b.Header.Timestamp})
+	}
+	if len(out) == 0 {
 		return nil, errors.New("nhb_getLatestBlocks returned no block")
 	}
-	h := blocks[0].Header
-	hash, err := h.Hash()
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Height > out[j].Height })
+	return out, nil
+}
+
+// latestBlock reads the newest block the node has, through nhb_getLatestBlocks.
+func (c *rpcClient) latestBlock(ctx context.Context) (*nodeStatus, error) {
+	blocks, err := c.latestBlocks(ctx, 1)
 	if err != nil {
 		return nil, err
 	}
-	return &nodeStatus{Height: h.Height, TipHash: hash, StateRoot: h.StateRoot, Timestamp: h.Timestamp}, nil
+	return blocks[0], nil
 }
 
 type waitOptions struct {
@@ -130,6 +162,11 @@ type waitOptions struct {
 	TipRPC        string
 	ExpectChainID *uint64
 	ExpectGenesis []byte // optional; compared with net_info's genesisHash
+	// MinHeight, when it is not zero, is the height of the snapshot the node
+	// started from: the node counts as synced only once it has applied a block
+	// above it, which a snapshot that is not part of the network's chain can
+	// never do.
+	MinHeight     uint64
 	MaxLagBlocks  uint64
 	MaxLagSeconds int64
 	Interval      time.Duration
@@ -144,6 +181,7 @@ type syncResult struct {
 	Height   uint64
 	TipHash  []byte
 	Root     []byte
+	Peers    int    // peers the node was connected to at the last poll
 	TipRPC   uint64 // height of the reference node at the last poll, zero when none is used
 	LagBlock uint64
 	LagSecs  int64
@@ -187,14 +225,23 @@ func checkIdentity(info *netInfo, o *waitOptions, who string) error {
 	return nil
 }
 
-// waitSynced polls a node until it is within a few blocks of the network tip.
+// waitSynced polls a node until it is at the network tip. All of these must
+// hold on Stable polls in a row:
 //
-// With a reference RPC the distance is measured in blocks against that node's
-// newest block. Without one the newest block's own timestamp is compared with
-// this host's clock: a block committed within MaxLagSeconds of now means the
-// node has reached the tip of a chain that is still producing blocks. The
-// reference is used only to decide when to stop waiting; it authenticates
-// nothing, the node validates every block it applies itself.
+//   - the node is connected to at least one peer;
+//   - when MinHeight is set, the node has applied a block above it. A node that
+//     started from a snapshot that is not part of the network's chain can never
+//     apply the network's next block, so this is what a forged snapshot cannot
+//     fake;
+//   - with a reference RPC, the two nodes' newest blocks are at most
+//     MaxLagBlocks apart and are the same blocks (a different block hash at a
+//     height both hold ends the wait: the node is on another chain);
+//   - without one, the newest block's own timestamp is within MaxLagSeconds of
+//     this host's clock, on either side: a block dated in the future is no
+//     evidence of being at the tip of a chain that is still producing blocks.
+//
+// The reference is used to decide when to stop waiting and to catch a node on
+// another chain; the node validates every block it applies itself.
 func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 	o.defaults()
 	ctx, cancel := context.WithTimeout(ctx, o.Timeout)
@@ -202,8 +249,10 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 
 	local := newRPCClient(o.RPC)
 	var ref *rpcClient
+	window := 1
 	if strings.TrimSpace(o.TipRPC) != "" {
 		ref = newRPCClient(o.TipRPC)
+		window = referenceWindow(o.MaxLagBlocks)
 	}
 	start := o.Now()
 
@@ -242,10 +291,11 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 		firstAt     time.Time
 	)
 	for {
-		status, err := local.latestBlock(ctx)
+		blocks, err := local.latestBlocks(ctx, window)
 		if err != nil {
 			fmt.Fprintf(o.Out, "could not read the node's newest block: %v\n", err)
 		} else {
+			status := blocks[0]
 			now := o.Now()
 			if !firstSeen {
 				firstSeen, firstHeight, firstAt = true, status.Height, now
@@ -257,28 +307,69 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 				lastAdvance = now
 			}
 			res := &syncResult{Height: status.Height, TipHash: status.TipHash, Root: status.StateRoot, Duration: now.Sub(start)}
-			synced := false
+			synced := true
+			var notes []string
+			if info, infoErr := local.netInfo(ctx); infoErr != nil {
+				synced = false
+				notes = append(notes, fmt.Sprintf("its peer count is unreadable: %v", infoErr))
+			} else {
+				res.Peers = info.PeerCounts.Total
+				if res.Peers < minPeers {
+					synced = false
+					notes = append(notes, "connected to no peer")
+				}
+			}
+			if o.MinHeight > 0 && status.Height <= o.MinHeight {
+				synced = false
+				notes = append(notes, fmt.Sprintf("no block above the snapshot's height %d has been applied yet", o.MinHeight))
+			}
 			var line string
 			if ref != nil {
-				refStatus, refErr := ref.latestBlock(ctx)
+				refBlocks, refErr := ref.latestBlocks(ctx, window)
 				if refErr != nil {
 					fmt.Fprintf(o.Out, "could not read the reference node's newest block: %v\n", refErr)
+					synced = false
 				} else {
+					refStatus := refBlocks[0]
 					res.TipRPC = refStatus.Height
-					if refStatus.Height > status.Height {
+					side := "behind"
+					if refStatus.Height >= status.Height {
 						res.LagBlock = refStatus.Height - status.Height
+					} else {
+						res.LagBlock = status.Height - refStatus.Height
+						side = "ahead"
 					}
-					synced = res.LagBlock <= o.MaxLagBlocks
-					line = fmt.Sprintf("height %d, network tip %d, %d blocks behind", status.Height, refStatus.Height, res.LagBlock)
+					if res.LagBlock > o.MaxLagBlocks {
+						synced = false
+					}
+					common, err := compareWindows(blocks, refBlocks)
+					if err != nil {
+						return nil, err
+					}
+					if common == 0 {
+						synced = false
+						notes = append(notes, "its newest blocks and the reference node's have no height in common")
+					}
+					line = fmt.Sprintf("height %d, network tip %d, %d blocks %s", status.Height, refStatus.Height, res.LagBlock, side)
 				}
 			} else {
 				res.LagSecs = now.Unix() - status.Timestamp
-				synced = res.LagSecs <= o.MaxLagSeconds
+				if res.LagSecs > o.MaxLagSeconds {
+					synced = false
+				}
+				if res.LagSecs < -o.MaxLagSeconds {
+					synced = false
+					notes = append(notes, "its newest block is dated in the future")
+				}
 				line = fmt.Sprintf("height %d, newest block is %d s old", status.Height, res.LagSecs)
 			}
 			if line != "" {
+				line += fmt.Sprintf(", %d peers", res.Peers)
 				if rate := progressRate(firstHeight, status.Height, firstAt, now); rate != "" {
 					line += ", " + rate
+				}
+				if len(notes) > 0 {
+					line += " (" + strings.Join(notes, "; ") + ")"
 				}
 				fmt.Fprintln(o.Out, line)
 				if synced {
@@ -298,6 +389,41 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 			return nil, &exitError{exitTimeout, fmt.Errorf("the node did not reach the network tip within %s (last height %d)", o.Timeout, lastHeight)}
 		}
 	}
+}
+
+// referenceWindow is how many of the newest blocks each node is asked for when
+// its blocks are compared with the reference node's: enough that the two lists
+// still overlap while the nodes are as far apart as the caller accepts, and few
+// enough to keep the replies small.
+func referenceWindow(maxLag uint64) int {
+	n := maxLag + 5
+	if n > blocksPerReply {
+		n = blocksPerReply
+	}
+	return int(n)
+}
+
+// compareWindows checks that two nodes' newest blocks agree at every height
+// both list, and returns how many heights that is. Blocks are final once
+// committed, so a different block at one height is not a race between the two
+// reads: the nodes are on different chains.
+func compareWindows(local, ref []*nodeStatus) (int, error) {
+	refHash := make(map[uint64][]byte, len(ref))
+	for _, b := range ref {
+		refHash[b.Height] = b.TipHash
+	}
+	common := 0
+	for _, b := range local {
+		want, ok := refHash[b.Height]
+		if !ok {
+			continue
+		}
+		common++
+		if !bytes.Equal(want, b.TipHash) {
+			return common, &exitError{exitFork, fmt.Errorf("the node's block %d is %x but the reference node's is %x: the two are not on the same chain, so the snapshot this node started from is not part of the network's chain", b.Height, b.TipHash, want)}
+		}
+	}
+	return common, nil
 }
 
 func progressRate(h0, h1 uint64, t0, t1 time.Time) string {
