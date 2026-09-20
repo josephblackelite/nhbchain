@@ -106,7 +106,11 @@ func (s *Server) handleGetValidatorInfo(w http.ResponseWriter, _ *http.Request, 
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address parameter", nil)
 		return
 	}
-	addr := common.HexToAddress(addrStr)
+	addr, err := parseValidatorAddress(addrStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address parameter", err.Error())
+		return
+	}
 	acc, err := s.node.GetAccount(addr.Bytes())
 	if err != nil || acc == nil {
 		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "validator not found", nil)
@@ -126,6 +130,22 @@ func (s *Server) handleGetValidatorInfo(w http.ResponseWriter, _ *http.Request, 
 		"delegatedValidator":    delegatedValidator,
 		"nonce":                 acc.Nonce,
 	})
+}
+
+// parseValidatorAddress reads the address parameter of nhb_getValidatorInfo: a
+// bech32 address (nhb1... or znhb1...) or hex. A bech32 address used to be read
+// as hex, which turned it into an unrelated address and answered for that one.
+func parseValidatorAddress(text string) (common.Address, error) {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "nhb1") || strings.HasPrefix(lower, "znhb1") {
+		raw, err := decodeBech32(trimmed)
+		if err != nil {
+			return common.Address{}, err
+		}
+		return common.BytesToAddress(raw[:]), nil
+	}
+	return common.HexToAddress(text), nil
 }
 
 func (s *Server) handleGetNetworkStats(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
