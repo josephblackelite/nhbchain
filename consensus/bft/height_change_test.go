@@ -484,8 +484,8 @@ wait:
 		}
 	}
 	stop.Store(true)
-	engA.NotifyExternalCommit()
-	engB.NotifyExternalCommit()
+	endRound(engA)
+	endRound(engB)
 	for _, done := range []chan struct{}{doneA, doneB} {
 		select {
 		case <-done:

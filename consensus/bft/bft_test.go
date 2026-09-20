@@ -820,8 +820,8 @@ func TestEngineFastForwardsHeightOnRestart(t *testing.T) {
 	if syncedHeight != expectedHeight {
 		t.Fatalf("expected engine height %d after sync, got %d", expectedHeight, syncedHeight)
 	}
-	if syncedRound != 0 {
-		t.Fatalf("expected engine round 0 after height sync, got %d", syncedRound)
+	if syncedRound != 1 {
+		t.Fatalf("expected engine round 1 (the round every height starts in) after height sync, got %d", syncedRound)
 	}
 	if stalePresent {
 		t.Fatalf("expected committedBlocks to be pruned for stale heights")

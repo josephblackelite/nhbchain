@@ -790,7 +790,7 @@ func TestARestartedProposerNeverDoubleSignsAndTheChainStillCommits(t *testing.T)
 	}
 	// The crash: nothing it sends from now on leaves the process, and its loop ends.
 	brV1.kill()
-	engineV1.NotifyExternalCommit()
+	endRound(engineV1)
 	select {
 	case <-firstDone:
 	case <-time.After(5 * time.Second):
