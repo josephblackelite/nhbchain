@@ -9,8 +9,9 @@ export methods that actually exist on the node today.
 Each reward entry is paid out in one of two modes:
 
 * `auto` — the reward is credited automatically; no further action is required.
-* `claim` — the reward is reserved for the winner and must be settled explicitly
-  via `potso_reward_claim` before it is paid.
+* `claim` — the reward is reserved for the winner until it is settled. The
+  `potso_reward_claim` method that settled it is retired (see below), so a
+  `claim`-mode reward has no way to be paid today; deployments use `auto`.
 
 ## JSON-RPC Interfaces
 
@@ -46,31 +47,14 @@ Response:
 `amount` is a decimal string in wei. `nextCursor` is present when more pages
 are available and empty otherwise.
 
-### `potso_reward_claim`
+### `potso_reward_claim` (retired)
 
-Settle a `claim`-mode reward for a specific epoch and address. Requires a
-signature from the winning address.
-
-Parameters:
-
-```json
-{
-  "epoch": 123,
-  "address": "nhb1...",
-  "signature": "0x..."
-}
-```
-
-Response:
-
-```json
-{ "paid": true, "amount": "1000000000000000000" }
-```
-
-Errors: `reward not found` (404) when no claimable reward exists for that
-epoch/address pair, `claiming disabled` (400) when the deployment's reward
-configuration doesn't allow manual claims, and `INSUFFICIENT_TREASURY` (409)
-if the reward treasury can't currently cover the payout.
+Retired: every call gets HTTP 410 with JSON-RPC error `-32060` and nothing is
+executed. The method paid a `claim`-mode reward on the live state of the one
+validator that handled the call, outside block execution, so that validator's
+next block differed from the others'. A claim-mode payout will need a signed
+transaction that every validator executes in a block; until one exists, use
+`auto` mode.
 
 ### `potso_export_epoch`
 
@@ -117,17 +101,14 @@ address,amount,claimed,claimedAt,mode
    entire epoch's payouts against the treasury; decode `csvBase64` and import
    using `address` + `amount` as your dedupe key (there is no separate
    idempotency checksum field on this export).
-3. **Settle claim-mode rewards** via `potso_reward_claim`, using the returned
-   `paid`/`amount` to confirm settlement — repeated claims against an
-   already-paid reward return `reward not found`, not a silent success, so
-   treat that error as "already handled" rather than a hard failure when
-   retrying.
+3. **Claim-mode rewards** are not settled through the RPC any more
+   (`potso_reward_claim` is retired). Only `auto`-mode rewards are paid; an
+   entry with `claimed=false` and `mode=claim` stays unpaid.
 
 ## Not currently available
 
 There is no webhook/push notification system for reward events (no
 `potso.rewards.ready`/`potso.rewards.paid` equivalent), no JSONL export
-alongside the CSV export above, and no separate "mark rewards paid" method —
-settlement for `claim`-mode rewards happens through `potso_reward_claim`
-itself. Accounting systems need to poll `potso_rewards_history` /
+alongside the CSV export above, and no separate "mark rewards paid" method.
+Accounting systems need to poll `potso_rewards_history` /
 `potso_export_epoch` rather than subscribe to push events.

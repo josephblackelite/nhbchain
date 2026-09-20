@@ -11,8 +11,8 @@ events to downstream systems (email, CRM, treasury bots) via webhooks.
 | `potso.reward.paid`  | both modes      | `epoch`, `address`, `amount`, `mode` (`auto` or `claim`) |
 
 Events are queued inside the state processor and accessible through the existing event streaming interfaces. Each attribute is
-encoded as a string. In claim mode the `ready` event is emitted at epoch close while `paid` fires after a successful
-`potso_reward_claim` call.
+encoded as a string. In claim mode the `ready` event is emitted at epoch close; the `potso_reward_claim` call that used to
+make `paid` fire is retired, so in claim mode `paid` does not fire today.
 
 ## Webhook Envelope
 

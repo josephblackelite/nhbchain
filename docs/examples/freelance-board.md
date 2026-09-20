@@ -14,7 +14,7 @@ The app includes:
 
 * **Dashboard** - displays milestone legs with statuses that map to the RPC transitions (`escrow_milestoneFund`, `escrow_milestoneRelease`, `escrow_milestoneCancel`).
 * **Subscription view** - walks through recurring retainers using `escrow_milestoneSubscriptionUpdate`.
-* **Skill ledger** - showcases the payload returned by `reputation_verifySkill`.
+* **Skill ledger** - shows sample attestations in the shape the reputation module records (the `reputation_verifySkill` RPC is retired, so the page carries sample data only).
 
 ## Integrating with a node
 

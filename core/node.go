@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -4707,65 +4706,6 @@ func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, in
 // SyncManager exposes the fast-sync subsystem for RPC handlers.
 func (n *Node) SyncManager() *syncmgr.Manager { return n.syncMgr }
 
-// SnapshotExport produces a snapshot manifest in the supplied directory.
-func (n *Node) SnapshotExport(ctx context.Context, outDir string) (*syncmgr.SnapshotManifest, error) {
-	if n == nil || n.syncMgr == nil {
-		return nil, fmt.Errorf("fast-sync manager not initialised")
-	}
-	root := n.state.CurrentRoot()
-	var checkpointHash []byte
-	height := n.chain.Height()
-	if header := n.chain.CurrentHeader(); header != nil {
-		height = header.Height
-		if len(header.StateRoot) > 0 {
-			root = common.BytesToHash(header.StateRoot)
-		}
-		if hash, err := header.Hash(); err == nil {
-			checkpointHash = hash
-		}
-	}
-	manifest, err := n.syncMgr.ExportSnapshot(ctx, height, root, outDir)
-	if err != nil {
-		return nil, err
-	}
-	if len(checkpointHash) > 0 {
-		manifest.Checkpoint = append([]byte(nil), checkpointHash...)
-		if manifest.Metadata == nil {
-			manifest.Metadata = make(map[string]string)
-		}
-		manifest.Metadata["checkpointHeight"] = strconv.FormatUint(height, 10)
-		manifest.Metadata["checkpointHash"] = hex.EncodeToString(checkpointHash)
-	}
-	return manifest, nil
-}
-
-// SnapshotImport verifies and installs a snapshot manifest/chunk set.
-func (n *Node) SnapshotImport(ctx context.Context, manifest *syncmgr.SnapshotManifest, chunkDir string) (common.Hash, error) {
-	if n == nil || n.syncMgr == nil {
-		return common.Hash{}, fmt.Errorf("fast-sync manager not initialised")
-	}
-	if manifest.ChainID != 0 && manifest.ChainID != n.chain.ChainID() {
-		return common.Hash{}, fmt.Errorf("snapshot chain mismatch: manifest=%d local=%d", manifest.ChainID, n.chain.ChainID())
-	}
-	root, err := n.syncMgr.ImportSnapshot(ctx, manifest, chunkDir)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	n.stateMu.Lock()
-	if err := n.state.ResetToRoot(root); err != nil {
-		n.stateMu.Unlock()
-		return common.Hash{}, err
-	}
-	if err := n.refreshModulePauses(); err != nil {
-		n.stateMu.Unlock()
-		return common.Hash{}, err
-	}
-	n.stateMu.Unlock()
-	n.syncMgr.SetHeight(manifest.Height)
-	n.refreshValidatorSet()
-	return root, nil
-}
-
 func (n *Node) refreshValidatorSet() {
 	if n == nil || n.syncMgr == nil {
 		return
@@ -4804,19 +4744,6 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 		return nil, fmt.Errorf("state unavailable")
 	}
 	return n.state.GetAccount(addr)
-}
-
-// SweepExpiredPOSAuthorizations triggers an on-demand sweep of expired POS authorizations.
-func (n *Node) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
-	if n == nil {
-		return 0, fmt.Errorf("node unavailable")
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	if n.state == nil {
-		return 0, fmt.Errorf("state unavailable")
-	}
-	return n.state.SweepExpiredPOSAuthorizations(now)
 }
 
 // GetPOSAuthorization returns the authorization record for the given ID.
@@ -5178,6 +5105,11 @@ func (n *Node) NetworkSeedsParam() ([]byte, bool, error) {
 	return append([]byte(nil), raw...), true, nil
 }
 
+// PotsoRewardClaim pays one claim-mode reward out of the treasury on the live
+// state trie, outside block execution. No RPC calls it any more (potso_reward_claim
+// is retired, see potsoRewardClaimRPCDisabledMessage in rpc/potso_reward_handlers.go);
+// it is kept for its tests. Do not expose it again: a write made here becomes part
+// of this validator's next proposed block only, so the validators would disagree.
 func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, error) {
 	if err := nativecommon.Guard(n, modulePotso); err != nil {
 		return false, nil, err
@@ -6510,7 +6442,11 @@ func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, active bool, signa
 }
 
 // ReputationVerifySkill validates the caller's verifier role and records a
-// skill verification.
+// skill verification on the live state trie, outside block execution. No RPC
+// calls it any more (reputation_verifySkill is retired, see
+// reputationRPCDisabledMessage in rpc/reputation_handlers.go); it is kept for its
+// tests. Do not expose it again: a write made here becomes part of this
+// validator's next proposed block only, so the validators would disagree.
 func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, expiresAt int64) (*reputation.SkillVerification, error) {
 	if n == nil {
 		return nil, fmt.Errorf("reputation: node unavailable")

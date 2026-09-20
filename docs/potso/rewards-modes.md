@@ -26,9 +26,10 @@ participants.
 * **When to use:** controlled payouts (e.g. loyalty rebates, ambassador programs) where finance/compliance teams want to run
   additional checks or batch treasury top-ups before releasing rewards.
 * **How it works:** epoch processing stores a ledger entry per winner (`claimed=false`, `mode=claim`) and emits
-  `potso.reward.ready` webhooks. No funds move at this stage. Winners (or downstream automation) call the
-  `potso_reward_claim` RPC with a signature that proves ownership. The node debits the treasury at claim time, updates the
-  ledger, appends the history entry, and emits `potso.reward.paid` with `mode=claim`.
+  `potso.reward.ready` webhooks. No funds move at this stage. The `potso_reward_claim` RPC that used to pay the reward
+  (debiting the treasury on one validator's live state, outside block execution) is retired and answers HTTP 410, so a
+  claim-mode reward is not paid today: keep the deployment in `auto` mode until claiming is a signed transaction that every
+  validator executes in a block.
 * **Operational guardrails:** treasury must be funded before the claim executes. If insufficient balance exists the claim
   fails with `INSUFFICIENT_TREASURY` and the ledger remains `claimed=false`. Claims are idempotent; retries after funding the
   treasury succeed without double-paying.

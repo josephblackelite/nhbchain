@@ -26,8 +26,9 @@ export default function Skills() {
         <section>
           <h1>Skill verification ledger</h1>
           <p>
-            Verifiers sign off capability badges through <code>reputation_verifySkill</code>. The current RPC stub simply echoes
-            the payload so that product teams can develop review pipelines, UI affordances, and governance approval loops.
+            Verifiers sign off capability badges. The <code>reputation_verifySkill</code> RPC is retired, so the attestations
+            below are sample data that product teams can use to develop review pipelines, UI affordances, and governance
+            approval loops.
           </p>
           <Link href="/">Back to board</Link>
         </section>
