@@ -146,7 +146,7 @@ func decodeMarketID32(raw string) ([32]byte, error) {
 // { listings }. Unauthenticated and read-only, matching
 // lending_getMarket/lending_getPools's convention -- the open order book is
 // public market data by design (that's the whole point of a marketplace).
-func (s *Server) handleMarketListOpenListings(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleMarketListOpenListings(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if s == nil || s.node == nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
 		return
@@ -167,6 +167,11 @@ func (s *Server) handleMarketListOpenListings(w http.ResponseWriter, _ *http.Req
 		limit = clampMarketListLimit(params.Limit)
 	}
 
+	// Reading the whole book holds the node's exclusive state lock for as long as
+	// the book is long, so it takes a slot in the query pool first.
+	if !s.admitHeavy(w, r, req) {
+		return
+	}
 	var listings []*market.Listing
 	err := s.node.WithStateView(func(manager *nhbstate.Manager) error {
 		open, err := manager.ListOpenMarketListings()
@@ -277,7 +282,7 @@ func (s *Server) handleMarketGetListing(w http.ResponseWriter, _ *http.Request, 
 // lending_getUserAccount's convention: every balance and position on this
 // chain is public by nature, so a caller who already knows an address can
 // query its listings without proving ownership.
-func (s *Server) handleMarketGetMyListings(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleMarketGetMyListings(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if s == nil || s.node == nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
 		return
@@ -316,6 +321,9 @@ func (s *Server) handleMarketGetMyListings(w http.ResponseWriter, _ *http.Reques
 	// "still readable by ID -- just no longer discoverable in the open
 	// list") and keeps this handler O(open listings), not O(all listings
 	// ever created).
+	if !s.admitHeavy(w, r, req) {
+		return
+	}
 	var mine []*market.Listing
 	err = s.node.WithStateView(func(manager *nhbstate.Manager) error {
 		open, err := manager.ListOpenMarketListings()
@@ -350,7 +358,7 @@ func (s *Server) handleMarketGetMyListings(w http.ResponseWriter, _ *http.Reques
 // market_getMyFills([{ address, role, limit }]) -> { fills }. role selects
 // "buyer" (backs My Purchases) or "seller" (backs the seller-side fill
 // history); any other/omitted role defaults to "buyer".
-func (s *Server) handleMarketGetMyFills(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleMarketGetMyFills(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if s == nil || s.node == nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
 		return
@@ -381,6 +389,9 @@ func (s *Server) handleMarketGetMyFills(w http.ResponseWriter, _ *http.Request, 
 	limit := clampMarketListLimit(params.Limit)
 	asSeller := strings.EqualFold(strings.TrimSpace(params.Role), "seller")
 
+	if !s.admitHeavy(w, r, req) {
+		return
+	}
 	var fills []*market.Fill
 	err = s.node.WithStateView(func(manager *nhbstate.Manager) error {
 		if asSeller {
