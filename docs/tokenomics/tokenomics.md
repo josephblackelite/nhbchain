@@ -32,7 +32,7 @@ NHBCoin runs a deliberate two-token model. **NHB** is the commerce currency: an 
 
 ## 2) NHB — the commerce currency
 
-NHB is the settlement and payments rail: mint-on-deposit, burn-on-redemption, no fixed supply cap. It is designed to be backed 1:1 by custodied reserves (USDT/USDC via the swap/OTC pipeline) — this document makes no claim about NHB's price beyond that backing relationship; it is not a speculative asset.
+NHB is the settlement and payments rail: mint-on-deposit, burn-on-redemption, no fixed supply cap. This document makes no claim about NHB's price; it is not a speculative asset.
 
 ---
 
@@ -174,4 +174,3 @@ Callers building a `TxTypeBuyZNHB` transaction should use `nhbCostWei` plus a sm
 * No specific deployed network has necessarily passed a `policy.buybackParams` proposal yet; this document does not claim any network's current bps values have ever diverged from the code-level defaults, only that the proposal kind exists and works — see §6/§7.
 * `policy.trancheGating` (future-tranche release conditions on the Genesis Treasury Distribution Curve, §4) is a separate, still-undesigned governance kind — not part of the buyback engine, and not built.
 * `znhb_getTokenomicsState` does not yet expose per-epoch buyback ask/settlement history or the reference-price signer set as structured data — only the current accrual balance.
-* NHB's backing claim (1:1 custodied reserves) describes the intended architecture; verifying live reserve custody is outside the scope of this document.

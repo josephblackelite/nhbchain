@@ -8217,7 +8217,7 @@ func (n *Node) SwapLimits(addr [20]byte) (*swap.RiskUsage, swap.RiskParameters, 
 // treasury Sale Pool rather than minting new supply (see
 // core/swap_voucher_tx.go's applySwapVoucherMintTransaction), so they carry
 // no external financial risk needing a governance-adjustable circuit
-// breaker -- only the NHB-custody-backed redeem direction does.
+// breaker -- only the redeem direction does.
 func (n *Node) SwapRiskParams() (swap.RedeemRiskParameters, error) {
 	var redeem swap.RedeemRiskParameters
 	err := n.WithState(func(m *nhbstate.Manager) error {

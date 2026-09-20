@@ -129,7 +129,7 @@ Additional examples:
     "proposer": "nhb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp8d7z2",
     "kind": "policy.swapPriceSigner",
     "payload": {
-      "provider": "nowpayments",
+      "provider": "example-provider",
       "signerAddress": "nhb1exampleoraclesigner00000000000000000",
       "memo": "Provision production ZNHB/USD oracle signer"
     }
