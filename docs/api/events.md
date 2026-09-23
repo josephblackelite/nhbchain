@@ -7,9 +7,16 @@ the transfer and staking events defined in `core/events/transfer.go` and
 integers in wei unless stated.
 
 When a transaction fails, the events it appended are discarded, except when the
-failure is a transfer pause (`transfer.nhb.paused`, `transfer.znhb.paused`) or a
-rejected sponsorship (`ApplyTransaction` in `core/state_transition.go`), whose
-events are kept.
+failure is a transfer pause (`transfer.nhb.paused`, `transfer.znhb.paused`), a
+rejected sponsorship or a paused staking module (`stake.paused`), whose events
+are kept (`executeTransaction` in `core/state_transition.go`).
+
+The node keeps the events of committed blocks in a bounded in-memory log
+(`core/event_log.go`); they are not part of any state root. The log holds the
+most recent 20,000 events (`maxRetainedEvents`) plus a second log of up to 100,000
+events of the types `fees.applied`, `potso.penalty.applied` and every `escrow.`
+event (`maxPinnedEvents`, `isPinnedEvent`), so busy events of other kinds do not
+push those out. Older events are dropped.
 
 `nhb_getTransactionReceipt` exposes events as flat `logs` entries and re-derives
 them by simulating the transaction; see [rpc.md](./rpc.md#nhb_gettransactionreceipt)
@@ -78,17 +85,12 @@ above.
 | `releaseTime` | Unix time when the unbond matures. Delegator event only. |
 | `unbondingId` | Id of the pending unbond entry. Delegator event only. |
 
-## `stake.claimed` (unbond claim)
-
-Emitted by `StakeClaim` (`TxTypeStakeClaim`) when a matured unbond is released
-back to the delegator's balance. Attributes: `delegator`, `validator`, `amount`,
-`unbondingId`.
-
 ## `stake.unbondClaimed`
 
-Claiming a matured unbonding entry returns the unbonded ZNHB to the delegator's liquid balance.
-This event used to be named `stake.claimed`, the name the legacy alias of `stake.rewardsClaimed`
-(below) still carries, so the two could not be told apart by type.
+Emitted by `StakeClaim` (`TxTypeStakeClaim`) when a matured unbonding entry is
+claimed: the unbonded ZNHB returns to the delegator's liquid balance
+(`core/events/stake.go`, `StakeUnbondClaimed`). The type `stake.claimed` is not used
+for this; it is only the legacy alias of `stake.rewardsClaimed` (below).
 
 ### Attributes
 
@@ -102,7 +104,7 @@ This event used to be named `stake.claimed`, the name the legacy alias of `stake
 ## `stake.rewardsClaimed`
 
 Emitted by a reward claim (`TxTypeStakeClaimRewards`), together with a second
-event that reuses the type `stake.claimed` (see below).
+event of the legacy type `stake.claimed` (see below).
 
 | Attribute | Description |
 | --- | --- |
@@ -114,9 +116,8 @@ event that reuses the type `stake.claimed` (see below).
 
 The legacy alias event has type `stake.claimed` and attributes `addr`, `minted`
 (same value as `paidZNHB`), `periods`, `aprBps`, `nextEligibleUnix`
-(`StakeRewardsClaimed.LegacyEvent`). The same type string `stake.claimed` is also
-used by the unbond-claim event above, so consumers must distinguish them by
-attributes (`minted` versus `delegator`/`unbondingId`).
+(`StakeRewardsClaimed.LegacyEvent`). `stake.claimed` names only this alias; an unbond
+claim emits `stake.unbondClaimed`.
 
 If the annual emission cap reduces the payout, a `stake.emissionCapHit` event is
 emitted first with `requestedZNHB`, `attemptedZNHB`, `allowedZNHB`, `ytd`, `cap`.
