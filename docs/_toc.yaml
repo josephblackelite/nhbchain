@@ -7,8 +7,6 @@ toc:
         toc:
           - name: NHB Pay intents
             path: specs/nhb-pay.md
-          - name: NFC NDEF payloads
-            path: specs/nfc-ndef.md
           - name: Intent field reference
             path: specs/pos-intent-fields.md
           - name: Quality of service

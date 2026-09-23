@@ -28,7 +28,13 @@ are listed here; record your own baselines from them.
 
 ## Prometheus metrics
 
-Metrics registered in `observability/metrics.go` (all under the `nhb` namespace):
+Metrics registered in `observability/metrics.go` (all under the `nhb` namespace).
+The validator binaries (`nhb`, `consensusd`) serve them at `/metrics` only when the
+environment variable `NHB_METRICS_ADDR` names a listen address (for example
+`127.0.0.1:9100`); it is unset, and nothing is served, by default. The endpoint has
+no authentication and the node logs a warning when it is bound to a non-loopback
+address; a failure to start it is logged and never stops the node
+(`observability/metrics_server.go`).
 
 | Metric | Meaning |
 | --- | --- |
@@ -37,7 +43,18 @@ Metrics registered in `observability/metrics.go` (all under the `nhb` namespace)
 | `nhb_mempool_pos_lane_backlog{asset}` | Gauge: pending POS-tagged transfers by asset. |
 | `nhb_mempool_pos_tx_enqueued_total` | Counter of POS-tagged transactions admitted. |
 | `nhb_mempool_pos_p95_finality_ms` | Histogram of POS enqueue-to-finality latency in ms (buckets 50 to 12800). |
+| `nhb_consensus_seconds_since_last_commit`, `nhb_consensus_last_commit_height`, `nhb_consensus_liveness_stalled` | Liveness watchdog: seconds since this node last saw its committed height advance, that height, and 1 while no block has committed for longer than the stall threshold (60 s by default). |
+| `nhb_consensus_build_failures_consecutive`, `nhb_consensus_build_failures_total{reason}`, `nhb_consensus_empty_block_fallbacks_total`, `nhb_consensus_build_duration_seconds`, `nhb_consensus_build_waves` | Block assembly on the proposer: consecutive builds that fell back to an empty block, whole-build failures by reason, fallbacks, wall-clock time and execution waves per build. |
+| `nhb_consensus_tx_panics_recovered_total`, `nhb_consensus_local_validation_failures_total` | Panics contained while applying a candidate transaction; own proposals that this node's own validation rejected. |
+| `nhb_mempool_tx_failures_total{disposition}`, `nhb_mempool_evictions_total{reason}`, `nhb_mempool_strike_records`, `nhb_mempool_strike_overflow_evictions_total`, `nhb_mempool_inflight_leases_expired_total` | Proposal-time transaction failures, local evictions by block-production containment, the strike book ([tuning](./tuning.md#block-production-containment)). |
 | `nhb_rpc_limiter_hits_total` | RPC rate-limiter hits. |
 | `nhb_module_requests_total`, `nhb_module_errors_total`, `nhb_module_request_duration_seconds`, `nhb_module_throttles_total` | Per RPC module/method request statistics. |
 | `nhb_pos_auth_expired_total` | POS authorizations voided by expiry sweeps. |
 | `nhb_staking_*`, `nhb_loyalty_*`, `nhb_paymaster_*`, `nhb_token_supply_total`, `nhb_security_insecure_binds_total` | Module-specific gauges and counters. |
+
+Alert rules for the liveness and containment metrics are in
+`observability/alerts.yaml`: `ConsensusNoCommit` (no commit for more than 60 s),
+`ConsensusBuildFailing` (two or more consecutive failed builds),
+`ConsensusEmptyBlockFallbackRate` (more than 20 fallbacks in 5 minutes),
+`MempoolNondeterministicTransactions` and `ConsensusTxPanicRecovered`. When the
+watchdog sees a stall the node logs lines that start with `LIVENESS:`.

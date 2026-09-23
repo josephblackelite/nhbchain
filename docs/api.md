@@ -146,6 +146,10 @@ Supported proposal kinds (`native/governance/types.go`): `param.update`,
 `policy.lendingDepositRateSchedule`, `policy.redemptionFeeParams`. A
 `param.update` payload is a JSON object of allow-listed keys, for example
 `{"fees.baseFee":"1000"}`.
+A numeric parameter value in a `param.update` payload may be a bare number or a
+quoted decimal string; the value is stored exactly as the proposer wrote it and
+the readers of governed parameters accept both spellings, ignoring surrounding
+whitespace and leading `+` signs (`ParamDecimal`, `native/common/paramvalue.go`).
 
 Events emitted by the engine: `gov.proposed`, `gov.vote`, `gov.finalized`,
 `gov.queued`, `gov.executed`, and `gov.policy.invalid` (`EventTypePolicyInvalid`,
@@ -190,14 +194,19 @@ Params: `[{"providerTxId": "order-12345", "signature": "0x..."}]`.
 `keccak256("NHB_SWAP_VOUCHER_REVERSE_V1|providerTxId=<providerTxId>")` (the id is
 trimmed), produced by a key holding the on-chain role `ROLE_SWAP_ADMIN`.
 
-When the transaction executes, the voucher's minted amount is debited from the
-voucher recipient's balance and credited to the node's configured swap refund
-sink, and the voucher is marked reversed. It fails if the recipient's balance is
-lower than the minted amount. The RPC returns `{"ok": true, "txHash": "0x..."}`
-once the transaction is accepted into the mempool (reversal takes effect when a
-block applies it). An already-reversed voucher returns `{"ok": true}` with no
-`txHash`. Errors: 403 (`-32001`) unauthorized signer, 409 (`-32602`) voucher not
-minted or insufficient recipient balance, 404 (`-32602`) unknown voucher.
+When the transaction executes (`applySwapVoucherReverseTransaction`,
+`core/swap_admin_tx.go`), only a voucher in status minted can be reversed and only
+one whose token is ZNHB (`ErrSwapInvalidToken` otherwise). The minted amount is
+debited from the recipient's ZNHB account balance and credited to the node's
+configured swap refund sink account, and the voucher is marked reversed. It fails
+if the recipient's ZNHB balance is lower than the minted amount, or if the recipient
+is the refund sink. When the sink is the admin wallet, the amount also returns to the
+ZNHB Sale Pool and the cumulative sale-distributed counter is reduced by it. The RPC
+returns `{"ok": true, "txHash": "0x..."}` once the transaction is accepted into the
+mempool (reversal takes effect when a block applies it). An already-reversed voucher
+returns `{"ok": true}` with no `txHash`. Errors: 403 (`-32001`) unauthorized signer,
+409 (`-32602`) voucher not minted or insufficient recipient balance, 404 (`-32602`)
+unknown voucher.
 
 ### `swap_markReconciled`
 

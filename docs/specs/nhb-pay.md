@@ -26,8 +26,8 @@ the transaction's `value` (wei, an integer); no currency code exists on-chain.
 
 ## Rules enforced when a transaction has an `intentRef`
 
-`ApplyTransaction` (`core/state_transition.go`) calls
-`IntentRegistryValidate` (`core/state/intent_registry.go`) with the block
+`executeTransaction` (`core/state_transition.go`, reached through `ApplyTransaction`)
+calls `IntentRegistryValidate` (`core/state/intent_registry.go`) with the block
 timestamp:
 
 * `intentExpiry` must be non-zero and greater than the block time, else
@@ -72,5 +72,3 @@ nhbpay://intent/<intent_ref_hex>?amount=<decimal>&currency=<code>&expiry=<unix_s
   hex signature in `sig`.
 * In the example `paymaster` is an arbitrary string; it is unrelated to the
   on-chain `paymaster` address field.
-
-An NFC/NDEF carrier for this data is only a proposal; see [nfc-ndef.md](./nfc-ndef.md).
