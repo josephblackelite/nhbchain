@@ -10,39 +10,29 @@ npm run dev
 
 ## What the pages show
 
-- `/` lists three hard-coded milestone legs and names the RPC methods and event topics they correspond to.
+- `/` lists three hard-coded milestone legs and names `escrow_milestoneFund`, `escrow_milestoneRelease` and `escrow_milestoneCancel` and the `escrow.milestone.*` event topics.
 - `/subscriptions` describes a retainer flow around `escrow_milestoneSubscriptionUpdate`.
-- `/skills` lists two hard-coded skill attestations and names `reputation_verifySkill`.
+- `/skills` lists two hard-coded skill attestations and mentions `reputation_verifySkill`.
 
-Nothing on these pages subscribes to a WebSocket or calls the node, whatever the page text says.
+Nothing on these pages subscribes to a WebSocket or calls the node, whatever the page text says (`pages/index.tsx` says the UI subscribes to websocket relays for the `escrow.milestone.*` topics; it does not).
 
-## The RPC methods the pages refer to
+## Status of the RPC methods the pages refer to
 
-Caution: these methods are not retired, but the node methods behind the write calls (`EscrowMilestoneCreate`, `Fund`, `Release`, `Cancel`, `SubscriptionUpdate`, and `ReputationVerifySkill` in `core/node.go`) lock `n.stateMu` and write `n.state.Trie` directly, outside the transaction and block pipeline. The comment on `escrowRPCDisabledMessage` in `rpc/escrow_handlers.go` explains why that pattern was disabled for `escrow_create` and the other retired methods: the change exists only on the validator that served the call, so the next block is rejected by the others on a state-root mismatch. Treat the write methods below as unsafe on a multi-validator network. `escrow_milestoneGet` is read-only.
+Every method the pages name that writes state is retired in the node and answers HTTP `410` with error code `-32060` (`codeMethodDisabled`):
 
-These are dispatched by the node (`rpc/http.go`). All six milestone methods and `reputation_verifySkill` require `Authorization: Bearer <JWT>` (`requireAuthInto`), and are not among the retired methods listed in the [examples index](README.md).
+| Method | Handler |
+| --- | --- |
+| `escrow_milestoneCreate`, `escrow_milestoneFund`, `escrow_milestoneRelease`, `escrow_milestoneCancel`, `escrow_milestoneSubscriptionUpdate` | `rpc/escrow_milestone_handlers.go` (`milestoneRPCDisabledMessage`) |
+| `reputation_verifySkill` | `rpc/reputation_handlers.go` (`reputationRPCDisabledMessage`) |
 
-Milestone methods (`rpc/escrow_milestone_handlers.go`). Each takes a single parameter object. Every mutating call carries a `signature`: a 65-byte secp256k1 signature, hex encoded, over a canonical envelope (`escrow.RecoverMilestone*Signer`). There is no caller field; the signer is recovered from the signature, and the node requires it to be the project's payer (`milestoneUnauthorized("payer")` in `core/node.go`).
+The messages say the methods mutated validator-local state outside the block pipeline and that a signed-transaction replacement is pending. There is no milestone or reputation transaction type in `core/types/transaction.go`, and nothing in the node calls the `Node.EscrowMilestoneCreate`, `Fund`, `Release`, `Cancel` or `SubscriptionUpdate` methods or `Node.ReputationVerifySkill` (`core/node.go`), so at present no live path creates or changes a milestone project or records a skill verification, and no live path emits the `escrow.milestone.*` events (topic names are defined in `native/escrow/events.go`: `escrow.milestone.created`, `escrow.milestone.funded`, `escrow.milestone.released`, `escrow.milestone.cancelled`, `escrow.milestone.leg_due`).
 
-| Method | Parameters | Result |
-| --- | --- | --- |
-| `escrow_milestoneCreate` | `payer`, `payee` (bech32), optional `realm`, optional `meta` (`0x` hex, at most 96 bytes), `legs`, optional `subscription`, `signature` | `{"id": "0x..."}` |
-| `escrow_milestoneGet` | `id` | Project object (below) |
-| `escrow_milestoneFund` | `id`, `legId` (> 0), `signature` | `{"status": "funded"}` |
-| `escrow_milestoneRelease` | `id`, `legId`, `signature` | `{"status": "released"}` |
-| `escrow_milestoneCancel` | `id`, `legId`, `signature` | `{"status": "cancelled"}` |
-| `escrow_milestoneSubscriptionUpdate` | `id`, `active`, `signature` | Project object |
+### `escrow_milestoneGet`
 
-Each leg in `legs`: `id` (> 0, unique), `type` (`deliverable`, `timebox`, or `subscription` as an alias for `timebox`), `title`, `description`, `token`, `amount` (positive base-10 integer string), `deadline` (Unix seconds, must be in the future). At least one leg is required. `subscription` is `{intervalSeconds, nextReleaseAt, active}`.
+The one milestone method that is still served (`handleEscrowMilestoneGet`). It requires `Authorization: Bearer <JWT>` (`requireAuthInto`; without it the node answers HTTP 401 with code `-32001`). It takes a single parameter object `{"id": "<32-byte id, hex, optional 0x>"}`.
 
-Project object: `id`, `payer`, `payee` (as `0x` hex), `realm`, `status` (`draft`, `active`, `completed`, `cancelled`), `createdAt`, `updatedAt`, `meta`, `legs` (`id`, `type`, `title`, `token`, `amount`, `deadline`, `status`), and `subscription` (including `sequence`, the counter the next subscription-update signature must cover). Leg `status` is one of `pending`, `funded`, `released`, `cancelled`, `expired`.
+Result (`milestoneProjectJSON`, `formatMilestoneJSON`): `id`, `payer` and `payee` (as `0x` hex, empty string for a zero address), `realm`, `status` (`draft`, `active`, `completed`, `cancelled`), `createdAt`, `updatedAt`, `meta` (`0x` hex or empty), `legs` (`id`, `type` `deliverable` or `timebox`, `title`, `token`, `amount` decimal string, `deadline`, `status` one of `pending`, `funded`, `released`, `cancelled`, `expired`), and, when the project has one, `subscription` (`intervalSeconds`, `nextReleaseAt`, `active`, `sequence`).
 
-Errors use the escrow error codes with messages such as `invalid_params`, `not_found` (HTTP 404) and `forbidden` (HTTP 403).
+Errors: a wrong parameter count or an id that does not parse is HTTP 400 with `invalid_params` (code `-32021`); a project that does not exist is HTTP 404 with `not_found` (code `-32022`) (`writeMilestoneError`). Because no live path creates projects, this is the answer for an id that was never stored.
 
-`reputation_verifySkill` (`rpc/reputation_handlers.go`): parameter object `{verifier, subject, skill, expiresAt?}` (bech32 addresses); returns `{verifier, subject, skill, issuedAt, expiresAt?}` with `issuedAt` set by the node. It does not echo the request payload. An empty `skill` is `invalid_params` / `skill required`.
-
-Authorization: `verifier` is read from the request body, and the request carries no signature over it. `core/node.go` (`ReputationVerifySkill`) requires that address to hold the `ROLE_REPUTATION_VERIFIER` role and otherwise returns `ErrReputationVerifierUnauthorized` (`reputation: caller lacks verifier role`), which the handler maps to HTTP 403 (`rpc/reputation_handlers.go`). The only other gate is the bearer token required for the call, so any token holder can name any verifier address that holds the role.
-
-## Event topics
-
-Defined in `native/escrow/events.go`: `escrow.milestone.created`, `escrow.milestone.funded`, `escrow.milestone.released`, `escrow.milestone.cancelled`, `escrow.milestone.leg_due`. See [`docs/escrow/milestones.md`](../escrow/milestones.md) for the engine.
+For the escrow module itself see [`docs/escrow/milestones.md`](../escrow/milestones.md).

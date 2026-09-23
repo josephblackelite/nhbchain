@@ -60,7 +60,7 @@ curl -sS "$NHB_RPC_URL" -H 'Content-Type: application/json' \
 ```
 
 - `nhb_getLatestBlocks(count)`: newest first; `count` defaults to 10 and is capped at 20 (`handleGetLatestBlocks`). Each element is a `types.Block` serialised with Go's default field names: `Header` (`height`, `timestamp`, `prevHash`, `stateRoot`, `txRoot`, `executionGraphRoot`, `validator`), `Transactions`, and `quorumCert` when present. Byte fields are base64 strings.
-- `nhb_getLatestTransactions(count)`: walks blocks from the tip; `count` defaults to 20 and is capped at 50 (`handleGetLatestTransactions`). Each element is a raw `types.Transaction`: `chainId`, `type` (a number, see `core/types/transaction.go`), `nonce`, `to` (base64 of the 20-byte address), `value`, `data`, `gasLimit`, `gasPrice`, `r`, `s`, `v`, plus optional fields. There is no `hash`, `from` or `timestamp` field in this response. Use `nhb_getTransaction` / `nhb_getTransactionReceipt` with a hash for that.
+- `nhb_getLatestTransactions(count)`: walks blocks from the tip, skipping blocks that hold no transaction; `count` defaults to 20 and is capped at 50 (`handleGetLatestTransactions`). It is one of the read methods that run in the admission pool (`isGatedQueryMethod` in `rpc/query_gate.go`), so under load it can be refused, see the troubleshooting table. Each element is a raw `types.Transaction`: `chainId`, `type` (a number, see `core/types/transaction.go`), `nonce`, `to` (base64 of the 20-byte address), `value`, `data`, `gasLimit`, `gasPrice`, `r`, `s`, `v`, plus optional fields. There is no `hash`, `from` or `timestamp` field in this response. Use `nhb_getTransaction` / `nhb_getTransactionReceipt` with a hash for that.
 - `nhb_getEpochSummary(epoch?)`: with no parameter, the latest epoch; the parameter may be a number or `{"epoch": n}`. Result fields: `epoch`, `height`, `finalizedAt`, `totalWeight` (string), `activeValidators` (`0x`-hex addresses), `eligibleValidatorCount`. Unknown epoch: HTTP 404, `epoch summary not found`.
 
 ## 4. The helper scripts
@@ -88,8 +88,10 @@ Known problems in the current scripts (source not changed here):
 
 | Symptom | Cause (from the code) |
 | --- | --- |
-| HTTP 401 with code `-32001` | The method is privileged and the request has no valid `Authorization: Bearer <JWT>` (`requireAuth`). Errors: `missing Authorization header`, `Authorization header must use Bearer scheme`, `invalid JWT`, `JWT authentication not configured`. |
+| HTTP 401 with code `-32001` | The method is privileged and the request has no valid `Authorization: Bearer <JWT>` (`requireAuth`). Errors: `missing Authorization header`, `Authorization header must use Bearer scheme`, `missing bearer token`, `invalid JWT`, `JWT authentication not configured`, `JWT authentication misconfigured`. |
 | HTTP 429 with code `-32020` | `RPC rate limit exceeded` (or `transaction rate limit exceeded` for `nhb_sendTransaction`). |
+| HTTP 429 with code `-32020` and message `RPC query capacity exceeded; retry later` | A pooled read (for example `nhb_getLatestTransactions`, `nhb_getTransaction`, `nhb_getTransactionReceipt`) found no free slot. The response carries a `Retry-After` header and `error.data.reason` (`client_limit`, `queue_full` or `wait_timeout`). Defaults: one slot per client, a queue of 8, 100 ms wait (`defaultQueryMaxPerClient`, `defaultQueryQueueDepth`, `defaultQueryQueueWait` in `rpc/query_gate.go`; settings `RPCQuery*` in `config/config.go`, see [`docs/ops/rpc-query-limits.md`](../ops/rpc-query-limits.md)). Retry after the delay. |
+| HTTP 503 with code `-32021` | `RPC query exceeded its time budget` (10 s by default for a pooled read; `Retry-After: 1`). |
 | HTTP 404, `unknown method <name>` (code `-32601`) | The method is not in the dispatcher. |
 | HTTP 410, code `-32060` | The method is retired. See the [examples index](README.md). |
 | HTTP 400 `failed to decode address` | The address is not valid Bech32 for this chain. |
