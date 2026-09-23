@@ -65,7 +65,7 @@ The general request error and latency alerts are in the [alert runbook](./alerts
 | POS lane over 1 | `nhb_mempool_pos_lane_fill` and `nhb_mempool_pos_lane_backlog`; raise `POSReservationBPS` or investigate a burst. |
 | Sponsored transactions rejected | Run `tx_previewSponsorship` on one of them. A paused merchant, revoked device, exhausted cap or low sponsor balance each has its own `reason` (see [paymaster budgets](./paymaster-budgets.md) and [POS pause and revoke](./pos-pause-revoke.md)). |
 | Authorizations disappearing | `pos.auth_auto_voided` events and `nhb_pos_auth_expired_total`. |
-| Capture or void rejected with `pos: invalid authorization id` | The capture and void messages take the authorization id as 64 hex characters, optionally prefixed with `0x` (`decodePOSAuthorizationID`, `core/state_transition.go`), the form `pos_getAuthorization` returns. Any other text is refused. |
+| Capture or void rejected with `pos: invalid authorization id` | The capture and void messages take the authorization id as 64 hex characters, optionally prefixed with `0x` (`decodePOSAuthorizationID`, `core/state_pos.go`), the form `pos_getAuthorization` returns. Any other text is refused. |
 | Registry change rejected | `pos: signer may not change this registry entry` or `pos: stale nonce`; see [POS merchant and device onboarding](./pos-onboarding.md). |
 
 ## Incident review
