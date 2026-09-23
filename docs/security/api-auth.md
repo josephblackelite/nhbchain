@@ -3,7 +3,9 @@
 Two components in this repository authenticate requests with an API key and an HMAC-SHA256 signature. Both use the same implementation, `gateway/auth/auth.go`:
 
 - the node's JSON-RPC server, for the swap methods listed in `isPublicSwapMethod` in `rpc/http.go` (`swap_submitVoucher`, `swap_voucher_get`, `swap_voucher_list`, `swap_voucher_export`, `nhb_requestSwapApproval`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus`, `nhb_getSwapQuote`, `nhb_checkSwapAllowance`, `nhb_getOraclePrice`, `swap_getRiskParams`, `swap_getRedemptionFeeParams`), enabled when `[RPCSwapAuth].Secrets` is non-empty;
-- the escrow gateway (`services/escrow-gateway`).
+- the escrow gateway (`services/escrow-gateway`), on its write routes and on its three read routes (see [Escrow gateway routes](#escrow-gateway-routes)).
+
+In the node, this HMAC check is one layer. The HMAC scheme is applied to the swap methods above when `[RPCSwapAuth].Secrets` is set. `nhb_requestSwapApproval`, `nhb_getSwapQuote`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus` and `nhb_checkSwapAllowance` additionally require a verified TLS client certificate or a bearer JWT (`requireAuthInto` in `rpc/http.go`). `swap_voucher_get`, `swap_voucher_list` and `swap_voucher_export` require a certificate or JWT only when `[RPCSwapAuth].Secrets` is empty (`requireSwapLedgerAuth` in `rpc/swap_handlers.go`); with secrets configured, the HMAC check is their credential.
 
 The API gateway in `cmd/gateway` does not use this scheme. It validates bearer JWTs (`gateway/middleware/auth.go`).
 
@@ -56,7 +58,7 @@ The signature is verified before the nonce is recorded, so unsigned or badly sig
 | Nonce window | 10 min | 10 min | `[RPCSwapAuth].NonceTTLSeconds` |
 | Nonce cache entries per API key | 4096 | 65536 | `[RPCSwapAuth].NonceCapacity` |
 
-A value of zero or less selects the default and a larger value is clamped to the maximum (`NewAuthenticator` in `gateway/auth/auth.go`, and `swapDefault*`/`swapMax*` in `rpc/http.go`). When the cache is full the oldest entry is evicted.
+A value of zero or less selects the default and a larger value is clamped to the maximum (`NewAuthenticator` in `gateway/auth/auth.go`, and `swapDefault*`/`swapMax*` in `rpc/http.go`). When a configured value is clamped, `NewAuthenticator` logs a warning naming the configured and the effective value. When the cache is full the oldest entry is evicted.
 
 For the node RPC, when secrets are configured a nonce persistence backend is mandatory: `[RPCSwapAuth.Persistence] Backend = "leveldb"` with `LevelDBPath` (relative paths are resolved under `DataDir`); an empty backend or `none` stops the node at startup (`cmd/nhb/main.go`). Persisted nonces are loaded into memory at startup. The escrow gateway constructs its authenticator without persistence, so its nonces are held in memory only. `config.Load` refuses `NetworkName = "mainnet"` when `[RPCSwapAuth].Secrets` is empty (`config/config.go`).
 
@@ -66,6 +68,16 @@ Optional per-key request quotas for the swap methods come from `[RPCSwapAuth].Pa
 
 - Node JSON-RPC: HTTP 401 with the JSON-RPC error `codeUnauthorized` and the message from the failed check.
 - Escrow gateway: HTTP 401 with `{"error":"<message>"}`.
+
+## Escrow gateway routes
+
+`Server.ServeHTTP` in `services/escrow-gateway/server.go` routes these paths:
+
+| Route | Credential |
+| --- | --- |
+| `POST /escrow/create`, `/escrow/release`, `/escrow/refund`, `/escrow/dispute`, `/escrow/resolve` | API key and HMAC signature, plus the request-specific checks below. |
+| `POST /p2p/offers`, `POST /p2p/accept` | API key and HMAC signature, plus a wallet co-signature (next section). |
+| `GET /escrow/{id}`, `GET /p2p/offers`, `GET /p2p/trades/{id}` | API key and HMAC signature, signed over an empty body (`authenticateRead`). A failure answers HTTP 401. |
 
 ## Wallet co-signatures (escrow gateway)
 

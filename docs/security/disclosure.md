@@ -4,8 +4,8 @@ We appreciate security researchers who help us keep the NHBChain ecosystem safe.
 
 ## Scope
 The policy applies to:
-- NHBChain core node software and associated smart-contract modules shipped in this repository.
-- Official command-line utilities and SDKs published under the `nhbchain` GitHub organization.
+- NHBChain core node software and the native modules shipped in this repository (`core/`, `native/`, `consensus/`, `rpc/`, `p2p/`).
+- The command-line utilities (`cmd/`) and SDKs (`sdk/`) in this repository.
 - Production infrastructure operated by NHBChain Labs (validators, API gateways, and hosted explorers).
 
 The following assets are **out of scope**: third-party wallets, forked chains, legacy releases older than nine months, and experimental feature branches. If you are unsure whether a target is in scope, contact us before testing.

@@ -14,7 +14,7 @@ Each side writes one newline-terminated JSON object, then reads the peer's. The 
 | `nodeId` | Canonical node ID (below). |
 | `nonce` | 12 random bytes, `0x`-prefixed lowercase hex. |
 | `clientVersion` | Required, non-empty. |
-| `listenAddrs` | Optional list of `host:port` strings; entries with an empty host, port `0` or an unspecified IP are dropped. |
+| `listenAddrs` | Optional list of `host:port` strings; entries with an empty host, port `0` or an unspecified IP are dropped. Only the first 64 entries are examined and at most 8 are kept (`maxHandshakeListenAddrScan`, `maxHandshakeListenAddrs` in `p2p/handshake.go`). |
 | `sig` | 65-byte recoverable secp256k1 signature, hex. |
 
 A frame larger than the configured maximum message size (default 1 MiB) is rejected with `handshake frame exceeds maximum size`.
@@ -60,4 +60,9 @@ After the signature checks pass, the receiver records `(node ID, canonical nonce
 
 ## Violations and bans
 
-These failures call `markHandshakeViolation`: chain ID mismatch, genesis hash mismatch, any signature failure (bad encoding, wrong length, recovery failure, node ID mismatch) and nonce replay. It bans the peer's node ID in the reputation tracker and the peer store for `[p2p].BanDurationSeconds` (when unset it takes the top-level `PeerBanSeconds`, which defaults to 3600 seconds in `config/config.go`; `p2p/server.go` falls back to 15 minutes only if it is handed a non-positive duration) and records a violation in the peer store. Malformed encodings that fail before those checks (unsupported protocol version, missing fields, non-canonical node ID or nonce) return an error without recording a ban.
+`markHandshakeViolation(nodeID, authenticated)` bans a node ID only when `authenticated` is true, that is, when the packet's signature really recovers to the node ID the packet names (`handshakeSignedByClaimedNode`). The node ID in a packet is a string the sender chose, so a packet that is not signed by that node is never held against it.
+
+* **Banned (when the packet is signed by the claimed node):** chain ID mismatch and genesis hash mismatch. The ban is applied in the reputation tracker and the peer store for `[p2p].BanDurationSeconds` (when unset it takes the top-level `PeerBanSeconds`, which defaults to 3600 seconds in `config/config.go`; `p2p/handshake.go` falls back to 15 minutes, `defaultPeerBan`, only if it is handed a non-positive duration), and a violation is recorded in the peer store.
+* **Refused without a ban:** any signature failure (bad encoding, wrong length, recovery failure, node ID mismatch), and nonce replay. A replayed handshake is a copy that anyone who saw the original could send, so nothing is held against the node that signed it.
+* **Also refused without a ban:** unsupported protocol version, missing fields, non-canonical node ID or nonce.
+* **Never banned on handshake evidence:** a node ID that is a configured persistent peer (`isConfiguredPersistentPeer`), so that it can reconnect as soon as its fault is fixed.

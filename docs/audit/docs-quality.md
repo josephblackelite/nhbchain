@@ -18,7 +18,7 @@ Both entry points call `snippets.Verify` (`tools/docs/snippets/snippets.go`) on 
 - runs `go build` on the referenced file for every embed fenced as `go`, and `npx tsc --noEmit --project examples/docs/tsconfig.json` if any embed is fenced as `ts` or `typescript`;
 - checks that the target of every Markdown link or image with a relative path resolves to an existing file. The scan is a regular expression over the raw text, so it also matches link syntax inside code spans. `http(s)`, `mailto`, `tel`, `data:` and `#anchor` targets and site-absolute paths starting with `/` are skipped, and anchors are not checked.
 
-`make audit:docs` then runs `scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs`, which hashes `docs/security/audit-readiness.md` and `ops/audit-pack/BUILD_STEPS.md` into the phase report; that command fails if either file is missing. `ops/audit-pack/BUILD_STEPS.md` does not exist in the repository, so `make audit:docs` (and therefore `make bugcheck-docs` and the `docs` bugcheck) currently fails at this step even when the snippet check passes. The snippet check on its own (`go run ./tools/docs/verify.go`) does not depend on that file.
+`make audit:docs` then runs `scripts/audit/run_phase.sh docs ops/audit/docs.yaml artifacts/docs`, which hashes `docs/security/audit-readiness.md` into the phase report; that command fails if the file is missing. The snippet check runs first, so `make audit:docs` (and therefore `make bugcheck-docs` and the `docs` bugcheck) fails on the first broken embed or relative link it finds.
 
 The check does not verify that prose statements are true. That is the manual part.
 
@@ -31,9 +31,9 @@ For each document sampled:
 3. **Links.** The automated check covers relative links; confirm external links by hand.
 4. **Scope.** Documents must describe on-chain and node behavior implemented in this repository. Remove statements about planned features.
 
-The `docs/` tree has these directories that hold operator and developer material: `docs/runbooks/`, `docs/ops/`, `docs/architecture/`, `docs/consensus/`, `docs/overview/`, `docs/sdk/`. There is no `README.md` directly inside any `services/<name>/` directory.
+The `docs/` tree includes these directories of operator and developer material: `docs/runbooks/`, `docs/ops/`, `docs/architecture/`, `docs/consensus/`, `docs/overview/`, `docs/sdk/`. There is no `README.md` directly inside any `services/<name>/` directory.
 
 ## Exit criteria
 
-- `go run ./tools/docs/verify.go` succeeds on the commit under review (`make audit:docs` also needs `ops/audit-pack/BUILD_STEPS.md`, which is missing).
+- `go run ./tools/docs/verify.go` succeeds on the commit under review.
 - Each sampled document was checked against the code and any discrepancy was corrected or filed as an issue.
