@@ -2,7 +2,8 @@
 
 Every `TxTypeSwapVoucherMint` must carry a signed price proof. The chain
 verifies it deterministically against on-chain state; it does not call any live
-oracle while executing a block (`core/swap_voucher_tx.go` lines 183-196).
+oracle while executing a block (`applySwapVoucherMintTransaction` in
+`core/swap_voucher_tx.go`).
 
 ## Payload format
 
@@ -53,14 +54,13 @@ After the price proof passes, the mint path also runs the provider allow-list,
 sanctions, risk limits, mint-authority signature, slippage, duplicate and
 Sale Pool checks. Only when those pass does it call
 `PriceProofEngine.Record`, which stores the proof as the last accepted proof
-for that base at `swap/oracle/last/<BASE>` (`core/swap_voucher_tx.go`
-line 531). The voucher record stores the proof ID as `priceProofId` and the
+for that base at `swap/oracle/last/<BASE>` (`applySwapVoucherMintTransaction`). The voucher record stores the proof ID as `priceProofId` and the
 proof timestamp as `quoteTs`; `source` is the lower-cased proof provider.
 
 The mint-amount check derives the expected amount from the proof rate:
 `fiatAmount / rate * 10^decimals`, and requires the voucher `amount` to be
 within `SlippageBps` of it (`swap.ComputeMintAmount`,
-`core/swap_voucher_tx.go` lines 405-428). There is no comparison against a
+`applySwapVoucherMintTransaction`). There is no comparison against a
 live oracle rate on this path.
 
 ### Error mapping in the mint transaction

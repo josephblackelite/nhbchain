@@ -31,12 +31,31 @@ while the account has debt:
 
 * `OracleMaxAgeBlocks` (`config.toml`: `1000`; `0` disables): the market's last
   reference-price update (`OracleUpdatedBlock`) must be at most this many blocks
-  old, and a market that has never had one is treated as stale.
+  old, and a market that has never had one is treated as stale. It counts
+  blocks, so its length in time follows the block interval (2,000 seconds at
+  one block every 2 seconds).
 * `OracleMaxDeviationBps` (`config.toml`: `5000`; `0` disables): the latest
   median must be within this share of the previous median.
 
 Repayment is not gated by the oracle. Reference prices come from
 `TxTypeLendingRefPrice`; see [`docs/finance/lending/rpc-api.md`](../finance/lending/rpc-api.md#lending_submitrefprice-jwt-required).
+
+## Liquidation rules
+
+* A liquidator cannot be the borrower (`lending engine: a borrower cannot
+  liquidate their own position`).
+* The position must be unhealthy (`collateralValue * LiquidationThreshold <
+  debt * 10000`, flexible-rate debt only) and the price guard above must pass.
+* The liquidator repays the whole flexible debt and receives the collateral
+  worth that debt (plus `LiquidationBonus`, `0` on a running node) at the
+  market's reference price, capped at the collateral held; see
+  [`on-chain.md`](../finance/lending/on-chain.md#liquidation).
+
+## Interest accrual
+
+Interest accrues by block time (`elapsed seconds * APR / 31,536,000`), so risk
+figures do not depend on how fast blocks are produced
+([`on-chain.md`](../finance/lending/on-chain.md#accrual)).
 
 ## Fields that exist but are not configurable
 

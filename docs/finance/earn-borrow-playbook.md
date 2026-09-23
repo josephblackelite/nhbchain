@@ -75,7 +75,7 @@ Check in this order, using the errors the engine returns:
 3. Is the price guard failing? `lending_getRefPriceStatus`: with the shipped
    `OracleMaxAgeBlocks = 1000`, a borrow returns `oracle quote stale` if no
    reference price was ever accepted or the last one is older than 1000
-   blocks; `oracle deviation too large` if the last update moved the price by
+   blocks (2,000 seconds at one block every 2 seconds); `oracle deviation too large` if the last update moved the price by
    more than 50% (`OracleMaxDeviationBps = 5000`).
 4. Would the borrow exceed the limits? `borrow would exceed maximum
    loan-to-value ratio` or `borrower health factor below 1`.

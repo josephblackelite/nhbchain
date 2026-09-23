@@ -7,7 +7,10 @@ transaction deterministically on every validator
 (`core/swap_voucher_tx.go` `applySwapVoucherMintTransaction`).
 
 The asset delivered is **ZNHB moved out of the admin wallet and the treasury
-Sale Pool**, not newly minted supply (`core/swap_voucher_tx.go` lines 513-555).
+Sale Pool**, not newly minted supply (`applySwapVoucherMintTransaction`). The
+recipient cannot be the admin wallet itself: such a voucher is refused with
+`swap: invalid voucher transaction payload: recipient must not be the treasury
+admin wallet`.
 
 ## Voucher schema (V1)
 
@@ -74,16 +77,18 @@ submissions (`Node.SwapSubmitVoucher` requires `submission.Voucher`).
 ```
 
 * `voucher`, `sig`, `provider` and `providerTxId` are required.
-* `priceProof` is required by the chain (`ErrSwapPriceProofRequired`). See
+* `priceProof` is required by the chain (`ErrSwapPriceProofRequired`). A
+  `priceProof` that has fields but no `signature` is refused by the RPC handler
+  (`priceProof.signature required`). See
   [oracle-verification.md](oracle-verification.md).
 * `usdAmount` defaults to `voucher.fiatAmount` when `fiat` is `USD`. For any
   other fiat it must be supplied: the chain parses it as the USD budget for the
   Sale Pool curve check and rejects the voucher when it is not a positive
-  decimal (`core/swap_voucher_tx.go` lines 468-504).
+  decimal (`applySwapVoucherMintTransaction`).
 
 On success the result is `{"txHash": "0x...", "minted": false}`. `minted` is
 always `false` because the transaction is only enqueued
-(`Node.SwapSubmitVoucher`, `core/node.go` line 7738). Poll `swap_voucher_get`
+(`Node.SwapSubmitVoucher`, `core/node.go`). Poll `swap_voucher_get`
 until the record's `status` is `minted`.
 
 Errors (`rpc/swap_handlers.go`):
@@ -98,13 +103,18 @@ Errors (`rpc/swap_handlers.go`):
 | Anything else | 500 | `codeServerError` |
 
 `ErrSwapProviderTxIDCollision` (`swap: providerTxId collides with a different
-order`) is not in the handler's switch and therefore surfaces as a 500
-`swap voucher failed`.
+order`) and `ErrSwapVoucherInvalidPayload` (which includes the admin-wallet
+recipient refusal above) are not in the handler's switch and therefore surface
+as a 500 `swap voucher failed`.
 
 ## Read methods
 
+These three methods need a credential: the partner-signed request when partner
+authentication is configured, otherwise the RPC bearer JWT or a client
+certificate (see [README.md](README.md#rpc-methods)).
+
 * `swap_voucher_get` - param: the `providerTxId` string (or `{"providerTxId": "..."}`).
-* `swap_voucher_list` - params: `startTs`, `endTs`, optional `cursor`, optional `limit` (default 50). Returns `{"vouchers": [...], "nextCursor": "..."}`.
+* `swap_voucher_list` - params: `startTs`, `endTs`, optional `cursor`, optional `limit` (default 50, at most 200; a larger value is lowered to 200; follow `nextCursor` for more). Returns `{"vouchers": [...], "nextCursor": "..."}`.
 * `swap_voucher_export` - params: `startTs`, `endTs`. Returns `{"csvBase64", "count", "totalMintWei"}`.
 
 A voucher record contains: `provider`, `providerTxId`, `fiatCurrency`,
