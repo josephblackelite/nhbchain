@@ -17,7 +17,7 @@ active seed) and what `p2p_info` returns under `seeds` (see
 
 **The registry is read once, when the process starts.** `cmd/nhb` and `cmd/p2pd`
 load the `network.seeds` parameter at start-up (`Node.NetworkSeedsParam`,
-`core/node.go` line 5130) and parse it once; no code reloads it afterwards. A
+`core/node.go` line 5144) and parse it once; no code reloads it afterwards. A
 governance change to `network.seeds` reaches a node only after that node
 restarts. While running, the node re-resolves DNS for the registry it started
 with.
