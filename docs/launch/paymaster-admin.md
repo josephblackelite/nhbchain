@@ -1,8 +1,8 @@
 # Paymaster Sponsorship Administration
 
 This guide documents the paymaster (gas sponsorship) module as the code implements it:
-the role name, the two live RPC methods, the retired toggle, the sponsorship statuses and
-the events. Sources: `core/sponsorship.go`, `core/node.go`, `rpc/modules/transactions.go`,
+the role name, the two live RPC methods (and the retired third), the sponsorship statuses
+and the events. Sources: `core/sponsorship.go`, `core/node.go`, `rpc/modules/transactions.go`,
 `rpc/http.go`, `core/events/sponsorship.go`.
 
 A transaction requests sponsorship by carrying a `paymaster` address together with a
@@ -21,9 +21,12 @@ status is neither `ready` nor `none` is rejected with
 * The chain ID of every transaction is `0x4e4842` (decimal `5130306`, ASCII `NHB`)
   (`core/types/transaction.go`).
 * The role name `ROLE_PAYMASTER_ADMIN` is what `tx_getSponsorshipConfig` reports as `adminRole`
-  (`rpc/modules/transactions.go`). It no longer gates any RPC method (see section 3). The one
-  place the code uses it is as the built-in default `ApproverRole` of the automatic top-up policy
-  (`config/config.go`; see [auto top-up](../runbooks/paymaster-autotopup.md)). Roles are assigned in the
+  (`rpc/modules/transactions.go`). It no longer gates any RPC method: the only method that did,
+  `tx_setSponsorshipEnabled`, is retired (see section 3), and the module's enabled flag has no
+  runtime setter (`core/node.go`). The one place the code still uses this role is as the built-in
+  default `ApproverRole` of the automatic top-up policy
+  (`[global.Paymaster.AutoTopUp.Governance] ApproverRole`, `config/config.go`; see
+  [auto top-up](../runbooks/paymaster-autotopup.md)). Roles are assigned in the
   `roles` object of the genesis file, which maps a role name to a list of bech32 addresses
   (`core/genesis/spec.go`):
 
@@ -57,14 +60,17 @@ module enabled (`core/state_transition.go`, `NewStateProcessor`).
 
 ## 3. Enabling and disabling sponsorship
 
-The module cannot be switched off while a node runs. The RPC method `tx_setSponsorshipEnabled`
-answers HTTP 410 with code `-32060` and a message that says the method is disabled
-(`handleTxSetSponsorshipEnabled` in `rpc/http.go`); its handler and `SetPaymasterModuleEnabled`
-were removed. The stated reason in the code is that the flag decides whether a sponsored transaction is
-valid, so it must be identical on every validator, and the old method flipped it on one node on
-the strength of an unsigned `caller` address. Nothing in the configuration file sets the flag
-either, so `enabled` is always `true` and the status `module_disabled` (below) is not reachable
-on a running node. To stop sponsorship from being used, use the limits in
+The module cannot be switched off while a node runs. `tx_setSponsorshipEnabled` is retired:
+whatever the request or credential, the server answers HTTP 410 with error code `-32060`
+(`handleTxSetSponsorshipEnabled`, `rpc/http.go`); its handler and `SetPaymasterModuleEnabled`
+were removed. The method took a `caller` address from the request body without any proof that
+the requester held that key, and it flipped a flag in the memory of the one node that received
+it; because that flag decides whether a sponsored transaction is valid at all, different
+validators could disagree on which blocks were acceptable. Nothing in the configuration file
+sets the flag either, so sponsorship stays enabled on every node (`enabled` is always `true`,
+and the status `module_disabled` below is not reachable on a running node), and
+`tx_getSponsorshipConfig` (section 2) and `tx_previewSponsorship` (section 4) remain live. To
+stop sponsorship from being used, use the limits in
 [paymaster budgets](../runbooks/paymaster-budgets.md).
 
 ## 4. Preview sponsorship

@@ -1,6 +1,7 @@
 -- Fee transparency canonical queries
--- Export settlement events into your analytical store (SQLite, ClickHouse) using the
--- ingestion recipe in docs/api/fees-query.md.
+-- Load fee events into your analytical store (SQLite, ClickHouse) yourself: the node has no
+-- export command. docs/api/fees-query.md describes the fees.applied event and the columns
+-- these queries assume.
 
 -- =============================================
 -- Daily totals (SQLite)

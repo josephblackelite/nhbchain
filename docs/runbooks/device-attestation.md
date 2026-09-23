@@ -24,13 +24,18 @@ does, is in [POS merchant and device onboarding](./pos-onboarding.md) and
 ## Where a transaction's `deviceId` and `merchantAddr` are used
 
 A transaction may carry `deviceId` and `merchantAddr` (`core/types/transaction.go`). The
-code reads them in two places:
+code reads them in three places:
 
-1. **Sponsorship.** `EvaluateSponsorship` looks the pair up in the registry
-   (`CheckPOSRegistry`, `core/tx/checks.go`) and throttles a paused merchant, a revoked device
-   or a device bound to a different merchant. It also keeps per-merchant and per-device daily
-   counters for the paymaster caps. See [Paymaster budget](./paymaster-budgets.md).
-2. **Fee domain.** For an NHB or ZNHB transfer, `merchantAddr` is the domain name the fee
+1. **Sponsorship evaluation.** `EvaluateSponsorship` looks the pair up in the registry
+   (`CheckPOSRegistry`, `core/tx/checks.go`) and throttles a sponsored transaction when the
+   merchant is paused, the device is revoked (`device sponsorship revoked`) or the device is
+   bound to a different merchant (`device registered to merchant <address>`). A device or
+   merchant with no record is not blocked. See [Paymaster budget](./paymaster-budgets.md).
+2. **Per-device daily cap.** It also keeps per-merchant and per-device daily counters for the
+   paymaster caps: when `DeviceDailyTxCap` is set in `[global.Paymaster]`, a device may have at
+   most that many sponsored transactions per UTC day, and a sponsored transaction without both
+   `merchantAddr` and `deviceId` is throttled (see [paymaster budgets](./paymaster-budgets.md)).
+3. **Fee domain.** For an NHB or ZNHB transfer, `merchantAddr` is also the domain name the fee
    policy looks up. See [Fees and throttles](./fees-and-throttles.md).
 
 A device or merchant that is not in the registry is not refused by the registry check: only a
@@ -38,6 +43,9 @@ record that exists and is paused, revoked or bound elsewhere changes the outcome
 
 ## Operations
 
+* Registering, revoking and restoring devices, and who may sign those transactions, are
+  described in [POS merchant and device onboarding](./pos-onboarding.md) and
+  [POS pause and revoke](./pos-pause-revoke.md).
 * To check how a device would be treated, run `tx_previewSponsorship` (see
   [Paymaster administration](../launch/paymaster-admin.md)) with `merchantAddr` and `deviceId`
   set on the transaction.
