@@ -46,6 +46,15 @@ describe missing handlers. Its chart config only sets `listen`, while
 `tls.allow_insecure: true`) and at least one API token or mTLS common name, so
 extend `config.content` before scaling it up.
 
+The `prod` values for `consensusd` and `p2pd` set `AllowAutogenesis = false`,
+`GenesisFile = "/var/lib/nhb/genesis.relaunch.json"` and
+`NetworkId = 18346390202490284624` (`deploy/helm/values/prod/`). That file is the
+live network's genesis, `config/genesis.relaunch.json`; `cmd/consensusd` writes the
+embedded copy of it to the configured path when the file does not exist and
+autogenesis is off (`resolveGenesisPath`, `config/embed.go`). A node started from
+an empty data directory does not sync the live network from block 1; see
+[Onboarding a validator from a snapshot](../validators/snapshot-onboarding.md).
+
 ## Secrets
 
 The charts read secrets in two different ways:

@@ -18,6 +18,7 @@ Queries that the indexes and caches can answer never wait for a slot.
 | `nhb_getExplorerSnapshot` | computing a window other than the default one (cached per window and chain height) |
 | `nhb_getLatestTransactions`, `nhb_txWindowStats` | reading blocks that are not yet summarised |
 | `lending_getMarket`, `lend_getPools`, `lending_getUserAccount`, `market_listOpenListings`, `market_getMyListings`, `market_getMyFills` | holding the state lock while the state is read |
+| `swap_voucher_list`, `swap_voucher_export` | reading a page (list) or a time range (export) of the voucher ledger while the state lock is held (these and `swap_voucher_get` need a partner signature or, when partner authentication is not configured, a bearer token or client certificate) |
 
 A query is charged for each block it has to read. Up to 8 blocks are free; past
 that it must hold a slot. The state-lock methods and receipts take a slot

@@ -20,6 +20,23 @@ repository.
 - **Not in this repository:** the swap backend. The gateway still requires an
   endpoint for it (default `http://127.0.0.1:7102`) and routes `/v1/swap` to it.
 
+## Node (`cmd/nhb`)
+
+- **Protocol:** the node the `nhb.service` unit runs (see
+  [One-shot deployment](../deploy/one-shot-deploy.md)). It runs consensus, the
+  peer-to-peer layer and the JSON-RPC HTTP server (`RPCAddress`) in one process.
+- **Flags:** `-config` (default `./config.toml`), `-genesis` (overrides
+  `NHB_GENESIS` and the config's `GenesisFile`), `-allow-autogenesis`,
+  `-allow-migrate`.
+- **Environment:** `NHB_VALIDATOR_PASS` (keystore passphrase), `NHB_GENESIS`,
+  `NHB_ALLOW_AUTOGENESIS`, `NHB_ENV`, `NHB_METRICS_ADDR` (optional Prometheus
+  listener, see [Observability](../ops/observability.md)), `OTEL_EXPORTER_OTLP_*`,
+  and the block-production tuning variables in the
+  [Validator Operations Runbook](../ops/validator-runbook.md#operator-levers).
+- At start it logs a `configuration problem` warning for every problem in the
+  configuration and does not stop (see
+  [Runtime Configuration Guardrails](../ops/configuration.md)).
+
 ## Consensus daemon (`cmd/consensusd`)
 
 - **Protocol:** gRPC (`ConsensusService` and `QueryService`), default
@@ -33,7 +50,8 @@ repository.
 - **Environment:** `NHB_VALIDATOR_PASS` (keystore passphrase), `NHB_GENESIS`,
   `NHB_ALLOW_AUTOGENESIS`, `NHB_CONSENSUS_TIMEOUT_PROPOSAL`,
   `NHB_CONSENSUS_TIMEOUT_PREVOTE`, `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`,
-  `NHB_CONSENSUS_TIMEOUT_COMMIT`, `NHB_ENV`, `OTEL_EXPORTER_OTLP_*`.
+  `NHB_CONSENSUS_TIMEOUT_COMMIT`, `NHB_ENV`, `NHB_METRICS_ADDR`,
+  `OTEL_EXPORTER_OTLP_*`.
 - **Requirements:** a `[network_security]` section giving TLS material (or
   `AllowInsecure = true` together with `-allow-insecure` on a loopback target),
   and a shared secret or client-certificate authentication for its own gRPC
@@ -82,6 +100,14 @@ The transport is gRPC in both cases (not REST).
   `signer_key_file` / `signer_key_env`, `nonce_start`, `nonce_store_path`, `fee`,
   `tls`, `auth` and `consensus_client` (`services/governd/config/config.go`).
   The compose file supplies the signer key through `GOVERND_SIGNER_KEY`.
+
+## Snapshot tool (`cmd/nhb-snapshot`)
+
+Standalone tool used by `scripts/make-snapshot.sh` and `scripts/deployvalidator.sh`.
+Commands: `info`, `refs`, `pack`, `verify`, `extract`, `manifest`, `check-config`,
+`wait-synced` and `version` (`cmd/nhb-snapshot/main.go`). See
+[Snapshot operations](../ops/snapshots.md) and
+[Onboarding a validator from a snapshot](../validators/snapshot-onboarding.md).
 
 ## Other services
 

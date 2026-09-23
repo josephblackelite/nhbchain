@@ -49,6 +49,16 @@ and logs `fees: domain <name> missing FreeTierTxPerMonth, defaulting to 100` onc
 per domain. Policies built from `[global.Fees]` always mark the value as set, so
 this only applies to policies from other sources.
 
+## ZNHB fees and the admin/treasury wallet
+
+A ZNHB credit to, or debit from, the admin/treasury wallet that the ZNHB supply
+invariant tracks (a transfer, a routed fee, an escrow release and the other
+transaction types in `treasuryZNHBFlowTracked`) is booked into the Reward Pool
+sub-ledger in the same state transition. A transaction that would move more ZNHB
+off that wallet than the Reward Pool holds is rejected with
+`znhb: treasury reward pool cannot cover this outflow`
+(`core/znhb_treasury_pool.go`, `core/state_transition.go`).
+
 ## Monitoring
 
 Each domain fee evaluation appends a `fees.applied` event
