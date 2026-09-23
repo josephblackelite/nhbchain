@@ -23,7 +23,9 @@ with `nhb_sendTransaction` ([rpc-api.md](rpc-api.md)).
 
 ## 2. Authenticate
 
-* Reads need no credential.
+* Reads need no credential. `lending_getMarket`, `lend_getPools` and
+  `lending_getUserAccount` share a small query pool: on HTTP 429 (code
+  `-32020`) wait for the `Retry-After` header and try again.
 * `nhb_sendTransaction` requires the RPC credential: a JWT sent as
   `Authorization: Bearer <jwt>`, or a verified client certificate when the
   server requires one.

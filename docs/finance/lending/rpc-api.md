@@ -14,7 +14,16 @@ The read methods below have no authentication check in the dispatch switch
 RPC credential (`requireAuthInto`): a JWT sent as
 `Authorization: Bearer <jwt>` (validated per `[RPCJWT]` in `config.toml`) or a
 verified client certificate when required. `nhb-cli` reads the token it sends
-from `NHB_RPC_TOKEN`; the node does not read that variable.
+from `NHB_RPC_TOKEN`; the node does not read that variable. `nhb-cli
+rpc-token` prints a short-lived token signed with the node's JWT secret (run on
+the node host: `export NHB_RPC_TOKEN="$(nhb-cli rpc-token)"`).
+
+`lending_getMarket`, `lend_getPools` and `lending_getUserAccount` hold the
+node's state lock while they read, so they take a slot in the public query
+pool first. When the pool is full the answer is HTTP 429 with JSON-RPC code
+`-32020` and a `Retry-After` header; a query that runs past the pool's deadline
+gets HTTP 503 with code `-32021`
+([`docs/ops/rpc-query-limits.md`](../../ops/rpc-query-limits.md)).
 
 ## Disabled and removed methods
 
@@ -44,14 +53,15 @@ rendered as JSON numbers, not strings:
 
 `PoolID`, `DeveloperOwner`, `DeveloperFeeCollector`, `DeveloperFeeBps`,
 `TotalNHBSupplied`, `TotalSupplyShares`, `TotalNHBBorrowed`, `SupplyIndex`,
-`BorrowIndex`, `LastUpdateBlock`, `ReserveFactor`, `BorrowedThisBlock`,
+`BorrowIndex`, `LastUpdateBlock`, `LastUpdateTimestamp`, `ReserveFactor`, `BorrowedThisBlock`,
 `LastBorrowBlock`, `OracleMedianWei`, `OraclePrevMedianWei`,
 `OracleUpdatedBlock`, `TotalFixedTermDepositPrincipalWei`,
 `TotalFixedTermDepositInterestOwedWei`, `FixedTermDepositReserveWei`,
 `TotalFixedTermLoanInterestReceivableWei`, plus the tagged `depositApyBps`,
 `borrowApyBps`, `availableLiquidityWei`.
 
-The handler projects interest accrual to the current height before returning,
+The handler projects interest accrual to the newest committed block (its
+height and its timestamp) before returning,
 and computes `depositApyBps`, `borrowApyBps` and `availableLiquidityWei` on the
 fly; they are not stored.
 
@@ -178,7 +188,8 @@ Rules from `core/lending_native.go`:
   name a pool other than `default`, and the pool's developer owner is always
   the transaction signer.
 * `value` must be positive for every action except liquidate.
-* A borrower cannot liquidate their own position.
+* A borrower cannot liquidate their own position (the liquidator is the signer;
+  the check runs in the transaction handler and again in `Engine.Liquidate`).
 * Fixed-term borrow requires a non-zero `tenureDays` that is in the effective
   rate schedule; fixed-term supply also requires a valid `payout`.
 * Every lending transaction is counted against the `lending` module quota
@@ -198,5 +209,6 @@ Engine errors keep the `lending engine:` prefix. Those the code defines include
 `oracle deviation too large`, `borrow would exceed maximum loan-to-value ratio`,
 `cannot withdraw in the same block as a supply`, and
 `supply operations paused` / `borrow operations paused` /
-`repay operations paused` / `liquidation operations paused`
-(`native/lending/engine.go` lines 15-46).
+`repay operations paused` / `liquidation operations paused`, and
+`lending engine: a borrower cannot liquidate their own position`
+(the error variables at the top of `native/lending/engine.go`).

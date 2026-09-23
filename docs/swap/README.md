@@ -10,13 +10,13 @@ code exists but no live path reaches it, that is stated.
 | --- | --- | --- |
 | Voucher mint (fiat on-ramp) | `TxTypeSwapVoucherMint` (`0x1E`) | Verifies a mint-authority-signed voucher and a signed price proof, then **transfers ZNHB** from the admin wallet / treasury Sale Pool to the recipient. It does not mint new ZNHB. See [overview.md](overview.md). |
 | NHB mint | `mint_with_sig` RPC (see [`docs/escrow/mint-settlement.md`](../escrow/mint-settlement.md)) | Mints `NHB` only; `ZNHB` is rejected with `ErrMintZNHBNotMintable` (`core/node.go` `MintWithSignature`). |
-| ZNHB purchase | `TxTypeBuyZNHB` (`0x19`) | Buyer pays NHB to the admin wallet; the chain computes the price from the Genesis Treasury Distribution Curve and moves ZNHB from the Sale Pool to the buyer (`core/state_transition.go` `applyBuyZNHB`). |
+| ZNHB purchase | `TxTypeBuyZNHB` (`0x19`) | Buyer pays NHB to the admin wallet; the chain computes the price from the Genesis Treasury Distribution Curve (rounded up) and moves ZNHB from the Sale Pool to the buyer (`core/state_transition.go` `applyBuyZNHB`). The payload carries `znhbAmount` and `maxNHBAmount`; the purchase fails if the cost exceeds `maxNHBAmount`, and the admin wallet cannot buy from itself. |
 | NHB redemption (swap-out) | `TxTypeRedeemNHB` (`0x1B`), `TxTypeAttestRedemption` (`0x1C`) | Redeem burns the sender's NHB and stores a `pending` request; a holder of `ROLE_SWAP_PAYOUT_ATTESTOR` later marks it `paid` or `failed`. `failed` re-credits the burned NHB. See [risk-controls.md](risk-controls.md). |
 
-`TxTypeSwapMint` (`0x11`) and `TxTypeSwapBurn` (`0x12`) are disabled: both
-return "native on-chain swap mint/burn is disabled -- use the buyZNHB
-transaction type instead" (`core/state_transition.go` `applySwapMint`,
-`applySwapBurn`).
+`TxTypeSwapMint` (`0x11`) and `TxTypeSwapBurn` (`0x12`) are disabled: they
+return `swap: native on-chain swap mint is disabled -- use the buyZNHB
+transaction type instead` and the same text with "burn"
+(`core/state_transition.go` `applySwapMint`, `applySwapBurn`).
 
 The off-chain systems that produce vouchers, price proofs, and redemption
 attestations are outside the scope of this repository. This node only
@@ -33,11 +33,12 @@ verifies what an off-chain submitter hands it.
 
 ## RPC methods
 
-Method names come from the dispatch switch in `rpc/http.go`.
+Method names come from the dispatch switch in `rpc/http.go`. Privileged methods take `Authorization: Bearer <jwt>`; `nhb-cli rpc-token` prints a short-lived one (see [admin.md](admin.md#authentication)).
 
 | Method | Access |
 | --- | --- |
-| `swap_submitVoucher`, `swap_voucher_get`, `swap_voucher_list`, `swap_voucher_export` | Listed in `isPublicSwapMethod`. When swap partner authentication is configured (`s.swapAuth != nil`), requests must pass it (`rpc/http.go` around line 1359); no JWT is required. |
+| `swap_submitVoucher` | Listed in `isPublicSwapMethod`. When swap partner authentication is configured (`s.swapAuth != nil`, which needs `[RPCSwapAuth].Secrets`; the shipped `config.toml` leaves it empty), requests must pass it (checked in `rpc/http.go` before the dispatch switch). Otherwise no credential is asked for: what authorizes the mint is the mint authority's signature and the signed price proof, checked when the transaction executes. |
+| `swap_voucher_get`, `swap_voucher_list`, `swap_voucher_export` | Also listed in `isPublicSwapMethod`, and they always need a credential. With partner authentication configured, the signed partner request is the credential; without it they require the RPC bearer JWT or a verified client certificate (`requireSwapLedgerAuth`, `rpc/swap_handlers.go`). `swap_voucher_list` caps `limit` at 200. `swap_voucher_list` and `swap_voucher_export` take a slot in the public query pool (see [`docs/ops/rpc-query-limits.md`](../ops/rpc-query-limits.md)). `nhb-cli swap voucher get|list|export` sends `NHB_RPC_TOKEN` for these. |
 | `swap_getRiskParams`, `swap_getRedemptionFeeParams` | Public (same list). |
 | `swap_limits`, `swap_provider_status`, `swap_burn_list`, `swap_voucher_reverse`, `swap_markReconciled`, `swap_setManualQuote`, `swap_listPendingRedemptions` | Require the RPC bearer JWT (`requireAuthInto`). |
 | `nhb_requestSwapApproval`, `nhb_getSwapQuote`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus`, `nhb_checkSwapAllowance` | Listed in `isPublicSwapMethod` (partner authentication when configured) **and** require the RPC JWT (`requireAuthInto`). Quote/reservation methods served by a stable-quote engine attached to the node; they return `stable engine not enabled` when none is attached. `nhb_checkSwapAllowance` always returns `allowed: true` (`rpc/swap_stable_handlers.go`). |
