@@ -29,9 +29,11 @@ enforces.
   not the all-zero address, and a positive `value`
   (`applyEvmTransaction`, `applyTransferZNHB` in `core/state_transition.go`).
   In the JSON body, `to` and `data` are Go `[]byte` fields, so they are
-  base64 strings (`rpc/http.go:2883-2885`); `chainId`, `nonce`, `value`,
+  base64 strings; `type` is a JSON number; `chainId`, `nonce`, `value`,
   `gasLimit`, `gasPrice`, `r`, `s` and `v` accept a JSON number, a decimal string
-  or a `0x` hex string (`rpc/http.go:2908-2944`).
+  or a `0x` hex string (the `txDTO` and `parseNumericString` code in
+  `handleSendTransaction`, `rpc/http.go`). A `gasLimit` of zero or a `gasPrice`
+  that is not positive is rejected before the signature is checked.
 - **What a transfer debits.** The fee is a protocol-enforced percentage of the
   amount, not `gasLimit * gasPrice` (comments in `core/state_transition.go`).
   - ZNHB transfer (`applyTransferZNHB`): the sender's ZNHB balance is debited by
@@ -48,9 +50,9 @@ enforces.
 
   - Domain fee (both transfer types): when `tx.MerchantAddress` (JSON field
     `merchantAddr`, part of the signed hash) names a domain that has a configured
-    fee policy, `applyTransactionFee` (`core/state_transition.go:453-600`) applies
+    fee policy, `applyTransactionFee` (`core/state_transition.go`) applies
     that policy in addition to the fee above. It is called from the NHB path
-    (`:3083`) and from `applyTransferZNHB` (`:3642`). The fee, if non-zero after
+    (`applyEvmTransaction`) and from `applyTransferZNHB`. The fee, if non-zero after
     the domain's free tier, is subtracted from the domain's configured payer, which is
     the sender by default and the recipient if the policy says so, in the
     transferred asset, and is routed to the domain's owner wallet. A `fees.applied`
@@ -59,7 +61,17 @@ enforces.
     `fees: insufficient balance to route fee`.
   - Either transfer type can be paused by governance, in which case it fails with
     `nhb transfer: paused` (NHB) or `znhb transfer: paused` (ZNHB)
-    (`ErrTransferNHBPaused`, `ErrTransferZNHBPaused`, `core/state_transition.go:107-108`).
+    (`ErrTransferNHBPaused`, `ErrTransferZNHBPaused` in `core/state_transition.go`).
+  - Treasury wallet (ZNHB only). Every ZNHB movement onto or off the configured
+    admin/treasury wallet by a transfer is booked into the ZNHB Reward Pool in the
+    same state transition (`treasuryZNHBFlowTracked`, `bookTreasuryPoolMovement`
+    in `core/znhb_treasury_pool.go`). A transfer that would take more ZNHB out of
+    that wallet than the Reward Pool holds is rejected: the direct-send path fails
+    with `znhb transfer: znhb: treasury reward pool cannot cover this outflow: sends
+    <amount>, reward pool holds <balance>` (`applyTransferZNHB`), and other
+    transactions that move the wallet's ZNHB fail with the
+    `ErrTreasuryRewardPoolInsufficient` message `znhb: treasury reward pool cannot
+    cover this outflow`. Wallets other than the treasury wallet are not affected.
 
   `fees_getTransferStatus` reports a wallet's tracked spend and whether it is
   still eligible for the free tier; see the [fees policy](../fees/policy.md).
