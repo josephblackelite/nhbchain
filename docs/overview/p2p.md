@@ -43,16 +43,52 @@ Both sides send a signed JSON handshake and read the other's
 | `nodeId` | Canonical lowercase `0x` hex node id. |
 | `nonce` | 12 random bytes, `0x` hex. |
 | `clientVersion` | Non-empty string, default `nhbchain/node`. |
-| `listenAddrs` | Optional list of dialable `host:port` addresses (unspecified and port-0 addresses are dropped). |
+| `listenAddrs` | Optional list of dialable `host:port` addresses (unspecified and port-0 addresses are dropped; only the first 64 entries are looked at and at most 8 are kept, `sanitizeListenAddrs`). |
 | `sig` | 65-byte secp256k1 signature, `0x` hex. |
 
 The signature is over `keccak256("nhb-handshake-v1" || chainId (8 bytes,
 big-endian) || genesisHash || nonce || nodeId string)`. The verifier recovers the
 public key from the signature and requires that the node id derived from it
 equals the claimed `nodeId`; there is no public key field. A repeated nonce from
-the same node id within 10 minutes is rejected as a replay. A chain id, genesis
-or signature failure bans the claimed node id for the ban duration
-(`markHandshakeViolation`).
+the same node id within 10 minutes is rejected as a replay, and nothing is held
+against the node that signed it. A chain id or genesis hash mismatch bans the
+claimed node id for the ban duration only when the handshake signature really comes
+from that node id (`handshakeSignedByClaimedNode`), so a forged handshake cannot get
+someone else's id banned; a signature failure bans nothing, and a configured
+persistent peer is never banned on handshake evidence (`markHandshakeViolation`).
+
+## Limits on remote peers
+
+These are node-local resource limits in `p2p/server.go`, not protocol rules.
+Inbound connections from a loopback address, from a host that is not an IP
+address, and from the address of a configured persistent peer or bootnode are
+exempt from the per-address ones.
+
+* Inbound connections: an address may open 10 back to back and then one every 6
+  seconds (`handshakeAttemptBurst`, `handshakeAttemptRate`); at most 4 handshakes
+  in flight per address, 64 in flight in total, and 8 established inbound
+  connections per address (`defaultMaxPendingPerIP`, `defaultMaxPendingHandshakes`,
+  `defaultMaxInboundPerIP`).
+* Requests for chain data (types `0x03` get status and `0x05` get blocks) have
+  their own budgets, per remote address and shared by all addresses: get blocks
+  4 per second (burst 16) per address and 32 per second (burst 64) shared; get
+  status 2 per second (burst 8) per address and 64 per second (burst 128) shared.
+  A request over budget is dropped without a reply. Persistent peers are exempt
+  (`admitRequest`).
+* A chain data request is answered to the peer that asked, not broadcast
+  (`Node.HandlePeerMessage`, `core/node.go`).
+* Peer tables are bounded: the table of peers seen holds 4096 records
+  (`maxPeerRecords`), the reputation table 4096 (`defaultReputationMaxRecords`),
+  the persisted peer store 2048 entries with a 14 day time-to-live for entries
+  not seen since (`defaultPeerstoreMaxEntries`, `defaultPeerstoreTTL`; pruned
+  hourly), and the PEX address book 1024 entries (`pexBookMax`). When one is full
+  the least recently seen or updated entry is dropped first, preferring entries
+  that are not banned; connected peers are not dropped from the peer table or the
+  peer store, and seeds are never dropped from the PEX book.
+* A peer's outbound queue holds at most 64 messages and, in payload bytes, four
+  times `MaxMsgBytes` but not less than 4 MiB. A message that does not fit is
+  dropped for that peer, which keeps its connection; a log line about drops is
+  written at most every 10 seconds per peer.
 
 ## Rate limiting
 
@@ -78,7 +114,7 @@ Scores decay with a 10-minute half-life (`ReputationManager`). Changes:
 | Valid message | +1 |
 | Malformed message or protocol violation | -5 |
 | Rate-limit violation | -10 |
-| Outbound queue full (64-message queue) | -5 |
+| Write error on the connection (the peer is then disconnected) | -5 |
 
 A score at or below `-GreyScore` (default 50) greylists the peer for a minute; at
 or below `-BanScore` (default 100) it bans the peer for `BanDurationSeconds`
@@ -86,7 +122,8 @@ or below `-BanScore` (default 100) it bans the peer for `BanDurationSeconds`
 in a one-minute window have arrived and at least 50% are invalid, the peer is
 dropped for invalid message rate. Ping messages are sent to each peer every
 `PingIntervalSeconds` (default 30). A peer that sends nothing within `ReadTimeout`
-is disconnected by the socket read deadline. `PingTimeoutSeconds` is accepted and
+is disconnected by the socket read deadline. A full outbound queue is not scored:
+the message is dropped (see the limits above). `PingTimeoutSeconds` is accepted and
 stored by the server but nothing in `p2p/` reads it.
 
 ## Configuration
@@ -108,7 +145,7 @@ Defaults are those applied by `config.Load` when a key is `0`/empty.
 | `MaxMsgBytes` | 1048576 | Maximum frame size. |
 | `MaxMsgsPerSecond` (`[p2p] RateMsgsPerSec`) | 32 | Per-peer token refill rate. |
 | `ClientVersion` | `nhbchain/node` | Sent in the handshake. |
-| `[p2p] NetworkId` | 430060579445266314 | Parsed from the config (decimal string or integer) but not used by the node: the handshake `chainId` is the node's chain id (`Node.ChainID`). |
+| `[p2p] NetworkId` | 18346390202490284624 in a config file the node creates when none exists; no default when the key is absent from an existing file | Parsed from the config (decimal string or integer; a bare integer above the signed 64-bit range is accepted) but not used by the node: the handshake `chainId` is the node's chain id (`Node.ChainID`), the first 8 bytes of the genesis block hash, which is 18346390202490284624 for `config/genesis.relaunch.json`. |
 | `[p2p] ExternalAddress` | empty | This node's publicly dialable `host:port`, advertised in the handshake when `ListenAddress` is unspecified. |
 | `[p2p] Seeds` | `[]` | Seed entries. |
 | `[p2p] Burst` | 200 | Token bucket burst. |
@@ -119,7 +156,13 @@ Defaults are those applied by `config.Load` when a key is `0`/empty.
 | `[p2p] PEX` | true | Enable peer exchange. |
 
 PEX (`p2p/pex.go`) exchanges up to 32 recently seen addresses per response and
-keeps address entries for 60 minutes.
+keeps address entries for 60 minutes. Only addresses of peers this node completed a
+handshake with, and configured seeds, are handed out to other peers. Address
+messages are accepted only as the reply to a request this node sent (a request
+stays open for 5 minutes, at most 4 open per peer, replies at most 64 KiB); any
+other address message is a protocol violation. A peer may send an address request
+3 times back to back and then one every 5 seconds. At most 4 candidate addresses
+are probed by dialing at the same time.
 
 ## Tests
 

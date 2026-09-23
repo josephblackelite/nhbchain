@@ -7,26 +7,20 @@ native transactions sent to the node, and status is read with JSON-RPC.
 For fee behaviour on POS payments see [fee policy](../fees/policy.md) and
 [fee routing](../fees/routing.md).
 
-## Submitting a payment
+## Submitting authorize, capture and void
 
-The `pos.v1.Tx` gRPC service (`AuthorizePayment`, `CapturePayment`,
-`VoidPayment`, defined in [`proto/pos/tx.proto`](../../proto/pos/tx.proto)) is
-**retired** and is not registered on the node's RPC server (`rpc/http.go`
-`Serve`, NHB-AUDIT-S3); calls return `Unimplemented`. Its messages carry no
-signature field, so the service could never produce an authorized payment.
+The `pos.v1.Tx` and `pos.v1.Registry` gRPC services are defined in
+[`proto/pos/tx.proto`](../../proto/pos/tx.proto) and
+[`proto/pos/registry.proto`](../../proto/pos/registry.proto), but they are **not
+registered** on the node: `Serve` in `rpc/http.go` registers only
+`pos.v1.Realtime`. A call to the Tx service fails with `Unimplemented`. The
+implementation in `rpc/pos_grpc.go` is unused because its messages carry no
+signature, and the state machine requires the transaction signer to be the party
+named in the message.
 
-Payments are submitted as native transactions signed client-side with the
-payer's or merchant's own wallet key and sent through the standard
-`nhb_sendTransaction` JSON-RPC method:
-
-| Operation | Transaction type |
-| --- | --- |
-| Authorize | `TxTypePOSAuthorize` (`0x20`) |
-| Capture | `TxTypePOSCapture` (`0x21`) |
-| Void | `TxTypePOSVoid` (`0x22`) |
-
-For an authorize transaction the payer must be the transaction signer
-(`core/state_pos.go` `applyPOSAuthorize`).
+The working path is `nhb_sendTransaction` with these transaction types
+(`core/types/transaction.go`, dispatch in `core/state_transition.go`,
+handlers in `core/state_pos.go`):
 
 | Type | Value | `data` | Who must sign |
 | --- | --- | --- | --- |
@@ -42,10 +36,27 @@ fields the state machine reads are:
 * `MsgCapturePayment`: `authorization_id`, `amount`.
 * `MsgVoidPayment`: `authorization_id`, `reason`.
 
-`authorization_id` must be the 64-character hex string of the 32-byte id, without
-a `0x` prefix. The `nonce`, `expires_at`, `chain_id` and `merchant` fields in
-these messages are not read by the transaction handlers. The lifecycle rules are
-in [POS lifecycle](../specs/pos-lifecycle.md).
+`authorization_id` must be the hex text of the 32-byte id: 64 hex characters,
+optionally prefixed with `0x` (the form `pos_getAuthorization` returns and the
+event attributes carry, `decodePOSAuthorizationID` in `core/state_pos.go`); anything
+else fails with `pos: invalid authorization id`. The `nonce`, `expires_at`,
+`chain_id` and `merchant` fields in these messages are not read by the transaction
+handlers. The lifecycle rules are in [POS lifecycle](../specs/pos-lifecycle.md).
+
+### Registry transactions
+
+Merchant and device registry changes are carried by `TxTypePOSRegistry` (`0x23`).
+Its `data` is a protobuf `google.protobuf.Any` wrapping one of the
+`proto/pos/registry.proto` messages `MsgRegisterMerchant`, `MsgPauseMerchant`,
+`MsgResumeMerchant`, `MsgRegisterDevice`, `MsgRevokeDevice` or `MsgRestoreDevice`
+(`applyPOSRegistry`, `core/state_pos.go`). The signer must be the merchant named in
+the message (`merchant_addr`, a bech32 or hex address) or hold the role
+`ROLE_POS_REGISTRY_ADMIN`; otherwise the transaction fails with `pos: signer may
+not change this registry entry`. When the message's `authority` field is set it
+must be the signer's own address. For a revoke or restore the named device must be
+registered and, if `merchant_addr` is given, bound to that merchant. The registry
+keeps one nonce per signer and each message's `nonce` must be positive and higher
+than the last one used (`pos: stale nonce`).
 
 ## Looking up authorization status (JSON-RPC)
 
@@ -77,6 +88,7 @@ Result fields: `id`, `payer`, `merchant` (bech32), `amount`, `capturedAmount`,
 in-memory finality cache and is omitted after a restart or when this validator
 never saw the intent; do not rely on it for reconciliation.
 
-Prefer the realtime gRPC (`pos.v1.Realtime/SubscribeFinality`) or WebSocket stream ([`docs/api/pos-realtime.md`](pos-realtime.md))
-for live updates, and only fall back to polling `pos_getAuthorizationByIntentRef`
-during recovery or when a terminal cannot maintain a streaming connection.
+## Live updates
+
+Use the finality stream ([pos-realtime.md](pos-realtime.md)) for live status and
+fall back to `pos_getAuthorizationByIntentRef` for recovery.

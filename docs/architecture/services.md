@@ -45,9 +45,12 @@ deployments set their own bind addresses.
 (`gateway/routes/router.go`). It serves `/healthz`, an optional JSON-RPC
 compatibility handler on `/rpc`, `/metrics` when observability is enabled, and
 one reverse-proxied route per entry in the config's `services` list, with
-optional per-route rate limiting and JWT scope checks. Routes named `lending`,
-`transactions` and `consensus` also mount bridge handlers
-(`gateway/routes/lending.go`, `transactions.go`, `wallet.go`).
+optional per-route rate limiting and JWT scope checks. The `/rpc` handler now
+goes through the same rate limiter and authenticator middleware as the routes
+it stands in for, so a caller needs a valid token to reach it
+(`gateway/routes/router.go`). Routes named `lending`, `transactions` and
+`consensus` also mount bridge handlers (`gateway/routes/lending.go`,
+`transactions.go`, `wallet.go`).
 
 ## Protobuf layout
 
