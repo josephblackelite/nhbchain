@@ -9,9 +9,11 @@ Facts about the creator module that matter for operators (`native/creator`, `rpc
 
 ## Engine guards
 
-* **Sufficient funds** – Tipping and staking debit the caller immediately. Failed balance checks surface as validation errors; clients should present clear messaging to avoid repeated retries.
-* **Rate limits** – The RPC server enforces a per-source transaction quota over a sliding `RPCRateLimitWindow` (code default 5 per 60s when `RPCMaxTxPerWindow` is unset; the shipped `config.toml` sets 120). Consider lowering this in public devnets to reduce griefing and wash trading.
-* **Reward configuration** – Staking yield is controlled in-code (2.5% BPS in this build). Networks can fork to adjust or gate staking entirely if needed.
+Enforced by the engine when it runs (`native/creator/engine.go`), which today happens only in tests and Go callers because the write RPCs are disabled:
+
+* Tips and stakes debit the caller's NHB balance and fail with `creator engine: insufficient balance` when it is too low.
+* Tips are limited to 5 per creator per rolling 1-second window; a fan may stake at most 1,000,000,000,000 base units per 3600-second window ([`economics.md`](./economics.md)).
+* The staking yield rate is a constant in the code (`stakingAccrualBps` = 250, 2.5%); no parameter changes it.
 
 ## Known accounting behavior
 

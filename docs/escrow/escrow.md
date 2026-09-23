@@ -11,6 +11,7 @@ Related documents: [`hardened-engine.md`](./hardened-engine.md) (transaction rou
 * **Tokens.** Only `NHB` and `ZNHB` are accepted (`native/escrow/types.go`, `defaultTokenRegistry`). Symbols are trimmed and upper-cased; anything else fails with `unsupported escrow token`.
 * **Transitions are idempotent.** Calling a transition that has already been applied returns success without changing state (`Engine.Fund`, `Release`, `Refund`, `Expire`, `Dispute`, `Resolve` in `native/escrow/engine.go`). There is no client-supplied idempotency key.
 * **Writes are signed transactions.** The `escrow_create`, `escrow_fund`, `escrow_release`, `escrow_refund`, `escrow_expire`, `escrow_dispute` and `escrow_resolve` JSON-RPC methods are permanently disabled; they answer HTTP 410 with error code `-32060` (`rpc/escrow_handlers.go`, `escrowRPCDisabledMessage`). Every state change goes through a signed transaction submitted with `nhb_sendTransaction` (section 4).
+* **Block time.** The engine's clock is the block timestamp (`configureTradeEngine` sets `SetNowFunc` to `sp.blockTimestamp()`, `core/state_transition.go`), never the wall clock. `createdAt`, `deadline` checks and the legacy-migration timestamps are therefore the same on every validator.
 * **Pause switch.** Every engine transition first checks the `escrow` module pause flag (`nativecommon.Guard(e.pauses, "escrow")`).
 
 ---
@@ -102,6 +103,8 @@ Storage lives in the state manager (`core/state`): the escrow record, a per-escr
 
 The escrow fee treasury is set on the state processor (`SetEscrowFeeTreasury`) when the node starts (`core/node.go`).
 
+**Treasury wallet booking.** Fund, release, refund, expire and the arbitration and delegated release/refund transaction types are in `treasuryZNHBFlowTracked` (`core/znhb_treasury_pool.go`). If one of them moves ZNHB onto or off the node's admin/treasury wallet (for example a ZNHB escrow fee paid to it), `executeTransaction` books the net movement into the ZNHB Reward Pool in the same state transition; a transaction that would take more ZNHB out of that wallet than the Reward Pool holds fails with `znhb: treasury reward pool cannot cover this outflow`. The escrow engine also handles a transfer leg whose two ends are the same address (a payee, fee treasury or realm fee recipient that is the vault itself) on one account object, so such a leg cannot create or destroy value (`transferToken`, `native/escrow/engine.go`).
+
 ---
 
 ## 4. Transactions
@@ -127,7 +130,7 @@ Write access is through these transaction types (`core/types/transaction.go`). T
 
 JSON encoding notes for `TxTypeCreateEscrow` (`applyCreateEscrow`): `payee`, `mediator` and `meta` are Go `[]byte` fields, so as JSON they are base64 strings; `amount` is a JSON number. The `nhb-cli escrow create` command builds this payload for you.
 
-Each accepted escrow transaction except the arbitration types increments the sender's account nonce (`applyArbitrate` does not, see `core/state_transition.go`), and is counted against the `escrow` module quota (`applyQuota(moduleEscrow, ...)`); arbitration transactions count against the `trade` module quota, and the two realm transactions are not quota-gated.
+Each accepted escrow transaction increments the sender's account nonce, including the two arbitration types (`applyArbitrate` ends with `updateSenderNonce`, `core/state_transition.go`); the relayer that submits a decision owns the transaction nonce even though its address is not checked. Escrow transactions are counted against the `escrow` module quota (`applyQuota(moduleEscrow, ...)`); arbitration transactions count against the `trade` module quota, and the two realm transactions are not quota-gated.
 
 Escrow IDs in `tx.Data` for release/refund/lock/dispute/expire are the raw 32 bytes (`decodeEscrowID`).
 
@@ -180,7 +183,7 @@ A realm is a named arbitrator committee. Realms are created and updated only by 
 
 Create fails if the realm already exists; update fails if it does not. An update replaces the arbitrator set, bumps `version` by one, and replaces the fee schedule.
 
-Governance bounds (parameter store keys in `native/escrow/types.go`): `escrow.realm.MinThreshold` (default 1), `escrow.realm.MaxThreshold` (default 10) and `escrow.realm.AllowedSchemes` (default single and committee). The arbitrator set must have at least `MinThreshold` members and the threshold must lie within the bounds.
+Governance bounds (parameter store keys in `native/escrow/types.go`): `escrow.realm.MinThreshold` (default 1), `escrow.realm.MaxThreshold` (default 10) and `escrow.realm.AllowedSchemes` (default single and committee). A numeric value may be stored bare or as a quoted decimal string; both are read the same way (`parseUintParam` calls `nativecommon.ParamDecimal`, `native/escrow/engine.go`). The arbitrator set must have at least `MinThreshold` members and the threshold must lie within the bounds.
 
 ### 5.2 Frozen policy
 
@@ -222,8 +225,8 @@ Requests use the node's JSON-RPC envelope with `params` as an array holding one 
 | `escrow_get` | `{"id": "<64 hex, optional 0x>"}` | Escrow object: `id`, `payer`, `payee`, `mediator?`, `token`, `amount` (decimal string), `feeBps`, `deadline`, `createdAt`, `nonce`, `status`, `meta` (`0x` + 64 hex), `disputeReason?`, and for realm-bound escrows `realm`, `realmVersion`, `policyNonce`, `arbScheme` (number), `arbThreshold`, `frozenAt`, `arbitrators` (`rpc/escrow_handlers.go`, `escrowJSON`). Addresses are bech32 (`nhb1...`). |
 | `escrow_getSnapshot` | `{"id": ...}` | Same core fields plus `frozenPolicy` (scheme as `single`/`committee`, threshold, members, metadata) and `resolutionHash?` (`rpc/modules/escrow.go`). |
 | `escrow_getRealm` | `{"id": "<realm id>"}` | `id`, `version`, `nextPolicyNonce`, `createdAt`, `updatedAt`, `arbitrators` (`scheme`, `threshold`, `members`), `metadata` (`scope`, `providerProfile`, `arbitrationFeeBps`, `feeRecipient?`). Unknown realm: HTTP 404, code `-32602`, message `realm not found`. |
-| `escrow_listEvents` | optional `{"prefix": "escrow.", "limit": N}` | Events currently held in the node's in-memory event buffer whose type starts with the prefix (default `escrow.`), each `{sequence, type, attributes}`; `sequence` is the position within this response, not a stable cursor. |
-| `escrow_milestone*` | see [`milestones.md`](./milestones.md) | |
+| `escrow_listEvents` | optional `{"prefix": "escrow.", "limit": N}` | Events currently held in the node's in-memory event log whose type starts with the prefix (default `escrow.`), oldest first, each `{sequence, type, attributes}`; `limit` keeps the oldest matches; `sequence` counts from 1 within this response and is not a stable cursor. The log is not part of state and is empty after a restart. It keeps the last 20,000 events of ordinary types plus, separately, the last 100,000 events that are fee, POTSO-penalty or `escrow.` events (`maxRetainedEvents`, `maxPinnedEvents`, `core/event_log.go`), so an older escrow event drops out of the list once 100,000 newer ones of those kinds exist. |
+| `escrow_milestoneGet` | see [`milestones.md`](./milestones.md) (the other `escrow_milestone*` methods answer 410) | |
 
 `escrow_get` reports unknown IDs with HTTP 404 and code `-32022`.
 
@@ -237,7 +240,7 @@ Requests use the node's JSON-RPC envelope with `params` as an array holding one 
 | `-32023` | Forbidden. |
 | `-32024` | Conflict (transition not valid from the current status, identifier already exists). |
 | `-32025` | Internal error. |
-| `-32060` | Method disabled (the write `escrow_*` methods and `p2p_createTrade`/`p2p_settle`/`p2p_dispute`/`p2p_resolve`). |
+| `-32060` | Method disabled, HTTP 410 (the write `escrow_*` methods, the write `escrow_milestone*` methods and `p2p_createTrade`/`p2p_settle`/`p2p_dispute`/`p2p_resolve`). |
 | `-32010`, `-32030` | Returned by `nhb_sendTransaction`: duplicate transaction, mempool full. |
 
 Transaction-level failures (for example `escrow: unauthorized release caller`) surface when the block is executed, as plain Go error strings.
@@ -246,7 +249,7 @@ Transaction-level failures (for example `escrow: unauthorized release caller`) s
 
 ## 8. Command line
 
-`nhb-cli escrow <command>` (`cmd/nhb-cli/escrow_cmd.go`). Every command that writes takes `--key <path to private key file>`; the signer is the actor.
+`nhb-cli escrow <command>` (`cmd/nhb-cli/escrow_cmd.go`). Every command that writes takes `--key <path to private key file>`; the signer is the actor. Write commands sign a transaction with gas limit 50000 and gas price 1 and submit it with an authenticated `nhb_sendTransaction` call (`signAndSendTx`, `cmd/nhb-cli/main.go`), so `NHB_RPC_TOKEN` must be set (`nhb-cli rpc-token` prints a token when run on the node host); `get` needs no token. A failing command exits non-zero.
 
 | Command | Flags | Transaction |
 |---------|-------|-------------|

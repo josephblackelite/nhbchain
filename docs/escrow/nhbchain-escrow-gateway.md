@@ -4,10 +4,10 @@ This document describes how `services/escrow-gateway` is configured and how it t
 
 ## What the gateway does
 
-* Accepts REST requests authenticated with an API key + HMAC (all `POST`s) and, for escrow actions, a participant wallet signature.
+* Accepts REST requests authenticated with an API key + HMAC (every route, reads included) and, for escrow create, release, refund and dispute, a participant wallet signature.
 * Relays the action to the node as a signed transaction using its own **relayer key**: `TxTypeDelegatedCreateEscrow`, `TxTypeDelegatedReleaseEscrow`, `TxTypeDelegatedRefundEscrow`, `TxTypeDelegatedDisputeEscrow`, or `TxTypeArbitrateRelease` / `TxTypeArbitrateRefund` for resolve (`services/escrow-gateway/node_client.go`). The transaction is submitted with `nhb_sendTransaction`.
 * Reads the node with `escrow_get`, `escrow_getRealm`, `p2p_getTrade` and `nhb_getBalance`.
-* Stores idempotency records, an audit log, P2P offers and (unused, see below) trade and webhook tables in SQLite.
+* Stores idempotency records, an audit log, P2P offers, webhook subscriptions and delivery attempts, and a trade table that no running code path fills, in SQLite.
 
 The node's `escrow_create`, `escrow_release`, `escrow_refund`, `escrow_dispute` and `escrow_resolve` JSON-RPC methods are disabled, and the gateway does not call them.
 
@@ -23,11 +23,11 @@ All values come from environment variables (`LoadConfigFromEnv`, `services/escro
 | `ESCROW_GATEWAY_API_KEYS` | yes | | JSON array `[{"key":"...","secret":"...","merchant":{...}}]`. At least one entry; `key` and `secret` are required. |
 | `ESCROW_GATEWAY_RELAYER_KMS_ENV` | yes | | Name of another environment variable that holds the relayer's raw hex secp256k1 private key (`0x` prefix optional). Startup fails if it is empty or the named variable is unset or invalid. |
 | `ESCROW_GATEWAY_LISTEN` | no | `:8081` | HTTP listen address. |
-| `ESCROW_GATEWAY_NODE_TOKEN` | no | none | Bearer token sent as `Authorization: Bearer ...` on every node RPC call. |
+| `ESCROW_GATEWAY_NODE_TOKEN` | no | none | Bearer token sent as `Authorization: Bearer ...` on every node RPC call. The node requires authentication for `nhb_sendTransaction` (`rpc/http.go`), so every relayed write fails without a valid token. |
 | `ESCROW_GATEWAY_DB_PATH` | no | `escrow-gateway.db` | SQLite file. |
-| `ESCROW_GATEWAY_TIMESTAMP_SKEW` | no | `2m` | Allowed request clock skew (Go duration). The authenticator caps it at 2 minutes. |
-| `ESCROW_GATEWAY_NONCE_TTL` | no | twice the skew | How long nonces are remembered; positive Go duration, never below the skew; capped at 10 minutes by the authenticator. |
-| `ESCROW_GATEWAY_NONCE_CAP` | no | `1024` | Nonce cache size per key; positive integer; capped at 65536. |
+| `ESCROW_GATEWAY_TIMESTAMP_SKEW` | no | `2m` | Allowed request clock skew (Go duration). The authenticator caps it at 2 minutes and logs a warning at startup when a larger value is lowered. |
+| `ESCROW_GATEWAY_NONCE_TTL` | no | twice the skew | How long nonces are remembered; positive Go duration, never below the skew; capped at 10 minutes by the authenticator (warning logged when lowered). |
+| `ESCROW_GATEWAY_NONCE_CAP` | no | `1024` | Nonce cache size per key; positive integer; capped at 65536 (warning logged when lowered). |
 | `ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` | no | `1000000000000000000` | Low-balance warning threshold (non-negative integer). |
 | `ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` | no | `10m` | Interval of the balance check. |
 | `ESCROW_GATEWAY_QUEUE_CAP` | no | `1024` | Webhook queue capacity. |
@@ -43,7 +43,7 @@ Merchant settings (optional `merchant` object on an API key entry, `sanitizeMerc
 
 `identity` defaults to the key (max 128 characters); `realm.default` is at most 64 characters; `scope` is `platform` or `marketplace`; `type` is `public` or `private`; `enforceIdentityMatch` forces type `private` and defaults the realm to the identity. On `POST /escrow/create`, the merchant's default realm is applied when the request has none, and a request without a realm is rejected (`realm selection required`) when any realm setting is configured.
 
-Note that the realm `type` check reads a `type` field from `escrow_getRealm`, which the node does not return (`rpc/modules/escrow.go`, `EscrowRealmMetadataResult` has `scope` but no `type`). With `type` or `enforceIdentityMatch` configured, `POST /escrow/create` with a realm therefore fails with `realm type metadata unavailable`.
+Realm checks on create (`enforceRealmConstraints`): if `scope` is set, the realm's `scope` from `escrow_getRealm` must equal it. The node's realm result has no `type` field (`EscrowRealmMetadataResult` in `rpc/modules/escrow.go` carries `scope`, `providerProfile`, `arbitrationFeeBps`, `feeRecipient`), so there is nothing to compare a configured `type` against. Instead, when `type` is `private` or `enforceIdentityMatch` is set, the realm name must equal the merchant identity (case-insensitive), else the request fails with `realm must match merchant identity <identity>`. A merchant of type `public` accepts any realm that passes the scope check.
 
 ## Relayer
 
@@ -86,6 +86,6 @@ Replay safety of these signatures comes from the chain's idempotent status trans
 
 ## Not implemented or retired
 
-* Webhook delivery is not started by `main.go`, and the `events_since` node method the watcher polls does not exist. See [`gateway-api.md`](./gateway-api.md) section 4.
+* Only `escrow.created` webhooks exist: the worker is started by `main.go`, but the gateway has no feed of chain events, so no other event is produced. See [`gateway-api.md`](./gateway-api.md) section 4.
 * `POST /p2p/accept` always fails: trade creation through the gateway is retired (`ErrP2PTradeRetired`).
 * The gateway exposes no endpoint to read its audit log, to register webhooks, or to settle, dispute or resolve P2P trades.

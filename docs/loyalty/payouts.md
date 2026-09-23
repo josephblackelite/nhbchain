@@ -29,7 +29,7 @@ The configuration is one record in state, written by the genesis loader from the
 | `seedZNHB` | When greater than 0, the genesis loader sets the treasury's ZNHB genesis allocation to this amount (`core/genesis/loader.go`). |
 | `dynamic` | Daily budget and pro-rating settings, see [`policy.md`](./policy.md). |
 
-The genesis files under `config/` (`genesis.json`, `genesis.mainnet.json`, `genesis.phase-e.json`, `genesis.local.json`) set `active` true, `baseBps` 50, `minSpend` 1 NHB (1e18), `capPerTx` 50 ZNHB (50e18), `dailyCapUser` 200 ZNHB (200e18) and no `dailyCapCounterparty`.
+The genesis files under `config/` (`genesis.relaunch.json`, the live network's genesis and the embedded default; `genesis.phase-e.json`; `genesis.local.json`) set `active` true, `baseBps` 50, `minSpend` 1 NHB (1e18), `capPerTx` 50 ZNHB (50e18), `dailyCapUser` 200 ZNHB (200e18) and no `dailyCapCounterparty`.
 
 ## Skip reasons
 
@@ -42,6 +42,8 @@ After the checks above the reward is added to the block's pending queue (`QueueP
 The actual credit happens at the end of the block (`EndBlockRewards`) when the stored `dynamic.EnableProRate` is true, which is the default and the only value the genesis loader can produce: the day's remaining budget is compared with the queued demand and every reward is scaled by `min(1, budget / demand)`. Details and events are in [`policy.md`](./policy.md). Each payout is also capped by the treasury's remaining balance. The recipient of the credit is the sender (the spender).
 
 If `EnableProRate` is false in the stored configuration, each reward is credited immediately (`settleBaseRewardImmediate`), limited only by the treasury balance.
+
+`EndBlockRewards` books the net movement of the ZNHB Reward Pool for the whole payout step on every exit path, in the same state transition (`captureTreasuryPoolPosition` / `bookTreasuryPoolMovement`, `core/state_transition.go`, `core/znhb_treasury_pool.go`). This matters when the configured loyalty treasury is the node's admin/treasury wallet, whose ZNHB the pool ledger must always account for. It is not a transaction, so a shortfall in the Reward Pool is drawn from the Sale Pool instead of failing the block. If the spender is the treasury itself, the payout is credited on the treasury's own loaded account object so it nets to zero rather than overwriting the debit.
 
 Because the accrued event and the meters record the proposed amount, the ZNHB actually received can be lower than `reward` in `loyalty.base.accrued` when pro-rating applies or the treasury runs low.
 
