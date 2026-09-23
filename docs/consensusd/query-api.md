@@ -51,13 +51,13 @@ There is no `QueryPrefix` for `swap`.
 | `QueryState("gov", "proposals/{id}")` | JSON of the proposal; an empty value if the ID does not exist. |
 | `QueryState("gov", "tallies/{id}")` | `{"proposal_id", "status", "tally"}` computed from the stored votes; only `{"proposal_id"}` if the proposal does not exist. |
 | `QueryState("gov", "params")` | `{"policy": <ProposalPolicy>, "params": {key: value}}` for every key in the governance policy's allowed-parameter list plus `staking.minimumValidatorStake`, for those that have a stored value. |
-| `QueryPrefix("gov", "params")` | Key/value records for `staking.minimumValidatorStake` only, if it has a stored value (`StateProcessor.queryGovernancePrefix`, `core/query_router.go` line 191). This call succeeds, so the node's wider fallback that lists every allowed parameter (`queryPrefixFallback`, `core/node.go`) is not reached; it returns a different, smaller set than `QueryState("gov", "params")`. Any other prefix returns `ErrQueryNotSupported`. |
+| `QueryPrefix("gov", "params")` | Key/value records for `staking.minimumValidatorStake` only, if it has a stored value (`StateProcessor.queryGovernancePrefix`, `core/query_router.go`). This call succeeds, so the node's wider fallback that lists every allowed parameter (`queryPrefixFallback`, `core/node.go`) is not reached; it returns a different, smaller set than `QueryState("gov", "params")`. Any other prefix returns `ErrQueryNotSupported`. |
 
 ## Transaction simulation
 
 `SimulateTx` decodes `tx_bytes` as a `consensus.v1.Transaction` protobuf message
 (`proto/consensus/v1/tx.proto`) and converts it with `codec.TransactionFromProto`
-(`Node.SimulateTx`, `core/node.go` line 8594). It then runs
+(`Node.SimulateTx`, `core/node.go`). It then runs
 `ExecuteTransaction` on a copy of the current state at the chain's current
 height and time, and discards the copy, so nothing is written. The response has
 the execution's gas figures and the events it emitted. Native transaction types

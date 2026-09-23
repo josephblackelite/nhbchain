@@ -24,6 +24,29 @@ The gossip relay between `p2pd` and `consensusd` (`network/metrics.go`) adds
 `nhb_network_relay_queue_enqueued_total`, `nhb_network_relay_queue_dropped_total`
 and `nhb_network_relay_queue_occupancy`.
 
+## Validator liveness metrics
+
+These metrics are not part of the P2P layer; they are registered in
+`observability/metrics.go` and recorded by the node's liveness watchdog
+(`core/liveness_watchdog.go`) and block-building code (`core/build_telemetry.go`).
+The `nhb` and `consensusd` binaries expose the Prometheus registry at `/metrics`
+only when `NHB_METRICS_ADDR` is set to a listen address (`host:port`); the endpoint is unauthenticated, a warning is logged when it
+is bound to a non-loopback address, and a failure to start it never stops the
+validator (`observability/metrics_server.go`).
+
+| Metric | Type | Description |
+| ------ | ---- | ----------- |
+| `nhb_consensus_seconds_since_last_commit` | gauge | Seconds since this node last saw its committed height advance (process start counts as a commit). Sampled every 5 seconds. |
+| `nhb_consensus_last_commit_height` | gauge | Committed height as last observed by the watchdog. |
+| `nhb_consensus_liveness_stalled` | gauge | 1 while no block has committed for longer than the stall threshold (60 seconds by default, `NHB_LIVENESS_STALL_SECS`), else 0. A continuing stall is logged as `LIVENESS: no block committed for Ns` once a minute. |
+| `nhb_consensus_block_interval_seconds` | gauge | Seconds between the timestamps of consecutive committed blocks. |
+| `nhb_consensus_build_failures_consecutive`, `nhb_consensus_build_failures_total{reason}`, `nhb_consensus_empty_block_fallbacks_total`, `nhb_consensus_build_duration_seconds`, `nhb_consensus_build_waves`, `nhb_consensus_tx_panics_recovered_total`, `nhb_consensus_local_validation_failures_total` | mixed | Block-proposal building: failures, fallbacks to an empty block, duration and execution waves. |
+| `nhb_mempool_tx_failures_total{disposition}`, `nhb_mempool_evictions_total{reason}`, `nhb_mempool_strike_records`, `nhb_mempool_strike_overflow_evictions_total`, `nhb_mempool_inflight_leases_expired_total` | mixed | Transactions that failed while a proposal was assembled, and mempool evictions by the containment layer. |
+
+`observability/alerts.yaml` has a `consensus-liveness` group with alerts on these
+(`ConsensusNoCommit`: `nhb_consensus_seconds_since_last_commit > 60` for a minute;
+`ConsensusBuildFailing`: `nhb_consensus_build_failures_consecutive >= 2`).
+
 ## OpenTelemetry
 
 The server obtains a meter named `nhbchain/p2p` from the global meter provider
