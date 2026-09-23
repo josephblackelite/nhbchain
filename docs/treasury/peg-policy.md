@@ -55,7 +55,10 @@ separate `SlippageBps` checks, and a voucher must pass both, each failing with
 
 The curve is the authoritative treasury price and the Sale Pool is what the
 mint draws from (code comment at `core/swap_voucher_tx.go`, above the curve
-check).
+check). A voucher whose recipient is the treasury admin wallet is refused
+(`ErrSwapVoucherInvalidPayload`: `recipient must not be the treasury admin
+wallet`), and the mint fails when no admin wallet is configured
+(`ErrSwapInvalidSigner`).
 
 ## Node settings (`[swap]`)
 

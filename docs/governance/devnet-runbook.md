@@ -43,28 +43,46 @@ Notes from the code:
   see [policy invariants](../gov/policy-invariants.md)).
 - `cmd/nhb` flags: `--config <path>` (default `./config.toml`), `--genesis
   <path>`, `--allow-autogenesis` (development only, also `NHB_ALLOW_AUTOGENESIS`),
-  `--allow-migrate`. Without a genesis file the node refuses to start unless
-  autogenesis is enabled.
+  `--allow-migrate`. The genesis file is taken from `--genesis`, else the
+  `NHB_GENESIS` environment variable, else `GenesisFile` in the config
+  (`resolveGenesisPath`, `cmd/nhb/main.go`). With none of them the node refuses
+  to start unless autogenesis is enabled.
+- The repository's `config.toml` sets `GenesisFile =
+  "./config/genesis.relaunch.json"`, the genesis of the live network (also
+  embedded in the binary as `config.MainnetGenesis`, and written to the
+  configured path when that file is missing). Do not use it for a devnet: give
+  the devnet its own genesis file with `--genesis`, one that allocates ZNHB to
+  the proposer and voter (`config/genesis.local.json` shows the format). `--allow-autogenesis` only applies when no genesis path is
+  set at all, and then creates an empty genesis block with no balances
+  (`createGenesisBlock`, `core/blockchain.go`), so no account could pay a
+  deposit.
 
 ```bash
-bin/nhb-node --config ./devnet.toml --allow-autogenesis
+bin/nhb-node --config ./devnet.toml --genesis ./devnet-genesis.json
 ```
 
 ## 3. CLI setup
 
 `nhb-cli` talks to `http://localhost:8080` unless `RPC_URL` is set or `--rpc
-<url>` is passed before the command. Write methods (`nhb_sendTransaction`)
-send `Authorization: Bearer $NHB_RPC_TOKEN`; the CLI refuses to send a
-transaction without that variable set.
+<url>` is given (the flag is removed from the arguments wherever it appears).
+Write methods (`nhb_sendTransaction`) send `Authorization: Bearer
+$NHB_RPC_TOKEN`; the CLI refuses to send a transaction without that variable
+set. On the node host, `nhb-cli rpc-token` prints a short-lived token signed
+with the node's JWT secret, read from the `NHB_RPC_JWT_SECRET` environment
+variable or from standard input with `--secret-stdin` (flags `--ttl`, default
+10 minutes and at most 24 hours; `--issuer`, default `nhb-rpc`; `--audience`,
+default `wallets`; these must match the node's `[RPCJWT]` block,
+`cmd/nhb-cli/rpc_token.go`).
 
 ```bash
 export RPC_URL="http://127.0.0.1:8081"
-export NHB_RPC_TOKEN="<token accepted by the node's RPC auth>"
+export NHB_RPC_TOKEN="$(bin/nhb-cli rpc-token)"   # or any token the node's RPC auth accepts
 ```
 
-Create keys. `generate-key` always writes `./wallet.key` and prints the
-address; rename the file after each run, and read an address back with
-`address`:
+Create keys. `generate-key` writes `./wallet.key` and prints the address. It
+never overwrites an existing `wallet.key` (it exits non-zero instead;
+`generate-key --force` first saves a `wallet.key.bak-<UTC time>` copy), so
+rename the file after each run. Read an address back with `address`:
 
 ```bash
 bin/nhb-cli generate-key && mv wallet.key proposer.key
@@ -80,8 +98,11 @@ Preconditions for the governance transactions:
   `bin/nhb-cli send-znhb <recipient> <amount_wei> <key_file>`.
 - Every voter needs non-zero POTSO weight in the snapshot of the last processed
   POTSO reward epoch. Check with the `potso_getWeight` RPC, params
-  `[{"address": "<bech32>"}]`, result `{epoch, address, weightBps}`. If no
-  epoch has been processed, votes fail with `governance: potso snapshot
+  `[{"address": "<bech32>"}]`, result `{epoch, address, weightBps}`. POTSO
+  reward epochs run every `[potso.rewards] EpochLengthBlocks` blocks (`0`
+  disables them; the shipped `config.toml` sets `120`), so how long the first
+  one takes depends on the block pace ([block cadence](../consensus/block-cadence.md)).
+  If no epoch has been processed, votes fail with `governance: potso snapshot
   unavailable`; a voter not in the snapshot fails with `governance: voter has
   zero voting power`.
 
@@ -95,7 +116,7 @@ cat > payload.json <<'JSON'
 JSON
 ```
 
-Use an unquoted number (see [params](./params.md#how-a-parameter-proposal-is-checked)).
+A bare number and a quoted decimal string are both accepted and are read back the same way (see [params](./params.md#how-a-parameter-proposal-is-checked)); this example uses a bare number.
 
 ### 4.2 Propose
 

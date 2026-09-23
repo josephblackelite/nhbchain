@@ -43,7 +43,11 @@ The escrow engine reads three param-store keys when it validates a realm
 
 A `param.update` proposal can set them only if they are in `AllowedParams`; they
 are not in the default list (see [params](./params.md)). The engine rejects a
-configuration where the minimum exceeds the maximum.
+configuration where the minimum exceeds the maximum. The threshold values are
+read through `nativecommon.ParamDecimal`, so a bare and a quoted number are read
+the same way. The escrow and trade engines stamp `CreatedAt`, `UpdatedAt`,
+`FrozenAt` and their deadline checks with the block timestamp
+(`configureTradeEngine`, `core/state_transition.go`), not the wall clock.
 
 ## `ROLE_ARBITRATOR`
 

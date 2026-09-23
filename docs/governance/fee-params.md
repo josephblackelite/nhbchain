@@ -34,8 +34,11 @@ is absent from the file.
 `TransferFreeTierSpendWei >= 0`, and requires an `OwnerWallet` for `ZNHB` in
 `Assets` whenever a `ZNHB` asset entry exists
 (`fees: route_wallet_by_asset.ZNHB must be configured when ZNHB fees are
-enabled`). `cmd/consensusd` calls `ValidateConfig` at startup
-(`cmd/consensusd/main.go:139`); `cmd/nhb` does not.
+enabled`). `cmd/consensusd` calls `ValidateConfig` at startup and
+refuses to start on the first problem (`cmd/consensusd/main.go:141`). `cmd/nhb`
+runs the same checks (`config.ConfigProblems`) at startup and only logs each
+problem as a `configuration problem` warning; it never refuses to start
+(`cmd/nhb/config_check.go`).
 
 Example (the `Fees` struct fields in `config/types.go` are PascalCase and carry no `toml` tags; the decoder, `github.com/BurntSushi/toml` v1.5.0, tries an exact key match first and then falls back to a case-insensitive one):
 

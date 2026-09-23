@@ -91,12 +91,19 @@ proposal is the record of the outcome.
 - The quorum-versus-threshold and minimum-voting-period cross-checks in
   `native/gov` are not registered on the engine that applies governance
   transactions; see [policy invariants](../gov/policy-invariants.md).
-- Param values are stored as the raw JSON text submitted, and readers parse
-  them as bare integers, so integer values must be submitted unquoted; see
-  [params](./params.md#how-a-parameter-proposal-is-checked).
+- Param values are stored as the raw JSON text submitted, so a quoted number
+  is stored with its quotes. The readers of governed numeric values strip the
+  quotes and leading `+` characters before parsing, so a bare and a quoted number
+  behave the same; see [params](./params.md#how-a-parameter-proposal-is-checked).
+  Reads of the store itself (`QueryState("gov", "params")`) return the text as
+  stored.
 - `treasury.directive` debits and credits ZNHB account balances
   (`applyTreasuryDirective`) and does not touch the Sale Pool or Reward Pool
-  ledgers.
+  ledgers itself; when the admin wallet is the source or a recipient, the net
+  movement is booked into the Reward Pool ledger by `executeTransaction`
+  (`TxTypeGovExecute` is a tracked type, `core/znhb_treasury_pool.go`), and the
+  transaction fails with `ErrTreasuryRewardPoolInsufficient` if the ledger
+  cannot cover an outflow.
 - Governance policy (voting period, timelock, quorum, threshold, allow-lists)
   is read from each node's local config file. Validators need identical
   `[governance]` blocks.
