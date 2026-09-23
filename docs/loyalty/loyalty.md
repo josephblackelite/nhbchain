@@ -22,7 +22,7 @@ Every outcome of an evaluation is an event: a success emits `loyalty.base.accrue
 | **Business** | Registered by an owner address (`RegisterBusiness`). ID is a 32-byte value minted from a global counter: the counter, big-endian, in the last 8 bytes (first business is `0x00...01`). You cannot predict your ID; look it up with `loyalty_listBusinesses`. |
 | **Merchant** | An address added to a business. An address can belong to at most one business (`loyalty: merchant already assigned`). A business's owner is not a merchant unless added explicitly. |
 | **Program** | A reward configuration created by a merchant of the business. The 32-byte program ID is chosen by the client. The program's owner is the transaction sender. |
-| **Paymaster** | An address set on the business; its ZNHB balance pays program rewards. Setting it moves no funds. One owner can have a paymaster on only one business at a time (`loyalty: paymaster already assigned`). |
+| **Paymaster** | An address set on the business; its ZNHB balance pays program rewards. Setting it moves no funds. One owner can have a paymaster on only one business at a time (`loyalty: paymaster already assigned`). Because rewards are debited from the paymaster's own balance and the named wallet does not sign the assignment, a wallet can be named only by itself or with its recorded opt-in; see section 5. |
 | **`ROLE_LOYALTY_ADMIN`** | On-chain role (`RoleLoyaltyAdmin`) that may act on any business or program in place of the owner. Granted through the role allowlist governance flow (`config.toml` `AllowedRoles`). |
 
 A program pays the merchants' customers: at accrual time the engine finds the recipient of the transfer (the merchant), takes the first program owned by that merchant address (programs indexed by owner, sorted by ID) that is active for the current time, and finds the merchant's business to get the paymaster.
@@ -73,7 +73,7 @@ For each qualifying NHB transfer:
 3. Compute the reward: fixed mode uses `fixedRewardWei`; bps mode uses `amount * accrualBps / 10000` (`no_reward_rate` when zero, `reward_zero` when it rounds to zero).
 4. Clamp in this order: `capPerTx`, remaining `dailyCapUser`, remaining `dailyCapProgram`, remaining epoch cap, remaining `issuanceCapUser`. If a remaining allowance is zero the accrual is skipped (`daily_cap_reached`, `daily_program_cap_reached`, `epoch_cap_reached`, `issuance_cap_reached`).
 5. The business must have a paymaster (`paymaster_missing`) whose ZNHB balance covers the reward (`paymaster_insufficient`). See [`paymaster.md`](./paymaster.md) for the reserve check.
-6. The reward moves from the paymaster to the sender, the meters are updated, an accrual record is appended, and `loyalty.program.accrued` is emitted. Settlement of the NHB transfer itself never depends on this outcome.
+6. The reward moves from the paymaster to the sender and both account writes are persisted by the engine itself (`ApplyProgramReward` loads each address once; if the paymaster is the sender the move nets to zero). If loading or storing the sender's account fails the debit is undone and the skip reason is `recipient_error` or `recipient_persist_error`; a failed write of the paymaster account is `paymaster_persist_error`. Then the meters are updated, an accrual record is appended, and `loyalty.program.accrued` is emitted. Settlement of the NHB transfer itself never depends on this outcome. The engine is handed a state view (`loyaltyRewardState`, `core/state_transition.go`) that, when the paymaster or the sender is the node's admin/treasury wallet, moves the ZNHB Reward Pool by the same amount as that account write, so the pool ledger stays equal to the wallet's ZNHB; a pool that cannot cover it refuses the write.
 
 Program rewards are credited immediately; they do not go through the pro-rating queue.
 
@@ -86,13 +86,20 @@ Administration is done with signed native transactions submitted through `nhb_se
 | Type | Value | `tx.Data` | Authorization |
 |------|-------|-----------|---------------|
 | `TxTypeCreateLoyaltyBusiness` | `0x42` | `{"name": "..."}` | Anyone; the sender becomes the owner. Name must not be empty. Subject to the `loyalty` quota. |
-| `TxTypeLoyaltySetPaymaster` | `0x43` | `{"businessId": "0x...", "paymaster": "nhb1..."}` (omit `paymaster` to clear) | Business owner or `ROLE_LOYALTY_ADMIN`. Emits `loyalty.paymaster.rotated`. |
+| `TxTypeLoyaltySetPaymaster` | `0x43` | `{"businessId": "0x...", "paymaster": "nhb1..."}` (omit `paymaster` to clear) | See the paymaster rules below. Emits `loyalty.paymaster.rotated` when the paymaster changes. |
 | `TxTypeLoyaltyAddMerchant` | `0x44` | `{"businessId": "0x...", "merchant": "nhb1..."}` | Business owner or `ROLE_LOYALTY_ADMIN` (checked by the handler). |
 | `TxTypeLoyaltyRemoveMerchant` | `0x45` | same | same; fails with `loyalty: merchant not found` if the address is not a merchant of that business. |
 | `TxTypeCreateLoyaltyProgram` | `0x46` | program payload (section 4.1) | Sender must be a merchant of `businessId` or hold `ROLE_LOYALTY_ADMIN`. The sender becomes the program owner. Subject to the `loyalty` quota. Emits `loyalty.program.created`. |
 | `TxTypeUpdateLoyaltyProgram` | `0x47` | program payload; `id` required | Existing program's owner or `ROLE_LOYALTY_ADMIN`. Full replace of the mutable fields; `id` and owner cannot change. Emits `loyalty.program.updated`. |
 | `TxTypePauseLoyaltyProgram` | `0x48` | `{"id": "0x..."}` | Program owner or `ROLE_LOYALTY_ADMIN`. Idempotent. Emits `loyalty.program.paused` when the state changes. |
 | `TxTypeResumeLoyaltyProgram` | `0x49` | `{"id": "0x..."}` | same; emits `loyalty.program.resumed`. |
+
+**Paymaster rules** (`Registry.SetPaymaster`, `native/loyalty/registry_business.go`; the handler is `applyLoyaltySetPaymaster`). The named wallet never signs the assignment, so:
+
+* A business owner (without `ROLE_LOYALTY_ADMIN`) may name only its own wallet, or clear the paymaster. Naming any other wallet fails with `loyalty: paymaster must be the caller's own wallet unless assigned by a loyalty admin`.
+* A `ROLE_LOYALTY_ADMIN` holder may name another wallet only if that wallet is the business owner or has recorded an opt-in for this business. Otherwise the transaction fails with `loyalty: paymaster has not consented`.
+* Recording an opt-in: any sender that is neither the owner nor an admin sends `TxTypeLoyaltySetPaymaster` with its own address as `paymaster` and the business ID. That transaction succeeds, stores the opt-in (per business) and emits no event; it does not change the business. The opt-in is consumed by the assignment it authorizes.
+* Any other sender, or an owner-less clear from a stranger, fails with `loyalty: unauthorized`.
 
 Removing a merchant stops future accruals through that merchant; rewards already paid are not reversed.
 
@@ -132,16 +139,18 @@ Requests use one parameter object: `{"jsonrpc":"2.0","id":1,"method":"loyalty_li
 | `loyalty_resolveUsername` | `{"username"}` | Bech32 address; HTTP 404 with `-32602` when unknown. |
 | `loyalty_userQR` | `{"address"}` or `{"username"}` | `{"address": "nhb1...", "payload": "nhb:nhb1..."}`. |
 
+`nhb_getLoyaltyBudgetStatus` (no parameters; `handleGetLoyaltyBudgetStatus`, `rpc/explorer_handlers.go`) reports the chain-wide base-reward budget from the loyalty engine's own state (`Node.LoyaltyBudgetStatus`): `budgetRemaining` (wei of ZNHB left of today's budget), `paidToday`, `proposedToday` (wei), `day` (`YYYYMMDD`, UTC), `resetAt` (Unix seconds of the next UTC midnight), `twapScalingFactor` (paid divided by proposed as a decimal string with at most six decimals, `"1.0"` while nothing was cut; the name is historical) and `guardFallback` only while the price guard is using a fallback price. It is not split per merchant.
+
 Error codes: `-32602` for invalid or unknown inputs (including 404 "business not found"), `-32000` for internal failures, `-32060` for the disabled write methods.
 
 ## 7. CLI
 
-`nhb-cli` (`cmd/nhb-cli/main.go`). The RPC endpoint defaults to `http://localhost:8080`, or the `RPC_URL` environment variable, or the `--rpc <url>` flag. Write commands sign with the key file given as the **last** argument; there is no caller or owner argument.
+`nhb-cli` (`cmd/nhb-cli/main.go`). The RPC endpoint defaults to `http://localhost:8080`, or the `RPC_URL` environment variable, or the `--rpc <url>` flag. Every command that fails (bad usage, load error, RPC error) exits non-zero. Commands that send a transaction (`sendTransaction` in `cmd/nhb-cli/main.go` makes an authenticated call) fail with `privileged RPC call requires NHB_RPC_TOKEN to be set` unless the `NHB_RPC_TOKEN` environment variable holds a bearer token; `nhb-cli rpc-token` prints one when run on the node host with `NHB_RPC_JWT_SECRET` set. The read commands call the RPC without a token. A sent transaction is only queued; read the outcome afterwards. Write commands sign with the key file given as the **last** argument; there is no caller or owner argument.
 
 ```bash
 nhb-cli loyalty-create-business <name> <key_file>
 nhb-cli loyalty-list-businesses <owner>                       # find the assigned businessId
-nhb-cli loyalty-set-paymaster <businessId> <paymaster> <key_file>
+nhb-cli loyalty-set-paymaster <businessId> <paymaster> <key_file>   # an owner may name only its own address; see section 5
 nhb-cli loyalty-add-merchant <businessId> <merchant> <key_file>
 nhb-cli loyalty-remove-merchant <businessId> <merchant> <key_file>
 nhb-cli loyalty-create-program <businessId> '<programSpecJSON>' <key_file>   # generates "id" if the spec has none
@@ -190,7 +199,7 @@ Events are held by the node for the block that produced them and are not a persi
 
 ## 10. Errors
 
-Registry errors (`native/loyalty/errors.go`) appear as transaction failures: `loyalty: unauthorized`, `loyalty: program already exists`, `loyalty: program not found`, `loyalty: invalid program`, `loyalty: immutable field`, `loyalty: token not registered`, `loyalty: accrual bps too high`, `loyalty: business not found`, `loyalty: invalid business`, `loyalty: paymaster already assigned`, `loyalty: merchant already assigned`, `loyalty: merchant not found`. Handler-level failures use messages such as `loyaltyCreateProgram: unauthorized: caller is not a registered merchant of the business and lacks ROLE_LOYALTY_ADMIN`.
+Registry errors (`native/loyalty/errors.go`) appear as transaction failures: `loyalty: unauthorized`, `loyalty: program already exists`, `loyalty: program not found`, `loyalty: invalid program`, `loyalty: immutable field`, `loyalty: token not registered`, `loyalty: accrual bps too high`, `loyalty: business not found`, `loyalty: invalid business`, `loyalty: paymaster already assigned`, `loyalty: paymaster has not consented`, `loyalty: paymaster must be the caller's own wallet unless assigned by a loyalty admin`, `loyalty: merchant already assigned`, `loyalty: merchant not found`. Handler-level failures use messages such as `loyaltyCreateProgram: unauthorized: caller is not a registered merchant of the business and lacks ROLE_LOYALTY_ADMIN`.
 
 **Troubleshooting**
 

@@ -8,9 +8,9 @@ The gateway has no path prefix and no fixed public base URL: routes are served a
 
 ## 1. Authentication
 
-### 1.1 API key + HMAC (every `POST`)
+### 1.1 API key + HMAC (every endpoint)
 
-Every `POST` endpoint calls `Authenticator.Authenticate` (`gateway/auth/auth.go`) and requires:
+Every endpoint, `POST` and `GET`, calls `Authenticator.Authenticate` (`gateway/auth/auth.go`; the `GET` handlers do it through `authenticateRead`, `services/escrow-gateway/server.go`) and requires:
 
 * `X-Api-Key`: the API key identifier.
 * `X-Timestamp`: Unix seconds. The request must be within the allowed skew of the gateway clock (default 2 minutes; the skew is capped at 2 minutes). Within that window the timestamp must also be strictly greater than the last timestamp accepted for the same key, otherwise the request fails with `timestamp not increasing`.
@@ -21,9 +21,9 @@ Every `POST` endpoint calls `Authenticator.Authenticate` (`gateway/auth/auth.go`
   signature = hex(HMAC-SHA256(secret, timestamp + "\n" + nonce + "\n" + METHOD + "\n" + path + "\n" + body))
   ```
 
-  `METHOD` is upper-cased. `path` is the request path; if there is a query string it is appended as `?` plus the query parameters sorted as strings (`CanonicalRequestPath`). Request bodies are limited to 1 MiB.
+  `METHOD` is upper-cased. `path` is the request path; if there is a query string it is appended as `?` plus the query parameters sorted as strings (`CanonicalRequestPath`). Request bodies are limited to 1 MiB. For a `GET` the body is empty, so the signed string ends with an empty body. The timestamp and nonce rules apply to reads exactly as to writes: a read consumes a nonce and advances the key's last-accepted timestamp.
 
-**The `GET` endpoints do not authenticate.** `GET /escrow/{id}`, `GET /p2p/offers` and `GET /p2p/trades/{id}` never call the authenticator (`handleEscrowGet`, `handleListOffers`, `handleGetTrade`); anyone who can reach the gateway can call them.
+`GET /escrow/{id}`, `GET /p2p/offers` and `GET /p2p/trades/{id}` call `authenticateRead` first (`handleEscrowGet`, `handleListOffers`, `handleGetTrade`); without a valid API key and signature they answer `401` and write an audit-log row. They need no wallet signature and no `Idempotency-Key`.
 
 ### 1.2 Wallet signature (participant proof)
 
@@ -62,7 +62,7 @@ Only successful (or otherwise completed) responses are stored; errors returned b
 | Method and path | Auth | Description |
 |-----------------|------|-------------|
 | `POST /escrow/create` | API key + HMAC, wallet signature of the payer | Relay a `TxTypeDelegatedCreateEscrow`; returns `201` with `{"escrowId": "0x...", "payIntent": {...}}`. |
-| `GET /escrow/{id}` | none | Returns the node's `escrow_get` result for the ID. |
+| `GET /escrow/{id}` | API key + HMAC | Returns the node's `escrow_get` result for the ID. |
 | `POST /escrow/release` | API key + HMAC, wallet signature of the payee or mediator | Relay a `TxTypeDelegatedReleaseEscrow`. |
 | `POST /escrow/refund` | API key + HMAC, wallet signature of the payer | Relay a `TxTypeDelegatedRefundEscrow`. |
 | `POST /escrow/dispute` | API key + HMAC, wallet signature of the payer or payee | Relay a `TxTypeDelegatedDisputeEscrow`. |
@@ -83,9 +83,9 @@ There is no `/escrow/{id}/events` endpoint. The `GET` route matches any path beg
 | Method and path | Auth | Description |
 |-----------------|------|-------------|
 | `POST /p2p/offers` | API key + HMAC, wallet signature of the seller | Store an offer in the gateway database. Returns `201` with the offer. |
-| `GET /p2p/offers` | none | All offers, no filtering or paging. |
+| `GET /p2p/offers` | API key + HMAC | All offers, no filtering or paging. |
 | `POST /p2p/accept` | API key + HMAC, wallet signature of the buyer | Always fails; see below. |
-| `GET /p2p/trades/{id}` | none | Reads a trade row from the gateway database (404 if unknown). |
+| `GET /p2p/trades/{id}` | API key + HMAC | Reads a trade row from the gateway database (404 if unknown). |
 
 `POST /p2p/offers` body: `seller` (bech32), `baseToken`, `baseAmount`, `quoteToken`, `quoteAmount` (positive decimal strings; tokens `NHB` or `ZNHB`), optional `minAmount`, `maxAmount` (positive decimal strings), optional `terms`. The server assigns `offerId` (`OFF_` plus 32 upper-case hex characters), sets `active` to true and returns the stored offer. No node call is made and no event is emitted.
 
@@ -95,19 +95,19 @@ There is no `/escrow/{id}/events` endpoint. The `GET` route matches any path beg
 
 ## 4. Webhooks
 
-The gateway code contains a webhook subsystem, but **it is not started by the shipped binary**: `main.go` creates the webhook queue and passes it to the server, and never constructs or runs `EventWatcher` or `WebhookWorker`. Also, the watcher polls the node method `events_since`, which the node does not implement. As shipped, no webhook is delivered. The following describes the code (`webhook.go`, `webhook_queue.go`, `watcher.go`) for when it is wired up:
+`main.go` starts a `WebhookWorker` on the webhook queue. Only events the gateway itself raises reach the queue, and the only such event is `escrow.created`, enqueued after a successful `POST /escrow/create`. The gateway has no feed of chain events (the watcher that polled a node event method was removed), so `escrow.funded`, `escrow.released` and the other escrow events are never delivered.
 
-* Subscriptions are rows in the gateway's `webhooks` table (`api_key`, `event_type`, `url`, `secret`, `rate_limit` default 60, `active`). There is no REST endpoint to create them.
+* Subscriptions are rows in the gateway's `webhooks` table (`api_key`, `event_type`, `url`, `secret`, `rate_limit` default 60, `active`). There is no REST endpoint to create them; an operator inserts rows into the SQLite database. With no matching row, nothing is delivered.
 * Delivery is an HTTP `POST` with header `X-Webhook-Signature` (hex HMAC-SHA256 of the raw body with the subscription secret) and body:
 
   ```json
-  {"type":"escrow.released","sequence":1234,"escrowId":"0x...","tradeId":"","attributes":{},
-   "timestamp":"2026-01-01T00:00:00.000000000Z","provider":{"scope":"platform","profile":"...","feeBps":100,"feeRecipient":"nhb1..."}}
+  {"type":"escrow.created","sequence":1234,"escrowId":"0x...","tradeId":"","attributes":null,
+   "timestamp":"2026-01-01T00:00:00.000000000Z"}
   ```
 
-  `provider` appears only when the event carries realm attributes (`realmScope`, `realmType`, `realmProfile`, `realmFeeBps`, `realmFeeRecipient`).
-* A delivery is retried after a non-2xx response or a network error with backoff of 1s, 2s, 4s and so on, capped at 5 minutes, for at most 5 attempts (`maxWebhookAttempts`). Attempts are recorded in `webhook_attempts`.
-* `POST /escrow/create` enqueues a gateway-originated `escrow.created` event after success.
+  A `provider` object is added only when the event's attributes carry realm values (`realmScope`, `realmType`, `realmProfile`, `realmFeeBps`, `realmFeeRecipient`); the `escrow.created` event the gateway raises carries no attributes, so it never has one.
+* A delivery is retried after a non-2xx response or a network error with backoff of 1s, 2s, 4s and so on, capped at 5 minutes, for at most 5 attempts (`maxWebhookAttempts`). Attempts are recorded in `webhook_attempts`. Each delivery has a 10-second HTTP timeout.
+* Queue capacity, history size and entry lifetime come from `ESCROW_GATEWAY_QUEUE_CAP`, `ESCROW_GATEWAY_QUEUE_HISTORY` and `ESCROW_GATEWAY_QUEUE_TTL` (see [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md)).
 
 ---
 
@@ -116,11 +116,11 @@ The gateway code contains a webhook subsystem, but **it is not started by the sh
 Errors are `{"error":"<message>"}` (double quotes in messages are replaced by single quotes). Status codes used by the handlers:
 
 * `400`: validation failure, malformed JSON, missing `Idempotency-Key`, oversized body, realm constraint violation.
-* `401`: API key/HMAC authentication failure (unknown key, bad signature, skew, nonce or timestamp replay).
+* `401`: API key/HMAC authentication failure (unknown key, bad signature, skew, nonce or timestamp replay), on any endpoint including the `GET`s.
 * `403`: wallet signature missing or invalid, or signer not authorized for the action.
 * `404`: unknown offer or trade.
 * `409`: idempotency key reused with a different request; inactive offer.
 * `500`: storage or internal failure.
 * `502`: the node call failed (this includes `escrow_get` failures such as an unknown escrow, and every `POST /p2p/accept`).
 
-Every `POST` handler writes an audit-log row (`audit_log` table: API key, method, path, request body, response status and body). There is no HTTP endpoint that reads it.
+Every `POST` handler, and a `GET` that fails authentication, writes an audit-log row (`audit_log` table: API key, method, path, request body, response status and body). There is no HTTP endpoint that reads it.

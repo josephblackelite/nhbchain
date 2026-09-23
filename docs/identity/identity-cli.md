@@ -28,24 +28,28 @@ nhb-cli id reverse --addr nhb1...
 
 Calls `identity_reverse` and prints `{"alias": ..., "aliasId": ...}`.
 
-## Commands that do not work
+## Retired commands
 
-These `nhb-cli id` subcommands exist but call JSON-RPC methods that are disabled on the node (HTTP 410, error code `-32060`), so they fail:
+These `nhb-cli id` subcommands are retired. The CLI does not contact the node for them: each prints that the command is retired because the node no longer serves the method (HTTP 410), and exits with status 1 (`identityRetiredMethods`, `cmd/nhb-cli/identity_cmd.go`; `reportRetired`, `cmd/nhb-cli/retired_cmd.go`).
 
-| Command | Flags | RPC method |
-| --- | --- | --- |
-| `id set-alias` | `--addr`, `--alias` | `identity_setAlias` |
-| `id set-avatar` | `--addr`, `--avatar` | `identity_setAvatar` |
-| `id add-address` | `--owner`, `--alias`, `--addr` | `identity_addAddress` |
-| `id remove-address` | `--owner`, `--alias`, `--addr` | `identity_removeAddress` |
-| `id set-primary` | `--owner`, `--alias`, `--addr` | `identity_setPrimary` |
-| `id rename` | `--owner`, `--alias`, `--new-alias` | `identity_rename` |
-| `id create-claimable` | `--payer`, `--recipient`, `--token` (default `NHB`), `--amount`, `--deadline` | `identity_createClaimable` |
-| `id claim` | `--id`, `--payee`, `--preimage` | `identity_claim` |
+| Command | Node method it used |
+| --- | --- |
+| `id set-alias` | `identity_setAlias` |
+| `id set-avatar` | `identity_setAvatar` |
+| `id add-address` | `identity_addAddress` |
+| `id remove-address` | `identity_removeAddress` |
+| `id set-primary` | `identity_setPrimary` |
+| `id rename` | `identity_rename` |
+| `id create-claimable` | `identity_createClaimable` |
+| `id claim` | `identity_claim` |
 
 Use `claim-username` to register a username.
+
+## Claimable commands
+
+`nhb-cli claimable get --id <0x...>` calls `claimable_get` and prints the raw JSON result. `claimable create`, `claimable claim` and `claimable cancel` are retired in the same way as the `id` commands above (`claimableRetiredMethods`, `cmd/nhb-cli/claimable_cmd.go`).
 
 ## Notes
 
 * Output of the `id` commands is the raw JSON result; RPC errors print as `RPC error <code>: <message>`.
-* The write RPCs (when they were enabled) were called with the authentication token from `NHB_RPC_TOKEN`; `resolve` and `reverse` need no token.
+* Every failing command, including usage errors, exits non-zero. `claim-username` sends a transaction, so it needs `NHB_RPC_TOKEN` (`nhb-cli rpc-token` prints one when run on the node host); `id resolve`, `id reverse` and `claimable get` need no token.

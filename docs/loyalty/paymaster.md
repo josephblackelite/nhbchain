@@ -8,6 +8,8 @@ Business loyalty programs pay rewards from the ZNHB balance of the business's **
 * At accrual time the engine requires a paymaster (`paymaster_missing` otherwise) whose ZNHB balance is at least the reward (`paymaster_insufficient` otherwise). A skipped reward never blocks the NHB transfer that triggered it.
 * `loyalty_paymasterBalance {businessId}` returns the paymaster address's current ZNHB balance as a decimal string (`"0"` when no paymaster is set). It does not report any reserved or pending amount.
 * An owner can have a paymaster on only one business at a time (`loyalty: paymaster already assigned`).
+* Naming a paymaster commits that wallet's ZNHB, and the wallet does not sign the assignment, so `SetPaymaster` (`native/loyalty/registry_business.go`) refuses a business owner who names any wallet but its own (`loyalty: paymaster must be the caller's own wallet unless assigned by a loyalty admin`), and lets a `ROLE_LOYALTY_ADMIN` holder name another wallet only if that wallet is the owner or has opted in for that business by sending its own `TxTypeLoyaltySetPaymaster` naming itself (otherwise `loyalty: paymaster has not consented`). See [`loyalty.md`](./loyalty.md) section 5.
+* This business paymaster is unrelated to the gas-sponsorship paymaster (the `tx.Paymaster` field of a transaction).
 
 ## Reserve check (not reachable today)
 

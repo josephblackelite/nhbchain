@@ -5,7 +5,7 @@ Security-relevant behavior of the identity module and gateway as implemented. So
 ## Authorization model
 
 * **Username claim** (`TxTypeRegisterIdentity`): authorized by the transaction signature; the sender becomes the alias owner and primary address. First come, first served: uniqueness is the only protection against squatting. There is no reserved-name list, deposit, cooldown or dispute process in the code.
-* **Alias changes** (rename, link/unlink address, set primary, avatar): no live path (RPC methods disabled, no transaction type). When they existed as RPC methods they were authorized by the RPC bearer token, not by a per-message owner signature.
+* **Alias changes** (rename, link/unlink address, set primary, avatar): no live path (RPC methods disabled, no transaction type).
 * **Claimables**: write paths are disabled. The rules in the code are described in [`pay-by-email.md`](./pay-by-email.md): alias-derived claimables require the payee to own the alias at claim time; opaque-secret claimables are bearer instruments (whoever knows the preimage can claim before the deadline); claims are rejected once `now >= deadline`.
 * **Read methods** (`identity_resolve`, `identity_reverse`, `claimable_get`) are public and unauthenticated.
 

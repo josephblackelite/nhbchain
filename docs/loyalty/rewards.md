@@ -26,7 +26,7 @@ This page describes the per-epoch ZNHB emission that is split across validators,
 * Base emission `HalvingBaseEmissionZNHB` = 200 ZNHB per epoch in the first era.
 * Era length `HalvingEraLengthEpochs` = 500,000 epochs; the emission is halved (right shift at wei precision, rounding down) each era, for at most 80 eras.
 
-Epoch length in blocks comes from the epoch configuration (`epoch.Config.Length`; default 100).
+Epoch length in blocks comes from the epoch configuration (`epoch.Config.Length`; default 100, `core/epoch/config.go`; the state processor starts from that default, `core/state_transition.go`). An epoch, and with it the emission per epoch, is counted in blocks, so its duration in time depends on how often blocks are produced. A validator waits at least `[consensus] MinBlockInterval` (default 1s when the key is absent; the shipped `config.toml` writes `2s`) after each commit before the next round, so an epoch lasts roughly `100 x (interval + about 0.03 s)`; see [`../consensus/block-cadence.md`](../consensus/block-cadence.md). The halving era of 500,000 epochs is likewise a count of epochs, not a fixed calendar time.
 
 ## Accrual and settlement
 

@@ -13,7 +13,7 @@ An alias record has an optional `AvatarRef` string. The chain stores only the st
 
 ## Setting an avatar
 
-The only interface that sets an avatar is `identity_setAvatar` (and `nhb-cli id set-avatar`), which is **disabled** (HTTP 410, code `-32060`). No transaction type sets an avatar and the identity gateway has no avatar endpoint. New aliases registered with `TxTypeRegisterIdentity` therefore have no avatar. See [`identity.md`](./identity.md).
+The only interface that sets an avatar is `identity_setAvatar`, which is **disabled** (HTTP 410, code `-32060`); `nhb-cli id set-avatar` is retired and exits non-zero without contacting the node. No transaction type sets an avatar and the identity gateway has no avatar endpoint. New aliases registered with `TxTypeRegisterIdentity` therefore have no avatar. See [`identity.md`](./identity.md).
 
 ## Client guidance
 
