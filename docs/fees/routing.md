@@ -52,3 +52,9 @@ PascalCase Go field names (`OwnerWallet`, `Assets`, `Asset`, `MDRBasisPoints`);
 the TOML decoder prefers an exact match but also accepts a different case.
 Routing targets and rates are node configuration and are not changed by any
 governance proposal.
+
+## Observing routing
+
+Each domain-fee evaluation emits `fees.applied` with `ownerWallet` (hex) and
+`asset` (`core/events/fees.go`); the accumulated totals per route wallet are returned by
+`fees_listTotals` ([accounting](./accounting.md)).

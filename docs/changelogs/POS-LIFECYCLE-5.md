@@ -12,7 +12,7 @@
   has since been retired and is not registered on the node (`rpc/http.go`).
   Reachable entry points are the `TxTypePOSAuthorize`/`Capture`/`Void`
   transactions (submitted via `nhb_sendTransaction`) and the JSON-RPC methods
-  `pos_getAuthorization`, `pos_getAuthorizationByIntentRef` and `pos_sweepVoids`.
+  `pos_getAuthorization` and `pos_getAuthorizationByIntentRef`. `pos_sweepVoids` answers HTTP 410 (`rpc/http.go` `handlePOSSweepVoids`); every block voids expired authorizations itself.
 * Introduced unit tests covering partial captures, double-capture rejection, and
   automatic voiding on expiry.
 
