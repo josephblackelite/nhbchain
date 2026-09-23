@@ -36,8 +36,10 @@ banner text. For `phase-d` the code treats the default as disabled (`DefaultMode
 
 ## Client impact
 
-Every response from `/rpc`, including error responses, carries these headers
-(`writeJSON` in `gateway/compat/compat.go`, text from the current phase):
+Every response the dispatcher itself writes, including its JSON-RPC error responses, carries these
+headers (`writeJSON` in `gateway/compat/compat.go`, text from the current phase). A request that
+the rate limiter or the authenticator refuses before it reaches the dispatcher (HTTP 429, 401 or
+403) does not carry them.
 
 * `Warning: 299 - "Monolithic JSON-RPC compatibility will be sunset in 90 days. Migrate to the service APIs and monitor the deprecation timeline."`
   (any double quote inside the banner is replaced by a single quote)

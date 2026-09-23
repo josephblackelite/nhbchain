@@ -1,8 +1,8 @@
 # Paymaster Sponsorship Administration
 
 This guide documents the paymaster (gas sponsorship) module as the code implements it:
-the role that may toggle it, the three RPC methods, the sponsorship statuses and the events.
-Sources: `core/sponsorship.go`, `core/node.go`, `rpc/modules/transactions.go`,
+the role name, the two live RPC methods, the retired toggle, the sponsorship statuses and
+the events. Sources: `core/sponsorship.go`, `core/node.go`, `rpc/modules/transactions.go`,
 `rpc/http.go`, `core/events/sponsorship.go`.
 
 A transaction requests sponsorship by carrying a `paymaster` address together with a
@@ -20,7 +20,10 @@ status is neither `ready` nor `none` is rejected with
 
 * The chain ID of every transaction is `0x4e4842` (decimal `5130306`, ASCII `NHB`)
   (`core/types/transaction.go`).
-* The role that may toggle the module is `ROLE_PAYMASTER_ADMIN`. Roles are assigned in the
+* The role name `ROLE_PAYMASTER_ADMIN` is what `tx_getSponsorshipConfig` reports as `adminRole`
+  (`rpc/modules/transactions.go`). It no longer gates any RPC method (see section 3). The one
+  place the code uses it is as the built-in default `ApproverRole` of the automatic top-up policy
+  (`config/config.go`; see [auto top-up](../runbooks/paymaster-autotopup.md)). Roles are assigned in the
   `roles` object of the genesis file, which maps a role name to a list of bech32 addresses
   (`core/genesis/spec.go`):
 
@@ -49,34 +52,20 @@ curl -s -X POST <rpc-endpoint> -H 'Content-Type: application/json' \
 ```
 
 The result is `{"enabled": true, "adminRole": "ROLE_PAYMASTER_ADMIN"}`. `<rpc-endpoint>` is
-the node's `RPCAddress` (the sample `config.toml` uses `127.0.0.1:8545`). A fresh node starts
-with the module enabled (`core/state_transition.go`).
+the node's `RPCAddress` (the sample `config.toml` uses `127.0.0.1:8545`). A node starts with the
+module enabled (`core/state_transition.go`, `NewStateProcessor`).
 
-## 3. Enable or disable sponsorship
+## 3. Enabling and disabling sponsorship
 
-`tx_setSponsorshipEnabled` requires RPC authentication (a bearer token) and one parameter
-object:
-
-```bash
-curl -s -X POST <rpc-endpoint> -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $NHB_RPC_TOKEN" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tx_setSponsorshipEnabled",
-       "params":[{"caller":"<bech32 address holding ROLE_PAYMASTER_ADMIN>","enabled":false}]}'
-```
-
-`NHB_RPC_TOKEN` is the variable `nhb-cli` reads for the token. On success the result is the
-same object as `tx_getSponsorshipConfig`. If `caller` does not hold the role the response is
-HTTP 403 with the message `paymaster: caller lacks ROLE_PAYMASTER_ADMIN`. A missing `caller`
-returns `caller required`.
-
-Behaviour to be aware of (`SetPaymasterModuleEnabled` in `core/node.go`):
-
-* The call changes a flag in the memory of the node that received it. It is not a
-  transaction and nothing is written to chain state, so it does not reach other nodes and it
-  is not kept across a restart (a restarted node is enabled again).
-* `caller` is a plain address string in the request. It is checked against the role, but no
-  signature proves that the requester controls that address. Access control therefore rests on
-  the RPC bearer token.
+The module cannot be switched off while a node runs. The RPC method `tx_setSponsorshipEnabled`
+answers HTTP 410 with code `-32060` and a message that says the method is disabled
+(`handleTxSetSponsorshipEnabled` in `rpc/http.go`); its handler and `SetPaymasterModuleEnabled`
+were removed. The stated reason in the code is that the flag decides whether a sponsored transaction is
+valid, so it must be identical on every validator, and the old method flipped it on one node on
+the strength of an unsigned `caller` address. Nothing in the configuration file sets the flag
+either, so `enabled` is always `true` and the status `module_disabled` (below) is not reachable
+on a running node. To stop sponsorship from being used, use the limits in
+[paymaster budgets](../runbooks/paymaster-budgets.md).
 
 ## 4. Preview sponsorship
 
@@ -92,8 +81,9 @@ when empty (`omitempty` tags in `core/types/transaction.go`).
 
 The result fields (`SponsorshipPreviewResult`) are:
 
-* `status`: `none`, `module_disabled`, `signature_missing`, `signature_invalid`,
-  `insufficient_balance`, `throttled` or `ready`.
+* `status`: `none`, `module_disabled` (defined in the code; not reachable on a running node, see
+  section 3), `signature_missing`, `signature_invalid`, `insufficient_balance`, `throttled` or
+  `ready`.
 * `reason`: text for every status except `none` and `ready`. Values in the code:
   `paymaster address cannot be zero`, `paymaster module disabled`,
   `missing paymaster signature`, `invalid paymaster signature`,
@@ -105,7 +95,7 @@ The result fields (`SponsorshipPreviewResult`) are:
   `device sponsorship cap reached`.
 * `sponsor`: the paymaster address (bech32).
 * `gasPriceWei` and `requiredBudgetWei` (`gasLimit * gasPrice`).
-* `moduleEnabled`: whether the module is enabled on the node answering.
+* `moduleEnabled`: whether the module is enabled on the node answering (always `true` on a running node).
 * `throttle`, only for a throttled result: `scope`, `merchant`, `deviceId`, `day`, `limitWei`,
   `usedBudgetWei`, `attemptBudgetWei`, `txCount` and `limitTxCount`, each only when set.
 
