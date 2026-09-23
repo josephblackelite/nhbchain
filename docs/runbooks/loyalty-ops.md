@@ -22,7 +22,7 @@ and how the state processor invokes it (`core/state_transition.go`).
 The global loyalty configuration is stored in chain state and is written from the
 `loyaltyGlobal` object of the genesis file when the genesis is loaded
 (`core/genesis/loader.go`, `core/genesis/spec.go`; the JSON key is `loyaltyGlobal`, see
-`config/genesis.json`). The genesis reader rejects unknown top-level keys
+`config/genesis.relaunch.json`, the live network's genesis). The genesis reader rejects unknown top-level keys
 (`DisallowUnknownFields` in `LoadGenesisSpec`), so a section named `loyalty` makes the genesis
 fail to load instead of being applied. When `loyaltyGlobal` is absent, no global config is
 written. Fields:
@@ -36,7 +36,7 @@ written. Fields:
 | `capPerTx` | Maximum reward for one transfer. `0` disables the cap. |
 | `dailyCapUser` | Maximum total base reward per sender per UTC day. `0` disables it. |
 | `dailyCapCounterparty` | Maximum total reward per day for one sender/recipient pair, counted in either direction. `0` disables it. |
-| `seedZNHB` | Amount of ZNHB (wei, decimal string) credited to the `treasury` account at genesis. When it is above zero the token `ZNHB` must be registered in `nativeTokens`, and the value is written into `alloc` for the `treasury` address, replacing any `ZNHB` amount already listed there for that same address string (`core/genesis/loader.go`). The shipped `config/genesis.json` uses `"0"`. |
+| `seedZNHB` | Amount of ZNHB (wei, decimal string) credited to the `treasury` account at genesis. When it is above zero the token `ZNHB` must be registered in `nativeTokens`, and the value is written into `alloc` for the `treasury` address, replacing any `ZNHB` amount already listed there for that same address string (`core/genesis/loader.go`). The shipped genesis files in `config/` use `"0"`. |
 | `dynamic` | Adaptive-rate and price-guard settings (`LoyaltyDynamicSpec`). |
 
 In this repository no RPC method returns the global configuration, and no transaction,
@@ -73,8 +73,39 @@ response includes `balanceZNHB`). Watch for `reason=treasury_insufficient` on
 `nhb_loyalty_demand_zn`, `nhb_loyalty_prorate_ratio` and `nhb_loyalty_paid_today_zn`
 (`observability/metrics.go`).
 
-Note: the RPC method `nhb_getLoyaltyBudgetStatus` returns fixed placeholder values
-(`rpc/explorer_handlers.go`), so do not use it for monitoring.
+The RPC method `nhb_getLoyaltyBudgetStatus` (no parameters) returns the engine's own figures
+(`handleGetLoyaltyBudgetStatus`, `rpc/explorer_handlers.go`, backed by `Node.LoyaltyBudgetStatus`):
+`budgetRemaining` (the remaining daily base-reward budget in wei), `paidToday` and `proposedToday`
+(the day's paid and proposed totals), `day` (`YYYYMMDD`, UTC), `resetAt` (Unix time of the next UTC
+midnight), `twapScalingFactor` (paid divided by proposed as a decimal string with at most six
+digits, `1.0` while nothing was cut) and, only while the price guard is using a fallback price,
+`guardFallback`. The answer is chain-wide, not per merchant.
+
+The admin/treasury wallet's ZNHB moves that the engine's end-of-block payouts cause are booked into
+the ZNHB Reward Pool in the same state transition (`EndBlockRewards`, `core/state_transition.go`);
+a payout that lands on the treasury itself is applied to the treasury's own account object rather
+than a second copy.
+
+## Program rewards and the paymaster
+
+A merchant loyalty program (separate from the base reward above) pays its reward in ZNHB out of
+the balance of the business's paymaster wallet to the spender. The engine loads each of the two
+accounts once and writes each back once, so a program reward is a conserved movement: when the
+paymaster is the spender the movement nets to zero (`ApplyProgramReward`,
+`native/loyalty/engine_program.go`). Its events are `loyalty.program.accrued`,
+`loyalty.program.skipped` (with a `reason`) and `loyalty.program.paymaster_warning`.
+
+Who may be named as a business's paymaster (`Registry.SetPaymaster`,
+`native/loyalty/registry_business.go`; transaction type `TxTypeLoyaltySetPaymaster`):
+
+* A business owner may name only its own wallet (or clear the paymaster). Naming another wallet is
+  refused with `loyalty: paymaster must be the caller's own wallet unless assigned by a loyalty admin`.
+* A holder of `ROLE_LOYALTY_ADMIN` may name another wallet only if it is the business owner or has
+  recorded its own opt-in for that business, by calling `SetPaymaster` with its own address as the
+  new paymaster. Without the opt-in the call fails with `loyalty: paymaster has not consented`;
+  the opt-in is per business and is used up by the assignment it authorizes.
+* A signer that is neither the owner nor a loyalty admin can only record its own opt-in;
+  anything else gets `loyalty: unauthorized`.
 
 ## Troubleshooting
 

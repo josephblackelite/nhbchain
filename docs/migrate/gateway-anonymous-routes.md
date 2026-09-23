@@ -10,19 +10,19 @@ an explicit opt-in in the gateway configuration. This page lists what the code r
   (`applyAuthDefaults` in `gateway/config/config.go` runs before validation). Set it to `false`
   explicitly to let the middleware pass every request through without a token.
 * `auth.allowAnonymous` defaults to `false`, whatever `auth.enabled` is.
-* The authentication middleware is attached to a route group only when that group is marked as
-  requiring authentication. In `cmd/gateway/main.go` these groups require it: `/v1/lending`,
-  `/v1/gov`, `/gov.v1.Msg`, `/v1/transactions` and one further group listed there. These do not: `/gov.v1.Query`,
+* The authentication middleware is attached to a proxied route group only when that group is marked as
+  requiring authentication (and always to the `/rpc` route when it is enabled). In `cmd/gateway/main.go` these groups require it: `/v1/lending`,
+  `/v1/gov`, `/gov.v1.Msg`, `/v1/transactions` and `/v1/swap`. These do not: `/gov.v1.Query`,
   `/v1/consensus` and `/consensus.v1.ConsensusService`. `/healthz` and `/metrics` are separate
-  handlers.
+  handlers. The `/rpc` compatibility route has its own group (see the last section).
 * On a group that requires it, a request skips the token check only when `auth.allowAnonymous`
   is true and the request path starts with one of the `auth.optionalPaths` entries
   (`strings.HasPrefix` on the full path). Any other request needs
   `Authorization: Bearer <token>`. The token must be HMAC-signed with `auth.hmacSecret`; the
   issuer and audience are checked when `auth.issuer` and `auth.audience` are set, and the
   scope named by `auth.scopeClaim` (default `scope`) must include the route's scope
-  (`lending` or `gov` for the groups described here; the scope is the `RequiredScopes` value of
-  the group in `cmd/gateway/main.go`).
+  (`lending`, `gov` or `swap`; the scope is the `RequiredScopes` value of the group in
+  `cmd/gateway/main.go`; `/v1/transactions` names no scope).
 
 ## Checklist
 
@@ -58,8 +58,15 @@ require a token again.
 ## The `/rpc` compatibility route
 
 The compatibility dispatcher (`/rpc`, see [monolith to gateway](./monolith-to-gateway.md)) is
-registered directly on the router, outside the route groups above. It does not run the
-authentication middleware or the per-route rate limiter, and it does not forward the caller's
-`Authorization` header to the upstream. Whether a call through `/rpc` is authenticated is
-therefore decided by the upstream, not by these settings. Disable the route with
-`--compat-mode=disabled` if it must not be reachable.
+mounted as its own group in `gateway/routes/router.go`, with the rate limit `compat` and the same
+authenticator as the groups above, without a route scope. It therefore follows the rules in this
+page: with `auth.enabled: true` a call needs a bearer token unless `auth.allowAnonymous` is true
+and `/rpc` (or a prefix of it) is listed in `auth.optionalPaths`. Adding `/rpc` to
+`optionalPaths` opens the whole route to callers without a token, and a call that arrives without a
+token is not held to any scope by the dispatcher.
+
+For a call that arrives with a token, the dispatcher checks the scope of the upstream that would
+answer it before forwarding (`compat.ScopeGuard`, `cmd/gateway/main.go`): `lending`, `gov` or `swap`
+for those upstreams, none for the consensus upstream. A missing scope answers the JSON-RPC error
+`-32004 insufficient scope`. The caller's `Authorization` header is forwarded to the upstream.
+Disable the route with `--compat-mode=disabled` if it must not be reachable.
