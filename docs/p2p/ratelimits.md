@@ -22,6 +22,9 @@ count):
 Peers marked persistent (addresses in `Bootnodes` / `PersistentPeers`, or node IDs
 already recognised as such) skip all three checks.
 
+The table of per-IP buckets holds at most 8,192 entries
+(`requestLimiterEntries`, `p2p/server.go`).
+
 ## Configuration
 
 ```
@@ -48,3 +51,16 @@ all, and if a rate-limit handler is reached it logs and ignores the event).
 Metrics and logs: `Peer exceeded rate limit` and `Global rate cap exceeded` log
 lines, and the `nhb_p2p_peer_misbehavior` gauge; see
 [networking observability](../networking/observability.md).
+
+## Other budgets
+
+Two further sets of limits are separate from the token buckets above; both are
+described in [networking security](../networking/security.md):
+
+- **Inbound admission** (before anything is read from a new connection): how
+  often one address may open connections, how many of its handshakes may be in
+  flight and how many established inbound connections it may hold, and how many
+  handshakes may be in flight in all.
+- **Chain-data requests** (`GetBlocks`, `GetStatus`): a budget per remote address
+  and one shared by all addresses. A request over budget is dropped without a
+  score change or a disconnect.
