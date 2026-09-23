@@ -98,7 +98,7 @@ Both assets are registered in the genesis file with 18 decimals. Amounts in tran
 | Market | 0x35 CreateListing, 0x36 FillListing, 0x37 CancelListing |
 | Loyalty | 0x42 CreateBusiness, 0x43 SetPaymaster, 0x44 AddMerchant, 0x45 RemoveMerchant, 0x46 CreateProgram, 0x47 UpdateProgram, 0x48 PauseProgram, 0x49 ResumeProgram |
 
-Types 0x11 (SwapMint) and 0x12 (SwapBurn) are defined but always fail with "disabled" (`core/state_transition.go`). Types 0x0E, 0x1E, 0x25, 0x26, 0x4A, 0x4B and 0x4C carry no envelope signature; their payloads carry their own signatures (`RequiresSignature` in `core/types/transaction.go`).
+Types 0x11 (SwapMint) and 0x12 (SwapBurn) are defined but always fail with "disabled" (`core/state_transition.go`). Types 0x0E, 0x1E, 0x25, 0x26, 0x4A and 0x4B carry no envelope signature; their payloads carry their own signatures (`RequiresSignature` in `core/types/transaction.go`). `TxTypeSubmitEvidence` (0x4C) is not in that exemption list: it requires an envelope signature like any other transaction, which is what lets it carry a signed sender (see [Not supported](#not-supported)).
 
 ### Consensus and block production
 
@@ -435,7 +435,7 @@ The RPC server is in `rpc/http.go`.
   | `escrow_*` (the live, non-milestone methods) and `p2p_*` | `-32021` invalid params, `-32022` not found, `-32023` forbidden, `-32024` conflict, `-32025` internal |
   | `claimable_*` | `-32041` invalid params, `-32042` not found, `-32043` forbidden, `-32044` conflict, `-32045` internal |
   | `net_*` | `-32040` invalid params, `-32041` unknown peer, `-32042` peer banned |
-  | `sync_*` | `-32060` invalid params, `-32061` unavailable |
+  | `sync_*` | `-32060` invalid params (`codeSyncInvalidParams`, `rpc/sync_handlers.go`; the only live method, `sync_status`, returns it when called with params) — this is the same numeric code as the general "method disabled" above, not a distinct unavailable/offline code; there is no `-32061` |
 
 Example:
 
