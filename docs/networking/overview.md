@@ -66,12 +66,12 @@ followed by `\n` (this initial frame is not wrapped in the `Message` envelope):
 | Field | Meaning |
 | --- | --- |
 | `protoVersion` | `1`. Any other value is rejected. |
-| `chainId` | uint64. Must equal the local chain ID, which is the first 8 bytes of the genesis hash read big-endian (`core/blockchain.go`, lines 197 and 257). |
+| `chainId` | uint64. Must equal the local chain ID, which is the first 8 bytes of the genesis hash read big-endian (`core/blockchain.go`). |
 | `genesisHash` | `0x` hex of the genesis hash. Must equal the local one. |
 | `nodeId` | Sender's node ID, canonical lower-case `0x` hex. |
 | `nonce` | 12 random bytes, `0x` hex. |
 | `clientVersion` | Non-empty free-form string (config `ClientVersion`, default `nhbchain/node`). |
-| `listenAddrs` | Optional list of the sender's dialable `host:port` addresses (its `ListenAddress` and `ExternalAddress`; unspecified hosts and port `0` are dropped). |
+| `listenAddrs` | Optional list of the sender's dialable `host:port` addresses (its `ListenAddress` and `ExternalAddress`; unspecified hosts and port `0` are dropped). The receiver looks at the first 64 entries and keeps at most 8 (`sanitizeListenAddrs`). |
 | `sig` | 65-byte secp256k1 signature, `0x` hex. |
 
 The signed digest is
@@ -88,12 +88,21 @@ keccak256( "nhb-handshake-v1"
 node ID from it, and requires it to equal the claimed `nodeId`.
 
 Checks run in this order (`verifyHandshake`): protocol version; non-empty
-`clientVersion`; non-empty canonical `nodeId`; canonical 12-byte nonce; chain ID
-(mismatch bans the peer); genesis hash (mismatch bans the peer); signature length
-and recovery (a mismatch bans the peer); nonce replay (bans the peer). Then
+`clientVersion`; non-empty canonical `nodeId`; canonical 12-byte nonce; chain ID;
+genesis hash; signature length and recovery; nonce replay. A chain ID or genesis
+mismatch bans the node it names only when the packet's signature really comes
+from that node, and never when that node is a configured persistent peer. A
+signature that does not match the node ID and a replayed nonce are refused and
+nothing is held against the node ID (see [security](security.md)). Then
 `initPeer` rejects a connection to itself, a peer that is currently banned, and a
 node ID that is already connected, and registers the peer subject to `MaxPeers`,
-`MaxInbound` and `MaxOutbound`.
+`MaxInbound`, `MaxOutbound` and a limit of 8 established inbound connections per
+remote address (configured peers, loopback and non-IP hosts excepted). A peer is
+recorded in the peer records, the PEX book and the peerstore only after
+`registerPeer` has accepted it.
+
+Before the handshake starts, `admitInbound` applies per-address and global
+limits to a new inbound connection; see [security](security.md#inbound-admission).
 
 The whole exchange must finish within `HandshakeTimeout` (`HandshakeTimeoutMs`,
 3000 in the repo `config.toml`; the server's own default is 5 s). The outcome is
@@ -130,13 +139,14 @@ Outbound targets come from:
    on-chain `network.seeds` registry; see [seeds.md](seeds.md). The connection
    manager runs one dial loop per active seed.
 3. **The peerstore**: previously seen peers with their addresses.
-4. **Handshake addresses.** Each successful handshake records the peer's
-   `listenAddrs` (or, if it sent none, the address it was dialed at, or the
-   connection's remote address) in the PEX address book and the peerstore.
+4. **Handshake addresses.** Each handshake that ends in a registered peer records
+   the peer's `listenAddrs` (or, if it sent none, the address it was dialed at, or
+   the connection's remote address) in the PEX address book and the peerstore.
 
 The node answers `PexRequest` messages from peers (see [pex.md](pex.md)), but the
 node's own code never sends a `PexRequest`: `NewPexRequestMessage` has no caller
-outside tests. Address discovery therefore relies on handshakes, seeds and the
+outside tests. Because a `PexAddresses` frame is accepted only as the reply to a
+request this node sent, address discovery relies on handshakes, seeds and the
 peerstore.
 
 `p2p/integration/mesh_test.go` (`TestMiniMeshIntegration`) exercises a small mesh
@@ -160,6 +170,15 @@ Each record (key `peer:<nodeID>`, JSON value) has:
 | `fails` | Consecutive failed dials; reset to 0 on success. |
 | `bannedUntil` | Ban expiry. |
 | `violations`, `lastViolation` | Handshake violation counters. |
+
+The store is bounded: at most 2,048 records (`defaultPeerstoreMaxEntries`), a
+record no larger than 4,096 bytes (address at most 255 characters, node ID at most
+128), and records not seen for 14 days are pruned (`defaultPeerstoreTTL`; the
+connection manager prunes once an hour, and loading the store at start drops
+expired, oversized and undecodable records). When it is full, the least recently
+seen record that is not connected and not banned is evicted first; peers that are
+connected right now are protected from eviction and pruning. In addition the
+server keeps at most 4,096 in-memory peer records.
 
 Dial scheduling (`NextDialAt`): a banned peer waits until `bannedUntil`; with no
 failures the next dial is now; otherwise the peer waits

@@ -30,8 +30,9 @@ Operational notes for the P2P layer, taken from the code. Settings live in the
   if a dial fails or a persistent outbound peer disconnects, retries with a
   delay that starts at `DialBackoffSeconds` (30) and doubles up to one minute.
 - Addresses in either list are treated as persistent: no rate limiting for that
-  peer, no pruning by the connection manager, and no score-based ban. Handshake
-  violations and operator bans still apply. A peer is treated as persistent by
+  peer, no per-address inbound limits or chain-data request budgets, no pruning by
+  the connection manager, and no score-based or handshake-based ban. Operator bans
+  (`net_ban`) still apply. A peer is treated as persistent by
   node ID only after it has been reached via one of these addresses or is in the
   config (see [overview.md](overview.md#handshake-protocol-version-1)).
 - The value must be `host:port`, for example `<bootnode-host>:6001`; an
@@ -46,7 +47,9 @@ LevelDB is the only backend in the code (`p2p/peerstore.go`). Records are
 described in [overview.md](overview.md#peerstore).
 
 - **Backup or restore:** stop the node, copy or replace the `peerstore`
-  directory, start the node. The server loads all records at start.
+  directory, start the node. The server loads the records at start, keeping at
+  most 2,048 (the most recently seen) and dropping expired, oversized or
+  undecodable ones (see [overview.md](overview.md#peerstore)).
 - **Reset:** stop the node and delete `<DataDir>/p2p/peerstore`. The node
   identity in `node_key.json` is separate; deleting that file gives the node a
   new node ID.
@@ -74,19 +77,19 @@ to an unspecified address. The repo `config.toml` itself does not satisfy this
 profile (for example it sets `RPCAllowInsecure = true` behind an nginx proxy).
 
 Without RPC TLS certificates, the RPC server refuses to start unless
-`RPCAllowInsecure = true` (`rpc/http.go` lines 840-843, error "TLS is required
+`RPCAllowInsecure = true` (`rpc/http.go`, `Start`, error "TLS is required
 for RPC server"). With it set, it binds plaintext only to a loopback address; an
 unspecified address is accepted only with `RPCAllowInsecureUnspecified = true`,
 and every insecure bind increments
-`nhb_security_insecure_binds_total{service="rpc",loopback=...}` (lines 844-865).
+`nhb_security_insecure_binds_total{service="rpc",loopback=...}`.
 
 ## Monitoring
 
 - **Logs:** connection, disconnection, rate-limit, ban and handshake-failure
   messages are listed in [security.md](security.md#log-messages).
 - **RPC:** `p2p_info` for counts, limits, node identity and seeds; `net_peers`
-  (or `p2p_peers`) for per-peer state, score, failures and ban expiry; see
-  [net-rpc.md](net-rpc.md).
+  (or `p2p_peers`; both need the RPC bearer token) for per-peer state, score,
+  failures and ban expiry; see [net-rpc.md](net-rpc.md).
 - **Metrics:** see [observability.md](observability.md).
 
 ## Configuration changes
