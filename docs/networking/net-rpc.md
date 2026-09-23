@@ -6,8 +6,10 @@ the node's normal JSON-RPC listener (`RPCAddress`, `127.0.0.1:8545` in the repo
 `rpc/net_handlers.go` and `rpc/p2p_query_handlers.go`. The examples below use
 `http://127.0.0.1:8545/`.
 
-Methods that change state (`net_dial`, `net_ban`) require a bearer JWT
-(`Authorization: Bearer <token>`); the read methods do not. Proxy handling, rate
+`net_dial`, `net_ban`, `net_peers` and `p2p_peers` require a bearer JWT
+(`Authorization: Bearer <token>`): the first two change state, and the peer list
+names every peer's address, score and ban state. `net_info` and `p2p_info` do not
+need one. Proxy handling, rate
 limits, timeouts and TLS for the listener are described in
 [security.md](security.md#rpc-perimeter) and in the
 [Network hardening playbook](../security/network-hardening.md).
@@ -32,8 +34,8 @@ Result (`netInfoResult`):
 {
   "nodeId": "0x...",
   "peerCounts": { "total": 8, "inbound": 5, "outbound": 3 },
-  "chainId": 430060579445266314,
-  "genesisHash": "7bf4...",
+  "chainId": 18346390202490284624,
+  "genesisHash": "fe9b78af9223ea50f456f63c41084dd99bac4aaa3a790a10fcc26d1dc63210a2",
   "listenAddrs": ["0.0.0.0:6001"]
 }
 ```
@@ -44,8 +46,8 @@ Result (`netInfoResult`):
 
 ## `net_peers`
 
-Takes no parameters. Returns an array of `PeerNetInfo` combining live
-connections, peerstore entries and reputation records:
+Requires auth. Takes no parameters. Returns an array of `PeerNetInfo` combining
+live connections, peerstore entries and reputation records:
 
 ```json
 [
@@ -81,8 +83,8 @@ connections, peerstore entries and reputation records:
 
 ```json
 {
-  "networkId": 430060579445266314,
-  "genesisHash": "7bf4...",
+  "networkId": 18346390202490284624,
+  "genesisHash": "fe9b78af9223ea50f456f63c41084dd99bac4aaa3a790a10fcc26d1dc63210a2",
   "counts": { "total": 8, "inbound": 5, "outbound": 3 },
   "limits": {
     "maxPeers": 64, "maxInbound": 60, "maxOutbound": 30,
@@ -99,8 +101,9 @@ connections, peerstore entries and reputation records:
 
 `seeds` lists the merged seed catalogue with each entry's `source` (`config`,
 `registry.static`, or `dns:<domain>`) and optional `notBefore` / `notAfter`.
-`p2p_peers` (no parameters) returns exactly the same array as `net_peers`. Both
-return HTTP 400 with code `-32602` if given parameters.
+`p2p_peers` (no parameters, requires auth) returns exactly the same array as
+`net_peers`. Both return HTTP 400 with code `-32602` (`p2p_peers`) or `-32040`
+(`net_peers`) if given parameters.
 
 ## `net_dial`
 
@@ -127,20 +130,19 @@ target it also returns `{"ok": true}`.
 Parameter errors from the handler itself (not exactly one parameter object,
 malformed JSON in it) return HTTP 400, code `-32040`, message `invalid_params`.
 
-Errors from the dial itself depend on what the network service returns
-(`writeNetError`, `rpc/net_handlers.go`):
+Errors from the dial itself (`writeNetError`, `rpc/net_handlers.go`):
 
-- In the all-in-one `nhb` binary the service is a thin adapter over the P2P
-  server (`cmd/nhb/main.go`, `p2pNetworkAdapter`) and returns plain Go errors,
-  so they are reported as HTTP 500, code `-32000`, message `server_error`, with
-  the error text in `data`: `p2p: empty dial target`, `p2p: invalid dial address:
-  ...`, `p2p: unknown peer: <id>` (node ID not in the peerstore or seed list), or
-  `p2p: peer is banned: ...`.
+- The P2P server's own errors, wrapped with detail, are mapped by kind:
+  `p2p: unknown peer` (a node ID not in the peerstore or seed list) to HTTP 404 /
+  `-32041` `unknown_peer`; `p2p: peer is banned` to HTTP 409 / `-32042`
+  `peer_banned`; `p2p: empty dial target` and `p2p: invalid dial address` to
+  HTTP 400 / `-32040` `invalid_params`. The error text is in `data`.
 - When the service returns gRPC status errors (the gRPC network client in
   `network/client.go`), they are mapped to: `InvalidArgument` to HTTP 400 /
   `-32040` `invalid_params`; `NotFound` to HTTP 404 / `-32041` `unknown_peer`;
   `FailedPrecondition` to HTTP 409 / `-32042` `peer_banned`; `Unavailable` to
   HTTP 503 / `-32000` `unavailable`.
+- Any other error is reported as HTTP 500, code `-32000`, message `server_error`.
 
 ## `net_ban`
 

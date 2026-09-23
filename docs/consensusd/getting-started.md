@@ -1,7 +1,8 @@
 # consensusd Getting Started
 
 `consensusd` (`cmd/consensusd`) runs the node's consensus engine as a gRPC
-service. It has no HTTP or JSON-RPC listener. It connects out to a separate
+service. It has no JSON-RPC listener; its only HTTP listener is the optional
+`/metrics` endpoint (see "Health and diagnostics"). It connects out to a separate
 `p2pd` process (`cmd/p2pd`) for peer-to-peer gossip. The all-in-one binary
 `cmd/nhb` (used by the validator bootstrap script and `deploy/systemd/nhb.service`)
 runs consensus, P2P and JSON-RPC in a single process instead.
@@ -25,7 +26,7 @@ runs consensus, P2P and JSON-RPC in a single process instead.
 ## Security configuration
 
 Both `consensusd` and `p2pd` read the `[network_security]` section of
-`config.toml` (`config.NetworkSecurity`, `config/config.go` line 169):
+`config.toml` (`config.NetworkSecurity`, `config/config.go`):
 
 | Key | Meaning |
 | --- | --- |
@@ -67,8 +68,9 @@ enabled with `--allow-insecure` on a loopback listener, the server also fails
 
 Genesis resolution order: `--genesis`, then `NHB_GENESIS`, then config
 `GenesisFile`. If `GenesisFile` is set, does not exist, and autogenesis is off,
-`consensusd` writes the embedded mainnet genesis (`config.MainnetGenesis`) to
-that path.
+`consensusd` writes the embedded genesis of the live network
+(`config.MainnetGenesis`, the file `config/genesis.relaunch.json`, chain id
+`18346390202490284624`) to that path.
 
 Environment variables read by `consensusd`:
 
@@ -80,12 +82,18 @@ Environment variables read by `consensusd`:
   `NHB_CONSENSUS_TIMEOUT_PRECOMMIT`, `NHB_CONSENSUS_TIMEOUT_COMMIT`: Go duration
   strings such as `500ms` or `3s`. A flag beats the environment variable, which
   beats the config value. Values must be positive.
+- `NHB_METRICS_ADDR`: when set, serves the Prometheus registry at `/metrics` on
+  that address (`observability/metrics_server.go`). Off when unset. The endpoint
+  is unauthenticated; the process logs a warning when it is bound to a
+  non-loopback address, and a failure to start it is logged and never stops the
+  validator.
 - `NHB_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
   `OTEL_EXPORTER_OTLP_INSECURE`: logging environment and OpenTelemetry export.
 
 ## Consensus timeouts
 
-The round timers come from `[consensus]` in `config.toml`:
+The round timers and the minimum block interval come from `[consensus]` in
+`config.toml`. The repo `config.toml` writes:
 
 ```toml
 [consensus]
@@ -93,17 +101,24 @@ ProposalTimeout = "2s"
 PrevoteTimeout = "2s"
 PrecommitTimeout = "2s"
 CommitTimeout = "4s"
-MinBlockInterval = "1s"
+MinBlockInterval = "2s"
 ```
 
-If a key is absent from the file the built-in default applies (2s, 2s, 2s, 4s;
-`config.defaultConsensusConfig`). If a key is present it is used as written:
-`consensusd` validates the final values with `config.ValidateConsensus` and exits
-when any is not positive. The repo `config.toml` currently sets all four to
-`"0s"`, so `consensusd` started with that file needs the four flags or
-environment variables above (or edited values). The `cmd/nhb` binary passes the
-values to `bft.WithTimeouts`, which ignores non-positive durations and keeps the
-engine defaults.
+If a key is absent from the file the built-in default applies (2s, 2s, 2s, 4s
+and, for `MinBlockInterval`, 1s; `config.defaultConsensusConfig`). If a key is
+present it is used as written: `consensusd` validates the final values with
+`config.ValidateConsensus` and exits when a timer is not positive, when
+`MinBlockInterval` is negative, or when it is longer than half the commit timeout.
+A file that writes `"0s"` for a timer therefore needs the flag or environment
+variable above to set it. The `cmd/nhb` binary passes the values to
+`bft.WithTimeouts`, which ignores non-positive durations and keeps the engine
+defaults, and at start-up only logs a `configuration problem` warning for a
+setting it finds wrong (`cmd/nhb/config_check.go`).
+
+`MinBlockInterval` is not a timer of a round: it is the least time the validator
+lets pass between seeing a block commit and starting the round of the next
+height, and so the pace of an idle chain (at most one block per interval). `0s`
+turns the wait off. See [Block cadence](../consensus/block-cadence.md).
 
 ## Ports and connectivity
 
@@ -127,7 +142,8 @@ are in `proto/consensus/v1/`. Server reflection is not registered.
 
 ## Health and diagnostics
 
-There is no HTTP health endpoint. Call `GetHeight` on the consensus port; a
+There is no HTTP health endpoint (`/metrics` is only available when
+`NHB_METRICS_ADDR` is set). Call `GetHeight` on the consensus port; a
 successful reply means the service is up. Because reflection is off, `grpcurl`
 needs the proto file. The example below assumes TLS; use `-plaintext` instead
 of `-cacert` only for a loopback listener started with `--allow-insecure`. Add

@@ -55,7 +55,7 @@ The handlers are in `core/state_transition.go`; the type constants are in
 
 - The entry must exist (`unbonding entry N not found`) and its release time must
   have passed (`unbonding entry N is not yet claimable`). The amount then returns
-  to `BalanceZNHB` and the entry is removed.
+  to `BalanceZNHB`, the entry is removed and a `stake.unbondClaimed` event is emitted.
 
 ### Claiming rewards (`StakeClaimRewards`)
 
@@ -75,12 +75,17 @@ The handlers are in `core/state_transition.go`; the type constants are in
   address (`sp.PotsoRewardConfig().TreasuryAddress`) and credited to the claimer.
   If no treasury is configured the claim fails with `staking rewards: treasury not
   configured`; if the treasury cannot cover it, with `potso.ErrInsufficientTreasury`.
+  When that treasury is the admin/treasury wallet, the debit is booked into the
+  ZNHB Reward Pool ledger in the same transition (`TxTypeStakeClaimRewards` is one
+  of the types in `treasuryZNHBFlowTracked`, `core/znhb_treasury_pool.go`).
 
 The configuration defaults for these parameters are `AprBps` 1250,
 `PayoutPeriodDays` 30, `UnbondingDays` 7 and `MaxEmissionPerYearWei`
 `5000000000000000000` (`config/config.go`, `Staking` block). The values the node
 uses come from the governance parameter store when a parameter has been set
-(`core/node.go`, around lines 1493-1535).
+(`core/node.go`). A governed numeric parameter is read the same whether it was
+stored as a bare number (`7`) or as a quoted decimal string (`"7"`), and leading
+`+` signs are dropped (`nativecommon.ParamDecimal`, `native/common/paramvalue.go`).
 
 ### Pausing
 
@@ -88,8 +93,8 @@ While the `staking` module is paused, `StakeDelegate`, `StakeUndelegate`,
 `StakeClaim` and `StakeClaimRewards` fail with `staking: module paused`
 (`ErrStakePaused`) and emit a `stake.paused` event. The pause comes from the
 node configuration (`Global.Pauses.Staking`) or from the on-chain pause set
-(`consensusd` logs a warning when the two disagree; the node enforces the
-on-chain value). The [runbook](../runbooks/staking-ops.md) covers operations.
+(at start-up `consensusd` logs a warning when the local config says
+unpaused but the on-chain value is paused; the node enforces the on-chain value). The [runbook](../runbooks/staking-ops.md) covers operations.
 
 ## Account fields
 
@@ -160,7 +165,9 @@ elapsed) and `nextPayoutTs` (Unix seconds).
 ```
 
 CLI equivalents: `nhb-cli stake position <address>` and
-`nhb-cli stake preview <address>`.
+`nhb-cli stake preview <address>`. `nhb-cli stake <amount> <key-file>` sends a
+`TxTypeStake` with no payload (a self-stake). `nhb-cli stake claim` prints a
+retired notice and exits non-zero (`cmd/nhb-cli/stake.go`, `retired_cmd.go`).
 
 ### `nhb_getBalance`
 
@@ -181,9 +188,9 @@ Attribute names are those set in `core/events/stake.go` and
 | --- | --- | --- |
 | `stake.delegated` | `addr`, `sharesAdded`, `newShares`, `lastIndex`, `validator`, `amount`, `locked` | A delegation. One event for the delegator (with `locked`) and, when delegating to another validator, one for the validator (without `locked`). |
 | `stake.undelegated` | `addr`, `sharesRemoved`, `newShares`, `lastIndex`, `validator`, `amount`, `releaseTime`, `unbondingId` | An unstake. The delegator's event carries `releaseTime` and `unbondingId`; the validator's does not. |
-| `stake.claimed` | `delegator`, `validator`, `amount`, `unbondingId` | A matured unbond is claimed (`StakeClaim`). |
+| `stake.unbondClaimed` | `delegator`, `validator`, `amount`, `unbondingId` | A matured unbond is claimed (`StakeClaim`). |
 | `stake.rewardsClaimed` | `addr`, `paidZNHB`, `periods`, `aprBps`, `nextEligibleUnix` | Rewards are claimed. |
-| `stake.claimed` (rewards alias) | `addr`, `minted`, `periods`, `aprBps`, `nextEligibleUnix` | Also emitted on a rewards claim, under the same event type string as the unbond claim above (`StakeRewardsClaimed.LegacyEvent`). Distinguish the two by their attributes. |
+| `stake.claimed` | `addr`, `minted`, `periods`, `aprBps`, `nextEligibleUnix` | Legacy alias of `stake.rewardsClaimed`, also emitted on a rewards claim (`StakeRewardsClaimed.LegacyEvent`). It is the only event with this name; a reclaimed unbond is `stake.unbondClaimed`. |
 | `stake.emissionCapHit` | `requestedZNHB`, `attemptedZNHB`, `allowedZNHB`, `ytd`, `cap` | The annual emission cap reduced a reward claim. |
 | `stake.paused` | `addr`, `operation` (`delegate`, `undelegate`, `claim`, `claimRewards`), `reason`, `unbondingId` | A staking request was rejected because the module is paused. |
 | `stake.validatorRegistrationChanged` | `addr`, `registered`, `at` | An account's validator registration flag changed. |
