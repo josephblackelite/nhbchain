@@ -29,20 +29,25 @@ requests.
 
 `observability/metrics.go`, `observability/metrics/potso.go`, `network/metrics.go`
 and `p2p/metrics.go` register these collectors on the default Prometheus
-registry. The only listener in this repository that serves a Prometheus endpoint
-is the gateway (below); no node, consensus or p2p binary mounts a `/metrics`
-handler.
+registry. Two listeners serve a Prometheus endpoint: the gateway (below) and, when
+`NHB_METRICS_ADDR` is set, `cmd/nhb` and `cmd/consensusd` (next section). `cmd/p2pd`
+mounts no `/metrics` handler.
 
 | Metric | Labels |
 | ------ | ------ |
 | `nhb_module_requests_total` | `module`, `method`, `outcome` (`success` or `error`) |
 | `nhb_module_errors_total` | `module`, `method`, `status` |
 | `nhb_module_request_duration_seconds` | `module`, `method` |
-| `nhb_module_throttles_total` | `module`, `reason` (only `rate_limit` is recorded by the RPC server) |
+| `nhb_module_throttles_total` | `module`, `reason` (the RPC server records `rate_limit` and `query_capacity`) |
 | `nhb_rpc_limiter_hits_total` | `scope`, `module`, `route` |
 | `nhb_security_insecure_binds_total` | `service`, `loopback` |
 | `nhb_token_supply_total` | `token` |
 | `nhb_consensus_block_interval_seconds` | none |
+| `nhb_consensus_build_failures_consecutive`, `nhb_consensus_empty_block_fallbacks_total`, `nhb_consensus_build_duration_seconds`, `nhb_consensus_build_waves`, `nhb_consensus_seconds_since_last_commit`, `nhb_consensus_last_commit_height`, `nhb_consensus_liveness_stalled`, `nhb_consensus_tx_panics_recovered_total`, `nhb_consensus_local_validation_failures_total` | none |
+| `nhb_consensus_build_failures_total` | `reason` (`lifecycle`, `evidence`, `state_copy`, `budget`, `waves`, `infra`, `panic`, `other`) |
+| `nhb_mempool_tx_failures_total` | `disposition` (`prune`, `skip`, `quarantine`, `nondeterministic`, `abort`) |
+| `nhb_mempool_evictions_total` | `reason` (`classified_prune`, `strikes`, `ttl`, `isolation`) |
+| `nhb_mempool_strike_records`, `nhb_mempool_strike_overflow_evictions_total`, `nhb_mempool_inflight_leases_expired_total` | none |
 | `nhb_mempool_pos_lane_fill`, `nhb_mempool_pos_lane_backlog{asset}`, `nhb_mempool_pos_tx_enqueued_total`, `nhb_mempool_pos_p95_finality_ms` | |
 | `nhb_pos_auth_expired_total` | none |
 | `nhb_paymaster_autotopups_total{outcome}`, `nhb_paymaster_autotopup_amount_wei_total{outcome}` | |
@@ -69,6 +74,17 @@ pro-rating applies (`Loyalty()` in `observability/metrics.go`).
 The escrow gateway records one OpenTelemetry counter,
 `nhb.escrow.webhooks.dropped` (attribute `reason`); see
 [Escrow gateway webhook queue operations](./webhooks.md).
+
+### Validator metrics listener
+
+`observability.StartMetricsServerFromEnv` (`observability/metrics_server.go`) is
+called by `cmd/nhb` and `cmd/consensusd` at start. If `NHB_METRICS_ADDR` (for
+example `127.0.0.1:9101`) is set, it serves the default registry at `/metrics`
+on that address. It is off when the variable is empty, it has no authentication,
+and it logs a warning when the address is not loopback. A failure to bind is
+logged and does not stop the node. The gauges above are set by the block-production
+containment and the liveness watchdog in `core/`; see the block production
+section of the [Validator Operations Runbook](./validator-runbook.md#block-production-liveness).
 
 ### Gateway endpoint
 
@@ -117,6 +133,11 @@ do not listen on 9464.
 | `ModuleQuotaExhausted` | `nhb_module_throttles_total{reason="quota"}` increased in 10 min |
 | `OracleFeedStale` | `max(nhb_oracle_update_age_seconds) > 120` for 5 min |
 | `PaymasterAutoTopUp*` | four alerts on `nhb_paymaster_autotopups_total` (success spikes above 3 and 10 in 5 min; failures) |
+| `ConsensusNoCommit` | `nhb_consensus_seconds_since_last_commit > 60` for 1 min |
+| `ConsensusBuildFailing` | `nhb_consensus_build_failures_consecutive >= 2` for 30 s |
+| `ConsensusEmptyBlockFallbackRate` | more than 20 `nhb_consensus_empty_block_fallbacks_total` in 5 min |
+| `MempoolNondeterministicTransactions` | any increase of `nhb_mempool_tx_failures_total{disposition="nondeterministic"}` in 10 min |
+| `ConsensusTxPanicRecovered` | any increase of `nhb_consensus_tx_panics_recovered_total` in 10 min |
 
 `observability/alerts/alert_rules.yaml` holds the `POTSO*` alerts and
 `TokenSupplyJumpIncrease` / `TokenSupplyJumpDecrease`.

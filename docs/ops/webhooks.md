@@ -14,6 +14,18 @@ Three environment variables are read at startup (a restart is needed to change t
 
 A value that does not parse or is not positive stops the gateway at startup (for example `ESCROW_GATEWAY_QUEUE_CAP must be positive`). TTL uses Go duration syntax (for example `30s`, `5m`).
 
+## Delivery
+
+`main.go` starts one `WebhookWorker` (`webhook.go`) on the queue. It delivers to
+the active rows of the gateway's `webhooks` table that match the event type; the
+gateway has no endpoint for adding a row. The only event the gateway itself
+enqueues is `escrow.created` (`server.go`): it has no feed of chain events, so
+other escrow events are not produced. Each delivery is an HTTP `POST` of a JSON
+body with `type`, `sequence`, `escrowId`, `tradeId`, `attributes` and `timestamp`,
+carrying `X-Webhook-Signature`, the hex HMAC-SHA256 of the body under the row's
+secret. The client timeout is 10 seconds. A failed delivery is retried with a
+back-off of 1 s doubling up to 5 min, for at most 5 attempts.
+
 ## Metrics
 
 `nhb.escrow.webhooks.dropped` is an OpenTelemetry counter (meter `nhbchain/escrow-gateway`), exported over OTLP when the gateway's telemetry is configured. It increments whenever a webhook is discarded and carries a `reason` attribute:
