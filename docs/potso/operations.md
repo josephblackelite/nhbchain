@@ -14,11 +14,11 @@ The six other POTSO metrics registered in the same file (`potso_evidence_accepte
 
 ## Pause switch
 
-The POTSO module honours the `potso` entry of the `system/pauses` parameter and the `[global.Pauses] POTSO` config value (`nativecommon.Guard(..., "potso")`). The node enforces one in-memory flag per module (`Node.IsPaused`). It is set from `[global.Pauses]` at start-up (`cmd/nhb/main.go:162`, `Node.SetModulePauses`) and reloaded from the on-chain `system/pauses` value by `refreshModulePauses` in the block validate/commit/create paths, so once blocks are processed the on-chain value is what is enforced.
+The POTSO module honours the `potso` entry of the `system/pauses` parameter and the `[global.Pauses] POTSO` config value (`nativecommon.Guard(..., "potso")`). The node enforces one in-memory flag per module (`Node.IsPaused`). It is set from `[global.Pauses]` at start-up (`node.SetModulePauses` in `cmd/nhb/main.go`) and reloaded from the on-chain `system/pauses` value by `refreshModulePauses` in the block validate/commit/create paths, so once blocks are processed the on-chain value is what is enforced.
 
-The guard blocks the POTSO stake transactions, evidence submission (RPC and transaction), reward claims and `Node.PotsoHeartbeat`. It does not stop reward epoch processing in `processPotsoRewardEpoch`.
+The guard blocks the POTSO stake transactions, the evidence transaction (`TxTypeSubmitEvidence`), `Node.PotsoRewardClaim` and `Node.PotsoHeartbeat` (the last two have no working RPC entry point, see [README](README.md) and [rewards-modes.md](rewards-modes.md)). It does not stop reward epoch processing in `processPotsoRewardEpoch`.
 
-Start-up caveat: `cmd/nhb/main.go` applies `[global.Pauses]` (line 162) before it applies the POTSO reward and weight configuration (`Node.SetPotsoRewardConfig`, `Node.SetPotsoWeightConfig`, lines 240 to 248). Both setters begin with `nativecommon.Guard(n, modulePotso)` (`core/node.go:4929` and `core/node.go:4958`). With `POTSO = true` in `[global.Pauses]` the guard returns "module paused" and the node panics at start-up with "Failed to apply POTSO rewards config: module paused". Leave `POTSO = false` in the config file and pause the module through the on-chain parameter instead.
+Start-up caveat: `cmd/nhb/main.go` applies `[global.Pauses]` (`node.SetModulePauses`) before it applies the POTSO reward and weight configuration (`Node.SetPotsoRewardConfig`, `Node.SetPotsoWeightConfig`). Both setters begin with `nativecommon.Guard(n, modulePotso)` (`core/node.go`). With `POTSO = true` in `[global.Pauses]` the guard returns "module paused" and the node panics at start-up with "Failed to apply POTSO rewards config: module paused". Leave `POTSO = false` in the config file and pause the module through the on-chain parameter instead.
 
 Read the live state and stage a change with the example programs under `examples/docs/ops/`:
 

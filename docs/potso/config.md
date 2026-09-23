@@ -2,20 +2,20 @@
 
 POTSO is configured in the node's TOML file under `[potso.rewards]`, `[potso.weights]` and `[potso.abuse]` (`config.PotsoConfig` in `config/config.go`). `cmd/nhb/main.go` converts them with `Config.PotsoRewardConfig()` and `Config.PotsoWeightConfig()` and hands them to the node at start-up (`SetPotsoRewardConfig`, `SetPotsoWeightConfig`). Block execution reads them directly (`processPotsoRewardEpoch`), so they only change when the process is restarted with a different file. An invalid value makes start-up panic.
 
-The repository's `config.toml` carries a full example. `config/prod.toml` has `[potso.rewards]` and `[potso.weights]` (with `TreasuryAddress = ""`) and no `[potso.abuse]` section.
+The repository's `config.toml` carries a full example (`EmissionPerEpoch = "50000000000000000000"`, 50 ZNHB). `config/prod.toml` has `[potso.rewards]` (`EpochLengthBlocks = 120`, `EmissionPerEpoch = "1000000000000000000"`, a non-empty `TreasuryAddress`, `PayoutMode = "auto"`) and `[potso.weights]`, and no `[potso.abuse]` section, so the loader defaults below apply to it.
 
 ## `[potso.rewards]`
 
 | Key | Type | Description | Value if key is omitted |
 | --- | --- | --- | --- |
-| `EpochLengthBlocks` | uint | Blocks per reward epoch. `0` disables reward processing. | `0` |
+| `EpochLengthBlocks` | uint | Blocks per reward epoch. `0` disables reward processing. Counted in blocks: the wall-clock length of an epoch is this number times the block interval, which depends on each validator's `[consensus] MinBlockInterval` (see [block cadence](../consensus/block-cadence.md)). | `0` |
 | `AlphaStakeBps` | uint | Stake share in basis points. Used only if `[potso.weights].AlphaStakeBps` is `0`, which the loader prevents (see below). | `0` |
 | `MinPayoutWei` | decimal string | Payouts below this many wei are dropped. | `"0"` |
 | `EmissionPerEpoch` | decimal string | Maximum wei budget per epoch. | `"0"` |
 | `TreasuryAddress` | bech32 (`nhb1...` or `znhb1...`) | Account that funds payouts. Required when rewards are enabled. | zero address |
 | `MaxWinnersPerEpoch` | uint | Cap on winners per epoch. `0` means no cap. | `0` |
 | `CarryRemainder` | bool | Parsed and stored in the config struct, but nothing reads it. | `true` |
-| `PayoutMode` | string | `auto` or `claim` (case-insensitive; any other non-empty value is normalised to `auto` by `Normalise`). | `auto` |
+| `PayoutMode` | string | `auto` or `claim` (case-insensitive; any other non-empty value is normalised to `auto` by `Normalise`). The node has no working way to collect a `claim`-mode reward, see [payout modes](rewards-modes.md). | `auto` |
 
 Rewards are enabled only when `EpochLengthBlocks > 0` and `EmissionPerEpoch > 0` (`RewardConfig.Enabled`, `maybeProcessPotsoRewards`). `RewardConfig.Validate` also rejects: alpha or `MaxUserShareBps` above 10000, negative amounts, `EpochLengthBlocks > 0` with a non-positive emission, and an enabled config with a zero `TreasuryAddress`.
 
@@ -57,7 +57,7 @@ The TOML key is `EmissionPerEpoch`. The governance parameter name `potso.rewards
 
 ## Governance parameters
 
-`potso.weights.AlphaStakeBps`, `potso.rewards.EmissionPerEpochWei`, `potso.abuse.MaxUserShareBps`, `potso.abuse.MinStakeToEarnWei`, `potso.abuse.QuadraticTxDampenAfter` and `potso.abuse.QuadraticTxDampenPower` are in the default `AllowedParams` list (`config/config.go`, `config.toml`), and `native/governance/engine.go` (`validatorForParam`) validates values for them in a `param.update` proposal. No code outside that validator reads these keys from the parameter store, so executing such a proposal does not change POTSO behaviour. Only the TOML values above are used.
+`potso.weights.AlphaStakeBps`, `potso.rewards.EmissionPerEpochWei`, `potso.abuse.MaxUserShareBps`, `potso.abuse.MinStakeToEarnWei`, `potso.abuse.QuadraticTxDampenAfter` and `potso.abuse.QuadraticTxDampenPower` are in the default `AllowedParams` list (`config/config.go`, `config.toml`), and `native/governance/engine.go` (`validatorForParam`) validates values for them in a `param.update` proposal (a JSON number or a quoted decimal string is accepted, `parseUintRaw`; `potso.abuse.QuadraticTxDampenPower` may not be `1`). No code outside that validator reads these keys from the parameter store, so executing such a proposal does not change POTSO behaviour. Only the TOML values above are used.
 
 ## `potso_params`
 

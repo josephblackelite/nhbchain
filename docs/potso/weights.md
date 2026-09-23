@@ -8,7 +8,7 @@ For each candidate address `i` in epoch `E`, `processPotsoRewardEpoch` builds:
 
 - `stake_i` (wei): the sum of
   - the bonded total from POTSO stake locks (`potso/stake/<owner>`, see [stake.md](stake.md)); and
-  - for addresses in `EligibleValidators`, the eligibility basis stored there (added on top of the lock total).
+  - for addresses in `EligibleValidators`, the eligibility basis stored there (added on top of the lock total). That basis is the account's total `Stake`, which includes ZNHB delegated in by third parties (`validatorEligibilityBasis`, `core/state_transition.go`); see [consensus integration](consensus-integration.md#voting-power-quorums).
 - `tx_i`, `escrow_i`: per-epoch counters accumulated as transactions are applied (`PotsoMetricsAddEngagement`, keyed by `height / EpochLengthBlocks`).
 - `uptime_i`: `UptimeSeconds / 60` for the epoch (whole minutes). Only `Node.PotsoHeartbeat` writes uptime and nothing in the running node calls it (see [README](README.md)), so this is 0 in practice.
 - `EMA_{E-1,i}`: the engagement stored in the previous epoch's snapshot (0 if none).
