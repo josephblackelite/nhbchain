@@ -1,12 +1,12 @@
 # `nhb-cli stake`
 
-`nhb-cli stake` has three read/claim subcommands (`position`, `preview`,
-`claim`) that call the staking RPC methods, plus a legacy form
+`nhb-cli stake` has two read subcommands (`position`, `preview`) that call the
+staking RPC methods, a `claim` subcommand that is retired, and a legacy form
 `stake <amount> <key_file>` that signs and sends a stake transaction. The code is
 in `cmd/nhb-cli/stake.go` (subcommands) and `cmd/nhb-cli/main.go` (the legacy
 `stake` function).
 
-Every RPC call the subcommands make is sent with the bearer token from the
+Every RPC call `position` and `preview` make is sent with the bearer token from the
 `NHB_RPC_TOKEN` environment variable; the CLI stops with "privileged RPC call
 requires NHB_RPC_TOKEN to be set" if it is empty. Use the global
 `--rpc <url>` flag, or the `RPC_URL` environment variable, to target a node
@@ -52,23 +52,23 @@ Stake rewards preview for <address>
 the current time. The public `nhb_getBalance` RPC (no token needed) also returns
 the same preview as `pendingStakingRewards`.
 
-## Claim rewards: `stake claim` does not work
+## Claim rewards: `stake claim` is retired
 
 ```bash
 nhb-cli stake claim <address>
 ```
 
-This subcommand sends the `stake_claimRewards` RPC, and that RPC is disabled on
-the node. `handleStakeClaimRewards` answers every call with HTTP 410 and error
-code `-32060`, so the CLI prints
+This subcommand no longer contacts the node. It prints
 
 ```
-RPC error -32060: this method is disabled; sign a transaction (TxTypeStake/TxTypeUnstake/TxTypeStakeClaim/TxTypeStakeClaimRewards) via nhb_sendTransaction instead, so the caller's own signature authorizes the action
+Error: nhb-cli stake claim is retired: the node no longer serves stake_claimRewards (HTTP 410), because it changed validator-local state outside the block pipeline, and this CLI has no replacement for it yet.
 ```
 
-and exits with status `1`. The method was disabled because it changed state
-outside block execution and trusted a caller-supplied address
-(comment above `stakeRPCDisabledMessage` in `rpc/stake_handlers.go`).
+to stderr and exits with status `1` (`reportRetired` in
+`cmd/nhb-cli/retired_cmd.go`). The node itself answers `stake_claimRewards`
+with HTTP 410 and error code `-32060` (`handleStakeClaimRewards` and
+`stakeRPCDisabledMessage` in `rpc/stake_handlers.go`): the method changed state
+outside block execution and trusted a caller-supplied address.
 
 Rewards are claimed with a signed transaction of type `TxTypeStakeClaimRewards`
 (`0x34`, `core/types/transaction.go`). It carries no payload, is signed by the
@@ -76,10 +76,6 @@ account that is claiming, and is submitted with `nhb_sendTransaction`
 (`applyStakeClaimRewards` in `core/state_transition.go`). `nhb-cli` has no
 command that builds this transaction. Claiming before a payout period has
 elapsed fails in the state transition with the staking "not due" error.
-
-The CLI's handling of "Not yet eligible" (HTTP 409) and "staking not ready"
-responses in `runStakeClaim` is left over from the earlier RPC; the node no
-longer returns those responses for this method.
 
 ## Legacy shortcut: `stake <amount> <key_file>`
 
@@ -99,8 +95,9 @@ Successfully sent stake transaction for <amount> ZapNHB.
 Check the node logs for confirmation and wait for the next block.
 ```
 
-Errors (bad key file, RPC error) are printed to stdout and the process still
-exits with status `0`, so scripts cannot rely on the exit code for this form.
+Errors (bad key file, RPC error) are printed to stdout and the process exits with
+status `1`. A command line that is not `<positive integer> <key_file>` prints the
+`stake` usage text to stderr and exits `1`.
 
 To stake and register as a validator candidate in one transaction, use
 `register-validator` (see [staking.md](./staking.md)).

@@ -74,4 +74,8 @@ fails, signing fails, or the node returns an error. Node errors are printed as
 reported by the node as `nonce N has already been used; current account nonce is M`.
 
 To confirm inclusion, call `nhb_getTransactionReceipt` with the printed hash
-(the node returns `null` when it cannot find the transaction).
+(the node returns `null` when it cannot find the transaction). That method is one
+of the public read methods that run in the node's query admission pool: when the
+pool is full it answers HTTP 429 with code `-32020`, and when the call runs out of
+time HTTP 503 with code `-32021` (`rpc/query_gate.go`; see
+[RPC query limits](../ops/rpc-query-limits.md)). Retry after a moment.

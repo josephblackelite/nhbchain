@@ -88,6 +88,12 @@ Behavior, from `sdk/go/client/tx.go`:
 - Both methods return the signed `*types.Transaction` and the string the node
   returned, which is `0x` plus the transaction hash. Acceptance into the mempool
   is not confirmation; poll `nhb_getTransactionReceipt`.
+- A response with any HTTP status other than 200 is returned as
+  `client: rpc error status <code>: <first 1024 bytes of the body>`; a JSON-RPC
+  `error` object is returned as `client: rpc error <code>: <message>`. The client
+  does not retry. A node whose query pool is full answers HTTP 429 (code
+  `-32020`) or 503 (code `-32021`); see
+  [RPC query limits](../ops/rpc-query-limits.md).
 - `AccountNonce(ctx, address)` is exported for callers that build other
   transaction types.
 
@@ -127,9 +133,10 @@ from the `authorization` request metadata (or the header named by
 `Bearer <secret>` (`network.NewTokenAuthenticator`); attach it with
 `consensus.WithPerRPCCredentials`. Plaintext is accepted only when the config
 sets `AllowInsecure`, the process runs with `--allow-insecure`, and the listener
-is on a loopback address. In `consensusd`, the same flag and config setting also
-gate its own plaintext connection to `p2pd` (`buildNetworkDialOptions`,
-`cmd/consensusd/main.go:543-620`).
+is on a loopback address; if the config supplies TLS material the server uses TLS
+instead. In `consensusd`, the same flag and config setting also gate its own
+plaintext connection to `p2pd` (`buildNetworkDialOptions` in
+`cmd/consensusd/main.go`).
 
 ### State queries
 
@@ -142,12 +149,15 @@ served by `core/query_router.go` and `core/node.go`. The supported queries are:
 | `swap` | `vouchers/<id>`; `oracles` | none |
 | `gov` (or `governance`) | `proposals/<id>`; `tallies/<id>`; `params` | `params` |
 
-`proposals/latest` is not usable today: `queryGovernanceState` matches every key that starts
-with `proposals/` and parses the remainder as an unsigned integer, so `latest` fails with
-`gov: invalid proposal id` (`core/query_router.go:163-171`) before the node's fallback handler
-(`core/node.go:8684`) is reached. Anything else returns the error `query: not supported`. `positions/<address>` returns a JSON
-array of `{ "poolId": ..., "account": ... }`, one entry per pool where the
-address has an account.
+`proposals/latest` is not usable today: `queryGovernanceState` in
+`core/query_router.go` matches every key that starts with `proposals/` and parses
+the remainder as an unsigned integer, so `latest` fails with
+`gov: invalid proposal id: ...` before the node's fallback handler
+(`queryStateFallback` in `core/node.go`, which does contain a `proposals/latest`
+case) is reached. `params`, `tallies/<id>` and `oracles` are answered by that
+fallback. Any other key returns the error `query: not supported`.
+`positions/<address>` returns a JSON array of `{ "poolId": ..., "account": ... }`,
+one entry per pool where the address has an account.
 
 ### Transaction envelopes
 
@@ -189,9 +199,13 @@ Build and sign the transaction with `sdk/lending/txbuilder.go`:
   strings. Defaults: gas limit `50000`, gas price `1`; `WithGasLimit` and
   `WithGasPrice` override them. For the six supply, withdraw, borrow, repay
   and collateral builders, a pool ID of empty or `default` produces no payload and any other
-  pool ID is sent as JSON `{"poolId": "..."}` (`sdk/lending/txbuilder.go:56-62`).
-  `NewLiquidateTx` always sends a payload, JSON `{"poolId": "...", "borrower": "..."}`, with an
-  empty pool ID replaced by `default` (`sdk/lending/txbuilder.go:154-166`).
+  pool ID is sent as JSON `{"poolId": "..."}` (`encodePayload` in
+  `sdk/lending/txbuilder.go`). `NewLiquidateTx` has value `0`, always sends a
+  payload, JSON `{"poolId": "...", "borrower": "..."}`, with an empty pool ID
+  replaced by `default`, and requires a non-empty borrower. The node refuses a
+  liquidation whose signer is the borrower (`lending.ErrSelfLiquidation` in
+  `applyLendingLiquidate`, `core/lending_native.go`); a borrower repays with a
+  repay transaction instead.
 - `SignAndEncode(tx, ecdsaKey)` signs and returns the JSON string to pass as
   `signedTxJSON`. `SenderAddress(key)` returns the bech32 account string.
 - `lending.NewMsgSupply`, `NewMsgBorrow`, `NewMsgRepay` and `NewMsgLiquidate`

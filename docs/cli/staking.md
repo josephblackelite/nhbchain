@@ -3,9 +3,9 @@
 The staking-related commands of `nhb-cli`. They fall into two groups:
 
 - **Read and preview helpers** that call RPC methods: `stake position`,
-  `stake preview`, `stake claim`. These are documented in
-  [stake.md](./stake.md), including the fact that `stake claim` currently fails
-  because the RPC it calls is disabled.
+  `stake preview`, `stake claim` (retired). These are documented in
+  [stake.md](./stake.md). `stake claim` is retired: the CLI reports that and
+  exits `1` without contacting the node.
 - **Signed-transaction commands** that build a transaction locally, sign it with
   a key file and submit it with `nhb_sendTransaction`: `stake <amount>
   <key_file>`, `un-stake`, `register-validator`, `deregister-validator` and
@@ -56,10 +56,13 @@ a pending unbond (visible in `nhb-cli balance`) that is released after the
 staking unbonding period. The period is the governance parameter
 `staking.unbondingDays` and defaults to 7 days when that parameter is unset
 (`unbondingPeriod` and `stakingUnbondingPeriod` in `core/state_transition.go`). Claiming a matured unbond is a separate transaction,
-`TxTypeStakeClaim` (`0x0D`, payload `unbondingId`); `nhb-cli` has no command for
-it.
+`TxTypeStakeClaim` (`0x0D`, payload `unbondingId`, which must be greater than
+zero); a successful claim emits the `stake.unbondClaimed` event
+(`core/state_transition.go`, `core/events/stake.go`). `nhb-cli` has no command for
+the claim.
 
-As with the legacy `stake` form, errors are printed and the process exits `0`.
+As with the legacy `stake` form, errors are printed to stdout and the process
+exits `1`.
 
 ## Register as a validator candidate
 

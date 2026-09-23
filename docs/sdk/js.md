@@ -47,7 +47,7 @@ Behavior:
 - The recipient must be a bech32 address with the `nhb` prefix and 20 data bytes.
   A string that does not decode as bech32, or decodes with a different prefix,
   throws `Invalid NHB address.`; a valid `nhb` bech32 string whose data is not 20
-  bytes throws `Expected a 20-byte address.` (`sdk/ts/src/wallet.ts:31-46`).
+  bytes throws `Expected a 20-byte address.` (`fromBech32` in `sdk/ts/src/wallet.ts`).
 - Other input errors (`sdk/ts/src/wallet.ts`): `Transfer amount must be positive.`,
   `Private key must be 32 bytes.` (a `Uint8Array` of the wrong length),
   `Expected a 32-byte hex private key.` (a hex string of the wrong length),
@@ -114,8 +114,13 @@ described in [the Go SDK guide](./go.md#identity-gateway-client).
 `swap/v1`, `network/v1`, `fees/v1`, `pos/` and `tx/`. `clients/ts/escrow/dispute.ts`
 is hand-written and talks to the JSON-RPC endpoint. For a walk-through of the
 lending stub see `sdk/examples/lending/ts/README.md`. The POS examples in
-`sdk/pos/examples/` (`create_intent.go`, `submit_and_watch.ts`, `subscriber.ts`)
-show intent creation and finality subscription.
+`sdk/pos/examples/` are reference code only where they call the POS `Tx` gRPC
+service: the node no longer registers the POS `Tx` and `Registry` gRPC services
+(`Server.Serve` in `rpc/http.go`), so `create_intent.go` and `submit_and_watch.ts`
+fail with `Unimplemented`. A POS authorization is a signed `TxTypePOSAuthorize`
+transaction submitted with `nhb_sendTransaction`. `subscriber.ts` uses the
+finality subscription, which is still served (the `Realtime` gRPC service and the
+`/ws/pos/finality` WebSocket on the RPC port).
 
 ## Examples workspace
 
