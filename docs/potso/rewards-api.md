@@ -1,34 +1,14 @@
 # POTSO Rewards API Reference
 
-JSON-RPC 2.0 methods for reading reward results and settling claim-mode rewards. Handlers are in `rpc/potso_reward_handlers.go`; routing is in `rpc/http.go`. Epoch-level methods (`potso_epoch_info`, `potso_epoch_payouts`, `potso_rewards_outflow`, including the `potso_rewards_outflow` result fields) are described in [potso_rewards.md](../potso_rewards.md#potso_rewards_outflow). Payout modes are in [rewards-modes.md](rewards-modes.md).
+JSON-RPC 2.0 methods for reading reward results. Handlers are in `rpc/potso_reward_handlers.go`; routing is in `rpc/http.go`. Epoch-level methods (`potso_epoch_info`, `potso_epoch_payouts`, `potso_rewards_outflow`, including the `potso_rewards_outflow` result fields) are described in [potso_rewards.md](../potso_rewards.md#potso_rewards_outflow). Payout modes are in [rewards-modes.md](rewards-modes.md).
 
 Every parameter list is a single JSON object: `"params": [ { ... } ]`. Amounts are decimal wei strings. Addresses are Bech32 (`nhb1...`).
 
-## `potso_reward_claim`
+## `potso_reward_claim` (retired)
 
-Settles a claim-mode reward. **Requires authentication** (JWT bearer token or verified client certificate; otherwise HTTP 401) **and** a signature by the winning address.
+The method is still routed, but the handler always answers HTTP 410 with JSON-RPC code `-32060` and a message saying the method is disabled (`handlePotsoRewardClaim`, `potsoRewardClaimRPCDisabledMessage` in `rpc/potso_reward_handlers.go`; `codeMethodDisabled` in `rpc/http.go`). It performs no authentication and reads no parameters. The reason given in the code comment is that the old implementation debited the treasury and credited the claimant on the live state of the one validator that handled the call, outside block execution, so validators could disagree about the next block.
 
-```json
-{ "epoch": 123, "address": "nhb1examplewinner...", "signature": "0x..." }
-```
-
-`address` and `signature` are required. The signature is a 65-byte secp256k1 signature (hex, `0x` optional) over `SHA-256("potso_reward_claim|<epoch>|<lowercase address>")`. The address recovered from it must equal `address`.
-
-Response:
-
-```json
-{ "paid": true, "amount": "899000000000000000000" }
-```
-
-`paid` is `false`, with the amount still returned, if the reward was already settled. Errors:
-
-| Condition | HTTP status | JSON-RPC code | Message |
-| --- | --- | --- | --- |
-| Missing address/signature, bad address, bad hex, signature not 65 bytes, signature does not match address | 400 | `-32602` | `address and signature are required`, `invalid address`, `invalid signature`, `signature must be 65 bytes`, `signature does not match address` |
-| No claim record for `(epoch, address)` | 404 | `-32000` | `reward not found` |
-| Node is not in claim mode | 400 | `-32602` | `claiming disabled` |
-| Treasury balance too low | 409 | `-32000` | `INSUFFICIENT_TREASURY` (claim stays pending) |
-| Node module paused or other failure | 500 | `-32000` | `failed to claim reward` |
+Consequence: a reward recorded in claim mode cannot be collected on a running node (see [rewards-modes.md](rewards-modes.md)). Auto mode, the mode in the repository's configuration files, needs no claim.
 
 ## `potso_rewards_history`
 
@@ -45,13 +25,13 @@ No authentication. Settled payouts for an address, newest first.
   "address": "nhb1examplewinner...",
   "entries": [
     { "epoch": 200, "amount": "850000000000000000000", "mode": "auto" },
-    { "epoch": 199, "amount": "920000000000000000000", "mode": "claim" }
+    { "epoch": 199, "amount": "920000000000000000000", "mode": "auto" }
   ],
   "nextCursor": "4"
 }
 ```
 
-`nextCursor` is omitted when there are no further entries. Only settled payouts appear: auto payouts with a positive amount, and claim-mode payouts after the claim succeeds.
+`nextCursor` is omitted when there are no further entries. Only settled payouts appear: auto payouts with a positive amount. A claim-mode payout would be added only by `Node.PotsoRewardClaim`, which no RPC reaches, so claim-mode epochs add no history entries.
 
 ## `potso_export_epoch`
 
@@ -88,19 +68,17 @@ Rows are in winner order (highest weight first). An epoch with no stored winners
 
 - Per-address reconciliation: page through `potso_rewards_history` until `nextCursor` is absent.
 - Per-epoch reconciliation: `potso_export_epoch`, or `potso_epoch_payouts` for JSON.
-- Repeated `potso_reward_claim` calls for a settled reward return `paid: false` with the amount, not an error.
 - The node emits the reward events in [notifications.md](notifications.md). No webhook or push delivery exists in the node.
 
 ## CLI
 
 ```bash
-nhb-cli potso reward claim   --epoch 199 --addr nhb1... [--key wallet.key]
 nhb-cli potso reward history --addr nhb1... [--cursor N] [--limit M]
 nhb-cli potso reward export  --epoch 199 > rewards-199.csv
 ```
 
-- `claim` signs the digest with the key file and calls `potso_reward_claim` with `NHB_RPC_TOKEN` as the bearer token; it fails if `NHB_RPC_TOKEN` is unset or if the key's address differs from `--addr`.
-- `--epoch` must be non-zero for `claim` and `export`, so epoch 0 cannot be claimed or exported with the CLI.
+- `nhb-cli potso reward claim` is retired: it prints an error that the node no longer serves `potso_reward_claim` and exits 1 without contacting the node (`reportRetired`, `cmd/nhb-cli/retired_cmd.go`).
+- `--epoch` must be non-zero for `export`, so epoch 0 cannot be exported with the CLI.
 - `history` prints the raw JSON result. `export` writes the decoded CSV bytes to stdout.
 
 ## OpenAPI fragment

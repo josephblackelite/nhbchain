@@ -2,7 +2,7 @@
 
 ## Emission configuration
 
-The per-epoch reward pool is one fixed value: `EmissionPerEpoch` under `[potso.rewards]` in the node TOML file, a decimal wei string (for example `"1000000000000000000"` for 1 ZNHB). There is no decay schedule, epoch-window configuration or change log in the code. The actual budget of an epoch is `min(EmissionPerEpoch, treasury balance)`; see [potso_rewards.md](../potso_rewards.md).
+The per-epoch reward pool is one fixed value: `EmissionPerEpoch` under `[potso.rewards]` in the node TOML file, a decimal wei string (for example `"1000000000000000000"` for 1 ZNHB). There is no decay schedule, epoch-window configuration or change log in the code. The actual budget of an epoch is `min(EmissionPerEpoch, treasury balance)`; see [potso_rewards.md](../potso_rewards.md). An epoch is `EpochLengthBlocks` blocks, so the emission per hour is the per-epoch value times the number of epochs that fit in an hour at the validators' block interval ([block cadence](../consensus/block-cadence.md)); it is not a fixed rate in time.
 
 To change it, edit the file and restart the node (`cmd/nhb/main.go` reads it once). The governance key `potso.rewards.EmissionPerEpochWei` is accepted by `param.update` validation but nothing reads it, so it has no effect ([config.md](config.md)). The value feeds block execution, so it is part of the node's consensus-relevant configuration.
 

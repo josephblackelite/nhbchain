@@ -4,8 +4,8 @@ This document describes how `processPotsoRewardEpoch` (`core/state_transition.go
 
 ## Overview
 
-- **What it does:** at each epoch boundary, transfers up to `EmissionPerEpoch` ZNHB from the account at `[potso.rewards].TreasuryAddress` to winning addresses (auto mode) or records claimable amounts (claim mode, see [payout modes](potso/rewards-modes.md)). No ZNHB is minted by this code; balances are moved from the treasury account.
-- **Cadence:** `ProcessBlockLifecycle` (`core/epochs.go`) calls `maybeProcessPotsoRewards` on every block. With `currentEpoch = height / EpochLengthBlocks`, it processes every epoch from the one after `potso/rewards/lastProcessed` (or 0 if none) up to `currentEpoch - 1`, in order. Nothing is processed when `EpochLengthBlocks = 0`, `EmissionPerEpoch <= 0`, or `currentEpoch = 0`.
+- **What it does:** at each epoch boundary, transfers up to `EmissionPerEpoch` ZNHB from the account at `[potso.rewards].TreasuryAddress` to winning addresses (auto mode) or records claimable amounts (claim mode, see [payout modes](potso/rewards-modes.md)). No ZNHB is minted by this code; balances are moved from the treasury account. When that account is the chain's admin wallet, the ZNHB Reward Pool ledger is reduced by the amount paid to other addresses in the same block (`processPotsoRewardEpoch`; `ProcessBlockLifecycle` also wraps `maybeProcessPotsoRewards` in `withTreasuryPoolBooking` so any remaining movement of that wallet is booked, `core/epochs.go`, `core/znhb_treasury_pool.go`).
+- **Cadence:** `ProcessBlockLifecycle` (`core/epochs.go`) calls `maybeProcessPotsoRewards` on every block. With `currentEpoch = height / EpochLengthBlocks`, it processes every epoch from the one after `potso/rewards/lastProcessed` (or 0 if none) up to `currentEpoch - 1`, in order. Nothing is processed when `EpochLengthBlocks = 0`, `EmissionPerEpoch <= 0`, or `currentEpoch = 0`. An epoch is a number of blocks, so its length in time is `EpochLengthBlocks` times the block interval, which follows each validator's `[consensus] MinBlockInterval` ([block cadence](consensus/block-cadence.md)).
 - **Inputs:** POTSO stake locks, the stake basis of eligible validators, and per-epoch engagement counters, combined as described in [weights.md](potso/weights.md).
 - **Budget:** `B = min(EmissionPerEpoch, treasury ZNHB balance)`. A smaller treasury therefore shrinks the payouts proportionally. If `B <= 0`, no weights are computed, no snapshot is stored and no winners are paid, but the epoch is still marked processed.
 
@@ -16,7 +16,7 @@ w_i = α * stakeShare_i + (1 − α) * engagementShare_i
 ```
 
 - `α = AlphaStakeBps / 10000`. The value used is `RewardConfig.AlphaStakeBps`, which comes from `[potso.weights].AlphaStakeBps` when that is non-zero (always, after `config.Load` defaults; default `7000`).
-- `stakeShare_i` is `stake_i` over the total stake of the candidates that passed the filters. `stake_i` is the POTSO bonded total plus, for eligible validators, their eligibility basis.
+- `stakeShare_i` is `stake_i` over the total stake of the candidates that passed the filters. `stake_i` is the POTSO bonded total plus, for eligible validators, their eligibility basis (the account's total `Stake`, including ZNHB delegated in by third parties).
 - `engagementShare_i` is the decayed engagement after filters and cap over the total.
 - A zero total makes that component 0.
 
@@ -27,7 +27,7 @@ Candidates are ranked by `w_i`. At most `MaxWinnersPerEpoch` (when non-zero) of 
 1. `payout_i = floor(B * w_i)`, then the optional per-winner cap `MaxUserShareBps` with redistribution ([spec.md](potso/spec.md)).
 2. Payouts that are `<= 0` or below `MinPayoutWei` are dropped.
 3. `TotalPaid` is the sum of the remaining payouts and `Remainder = B - TotalPaid` (stored in the epoch meta). The remainder is simply not debited from the treasury (auto mode) or not recorded (claim mode). The `CarryRemainder` setting is not read by any code, so there is no separate carry-over.
-4. Auto mode: debit the treasury by `TotalPaid`, credit each winner, write a claim record (`claimed = true`, `mode = auto`, `claimedAt` = block time of settlement) and a history entry per winner. Claim mode: write a claim record per winner (`claimed = false`).
+4. Auto mode: debit the treasury by `TotalPaid`, credit each winner, write a claim record (`claimed = true`, `mode = auto`, `claimedAt` = block time of settlement) and a history entry per winner. Claim mode: write a claim record per winner (`claimed = false`); nothing on a running node settles these records ([payout modes](potso/rewards-modes.md)).
 5. Persist winners, meta and emit events:
    - `potso.reward.paid` per winner in auto mode: `epoch`, `address`, `amount`, `mode`.
    - `potso.reward.ready` per winner in claim mode: same attributes.
@@ -56,7 +56,7 @@ Routing is in `rpc/http.go`. Every parameter list is a single JSON object. No au
 - `potso_rewards_history` and `potso_export_epoch`: see [rewards API](potso/rewards-api.md).
 - `potso_rewards_outflow` - see below.
 
-`potso_reward_claim` is different: it requires authentication (`requireAuthInto` in `rpc/http.go`) and a signature by the winning address, and it changes state (`Node.PotsoRewardClaim`). See [rewards API](potso/rewards-api.md).
+`potso_reward_claim` is retired: it always answers HTTP 410, code `-32060` ([rewards API](potso/rewards-api.md)).
 
 ### `potso_rewards_outflow`
 
