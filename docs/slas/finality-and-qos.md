@@ -8,7 +8,7 @@ fill level of the POS-reserved mempool lane.
 
 `bench/posloader/main.go` submits POS-tagged transfers to a JSON-RPC endpoint and
 measures the time until each one is reported finalized on the node's POS
-finality websocket (`/ws/pos/finality`, registered in `rpc/http.go`, line 784).
+finality websocket (`/ws/pos/finality`, registered in `rpc/http.go`, line 879).
 
 ```bash
 NHB_RPC_TOKEN=<jwt> POSLOADER_KEY=<hex private key> \

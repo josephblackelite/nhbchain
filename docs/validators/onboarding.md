@@ -16,7 +16,7 @@ made and why genesis sync does not work are in
 its short form.
 
 The one-command version is in the repo README under
-["Join As A Validator In One Command"](../../README.md#join-as-a-validator-in-one-command).
+["Validator bootstrap on a server"](../../README.md#validator-bootstrap-on-a-server).
 
 ## How a node becomes an active validator
 
