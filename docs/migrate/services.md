@@ -61,7 +61,10 @@ None of these services uses Postgres or Redis; the code has no client for either
 1. Bring up `consensusd` and `p2pd`, and confirm the chain height advances.
 2. Bring up `governd` and `lendingd`, then the gateway.
 3. Point clients at the gateway. Clients that still send JSON-RPC to the old node can use the
-   `/rpc` route (method table in [monolith to gateway](./monolith-to-gateway.md)).
+   `/rpc` route (method table and what it needs from its upstreams in
+   [monolith to gateway](./monolith-to-gateway.md)). The route requires a bearer token like the
+   other routes, unless anonymous access is configured for it
+   ([gateway anonymous routes](./gateway-anonymous-routes.md)).
 4. Exercise your integrations end to end. The cookbooks in `docs/cookbooks` and the samples in
    `examples/` show first transactions and queries.
 5. Stop the old JSON-RPC node when you no longer need it. The repository defines no waiting

@@ -24,9 +24,12 @@ This runbook covers recovering `p2pd` after a failure while keeping `consensusd`
   starts at 500 ms, doubles on each attempt and stops growing at 30 s
   (`maintainNetworkStream`), so a restarted `p2pd` is picked up without restarting
   `consensusd`.
-* Relay queue metrics from the `p2pd` process: `nhb_network_relay_queue_enqueued_total`,
+* Relay queue metrics: `nhb_network_relay_queue_enqueued_total`,
   `nhb_network_relay_queue_dropped_total` and `nhb_network_relay_queue_occupancy`
-  (`network/metrics.go`).
+  (`network/metrics.go`). They are registered in the `p2pd` process, but `cmd/p2pd` starts no
+  metrics listener: the `NHB_METRICS_ADDR` listener is started only by `nhb` and `consensusd`
+  (`observability.StartMetricsServerFromEnv`), so nothing in this repository serves these
+  three series. Use the log line below.
 * `p2pd` logs `relay queue saturated; dropping envelopes` with component `network_relay`
   when the share of dropped envelopes reaches `RelayDropLogRatio`, at most once per cooldown
   period (`network/relay.go`).
@@ -58,9 +61,9 @@ re-dials the target with the backoff described above.
 * Call `ListPeers` (request `network.v1.ListPeersRequest`) on the `p2pd` gRPC address to list
   connected peers. Use the TLS material and the shared secret from `[network_security]`.
   Unauthenticated reads are only allowed when `AllowUnauthenticatedReads` is true.
-* Compare `nhb_network_relay_queue_dropped_total` with
-  `nhb_network_relay_queue_enqueued_total`, and keep `nhb_network_relay_queue_occupancy` well
-  below the queue size.
+* Watch for the `relay queue saturated; dropping envelopes` log line described above. The
+  counters `nhb_network_relay_queue_dropped_total`, `nhb_network_relay_queue_enqueued_total` and
+  the gauge `nhb_network_relay_queue_occupancy` are the values behind it, when something exposes them.
 * Queue tuning lives in `[network_security]`: `StreamQueueSize` (default `128` when unset or
   not positive) and `RelayDropLogRatio` (default `0.1`; a value above `1` is set to `1`).
   `p2pd` sizes the relay queue with it and `consensusd` sizes its client send queue with it

@@ -16,7 +16,9 @@ observe them. How the pause map is stored and read is described in
   (`ErrTransferZNHBPaused`).
 * Only the matching transaction type is affected. The two flags are independent.
 * The blocked-transfer events are kept when the transaction is rejected for this reason;
-  events of other rejected transactions are discarded (`core/state_transition.go`).
+  events of other rejected transactions are discarded, except those of a refused sponsorship and
+  the `stake.paused` event of a paused staking module (`executeTransaction`,
+  `core/state_transition.go`).
 
 Event attributes (`core/events/transfer.go`): `asset`, `from`, `to` (bech32 addresses),
 `reason` (the value `paused by governance`) and `txHash`, each present only when known.

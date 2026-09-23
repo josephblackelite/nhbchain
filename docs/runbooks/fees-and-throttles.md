@@ -10,7 +10,7 @@ counters behind them, and how to check them. Everything below is what the code i
 and `TxTypeTransferZNHB` (asset `ZNHB`) transactions that carry a non-empty
 `merchantAddr`, and only when that value names a domain that has a fee policy. The node
 builds one policy from `[global.Fees]` and registers the same policy under a fixed list of three domain names
-(`pos`, `p2p` and one more; `buildFeePolicyFromConfig` in `core/node.go`). A transfer without
+(`pos`, `p2p` and a third fixed name; `buildFeePolicyFromConfig` in `core/node.go`). A transfer without
 `merchantAddr`, or with any other domain value, is not touched by this policy.
 
 **Free tier.** The default is `100` transactions per payer, per domain, per UTC calendar
@@ -48,6 +48,16 @@ configuration the owner wallet receives the whole fee. No fee is charged while
 the free tier applies. A transaction with an amount of zero still increments the payer's
 counter but is neither free nor charged.
 
+**Fees paid to the treasury wallet.** The sample `config.toml` points the
+fee wallets at the network's admin/treasury wallet (the genesis `adminWallet`). Every ZNHB movement onto or off that wallet
+that a transaction causes, including a ZNHB domain fee routed to it or a plain transfer to its
+address, is booked into the ZNHB Reward Pool in the same state transition
+(`treasuryZNHBFlowTracked` and `bookTreasuryPoolMovement`, `core/znhb_treasury_pool.go`). A
+transaction that would move more ZNHB off the wallet than the Reward Pool holds is rejected with
+`znhb: treasury reward pool cannot cover this outflow`. When the fee wallet is the sender or the
+recipient of the ZNHB transfer itself, the fee is credited to that transfer's own account object
+so the credit is not overwritten (`applyTransactionFee`).
+
 **Where the values come from.** `FreeTierTxPerMonth`, `MDRBasisPoints` and the per-asset
 entries are read from each node's `config.toml` (`[global.Fees]`) when the node starts. The
 governance `PolicyDelta` in `native/gov/validate.go` covers only governance, slashing,
@@ -77,7 +87,8 @@ disabled when the spend allowance is zero. Two read-only RPC methods report it
 * **Aggregate status.** `nhb-cli fees status`, or the JSON-RPC method `fees_getMonthlyStatus`
   with empty params, returns `window_yyyymm`, `used`, `remaining` and
   `last_rollover_yyyymm`. `nhb-cli` posts to `--rpc <url>`, else `$RPC_URL`, else
-  `http://localhost:8080`.
+  `http://localhost:8080` (`cmd/nhb-cli/main.go`; the sample `config.toml` serves RPC on
+  `127.0.0.1:8545`, so pass `--rpc` or set `RPC_URL`).
 * **Meaning of the numbers.** `used` counts free-tier transactions this month. The limit
   behind `remaining` grows by `FreeTierTxPerMonth` each time a payer's counter reaches 1
   for the month in any domain, so `remaining` is `limit - used` over the wallets seen so
