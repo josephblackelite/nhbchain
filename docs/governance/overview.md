@@ -41,7 +41,7 @@ kind`.
 | `param.update_fee_rate` | Identical code path to `param.update`. The key its constant is named for is `protocol.feeRateBps` (validator: integer `<= 10000`); it must be in `AllowedParams`, and nothing reads it (see [params](./params.md)). |
 | `policy.slashing` | Writes `slashing.policy.*` param-store keys. |
 | `role.allowlist` | Grants and/or revokes roles (`SetRole` / `RemoveRole`). Disabled unless `AllowedRoles` is non-empty. |
-| `treasury.directive` | Moves ZNHB from an allow-listed source account to recipients. Disabled unless `TreasuryAllowList` is non-empty. |
+| `treasury.directive` | Moves ZNHB from an allow-listed source account to recipients. Disabled unless `TreasuryAllowList` is non-empty. When the admin wallet is involved, the net movement is booked into the ZNHB Reward Pool ledger (see [tokenomics](../tokenomics/tokenomics.md#3-znhb-supply-and-pools)). |
 | `policy.swapPriceSigner` | Registers or revokes a swap price-proof signer for a provider. |
 | `policy.buybackParams` | Sets the three treasury-buyback basis-point parameters. |
 | `policy.swapRiskParams` | Sets the four redeem-side (swap-out burn) caps. |
@@ -94,6 +94,11 @@ nothing reads them back to change the running policy; see [params](./params.md).
    block timestamp, `VotingEnd = VotingStart + VotingPeriodSeconds`, and
    `TimelockEnd = VotingEnd + TimelockSeconds`, all fixed at submission.
 5. Emits `gov.proposed` and appends an audit record.
+
+All governance times are seconds of block time: the engine's clock is
+`StateProcessor.blockTimestamp()` (`governanceEngine`, `core/governance_tx.go`),
+never the wall clock. The voting period and timelock are therefore not counted in
+blocks and do not change with the block pace.
 
 ## Voting
 

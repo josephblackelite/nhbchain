@@ -35,14 +35,19 @@ There are two native tokens. **NHB** has no supply cap constant in the code; `Tx
 
 ## 3) ZNHB supply and pools
 
-`config/genesis.json` and `config/genesis.mainnet.json` allocate `1000000000000000000000000000` wei (1,000,000,000 ZNHB) to the admin wallet. `EnsureZNHBPoolsBootstrapped` runs once (guarded by a state flag, called from `ProcessBlockLifecycle`) and splits the admin wallet's **live** ZNHB balance at that moment: the Reward Pool gets 20% (floored) and the Sale Pool gets the remainder. It refuses to run when the balance is not positive, and it does not assert any absolute total. For a balance of exactly 1,000,000,000 ZNHB the pools are 800,000,000 (Sale) and 200,000,000 (Reward).
+`config/genesis.relaunch.json`, the genesis of the live network (chain id 18346390202490284624) and the file embedded in the node binary as `config.MainnetGenesis` (`config/embed.go`), allocates `1000000000000000000000000000` wei (1,000,000,000 ZNHB) to its `adminWallet` address. `EnsureZNHBPoolsBootstrapped` runs once (guarded by a state flag, called from `ProcessBlockLifecycle`) and splits the admin wallet's **live** ZNHB balance at that moment: the Reward Pool gets 20% (floored) and the Sale Pool gets the remainder. It refuses to run when the balance is not positive, and it does not assert any absolute total. For a balance of exactly 1,000,000,000 ZNHB the pools are 800,000,000 (Sale) and 200,000,000 (Reward).
 
 | Pool | Share of the admin wallet's ZNHB at bootstrap | Purpose |
 | --- | --- | --- |
 | Sale Pool | 80% (the remainder) | Sold through the curve in section 4; also receives bought-back ZNHB (section 6) |
-| Reward Pool | 20% | Backs epoch rewards (section 5); also receives forfeited governance deposits and ZNHB transfer fees credited to the admin wallet |
+| Reward Pool | 20% | Backs epoch rewards (section 5); also absorbs the net ZNHB movement of the admin wallet that does not go through the curve, such as forfeited governance deposits and ZNHB transfer fees credited to it (see below) |
 
-Two effects on the Reward Pool ledger outside epoch rewards, both in `core/state_transition.go`: a ZNHB transfer sent from the admin wallet debits the Reward Pool ledger by the amount sent, and a transfer fee credited to the admin wallet (or a rejected governance proposal's deposit forfeited to it) credits the Reward Pool ledger.
+**Keeping the pools in step with the treasury wallet.** `CheckZNHBSupplyInvariant` runs once per block, after every transaction, so any state transition that moves the admin wallet's ZNHB without the pool ledgers following would halt block production. The code therefore books such movement into the Reward Pool ledger in the same state transition (`core/znhb_treasury_pool.go`):
+
+* For the transaction types listed in `treasuryZNHBFlowTracked` (NHB and ZNHB transfers, escrow lock/release/refund/expire/arbitrate and delegated release/refund, `TxTypeStakeClaimRewards`, `TxTypePOSCapture`, POTSO stake lock and withdraw, ZNHB lending deposit, withdraw and liquidate, and governance finalize and execute), `executeTransaction` records the wallet's tracked ZNHB before the handler runs and, if the handler succeeds, adds the net change to (or subtracts it from) the Reward Pool ledger. A transaction that would take more out of the wallet than the Reward Pool holds is rejected with `ErrTreasuryRewardPoolInsufficient` (`znhb: treasury reward pool cannot cover this outflow`); it can succeed later if inflows raise the pool.
+* The same booking wraps the block-lifecycle steps that can pay or charge the wallet (subscription charges, POTSO reward payout, loyalty end-of-block payouts) and the slasher used for evidence penalties (`bookedSlasher`, `core/potso_evidence_tx.go`). These are booked so as not to fail the block or the slash: a shortfall is drawn from the Sale Pool instead of being rejected.
+* Loyalty program rewards paid out of or to the wallet adjust the Reward Pool when the account is written (`loyaltyRewardState.PutAccount`, `core/state_transition.go`).
+* Types with their own pool logic (`TxTypeBuyZNHB`, swap voucher mint, the market) adjust the ledgers themselves. Two specific paths remain explicit: a ZNHB transfer sent from the admin wallet debits the Reward Pool by the amount sent, and a transfer fee credited to the admin wallet (or a rejected governance proposal's deposit forfeited to it) credits it.
 
 The curve can sell at most 800,000,000 ZNHB in total (16,000 tranches of 50,000, section 4). The Sale Pool ledger is a separate number; a purchase needs both room under the curve and enough Sale Pool and admin-wallet ZNHB.
 
@@ -81,7 +86,16 @@ E  = 500,000 epochs per era  (HalvingEraLengthEpochs)
 emission(epoch) = B0 >> floor((epoch-1) / E)     at attoZNHB precision, epoch >= 1
 ```
 
-The shift rounds down each era; 200 ZNHB is about 2^67.4 attoZNHB, so the per-epoch emission reaches `0` after roughly 68 halvings, and `HalvingEmissionForEpoch` returns `0` for every era from `maxHalvingEras` (80) on. Since `2 * B0 * E` is 200,000,000 ZNHB, the sum of all eras is strictly less than 200,000,000 ZNHB. An "epoch" here is the reward epoch of `epochConfig.Length` blocks.
+The shift rounds down each era; 200 ZNHB is about 2^67.4 attoZNHB, so the per-epoch emission reaches `0` after roughly 68 halvings, and `HalvingEmissionForEpoch` returns `0` for every era from `maxHalvingEras` (80) on. Since `2 * B0 * E` is 200,000,000 ZNHB, the sum of all eras is strictly less than 200,000,000 ZNHB.
+
+An "epoch" here is the validator epoch of `epochConfig.Length` blocks; the length is `100` (`epoch.DefaultConfig`, `core/epoch/config.go`), and production code never changes it. It is counted in blocks, not in time, so how long an epoch, and therefore an era, lasts depends on how fast blocks are produced, which is set by the local `[consensus] MinBlockInterval` setting (see [block cadence](../consensus/block-cadence.md)):
+
+```
+seconds per epoch = 100 / blocks_per_second
+seconds per era   = 500,000 * 100 / blocks_per_second
+```
+
+The pace is about `1 / (MinBlockInterval + 0.03 s)` blocks a second for validators in step (`docs/consensus/block-cadence.md`). At the 2 s interval both live validators run, that is about 0.49 blocks a second: an epoch of about 200 s, 200 ZNHB emitted per epoch (2 ZNHB a block), and an era of about 3.2 years. At a 1 s interval an era is about 1.6 years. Nothing in the code fixes a block time of 1 s or 2.5 s.
 
 `StateProcessor.settleEpochRewards` (`core/rewards_logic.go`) reads the Reward Pool ledger: if the epoch's planned payout exceeds the pool balance, the plans are scaled down to the balance, and the pool is debited by what is paid.
 
@@ -91,11 +105,11 @@ The shift rounds down each era; 200 ZNHB is about 2^67.4 attoZNHB, so the per-ep
 
 ## 6) The treasury buyback engine
 
-The engine is dormant unless the genesis file declares `buybackSigners` and `buybackSignerThreshold` (`GenesisSpec.BuybackSignerConfig`, `core/genesis/spec.go`). Among the genesis files in `config/`, only `genesis.phase-e.json` declares them. When they are absent, `applyBuybackAsk`, `applyBuybackRefPrice` and `settleBuybackEpoch` do nothing or fail with `treasury buyback engine is not configured for this network`.
+The engine is dormant unless the genesis file declares `buybackSigners` and `buybackSignerThreshold` (`GenesisSpec.BuybackSignerConfig`, `core/genesis/spec.go`). Among the genesis files in `config/`, `genesis.relaunch.json` (the live network's genesis, embedded in the node) and `genesis.phase-e.json` declare them (three signers, threshold 2 in each); `genesis.local.json` does not. When they are absent, `applyBuybackAsk`, `applyBuybackRefPrice` and `settleBuybackEpoch` do nothing or fail with `treasury buyback engine is not configured for this network`.
 
 **Funding.** `applyTransactionFee` (`core/state_transition.go`), the domain-fee path described in [fee policy](../fees/policy.md), credits `feeShareBps` of each NHB fee to the buyback accrual account, a real account balance, and the rest to the fee's route wallet. The default `feeShareBps` is `2000` (20%) and can be changed by a `policy.buybackParams` proposal. The protocol transfer fee (`TransferFeeBps` 20 for NHB, `TransferFeeBpsZNHB` 10 for ZNHB by default) goes entirely to the transfer fee collector and has no buyback share.
 
-**Selling in.** `TxTypeBuybackAsk` (`0x24`) with `znhbAmount`. The seller's ZNHB is moved into the accrual account immediately and the ask is recorded for the current epoch. No price is named. These are rejected: the admin wallet, the accrual account, and any address whose `Stake` is positive.
+**Selling in.** `TxTypeBuybackAsk` (`0x24`) with `znhbAmount`. The seller's ZNHB is moved into the accrual account immediately and the ask is recorded for the current epoch. No price is named. An ask must be for at least 1 ZNHB (`1000000000000000000` wei, `ErrBuybackAskTooSmall`), a seller may have at most 8 pending asks in an epoch and an epoch holds at most 1,024 (`ErrBuybackAskLimit`; the count starts again with the next epoch), and these senders are rejected: the admin wallet, the accrual account, and any address whose `Stake` is positive (`applyBuybackAsk`, `core/buyback_tx.go`).
 
 **Pricing.** Settlement computes
 
@@ -106,7 +120,7 @@ MaxBuybackPrice = min( curve_price * (1 - discount_bps/10000),
 
 `curve_price` is the price of the current tranche (the terminal price if sold out). `reference_price` comes from `TxTypeBuybackRefPrice` (`0x25`): a rate (`rateNum/rateDenom`), epoch and timestamp with signatures over the message `NHB_BUYBACK_REFPRICE_V1|epoch=..|rate=..|ts=..` (keccak256, 65-byte signatures), from at least `threshold` distinct genesis signers. Only one reference price is accepted per epoch and the epoch must be the current open epoch. Defaults for `discount_bps` and `safety_margin_bps` are `500` each (`core/node.go`), adjustable by `policy.buybackParams`. If no reference price is on file for the epoch, no purchase happens and every ask is refunded in full.
 
-**Settlement.** `settleBuybackEpoch` runs in `finalizeEpoch` (`core/epochs.go`) right after reward settlement. Every ask is filled pro-rata against the accrual account's NHB balance at `MaxBuybackPrice`: all asks fill fully if total demand fits the budget, otherwise each is scaled by the same ratio (rounding down). Sellers receive NHB for filled ZNHB and get unfilled ZNHB refunded. Filled ZNHB is credited to the admin wallet, the Sale Pool ledger increases by the same amount, and `cumulative_sale_distributed` decreases (floored at `0`). Emits `BuybackEpochSettled`.
+**Settlement.** `settleBuybackEpoch` runs in `finalizeEpoch` (`core/epochs.go`) right after reward settlement, once per validator epoch (100 blocks, so its length in seconds follows the block pace, see section 5). Every ask is filled pro-rata against the accrual account's NHB balance at `MaxBuybackPrice`: all asks fill fully if total demand fits the budget, otherwise each is scaled by the same ratio (rounding down). Sellers receive NHB for filled ZNHB and get unfilled ZNHB refunded. Filled ZNHB is credited to the admin wallet, the Sale Pool ledger increases by the same amount, and `cumulative_sale_distributed` decreases (floored at `0`). Emits `buyback.epoch.settled` (`core/events/buyback.go`).
 
 ---
 
@@ -117,7 +131,7 @@ There are 12 proposal kinds ([overview](../governance/overview.md)). Related to 
 * `policy.buybackParams` sets `feeShareBps`, `discountBps` and `safetyMarginBps`, each `0`-`10000`. The payload has no field for the reference-price signers, which come only from genesis.
 * `param.update` can set `mint.nhb.maxEmissionPerYearWei`, `mint.znhb.maxEmissionPerYearWei` (the ZNHB mint path is closed regardless) and the `staking.*` keys, see [params](../governance/params.md).
 * `role.allowlist` cannot grant `MINTER_ZNHB`.
-* `treasury.directive`, when `TreasuryAllowList` is configured, debits and credits ZNHB account balances directly and does not update the Sale Pool or Reward Pool ledgers.
+* `treasury.directive`, when `TreasuryAllowList` is configured, debits and credits ZNHB account balances directly (`applyTreasuryDirective`). It does not update the Sale Pool or Reward Pool ledgers itself, but `TxTypeGovExecute` is a tracked type (section 3), so when the source or a recipient is the admin wallet the net movement is booked into the Reward Pool ledger in the same transaction, and a directive that takes more from the admin wallet than the Reward Pool holds is rejected with `ErrTreasuryRewardPoolInsufficient`.
 
 No proposal kind changes the curve parameters, the pool split, the halving schedule or the reward split.
 

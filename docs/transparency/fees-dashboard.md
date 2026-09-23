@@ -26,7 +26,9 @@ are in [`docs/queries/fees.sql`](../queries/fees.sql) and
 
 - The `fees.applied` event (`TypeFeeApplied`, `core/events/fees.go`), emitted
   by `applyTransactionFee` in `core/state_transition.go`. Attributes are listed
-  in [fee accounting](../fees/accounting.md).
+  in [fee accounting](../fees/accounting.md). A node keeps at most the last
+  100,000 such events, in memory (`core/event_log.go`), so a pipeline that needs
+  the full history has to record them as blocks arrive.
 - `fees_listTotals`, `fees_getMonthlyStatus`, `fees_getTransferStatus` and
   `fees_getTransferQuote` (`rpc/fees_handlers.go`, `rpc/fees_query.go`).
 - Account balances of the route wallets, for example from `nhb_getBalance`.

@@ -44,7 +44,12 @@ strings.
   Execution debits the source's ZNHB balance by the total and credits each
   recipient; it fails with `governance: treasury insufficient balance` when the
   source cannot cover the total. `kind` and `memo` are recorded only in the
-  audit record.
+  audit record. `applyTreasuryDirective` does not touch the ZNHB Sale Pool or
+  Reward Pool ledgers, but `TxTypeGovExecute` is one of the transaction types
+  whose net effect on the admin wallet's ZNHB is booked into the Reward Pool
+  ledger by `executeTransaction`, and the transaction is rejected with
+  `ErrTreasuryRewardPoolInsufficient` when that would take the ledger below zero
+  (see [tokenomics](../tokenomics/tokenomics.md#3-znhb-supply-and-pools)).
 - **`policy.swapPriceSigner`**: `provider` is trimmed and must be 1-64
   characters. Unless `revoke` is `true`, `signerAddress` must decode and must
   not be the zero address. Execution calls `SwapSetPriceSigner` or, on revoke,
@@ -66,7 +71,7 @@ strings.
 
 ## Examples
 
-Parameter update (numbers unquoted, see [params](../governance/params.md#how-a-parameter-proposal-is-checked)):
+Parameter update (a bare number or a quoted decimal string is accepted, see [params](../governance/params.md#how-a-parameter-proposal-is-checked)):
 
 ```json
 {"staking.aprBps": 1250}

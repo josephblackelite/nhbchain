@@ -32,7 +32,13 @@ Applies to `TxTypeTransfer` (NHB) and `TxTypeTransferZNHB` (ZNHB).
   the chain's admin wallet, a ZNHB fee is also added to the ZNHB Reward Pool
   ledger, and a ZNHB transfer sent from the admin wallet is debited from the
   Reward Pool ledger, to keep `CheckZNHBSupplyInvariant` true
-  (`core/state_transition.go`).
+  (`applyTransferZNHB`, `core/state_transition.go`). A transfer from the admin
+  wallet larger than the Reward Pool balance fails with `znhb: treasury reward
+  pool cannot cover this outflow` (`ErrTreasuryRewardPoolInsufficient`). Any
+  other way a ZNHB transfer moves the admin wallet's ZNHB (it is the recipient,
+  or it is the sender and the fee goes to another collector) is
+  booked into the Reward Pool by `executeTransaction` in the same state
+  transition (`treasuryZNHBFlowTracked`, `core/znhb_treasury_pool.go`).
 - **Sponsored NHB transfers.** When a paymaster sponsors an NHB transfer
   (`EvaluateSponsorship`), the paymaster's balance pays the fee instead of the
   sender.

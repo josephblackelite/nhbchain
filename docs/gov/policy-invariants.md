@@ -58,6 +58,9 @@ quorum and threshold deltas; the slashing, mempool and block delta types in
 `native/gov` are never populated by the engine.
 
 The same `ValidateConfig` is run against `[global.*]` settings at startup by
-`cmd/consensusd/main.go`, which is where `[global.Governance]`'s voting-period
-floor of `3600` seconds applies. `[global.Governance]` is a separate block
+`cmd/consensusd/main.go`, which refuses to start on a problem; that is where
+`[global.Governance]`'s voting-period floor of `3600` seconds is enforced.
+`cmd/nhb` runs the same checks (`config.ConfigProblems`) and logs each problem as
+a `configuration problem` warning but never refuses to start
+(`cmd/nhb/config_check.go`). `[global.Governance]` is a separate block
 from `[governance]` (`config/types.go`); the engine does not read it.
