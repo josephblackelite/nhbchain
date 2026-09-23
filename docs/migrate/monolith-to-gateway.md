@@ -38,13 +38,21 @@ upstream.
 | `consensus_validators` | `/v1/consensus/validators` | `GET` | consensus |
 | `consensus_block` | `/v1/consensus/block` | `POST` | consensus |
 
-The lending, governance and consensus upstreams correspond to `services/lendingd`,
-`services/governd` and `cmd/consensusd` in this repository. The mapping only defines what the gateway forwards. Whether an upstream implements a given
-path is decided by that upstream.
+The mapping only defines what the dispatcher sends: a plain HTTP request to the upstream's base
+URL plus the path in the table. The code does not tie a base URL to a binary in this repository.
+`services/lendingd` and `services/governd` serve gRPC only (`grpc.NewServer` in their `main.go`; the
+sample configs listen on `:50053` and `:50061`), `cmd/consensusd` serves gRPC only, and nothing in
+this repository serves the REST paths above. The gateway's own `/v1/lending` routes
+(`gateway/routes/lending.go`) turn REST calls into gRPC calls to the lending service, but the `/rpc`
+dispatcher does not use them. A call through `/rpc` therefore succeeds only when whatever answers
+at the configured upstream URL implements the path.
 
 ## Behaviour of `/rpc`
 
-* It accepts one JSON-RPC object or a batch array, with a request body limit of 1 MiB.
+* It accepts one JSON-RPC object or a batch array of at most 10 calls (a larger batch is refused
+  as a whole with `-32600 batch of <n> calls exceeds the limit of 10`, and nothing is forwarded).
+  It reads at most 1 MiB of the request body; a longer body is cut at that size and then fails to
+  decode.
 * Error codes (`gateway/compat/compat.go`):
   * `-32700` when the request body cannot be read or is not valid JSON (`read body`,
     `decode request`, `decode batch`).
@@ -52,6 +60,8 @@ path is decided by that upstream.
   * `-32601 method not found` for a method with no mapping.
   * `-32001 service unavailable` when the mapping names an upstream that is not registered
     in the dispatcher.
+  * `-32004 insufficient scope` when the caller's token lacks the scope of the upstream that
+    would answer (see below). In a batch each call is judged on its own.
   * `-32602` when the upstream HTTP request cannot be built (`build request: ...`).
   * `-32002` when the upstream cannot be reached (message `upstream error: <cause>`).
   * `-32003 read response: ...` when the upstream response body cannot be read.
@@ -60,6 +70,8 @@ path is decided by that upstream.
 * A successful upstream body is returned unchanged as the JSON-RPC `result`. An empty body
   becomes `null`.
 * Each call to an upstream uses a 15 second HTTP client timeout.
+* The caller's `Authorization` header is sent to the upstream with each call, so an upstream that
+  checks it sees the caller's own credential.
 
 ## Upstream endpoints and configuration
 
@@ -106,5 +118,14 @@ used, since only the `id`, rate and `burst` are read (`cmd/gateway/main.go`). Wh
 has an `id` the gateway uses 2/s burst 20 for `lending`, 1/s burst 10 for `gov`, and 4/s
 burst 40 for `consensus` (plus a default for the group not described here).
 
-The `/rpc` route is registered outside these groups: it is not subject to the token check or to
-these rate limits, and the caller's `Authorization` header is not forwarded to the upstream.
+The `/rpc` route is registered as its own group (`gateway/routes/router.go`). A request to it
+goes through the rate limit under the id `compat` (the gateway adds 2/s burst 20 when the YAML has
+no entry with that id; `gateway/config.yaml` lists the same values) and then the same
+authenticator as the routes above, with no scope required at that step. Whether a token is
+needed follows the same rules as for the other routes: with `auth.enabled: true` a token is
+required unless `auth.allowAnonymous` is true and the path matches `auth.optionalPaths`
+([gateway anonymous routes](./gateway-anonymous-routes.md)). The dispatcher then holds each call to the scope
+of the upstream that would answer it (`compat.ScopeGuard`, `cmd/gateway/main.go`): `lending` for
+the lending upstream, `gov` for the governance upstream and `swap` for the swap upstream; the
+consensus upstream asks for none. A request that came in without a token (authentication off, or
+an open path) is not held to scopes here.

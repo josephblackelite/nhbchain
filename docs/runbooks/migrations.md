@@ -14,6 +14,17 @@ Both `nhb` (`cmd/nhb`) and `consensusd` (`cmd/consensusd`) accept
 only)") and pass it to `core.NewNode`. New databases written by a genesis load or by
 `core/blockchain.go` are stamped with the current version.
 
+## This procedure is for a network you control, not for the live chain
+
+The steps below wipe the state and start from a genesis file. That only works on a development
+network whose validators produce their own blocks from that genesis. It does not work for a
+node that has to join the live network (chain id `18346390202490284624`,
+`config/genesis.relaunch.json`): a node that starts from genesis there cannot sync, because the
+validators ran several binaries and configurations since block 1 and a current build rejects block 1
+and stays at height 0. A new or wiped validator on the live network joins from a verified state
+snapshot instead. See [Snapshot onboarding](../validators/snapshot-onboarding.md#why-block-sync-from-genesis-is-not-supported)
+for the reason and the procedure, and [Validator onboarding](../validators/onboarding.md).
+
 ## When the guard trips
 
 The code stamps `state/version` only when it creates a state from genesis
@@ -35,12 +46,20 @@ schema is to wipe the state and start from genesis again.
    `<DataDir>/p2p/` (`peerstore` and `node_key.json`, see `cmd/nhb/main.go` and
    `cmd/p2pd/main.go`). Removing the whole directory therefore creates a new node identity.
    To keep the identity, keep `p2p/node_key.json` (and the `p2p/peerstore` directory)
-   when you clear the rest.
+   when you clear the rest. Two more files in `<DataDir>` belong to the chain history you are
+   discarding and must go with it: `bft_sign_state.json` (the last vote this validator signed;
+   the engine refuses to sign for an earlier height or round than the one recorded, so a
+   restart from height 1 with the old file present cannot vote, `consensus/bft/sign_state.go`) and
+   `polc_lock.json` (the engine's lock snapshot, `cmd/nhb/main.go`).
 4. **Provide the genesis file.** Start the node with `--genesis <file>` (or the `NHB_GENESIS`
    environment variable or `GenesisFile` in `config.toml`). When a genesis file is given,
    `nhb` loads and validates it and writes the resolved spec to
    `<DataDir>/genesis.resolved.json` itself (`cmd/nhb/main.go`), so no separate tool is needed
-   to create that file. Without a genesis file the node only creates one automatically when
+   to create that file. If the configured `GenesisFile` path does not exist and autogenesis is
+   off, the node writes the embedded live-network genesis (`config.MainnetGenesis`, the bytes
+   of `config/genesis.relaunch.json`) to that path (`resolveGenesisPath`), so a development
+   network must name its own genesis file explicitly (for example `config/genesis.local.json`).
+   Without any genesis file the node only creates one automatically when
    started with `--allow-autogenesis`, which is marked DEV ONLY.
 5. **Start the upgraded binaries.** After bootstrapping from genesis the stored version equals
    the binary's, and later restarts do not need `--allow-migrate`.
@@ -53,3 +72,6 @@ schema is to wipe the state and start from genesis again.
   Automation that starts `nhb` or `consensusd` should not pass it by default.
 * Both binaries pass the flag to `core.NewNode`, which calls `EnsureStateVersion`
   (`core/node.go`), so the guard behaves the same in both.
+* At startup `nhb` checks its effective configuration and logs a warning for each problem it
+  finds without stopping (`cmd/nhb/config_check.go`); `consensusd` refuses to start on a problem
+  in the `[global]` section.

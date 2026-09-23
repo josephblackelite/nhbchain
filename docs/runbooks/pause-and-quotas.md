@@ -114,7 +114,8 @@ that is `0`) for the epoch number to match the node's.
    ```
 
 2. Restart the node (`nhb` or `consensusd`) so it re-reads the file. `consensusd` runs
-   `config.ValidateConfig` on the `[global]` section at startup (the quota tables are not
-   among the checks) and prints `--- Consensus node initialised and running ---` once it is
-   up.
+   `config.ValidateConfig` on the `[global]` section at startup and refuses to start on a
+   problem; `nhb` logs each problem as a warning and starts (`cmd/nhb/config_check.go`). The
+   quota tables are not among the checks in either case. `consensusd` prints
+   `--- Consensus node initialised and running ---` once it is up.
 3. Use the `quota_dump` helper above to confirm counters follow the new epoch length.
