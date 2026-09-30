@@ -10,6 +10,14 @@ Usage: $0 -c <config-file>
 Validates that the supplied production configuration enables the safety
 rails required for mainnet deployments. The script exits non-zero when a
 violation is detected.
+
+Only keys the node itself reads are checked, matched the way the node matches
+them (config/config.go). The RPC listener must be one of:
+  - TLS terminated by the node: RPCAllowInsecure false, with RPCTLSCertFile,
+    RPCTLSKeyFile and RPCTLSClientCAFile set; or
+  - plaintext on a loopback RPCAddress (RPCAllowInsecure true) with TLS
+    terminated by a reverse proxy in front of the node. The node itself
+    refuses plaintext on any other address.
 USAGE
 }
 
@@ -46,7 +54,7 @@ python3 - <<'PY'
 import ipaddress
 import os
 import sys
-from typing import Iterable, Sequence
+from typing import Sequence
 
 try:
     import tomllib
@@ -60,33 +68,37 @@ with open(config_path, "rb") as fh:
 
 errors: list[str] = []
 
-def require(path: Sequence[str]):
-    cur = data
-    for key in path:
-        if isinstance(cur, dict) and key in cur:
-            cur = cur[key]
-        else:
-            return None
-    return cur
-
-def first_defined(paths: Iterable[Sequence[str]]):
-    for path in paths:
-        value = require(path)
-        if value is not None:
+# The node decodes its configuration with BurntSushi/toml (config/config.go): a
+# key is matched to a struct field by exact name and then case-insensitively,
+# and every other key is silently ignored. Look keys up the same way and only
+# where the loader reads them, so a setting this script accepts is one the
+# node actually applies.
+def lookup(table, name: str):
+    if not isinstance(table, dict):
+        return None
+    if name in table:
+        return table[name]
+    lowered = name.lower()
+    for key, value in table.items():
+        if key.lower() == lowered:
             return value
     return None
 
-def ensure_string(paths: Iterable[Sequence[str]], label: str):
-    value = first_defined(paths)
+def require(path: Sequence[str]):
+    cur = data
+    for key in path:
+        cur = lookup(cur, key)
+        if cur is None:
+            return None
+    return cur
+
+def ensure_string(path: Sequence[str], label: str):
+    value = require(path)
     if value is None or not isinstance(value, str) or not value.strip():
         errors.append(f"{label} must be set")
 
-def is_unspecified_address(value: str) -> bool:
+def listener_host(value: str) -> str:
     raw = (value or "").strip()
-    if not raw:
-        return True
-    if raw.startswith("unix://"):
-        return False
     if "://" in raw:
         raw = raw.split("://", 1)[1]
     host = raw
@@ -96,7 +108,15 @@ def is_unspecified_address(value: str) -> bool:
             host = raw[1:end]
     elif ":" in raw:
         host = raw.rsplit(":", 1)[0]
-    host = host.strip()
+    return host.strip()
+
+def is_unspecified_address(value: str) -> bool:
+    raw = (value or "").strip()
+    if not raw:
+        return True
+    if raw.startswith("unix://"):
+        return False
+    host = listener_host(raw)
     if not host:
         return True
     try:
@@ -105,77 +125,64 @@ def is_unspecified_address(value: str) -> bool:
     except ValueError:
         return host in {"*", "0.0.0.0"}
 
-def ensure_not_unspecified(paths: Iterable[Sequence[str]], label: str):
-    value = first_defined(paths)
+def is_loopback_address(value: str) -> bool:
+    host = listener_host(value)
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+def ensure_not_unspecified(path: Sequence[str], label: str):
+    value = require(path)
     if isinstance(value, str) and is_unspecified_address(value):
         errors.append(f"{label} must not bind to an unspecified or wildcard address")
 
-# TLS requirements
-allow_insecure = first_defined((("network_security", "AllowInsecure"),))
-if allow_insecure is not False:
+# Transport TLS between the node's internal services
+if require(("network_security", "AllowInsecure")) is not False:
     errors.append("TLS must be enabled: network_security.AllowInsecure must be false")
 
-rpc_allow_insecure = first_defined((
-    ("RPCAllowInsecure",),
-    ("global", "RPCAllowInsecure"),
-    ("network_security", "RPCAllowInsecure"),
-    ("global", "Staking", "RPCAllowInsecure"),
-))
-if rpc_allow_insecure is not False:
-    errors.append("TLS must be enabled: RPCAllowInsecure must be false")
-
 # Network TLS assets must be populated.
-ensure_string((("network_security", "ServerTLSCertFile"),), "Server TLS certificate path")
-ensure_string((("network_security", "ServerTLSKeyFile"),), "Server TLS private key path")
-ensure_string((("network_security", "ClientTLSCertFile"),), "Client TLS certificate path")
-ensure_string((("network_security", "ClientTLSKeyFile"),), "Client TLS private key path")
-ensure_string((("network_security", "ClientCAFile"),), "Client CA bundle path")
-ensure_string((("network_security", "ServerCAFile"),), "Server CA bundle path")
+ensure_string(("network_security", "ServerTLSCertFile"), "Server TLS certificate path")
+ensure_string(("network_security", "ServerTLSKeyFile"), "Server TLS private key path")
+ensure_string(("network_security", "ClientTLSCertFile"), "Client TLS certificate path")
+ensure_string(("network_security", "ClientTLSKeyFile"), "Client TLS private key path")
+ensure_string(("network_security", "ClientCAFile"), "Client CA bundle path")
+ensure_string(("network_security", "ServerCAFile"), "Server CA bundle path")
 
 # Listener binding checks
-ensure_not_unspecified((("ListenAddress",),), "ListenAddress")
-ensure_not_unspecified((("RPCAddress",),), "RPCAddress")
+ensure_not_unspecified(("ListenAddress",), "ListenAddress")
+ensure_not_unspecified(("RPCAddress",), "RPCAddress")
 
-# RPC TLS configuration may be nested or flat.
-ensure_string((
-    ("global", "RPC", "TLSCertFile"),
-    ("RPCTLSCertFile",),
-    ("global", "Staking", "RPCTLSCertFile"),
-    ("network_security", "RPCTLSCertFile"),
-), "RPC TLS certificate path")
-ensure_string((
-    ("global", "RPC", "TLSKeyFile"),
-    ("RPCTLSKeyFile",),
-    ("global", "Staking", "RPCTLSKeyFile"),
-    ("network_security", "RPCTLSKeyFile"),
-), "RPC TLS key path")
-ensure_string((
-    ("global", "RPC", "TLSClientCAFile"),
-    ("RPCTLSClientCAFile",),
-    ("global", "Staking", "RPCTLSClientCAFile"),
-    ("network_security", "RPCTLSClientCAFile"),
-), "RPC client CA bundle path")
+# RPC transport. Either the node terminates TLS itself, or it serves plaintext
+# on a loopback address only, with TLS terminated by a reverse proxy in front
+# of it. rpc/http.go refuses plaintext on any other address, so a config that
+# asks for it anywhere else could not start; this rejects it up front.
+if require(("RPCAllowInsecure",)) is True:
+    rpc_address = require(("RPCAddress",))
+    if not isinstance(rpc_address, str) or not is_loopback_address(rpc_address):
+        errors.append("RPCAllowInsecure may only be true when RPCAddress is a loopback address (TLS must terminate in front of the node)")
+    if require(("RPCAllowInsecureUnspecified",)) is True:
+        errors.append("RPCAllowInsecureUnspecified must be false")
+else:
+    ensure_string(("RPCTLSCertFile",), "RPC TLS certificate path")
+    ensure_string(("RPCTLSKeyFile",), "RPC TLS key path")
+    ensure_string(("RPCTLSClientCAFile",), "RPC client CA bundle path")
 
 # Loyalty pro-rate enforcement
-# NHB-AUDIT-R4: this repo's TOML section headers use PascalCase
-# (global.Staking, global.Pauses, global.Fees, global.Loyalty -- see
-# config/prod.toml) while these lookups used all-lowercase section names.
-# TOML keys are case-sensitive, so every one of these silently never
-# matched the real config regardless of what was correctly set there.
-enforce_prorate = first_defined((("global", "Loyalty", "Dynamic", "EnforceProRate"),))
-if enforce_prorate is not True:
+if require(("global", "Loyalty", "Dynamic", "EnforceProRate")) is not True:
     errors.append("global.Loyalty.Dynamic.EnforceProRate must be true")
 
-enable_prorate = first_defined((("global", "Loyalty", "Dynamic", "enableprorate"),))
-if enable_prorate is not True:
-    errors.append("global.Loyalty.Dynamic.enableprorate must be true")
+if require(("global", "Loyalty", "Dynamic", "EnableProRate")) is not True:
+    errors.append("global.Loyalty.Dynamic.EnableProRate must be true")
 
 # Fee routing wallets
-owner_wallet = first_defined((("global", "Fees", "owner_wallet"),))
+owner_wallet = require(("global", "Fees", "OwnerWallet"))
 if not isinstance(owner_wallet, str) or not owner_wallet.strip():
-    errors.append("global.Fees.owner_wallet must be set to a non-empty wallet address")
+    errors.append("global.Fees.OwnerWallet must be set to a non-empty wallet address")
 
-assets = first_defined((("global", "Fees", "Assets"),))
+assets = require(("global", "Fees", "Assets"))
 if not isinstance(assets, list) or not assets:
     errors.append("global.Fees.Assets must define at least one asset with an owner wallet")
 else:
@@ -183,13 +190,13 @@ else:
         if not isinstance(asset, dict):
             errors.append(f"global.Fees.Assets[{idx}] must be a table")
             continue
-        wallet = asset.get("owner_wallet")
+        wallet = lookup(asset, "OwnerWallet")
         if not isinstance(wallet, str) or not wallet.strip():
-            asset_name = asset.get("asset", f"index {idx}")
-            errors.append(f"global.Fees.Assets entry '{asset_name}' must set owner_wallet")
+            asset_name = lookup(asset, "Asset") or f"index {idx}"
+            errors.append(f"global.Fees.Assets entry '{asset_name}' must set OwnerWallet")
 
 # Staking emission caps
-emission_raw = first_defined((("global", "Staking", "MaxEmissionPerYearWei"),))
+emission_raw = require(("global", "Staking", "MaxEmissionPerYearWei"))
 if emission_raw is None:
     errors.append("global.Staking.MaxEmissionPerYearWei must be defined")
 else:
@@ -201,7 +208,7 @@ else:
         errors.append("global.Staking.MaxEmissionPerYearWei must be a positive integer value")
 
 # Pause checks
-pauses = first_defined((("global", "Pauses"),))
+pauses = require(("global", "Pauses"))
 if isinstance(pauses, dict):
     unsafe = [key for key, value in pauses.items() if value is True]
     if unsafe:
@@ -241,13 +248,15 @@ search_pattern() {
   fi
 }
 
+# RPCAllowInsecure is judged above, together with the RPC listen address; the
+# textual check below only catches the internal transport's AllowInsecure flag.
 for target in "${prod_targets[@]}"; do
   if [[ -d "$target" ]]; then
     if search_pattern '^[[:space:]]*[^#\n]*0\.0\.0\.0' "$target"; then
       echo "error: wildcard bind detected in production artifact '$target'" >&2
       violations=1
     fi
-    if search_pattern '^[[:space:]]*[^#\n]*AllowInsecure[[:space:]]*=[[:space:]]*true' "$target"; then
+    if search_pattern '^[[:space:]]*AllowInsecure[[:space:]]*=[[:space:]]*true' "$target"; then
       echo "error: AllowInsecure=true found in production artifact '$target'" >&2
       violations=1
     fi
@@ -256,7 +265,7 @@ for target in "${prod_targets[@]}"; do
       echo "error: wildcard bind detected in production artifact '$target'" >&2
       violations=1
     fi
-    if search_pattern '^[[:space:]]*[^#\n]*AllowInsecure[[:space:]]*=[[:space:]]*true' "$target"; then
+    if search_pattern '^[[:space:]]*AllowInsecure[[:space:]]*=[[:space:]]*true' "$target"; then
       echo "error: AllowInsecure=true found in production artifact '$target'" >&2
       violations=1
     fi

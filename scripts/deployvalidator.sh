@@ -421,32 +421,92 @@ if [[ "${NODE_HEALTHY}" != "1" ]]; then
   exit 1
 fi
 
-if [[ -n "${BENEFICIARY}" ]]; then
-  echo "[INFO] setting reward beneficiary to ${BENEFICIARY}"
-  if ! sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" \
-      set-reward-beneficiary "${BENEFICIARY}" "${VALIDATOR_KEY_FILE}"; then
-    echo "[WARN] could not set the reward beneficiary automatically -- retry later with:"
-    echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli set-reward-beneficiary ${BENEFICIARY} ${VALIDATOR_KEY_FILE}"
-  fi
-fi
+# --- begin validator CLI helpers (exercised by tests/scripts) ---
+# nhb-cli submits the transactions below through the node's privileged RPC,
+# which needs a bearer token (NHB_RPC_TOKEN). Mint a short-lived one from the
+# JWT secret this run wrote to node.env. The secret reaches nhb-cli on stdin,
+# not on a command line, and neither it nor the token is ever printed.
+mint_rpc_token() {
+  printf '%s' "${JWT_SECRET}" | sudo -u "${SERVICE_USER}" \
+    "${INSTALL_ROOT}/bin/nhb-cli" rpc-token --secret-stdin --ttl 10m
+}
 
-# Validator eligibility is gated on an explicit on-chain opt-in
-# (ValidatorRegistered) plus the account's total stake -- its own stake AND ZNHB
-# delegated to it by any wallet, added together -- meeting
-# staking.minimumValidatorStake, and the address not delegating its own stake to
-# a different validator (core/state_transition.go's setAccount and
-# validatorEligibilityBasis). This "pure registration" call (zero value,
-# RegisterValidator=true) costs nothing and needs no pre-funding -- it just
-# flips the flag now, so the only step left for the operator is getting stake
-# onto this validator's address, by delegation or self-stake (printed below).
-# Best-effort, same as set-reward-beneficiary above: warn and print the retry
-# command rather than fail the script.
-echo "[INFO] registering this validator's on-chain eligibility flag"
-if ! sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" "${INSTALL_ROOT}/bin/nhb-cli" \
-    register-validator 0 "${VALIDATOR_KEY_FILE}"; then
-  echo "[WARN] could not register validator eligibility automatically -- retry later with:"
-  echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli register-validator 0 ${VALIDATOR_KEY_FILE}"
+run_cli() {
+  sudo -u "${SERVICE_USER}" env RPC_URL="http://${RPC_ADDR}" NHB_RPC_TOKEN="${RPC_TOKEN}" \
+    "${INSTALL_ROOT}/bin/nhb-cli" "$@"
+}
+
+# How an operator runs a signing command later (the messages below print
+# these): the command needs a fresh token exactly like the steps in this script.
+TOKEN_RECIPE="TOKEN=\$(sudo sh -c '. ${CONFIG_DIR}/node.env && printf %s \"\$NHB_RPC_JWT_SECRET\"' | sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli rpc-token --secret-stdin)"
+cli_recipe() {
+  echo "sudo -u ${SERVICE_USER} env RPC_URL=http://${RPC_ADDR} NHB_RPC_TOKEN=\"\$TOKEN\" ${INSTALL_ROOT}/bin/nhb-cli $*"
+}
+
+# The node may still be finishing its own startup, so try a few times.
+run_cli_step() {
+  local attempt
+  for attempt in 1 2 3; do
+    if run_cli "$@"; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      sleep "${CLI_RETRY_DELAY:-5}"
+    fi
+  done
+  return 1
+}
+
+# Submits the reward-beneficiary and validator-registration transactions.
+# Returns 1 -- after saying which steps failed and how to run them again -- if
+# any did not go through, so the caller never reports success for a step that
+# did not happen.
+submit_validator_steps() {
+  local failed=() step
+
+  if [[ -n "${BENEFICIARY}" ]]; then
+    echo "[INFO] setting reward beneficiary to ${BENEFICIARY}"
+    run_cli_step set-reward-beneficiary "${BENEFICIARY}" "${VALIDATOR_KEY_FILE}" \
+      || failed+=("set-reward-beneficiary ${BENEFICIARY} ${VALIDATOR_KEY_FILE}")
+  fi
+
+  # Validator eligibility is gated on an explicit on-chain opt-in
+  # (ValidatorRegistered) plus the account's total stake -- its own stake AND ZNHB
+  # delegated to it by any wallet, added together -- meeting
+  # staking.minimumValidatorStake, and the address not delegating its own stake to
+  # a different validator (core/state_transition.go's setAccount and
+  # validatorEligibilityBasis). This "pure registration" call (zero value,
+  # RegisterValidator=true) costs nothing and needs no pre-funding -- it just
+  # flips the flag now, so the only step left for the operator is getting stake
+  # onto this validator's address, by delegation or self-stake (printed below).
+  echo "[INFO] registering this validator's on-chain eligibility flag"
+  run_cli_step register-validator 0 "${VALIDATOR_KEY_FILE}" \
+    || failed+=("register-validator 0 ${VALIDATOR_KEY_FILE}")
+
+  if [[ "${#failed[@]}" -gt 0 ]]; then
+    echo
+    echo "=================================================================="
+    echo "[ERROR] The node is running, but these steps did not complete:"
+    for step in "${failed[@]}"; do
+      echo "  nhb-cli ${step}"
+    done
+    echo
+    echo "Once the error above is fixed, run them again with:"
+    echo "  ${TOKEN_RECIPE}"
+    for step in "${failed[@]}"; do
+      echo "  $(cli_recipe "${step}")"
+    done
+    echo "=================================================================="
+    return 1
+  fi
+}
+# --- end validator CLI helpers ---
+
+if ! RPC_TOKEN=$(mint_rpc_token); then
+  echo "[ERROR] could not create an RPC token for the local node" >&2
+  exit 1
 fi
+submit_validator_steps || exit 1
 
 if [[ -n "${OPERATOR_EMAIL}" ]]; then
   echo "[INFO] requesting onboarding instructions be emailed to ${OPERATOR_EMAIL}"
@@ -482,17 +542,19 @@ echo "     validator's node address (printed above), for example with the"
 echo "     Delegate form in the Validator Hub of the NHBCoin portal."
 echo "  B. Self-stake: send at least 10,000 ZNHB to this validator's node"
 echo "     address, and once it has arrived, stake it from this server:"
-echo "     sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli register-validator 10000000000000000000000 ${VALIDATOR_KEY_FILE}"
-echo "  (this validator's registration flag was already set automatically"
-echo "   above; this node's own address must not itself be delegating its stake"
-echo "   to a different validator.)"
+echo "     ${TOKEN_RECIPE}"
+echo "     $(cli_recipe register-validator 10000000000000000000000 "${VALIDATOR_KEY_FILE}")"
+echo "  (the registration transaction was submitted above and takes effect once a"
+echo "   block includes it; this node's own address must not itself be delegating"
+echo "   its stake to a different validator.)"
 if [[ -z "${BENEFICIARY}" ]]; then
   echo
   echo "You did not pass --beneficiary, so this validator's epoch consensus"
   echo "reward (separate from the staking yield above) will accumulate at its"
   echo "own address, which this server's key controls. To redirect it to a"
   echo "wallet you can actually spend from, run:"
-  echo "  sudo -u ${SERVICE_USER} ${INSTALL_ROOT}/bin/nhb-cli set-reward-beneficiary <your-wallet-address> ${VALIDATOR_KEY_FILE}"
+  echo "  ${TOKEN_RECIPE}"
+  echo "  $(cli_recipe set-reward-beneficiary "<your-wallet-address>" "${VALIDATOR_KEY_FILE}")"
 fi
 echo
 echo "Check status with:"
