@@ -472,7 +472,7 @@ func Paymaster() *PaymasterMetrics {
 				Namespace: "nhb",
 				Subsystem: "paymaster",
 				Name:      "autotopup_amount_wei_total",
-				Help:      "Total wei minted through automatic paymaster top-ups segmented by outcome.",
+				Help:      "Total wei transferred through automatic paymaster top-ups segmented by outcome.",
 			}, []string{"outcome"}),
 		}
 		prometheus.MustRegister(
@@ -600,7 +600,7 @@ func (m *POSLifecycleMetrics) AuthExpiredCounter() prometheus.Counter {
 	return m.authExpired
 }
 
-// RecordAutoTopUp tracks the outcome of an automatic paymaster top-up and the minted amount in wei.
+// RecordAutoTopUp tracks the outcome of an automatic paymaster top-up and the transferred amount in wei.
 func (m *PaymasterMetrics) RecordAutoTopUp(outcome string, amount *big.Int) {
 	if m == nil {
 		return
