@@ -382,9 +382,13 @@ const (
 	// applies the identical reversal/reconciliation instead of only the one
 	// that happened to receive the RPC call.
 	//
-	// Senderless/envelope-unsigned, like TxTypeSwapVoucherMint and
-	// TxTypeDelegatedReleaseEscrow/RefundEscrow/DisputeEscrow just above:
-	// tx.Data carries its own embedded secp256k1 signature (see
+	// Senderless/envelope-unsigned, like TxTypeSwapVoucherMint above --
+	// unlike TxTypeDelegatedReleaseEscrow/RefundEscrow/DisputeEscrow just
+	// above, which DO require a normal envelope signature (RequiresSignature
+	// returns true for them); only the relayed release/refund/dispute
+	// action itself is authorized via an embedded participant signature,
+	// not the submitting transaction. Here, tx.Data carries its own
+	// embedded secp256k1 signature (see
 	// core/swap_admin_tx.go's SwapVoucherReverseSigningHash /
 	// SwapMarkReconciledSigningHash and the exact same
 	// ethcrypto.SigToPub-based recovery core/swap_voucher_tx.go's
