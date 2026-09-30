@@ -400,12 +400,30 @@ const (
 	// checked at ApplyTransaction time so a malicious mempool submission
 	// from a non-admin key can never apply, not merely rejected by the old
 	// RPC layer's bearer-auth check. Both operations are naturally
-	// idempotent by ledger status transition (VoucherRecord.Status:
-	// minted->reversed/reconciled are one-way; MarkReconciled is a no-op
-	// for an already-reconciled id) -- the exact same "no separate on-chain
-	// nonce registry needed" guarantee TxTypeArbitrateRelease/Refund and
-	// TxTypeDelegatedReleaseEscrow already rely on, so a resubmitted or
-	// replayed signature is harmless rather than a double-spend. 0x4A/0x4B
+	// idempotent for the reverse path by an explicit ledger status check:
+	// applySwapVoucherReverseTransaction (core/swap_admin_tx.go) only
+	// proceeds from VoucherStatusMinted, returns ErrSwapVoucherAlreadyReversed
+	// for an id that is already VoucherStatusReversed, and
+	// ErrSwapVoucherNotMinted for anything else, so minted->reversed really
+	// is one-way and a replayed/resubmitted reversal is safely rejected
+	// rather than reapplied. MarkReconciled is NOT the same: native/swap/
+	// ledger.go's Ledger.MarkReconciled performs no status check at all
+	// before writing VoucherStatusReconciled, and
+	// applySwapMarkReconciledTransaction adds none either, so it is not
+	// actually one-way and MarkReconciled is not a true no-op on an
+	// already-reconciled id -- it unconditionally re-applies the write. A
+	// replayed "mark reconciled" for an already-reconciled id is harmless
+	// only because the write happens to be idempotent (same status in, same
+	// status out); a voucher in any OTHER status, including
+	// VoucherStatusReversed, can just as silently be flipped to
+	// "reconciled" with no error. That gap is not fixed here -- this is a
+	// comment-only correction; see the MarkReconciled/
+	// applySwapMarkReconciledTransaction sources above for the actual
+	// behavior. Modulo that gap, a resubmitted or replayed admin signature
+	// is otherwise harmless rather than a double-spend, the exact same "no
+	// separate on-chain nonce registry needed" guarantee
+	// TxTypeArbitrateRelease/Refund and TxTypeDelegatedReleaseEscrow
+	// already rely on. 0x4A/0x4B
 	// are the next free bytes after TxTypeResumeLoyaltyProgram (0x49) --
 	// verified against this file's real, current tip; do not reuse without
 	// re-checking for newly added types above this comment.
