@@ -1,23 +1,13 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"strings"
-
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
-
-type potsoRewardClaimCLIParams struct {
-	Epoch     uint64 `json:"epoch"`
-	Address   string `json:"address"`
-	Signature string `json:"signature"`
-}
 
 type potsoRewardHistoryCLIParams struct {
 	Address string `json:"address"`
@@ -43,7 +33,7 @@ func runPotsoReward(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "claim":
-		return runPotsoRewardClaim(args[1:], stdout, stderr)
+		return reportRetired(stderr, "nhb-cli potso reward claim", "potso_reward_claim")
 	case "history":
 		return runPotsoRewardHistory(args[1:], stdout, stderr)
 	case "export":
@@ -59,65 +49,10 @@ func potsoRewardUsage() string {
 	builder := &strings.Builder{}
 	fmt.Fprintln(builder, "Usage: nhb-cli potso reward <subcommand> [options]")
 	fmt.Fprintln(builder, "Subcommands:")
-	fmt.Fprintln(builder, "  claim    Claim a pending reward")
+	fmt.Fprintln(builder, "  claim    (retired) the node no longer serves potso_reward_claim")
 	fmt.Fprintln(builder, "  history  View reward settlement history")
 	fmt.Fprintln(builder, "  export   Export an epoch payout ledger as CSV")
 	return builder.String()
-}
-
-func potsoRewardClaimDigest(epoch uint64, addr string) []byte {
-	normalized := strings.ToLower(strings.TrimSpace(addr))
-	payload := fmt.Sprintf("potso_reward_claim|%d|%s", epoch, normalized)
-	digest := sha256.Sum256([]byte(payload))
-	return digest[:]
-}
-
-func runPotsoRewardClaim(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("potso reward claim", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	var (
-		epoch uint64
-		addr  string
-		key   string
-	)
-	fs.Uint64Var(&epoch, "epoch", 0, "reward epoch number")
-	fs.StringVar(&addr, "addr", "", "bech32 address to claim for")
-	fs.StringVar(&key, "key", "wallet.key", "path to signing key (generate with ./nhb-cli generate-key)")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	if addr == "" {
-		fmt.Fprintln(stderr, "Error: --addr is required")
-		return 1
-	}
-	if epoch == 0 {
-		fmt.Fprintln(stderr, "Error: --epoch is required")
-		return 1
-	}
-	privKey, err := loadPrivateKey(key)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error loading key: %v\n", err)
-		return 1
-	}
-	signer := privKey.PubKey().Address().String()
-	if !strings.EqualFold(strings.TrimSpace(signer), strings.TrimSpace(addr)) {
-		fmt.Fprintf(stderr, "Error: signing key belongs to %s but --addr was %s\n", signer, addr)
-		return 1
-	}
-	digest := potsoRewardClaimDigest(epoch, addr)
-	sig, err := ethcrypto.Sign(digest, privKey.PrivateKey)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error signing claim: %v\n", err)
-		return 1
-	}
-	params := potsoRewardClaimCLIParams{Epoch: epoch, Address: addr, Signature: "0x" + strings.ToLower(hex.EncodeToString(sig))}
-	result, err := callPotsoRPCWithAuth("potso_reward_claim", params, true)
-	if err != nil {
-		fmt.Fprintf(stderr, "Error submitting claim: %v\n", err)
-		return 1
-	}
-	printJSONResult(result)
-	return 0
 }
 
 func runPotsoRewardHistory(args []string, stdout, stderr io.Writer) int {
