@@ -3095,10 +3095,28 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 				return nil, fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, SponsorshipStatusInsufficientBalance, "paymaster balance below required gas budget")
 			}
 			sponsorAcc.BalanceNHB.Sub(sponsorAcc.BalanceNHB, gasCost)
-			if transferGasPolicy.Enabled && bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]) {
-				sponsorAcc.BalanceNHB.Add(sponsorAcc.BalanceNHB, gasCost)
-			} else if transferGasPolicy.Enabled {
-				if err := sp.routeTransferGasFee(gasCost); err != nil {
+			// Always credit the fee somewhere when gasCost was actually
+			// debited from the sponsor above, regardless of
+			// transferGasPolicy.Enabled -- mirroring the self-pay credit
+			// fix a few lines below in this same function (and
+			// applyZNHBTransfer's unconditional `gasCost.Sign() > 0`
+			// credit). Enabled only gates the free-tier eligibility check
+			// (see freeTransferGas above); it must never gate whether an
+			// already-debited fee lands somewhere, or the fee is silently
+			// destroyed whenever Enabled is false but FeeBps > 0
+			// (docs/issue30.md item 7b / audit PL-DC-08, sponsored-path
+			// variant). This previously read `transferGasPolicy.Enabled &&
+			// bytes.Equal(...)` / `else if transferGasPolicy.Enabled`, which
+			// let the unconditional debit above run while both matching
+			// credit branches fired only when Enabled --
+			// buildTransferGasPolicyFromConfig forces Enabled=false
+			// whenever TransferFreeTierSpendWei<=0 independently of
+			// FeeBps, so that config combination burned every sponsored
+			// NHB transfer fee instead of collecting it.
+			if gasCost.Sign() > 0 {
+				if bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]) {
+					sponsorAcc.BalanceNHB.Add(sponsorAcc.BalanceNHB, gasCost)
+				} else if err := sp.routeTransferGasFee(gasCost); err != nil {
 					return nil, err
 				}
 			}
