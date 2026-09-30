@@ -175,7 +175,7 @@ require_cmd systemctl
 # failing here with "command not found" instead of just installing them
 # would break that promise on literally the first run. Install what's
 # missing instead of demanding the operator do it by hand first.
-GO_VERSION="1.24.3"
+GO_VERSION="1.26.6"
 GO_TARBALL="go${GO_VERSION}.linux-amd64.tar.gz"
 
 APT_MISSING=()
