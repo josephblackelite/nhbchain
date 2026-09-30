@@ -1,3 +1,13 @@
 # Example configuration for the lending daemon.
 # listen specifies the address the gRPC server should bind to.
 listen: ":50053"
+# tls/auth are required by services/lendingd/config.Config.validate(): TLS
+# needs either a cert+key pair or allow_insecure, and auth needs at least one
+# api token or mTLS common name. allow_insecure is fine for local/dev use
+# (see docs/lending/service.md's "Running locally" section); production
+# deployments must supply a real cert/key instead.
+tls:
+  allow_insecure: true
+auth:
+  api_tokens:
+    - "replace-me"
