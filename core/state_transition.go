@@ -3125,7 +3125,24 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			if paymasterTopUp != nil {
 				paymasterTopUp.Finalize(sp)
 			}
-		} else if transferGasPolicy.Enabled && !freeTransferGas {
+		} else if !freeTransferGas && gasCost.Sign() > 0 {
+			// Always credit the fee collector when a fee was actually
+			// debited from the sender above (see the `!freeTransferGas`
+			// debit a few lines up), regardless of
+			// transferGasPolicy.Enabled -- mirroring applyZNHBTransfer's
+			// unconditional `gasCost.Sign() > 0` credit block just below in
+			// this same file. Enabled only gates whether the free-tier
+			// eligibility check runs (see freeTransferGas above); it must
+			// never gate whether an already-debited fee is credited
+			// somewhere, or the fee is silently destroyed instead of
+			// collected whenever Enabled is false but FeeBps > 0
+			// (docs/issue30.md item 7b / audit PL-DC-08). This previously
+			// read `transferGasPolicy.Enabled && !freeTransferGas`, which
+			// let the debit above fire unconditionally while the matching
+			// credit fired only when Enabled -- buildTransferGasPolicyFromConfig
+			// forces Enabled=false whenever TransferFreeTierSpendWei<=0
+			// independently of FeeBps, so that config combination burned
+			// every NHB transfer fee instead of collecting it.
 			switch {
 			case bytes.Equal(transferGasPolicy.FeeCollector[:], from):
 				fromAcc.BalanceNHB.Add(fromAcc.BalanceNHB, gasCost)
