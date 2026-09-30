@@ -104,6 +104,15 @@ func run() error {
 	}
 	defer store.Close()
 
+	// DEV-ONLY DEFAULT: identitygateway.LogEmailer writes verification
+	// codes to this process's log output instead of emailing them to the
+	// user -- there is no production emailer wired in here (PL-DC-42,
+	// 5th sub-item). Do not run this in production; anyone who can read
+	// this service's logs can complete email verification/registration
+	// for any address. Replace with a real transactional-email-backed
+	// identitygateway.Emailer implementation before deploying anywhere
+	// the logs are not fully trusted/private.
+	log.Printf("identity-gateway: WARNING: using LogEmailer (dev-only) -- verification codes are written to this log, not emailed; do not use in production")
 	emailer := &identitygateway.LogEmailer{}
 	chainClient := identitygateway.NewRPCAliasOwnerLookup(nodeRPCURL)
 	server, err := identitygateway.NewServer(store, emailer, chainClient, identitygateway.Config{
