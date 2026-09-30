@@ -29,16 +29,16 @@ ZapNHB that would be minted by a claim right now as well as the timestamp when
 the next payout window opens. Use this before sending a claim to double check
 that the window has actually elapsed.
 
-## Claim rewards
+## Claim rewards (retired)
 
 ```bash
 nhb-cli stake claim nhb1exampleaddress
 ```
 
-The RPC surface for `stake_claimRewards` is exposed ahead of the staking engine
-shipping reward minting. Running the command today returns a friendly "staking
-not ready" message; once the rewards module is activated it will mint ZapNHB
-and print the updated account snapshot.
+`stake claim` is retired: the node no longer serves the `stake_claimRewards` RPC
+(HTTP 410), so the command says so and exits non-zero without contacting the
+node. Claiming staking rewards is a signed `TxTypeStakeClaimRewards`
+transaction sent through `nhb_sendTransaction`; this CLI does not build it yet.
 
 ## Legacy staking shortcut
 
@@ -48,6 +48,6 @@ The original shortcut remains available:
 nhb-cli stake 1000000000000000000 wallet.key
 ```
 
-This path still sends a `stake_delegate` transaction with the provided amount
-of ZapNHB. It is left in place for compatibility, but new scripts should prefer
-the explicit subcommands above.
+This path signs and sends a `TxTypeStake` transaction that stakes the given
+amount of ZapNHB from the key's own account. It is left in place for
+compatibility, but new scripts should prefer the explicit subcommands above.
