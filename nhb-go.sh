@@ -7,7 +7,7 @@ echo "==========================================================="
 
 # Check minimum Go version
 if ! command -v go &> /dev/null; then
-    echo "[!] Go is not installed. Please install Go 1.23.0+ to build NHBChain."
+    echo "[!] Go is not installed. Please install Go 1.24.0+ to build NHBChain."
     exit 1
 fi
 
