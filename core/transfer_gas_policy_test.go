@@ -2,8 +2,10 @@ package core
 
 import (
 	"math/big"
+	"path/filepath"
 	"testing"
 
+	"nhbchain/config"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -214,6 +216,138 @@ func TestTransferGasPolicyThresholdCrossingTransferRemainsFree(t *testing.T) {
 	}
 	if status.Eligible {
 		t.Fatalf("expected sender to become ineligible after crossing threshold")
+	}
+}
+
+// TestTransferGasPolicyDisabledStillCreditsFee is the regression test for
+// audit PL-DC-08: applyEvmTransaction's NHB transfer path debited gasCost
+// from the sender whenever `sponsorshipCtx==nil && !freeTransferGas`, but
+// only credited it to the collector inside a branch additionally gated on
+// `transferGasPolicy.Enabled` -- so a policy with Enabled=false and
+// FeeBps>0 (exactly what buildTransferGasPolicyFromConfig produces whenever
+// TransferFreeTierSpendWei<=0, independently of FeeBps) destroyed the fee
+// instead of collecting it. The ZNHB transfer path never had this bug (it
+// credits the collector whenever gasCost.Sign() > 0, regardless of
+// Enabled); this test proves the NHB path now matches that same guarantee:
+// the chain must never lose money it already took from a sender.
+func TestTransferGasPolicyDisabledStillCreditsFee(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate sender key: %v", err)
+	}
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	recipientAddr := recipientKey.PubKey().Address().Bytes()
+	var collector [20]byte
+	collector[19] = 0x99
+
+	// The exact config combination the code should never lose money under:
+	// Enabled=false (as buildTransferGasPolicyFromConfig forces whenever
+	// TransferFreeTierSpendWei<=0) with FeeBps>0 left configured.
+	sp.SetTransferGasPolicy(TransferGasPolicy{
+		Enabled:           false,
+		FreeSpendLimitWei: big.NewInt(0),
+		Window:            TransferGasWindowLifetime,
+		FeeCollector:      collector,
+		FeeBps:            1_000, // 10%, chosen for clean test arithmetic
+	})
+
+	if err := sp.setAccount(senderAddr, &types.Account{BalanceNHB: big.NewInt(50_000)}); err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	if err := sp.setAccount(recipientAddr, &types.Account{BalanceNHB: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed recipient: %v", err)
+	}
+	if err := sp.setAccount(collector[:], &types.Account{BalanceNHB: big.NewInt(0)}); err != nil {
+		t.Fatalf("seed collector: %v", err)
+	}
+
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeTransfer,
+		Nonce:    0,
+		To:       append([]byte(nil), recipientAddr...),
+		Value:    big.NewInt(1_000),
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+	if err := sp.ApplyTransaction(tx); err != nil {
+		t.Fatalf("apply transfer: %v", err)
+	}
+
+	// 10% of 1000 = 100. With Enabled=false, ComputeFee still returns this
+	// (ComputeFee ignores Enabled) and freeTransferGas can never become
+	// true (it is only evaluated when Enabled), so the debit path always
+	// fires here -- the fee this test cares about is genuinely deducted.
+	wantFee := big.NewInt(100)
+
+	updatedSender, err := sp.getAccount(senderAddr)
+	if err != nil {
+		t.Fatalf("load sender: %v", err)
+	}
+	wantSender := new(big.Int).Sub(big.NewInt(50_000), new(big.Int).Add(big.NewInt(1_000), wantFee))
+	if updatedSender.BalanceNHB.Cmp(wantSender) != 0 {
+		t.Fatalf("expected sender balance %s (transfer + fee debited), got %s", wantSender, updatedSender.BalanceNHB)
+	}
+
+	collectorAcc, err := sp.getAccount(collector[:])
+	if err != nil {
+		t.Fatalf("load collector: %v", err)
+	}
+	// This is the assertion that catches PL-DC-08: before the fix, the
+	// collector stayed at 0 here even though the sender was charged --
+	// the fee vanished instead of being collected.
+	if collectorAcc.BalanceNHB.Cmp(wantFee) != 0 {
+		t.Fatalf("PL-DC-08 regression: expected collector to receive the exact fee debited from the sender (%s), got %s -- fee was lost instead of credited", wantFee, collectorAcc.BalanceNHB)
+	}
+
+	updatedRecipient, err := sp.getAccount(recipientAddr)
+	if err != nil {
+		t.Fatalf("load recipient: %v", err)
+	}
+	if updatedRecipient.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
+		t.Fatalf("expected recipient to receive the full transfer value 1000, got %s", updatedRecipient.BalanceNHB)
+	}
+}
+
+// TestBuildTransferGasPolicyFromConfigDefaultStaysEnabled proves the
+// shipped default config (generated fresh by config.Load the same way
+// cmd/nhb does for a brand-new node, real TransferFreeTierSpendWei > 0)
+// never lands in the Enabled=false+FeeBps>0 combination that PL-DC-08 was
+// about -- i.e. buildTransferGasPolicyFromConfig leaves Enabled=true for
+// the config NHB validators actually ship with, with FeeBps still at its
+// configured nonzero default.
+func TestBuildTransferGasPolicyFromConfigDefaultStaysEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	cfg, err := config.Load(path, config.WithKeystorePassphrase("regression-test-passphrase"))
+	if err != nil {
+		t.Fatalf("load default config: %v", err)
+	}
+
+	var collector [20]byte
+	collector[19] = 0xAA
+	policy, err := buildTransferGasPolicyFromConfig(cfg.Global.Fees, collector)
+	if err != nil {
+		t.Fatalf("build transfer gas policy from default config: %v", err)
+	}
+	if !policy.Enabled {
+		t.Fatalf("expected the shipped default config (TransferFreeTierSpendWei=%q) to leave the transfer gas policy Enabled, got Enabled=false", cfg.Global.Fees.TransferFreeTierSpendWei)
+	}
+	if policy.FeeBps == 0 {
+		t.Fatalf("expected the shipped default config to configure a nonzero TransferFeeBps, got 0")
+	}
+	if policy.FreeSpendLimitWei == nil || policy.FreeSpendLimitWei.Sign() <= 0 {
+		t.Fatalf("expected the shipped default config to configure a positive free-tier spend limit, got %v", policy.FreeSpendLimitWei)
 	}
 }
 
