@@ -24,6 +24,19 @@ var (
 	errEscrowNotFound = errors.New("escrow engine: escrow not found")
 	errRealmNotFound  = errors.New("escrow engine: realm not found")
 	errRealmConfig    = errors.New("escrow engine: invalid realm configuration")
+
+	// ErrCreateInsufficientBalance indicates a Create/CreateWithSignature
+	// payer does not currently hold at least the amount they are declaring
+	// they will escrow, in the token they declared (PL-R8-DELEGATEDESCROW, a
+	// sibling of PL-CO-D1-5 in core/state_transition.go's applyCreateEscrow):
+	// Create only ever records escrow metadata -- the actual debit happens
+	// later, in a separate Fund step -- so a brand-new, zero-balance keypair
+	// could otherwise get escrow metadata recorded for free. Exported so
+	// core's classifyProposalError can recognize it directly via errors.Is,
+	// the same way it already does for lending.ErrHealthCheckFailed/
+	// ErrMaxLTVExceeded (core/node.go) rather than re-wrapping it in a
+	// core-package sentinel.
+	ErrCreateInsufficientBalance = errors.New("escrow: create insufficient balance")
 )
 
 const moduleName = "escrow"
@@ -626,6 +639,36 @@ func (e *Engine) Create(payer, payee [20]byte, token string, amount *big.Int, fe
 	if mediatorOpt != nil {
 		mediator = *mediatorOpt
 	}
+
+	// PL-R8-DELEGATEDESCROW: sibling of PL-CO-D1-5. This single chokepoint is
+	// deliberately where the balance precondition lives rather than in each
+	// caller: Create is reached both by the direct TxTypeCreateEscrow path
+	// (core/state_transition.go's applyCreateEscrow, via
+	// sp.EscrowEngine.Create) and by the delegated TxTypeDelegatedCreateEscrow
+	// path (applyDelegatedCreateEscrow, via CreateWithSignature -- which
+	// recovers and verifies the envelope signer as payer before calling this
+	// same Create). CreateWithSignature had no balance check anywhere in its
+	// chain, so a brand-new, zero-balance keypair could sign a create
+	// envelope declaring an arbitrary amount and get it relayed for free.
+	// Checking here once, after the signer is already an authenticated
+	// [20]byte payer (never attacker-suppliable), closes both entry points
+	// without duplicating the check in either caller. Mirrors the "can the
+	// payer actually afford it" precondition transferToken already enforces
+	// elsewhere in this file (BalanceNHB/BalanceZNHB.Cmp(amt) < 0 =>
+	// insufficient balance) rather than inventing a new validation framework.
+	payerAcc, err := e.state.GetAccount(payer[:])
+	if err != nil {
+		return nil, err
+	}
+	payerAcc = ensureAccount(payerAcc)
+	payerBalance := payerAcc.BalanceNHB
+	if normalizedToken == "ZNHB" {
+		payerBalance = payerAcc.BalanceZNHB
+	}
+	if payerBalance.Cmp(amt) < 0 {
+		return nil, fmt.Errorf("escrow: create insufficient balance: %w", ErrCreateInsufficientBalance)
+	}
+
 	var nonceBuf [8]byte
 	binary.BigEndian.PutUint64(nonceBuf[:], nonce)
 	id := ethcrypto.Keccak256Hash(payer[:], payee[:], metaHash[:], nonceBuf[:])
