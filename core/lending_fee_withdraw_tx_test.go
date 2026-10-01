@@ -1324,3 +1324,382 @@ func TestLendingWithdrawDeveloperFeesApply_RejectsTTLExpiryReplayWithTamperedInt
 		t.Fatalf("SECURITY REGRESSION: final replay attempts must not credit the recipient again, got %s", recipientFinal.BalanceNHB)
 	}
 }
+
+// TestLendingWithdrawProtocolFeesApply_RejectsExpiryBeyondRegistryTTL is the
+// direct, end-to-end regression test for the third-stage NHB-AUDIT
+// TTL-clamp-gap finding: a re-verifier PROVED LIVE that binding
+// tx.IntentExpiry into the signed hash (closing the tampered-expiry replay)
+// still left a gap whenever the admin's own, honestly SIGNED IntentExpiry
+// simply reaches further into the future than
+// core/state/intent_registry.go's IntentRegistryValidate will ever actually
+// retain the stored record for. Reproduces the PoC exactly:
+//
+//   - The registry's effective TTL for this submission is clamped to 1h
+//     (via node.state.intentTTL), while the admin signs IntentExpiry =
+//     now+10h -- a perfectly validly signed, byte-identical transaction the
+//     admin never tampered with.
+//   - Before this fix: the first submission would succeed but the STORED
+//     record would be silently clamped to now+1h; after advancing to
+//     now+2h (nine hours before the real signed deadline, but past the
+//     clamp), a first resubmission would purge the stale record with
+//     ErrIntentExpired and an immediate second, byte-identical resubmission
+//     would validate cleanly and re-execute the withdrawal -- doubling the
+//     recipient's balance with zero tampering anywhere.
+//   - After this fix: applyLendingWithdrawProtocolFeesTransaction rejects
+//     the transaction with ErrLendingFeeWithdrawExpiryTooFar before ANY
+//     state is touched -- not just on the replay, but on the very first
+//     submission, since a signed expiry that outlives the registry's
+//     retention window can never be honored in full. The transaction never
+//     enters the registry, never debits the fee accrual, and never credits
+//     the recipient, no matter how many times it is resubmitted or how far
+//     time advances.
+func TestLendingWithdrawProtocolFeesApply_RejectsExpiryBeyondRegistryTTL(t *testing.T) {
+	node := newTestNode(t)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	adminAddr := toAddress(adminKey)
+	assignRole(t, node, RoleLendingProtocolAdmin, adminAddr)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	recipientAddr20 := toAddress(recipientKey)
+	recipient := crypto.MustNewAddress(crypto.NHBPrefix, recipientAddr20[:])
+	recipientStr := recipient.String()
+
+	const poolID = "default"
+	moduleAddr := node.LendingModuleAddress()
+	amount := big.NewInt(100)
+
+	start := time.Unix(1_700_000_000, 0).UTC()
+	node.stateMu.Lock()
+	node.state.nowFunc = func() time.Time { return start }
+	// The re-verifier's exact precondition: the registry's effective TTL for
+	// this submission is 1h, far shorter than the 10h the admin is about to
+	// sign.
+	node.state.intentTTL = time.Hour
+	manager := nhbstate.NewManager(node.state.Trie)
+	if err := manager.LendingPutMarket(poolID, &lending.Market{PoolID: poolID, TotalNHBSupplied: big.NewInt(1000)}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed market: %v", err)
+	}
+	if err := manager.LendingPutFeeAccrual(poolID, &lending.FeeAccrual{ProtocolFeesWei: big.NewInt(100), DeveloperFeesWei: big.NewInt(0)}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed fee accrual: %v", err)
+	}
+	moduleAcc, err := manager.GetAccount(moduleAddr.Bytes())
+	if err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("load module account: %v", err)
+	}
+	moduleAcc.BalanceNHB = big.NewInt(500)
+	if err := manager.PutAccount(moduleAddr.Bytes(), moduleAcc); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("fund module account: %v", err)
+	}
+	node.stateMu.Unlock()
+
+	// The admin signs a withdrawal with IntentExpiry = now+10h -- ten times
+	// the registry's 1h effective TTL. This signature is entirely legitimate
+	// and the transaction bytes below are never tampered with at any point
+	// in this test.
+	nonce := "withdraw-1"
+	signedExpiry := uint64(start.Add(10 * time.Hour).Unix())
+	intentRef := LendingProtocolFeeWithdrawSigningHash(poolID, recipientStr, amount.String(), nonce, signedExpiry)
+	signature, err := ethcrypto.Sign(intentRef, adminKey.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign withdrawal: %v", err)
+	}
+	payload, err := encodeLendingFeeWithdrawTransaction(poolID, recipientStr, amount, nonce, signature)
+	if err != nil {
+		t.Fatalf("encode withdrawal: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:      types.NHBChainID(),
+		Type:         types.TxTypeLendingWithdrawProtocolFees,
+		Data:         payload,
+		GasLimit:     0,
+		GasPrice:     big.NewInt(0),
+		IntentRef:    intentRef,
+		IntentExpiry: signedExpiry,
+	}
+
+	assertUntouched := func(step string) {
+		t.Helper()
+		node.stateMu.Lock()
+		m := nhbstate.NewManager(node.state.Trie)
+		fees, ok, feesErr := m.LendingGetFeeAccrual(poolID)
+		recipientAcc, recipientErr := m.GetAccount(recipient.Bytes())
+		node.stateMu.Unlock()
+		if feesErr != nil || !ok {
+			t.Fatalf("[%s] read fee accrual: ok=%v err=%v", step, ok, feesErr)
+		}
+		if fees.ProtocolFeesWei.Cmp(big.NewInt(100)) != 0 {
+			t.Fatalf("SECURITY REGRESSION [%s]: protocol fees must remain untouched at 100, got %s", step, fees.ProtocolFeesWei)
+		}
+		if recipientErr != nil {
+			t.Fatalf("[%s] read recipient account: %v", step, recipientErr)
+		}
+		if recipientAcc.BalanceNHB.Sign() != 0 {
+			t.Fatalf("SECURITY REGRESSION [%s]: recipient must never be credited, got %s", step, recipientAcc.BalanceNHB)
+		}
+	}
+
+	// The very first submission must already be rejected -- unlike the
+	// tampered-IntentExpiry fix, this gap does not require any replay at
+	// all; a single, originally-signed transaction with an out-of-bound
+	// expiry can never be honored in full by the registry.
+	node.stateMu.Lock()
+	firstErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if !errors.Is(firstErr, ErrLendingFeeWithdrawExpiryTooFar) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrLendingFeeWithdrawExpiryTooFar on the first submission, got %v", firstErr)
+	}
+	assertUntouched("first submission")
+
+	// Resubmitting the exact same, byte-identical transaction immediately
+	// must fail identically -- no window where it ever validates.
+	node.stateMu.Lock()
+	secondErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if !errors.Is(secondErr, ErrLendingFeeWithdrawExpiryTooFar) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrLendingFeeWithdrawExpiryTooFar on immediate resubmission, got %v", secondErr)
+	}
+	assertUntouched("immediate resubmission")
+
+	// Finally, reproduce the re-verifier's exact timeline: advance to now+2h
+	// (past the 1h TTL clamp, nine hours before the real signed deadline)
+	// and resubmit the same unmodified transaction once more. Before this
+	// fix this is precisely the step that would have validated cleanly
+	// (after an initial purge) and re-executed the withdrawal; after this
+	// fix it must still fail the exact same way, with zero state touched.
+	afterTTLClamp := start.Add(2 * time.Hour)
+	node.stateMu.Lock()
+	node.state.nowFunc = func() time.Time { return afterTTLClamp }
+	thirdErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if !errors.Is(thirdErr, ErrLendingFeeWithdrawExpiryTooFar) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrLendingFeeWithdrawExpiryTooFar after advancing past the TTL clamp, got %v", thirdErr)
+	}
+	assertUntouched("after advancing past the TTL clamp")
+}
+
+// TestLendingWithdrawDeveloperFeesApply_RejectsExpiryBeyondRegistryTTL is
+// TestLendingWithdrawProtocolFeesApply_RejectsExpiryBeyondRegistryTTL's
+// counterpart for TxTypeLendingWithdrawDeveloperFees -- the re-verifier
+// named LendingDeveloperFeeWithdrawSigningHash explicitly alongside
+// LendingProtocolFeeWithdrawSigningHash as sharing the identical TTL-clamp
+// gap, so both tx types need the identical regression coverage.
+func TestLendingWithdrawDeveloperFeesApply_RejectsExpiryBeyondRegistryTTL(t *testing.T) {
+	node := newTestNode(t)
+
+	developerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate developer key: %v", err)
+	}
+	developerAddr20 := toAddress(developerKey)
+	developerOwner := crypto.MustNewAddress(crypto.NHBPrefix, developerAddr20[:])
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	recipientAddr20 := toAddress(recipientKey)
+	recipient := crypto.MustNewAddress(crypto.NHBPrefix, recipientAddr20[:])
+	recipientStr := recipient.String()
+
+	const poolID = "default"
+	moduleAddr := node.LendingModuleAddress()
+	amount := big.NewInt(100)
+
+	start := time.Unix(1_700_000_000, 0).UTC()
+	node.stateMu.Lock()
+	node.state.nowFunc = func() time.Time { return start }
+	node.state.intentTTL = time.Hour
+	manager := nhbstate.NewManager(node.state.Trie)
+	if err := manager.LendingPutMarket(poolID, &lending.Market{PoolID: poolID, DeveloperOwner: developerOwner, TotalNHBSupplied: big.NewInt(1000)}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed market: %v", err)
+	}
+	if err := manager.LendingPutFeeAccrual(poolID, &lending.FeeAccrual{ProtocolFeesWei: big.NewInt(0), DeveloperFeesWei: big.NewInt(100)}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed fee accrual: %v", err)
+	}
+	moduleAcc, err := manager.GetAccount(moduleAddr.Bytes())
+	if err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("load module account: %v", err)
+	}
+	moduleAcc.BalanceNHB = big.NewInt(500)
+	if err := manager.PutAccount(moduleAddr.Bytes(), moduleAcc); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("fund module account: %v", err)
+	}
+	node.stateMu.Unlock()
+
+	nonce := "withdraw-1"
+	signedExpiry := uint64(start.Add(10 * time.Hour).Unix())
+	intentRef := LendingDeveloperFeeWithdrawSigningHash(poolID, recipientStr, amount.String(), nonce, signedExpiry)
+	signature, err := ethcrypto.Sign(intentRef, developerKey.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign withdrawal: %v", err)
+	}
+	payload, err := encodeLendingFeeWithdrawTransaction(poolID, recipientStr, amount, nonce, signature)
+	if err != nil {
+		t.Fatalf("encode withdrawal: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:      types.NHBChainID(),
+		Type:         types.TxTypeLendingWithdrawDeveloperFees,
+		Data:         payload,
+		GasLimit:     0,
+		GasPrice:     big.NewInt(0),
+		IntentRef:    intentRef,
+		IntentExpiry: signedExpiry,
+	}
+
+	node.stateMu.Lock()
+	firstErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if !errors.Is(firstErr, ErrLendingFeeWithdrawExpiryTooFar) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrLendingFeeWithdrawExpiryTooFar on the first submission, got %v", firstErr)
+	}
+
+	afterTTLClamp := start.Add(2 * time.Hour)
+	node.stateMu.Lock()
+	node.state.nowFunc = func() time.Time { return afterTTLClamp }
+	secondErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if !errors.Is(secondErr, ErrLendingFeeWithdrawExpiryTooFar) {
+		t.Fatalf("SECURITY REGRESSION: expected ErrLendingFeeWithdrawExpiryTooFar after advancing past the TTL clamp, got %v", secondErr)
+	}
+
+	node.stateMu.Lock()
+	m := nhbstate.NewManager(node.state.Trie)
+	fees, ok, feesErr := m.LendingGetFeeAccrual(poolID)
+	recipientAcc, recipientErr := m.GetAccount(recipient.Bytes())
+	node.stateMu.Unlock()
+	if feesErr != nil || !ok {
+		t.Fatalf("read fee accrual: ok=%v err=%v", ok, feesErr)
+	}
+	if fees.DeveloperFeesWei.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("SECURITY REGRESSION: developer fees must remain untouched at 100, got %s", fees.DeveloperFeesWei)
+	}
+	if recipientErr != nil {
+		t.Fatalf("read recipient account: %v", recipientErr)
+	}
+	if recipientAcc.BalanceNHB.Sign() != 0 {
+		t.Fatalf("SECURITY REGRESSION: recipient must never be credited, got %s", recipientAcc.BalanceNHB)
+	}
+}
+
+// TestLendingWithdrawProtocolFeesApply_AllowsExpiryWithinTightTTL confirms
+// the fix above does not regress the ordinary case: a withdrawal signed
+// comfortably within -- or exactly at -- a short registry TTL must still
+// apply exactly as before, even when that TTL is far shorter than the
+// default 24h (core/state_transition.go's defaultIntentTTL). This isolates
+// the exact boundary the new check enforces (reject only when
+// tx.IntentExpiry strictly exceeds now+ttl) from the TTL-exceeding case
+// covered above.
+func TestLendingWithdrawProtocolFeesApply_AllowsExpiryWithinTightTTL(t *testing.T) {
+	node := newTestNode(t)
+
+	adminKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate admin key: %v", err)
+	}
+	adminAddr := toAddress(adminKey)
+	assignRole(t, node, RoleLendingProtocolAdmin, adminAddr)
+
+	recipientKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate recipient key: %v", err)
+	}
+	recipientAddr20 := toAddress(recipientKey)
+	recipient := crypto.MustNewAddress(crypto.NHBPrefix, recipientAddr20[:])
+	recipientStr := recipient.String()
+
+	const poolID = "default"
+	moduleAddr := node.LendingModuleAddress()
+	amount := big.NewInt(100)
+
+	start := time.Unix(1_700_000_000, 0).UTC()
+	node.stateMu.Lock()
+	node.state.nowFunc = func() time.Time { return start }
+	node.state.intentTTL = time.Hour
+	manager := nhbstate.NewManager(node.state.Trie)
+	if err := manager.LendingPutMarket(poolID, &lending.Market{PoolID: poolID, TotalNHBSupplied: big.NewInt(1000)}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed market: %v", err)
+	}
+	if err := manager.LendingPutFeeAccrual(poolID, &lending.FeeAccrual{ProtocolFeesWei: big.NewInt(100), DeveloperFeesWei: big.NewInt(0)}); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("seed fee accrual: %v", err)
+	}
+	moduleAcc, err := manager.GetAccount(moduleAddr.Bytes())
+	if err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("load module account: %v", err)
+	}
+	moduleAcc.BalanceNHB = big.NewInt(500)
+	if err := manager.PutAccount(moduleAddr.Bytes(), moduleAcc); err != nil {
+		node.stateMu.Unlock()
+		t.Fatalf("fund module account: %v", err)
+	}
+	node.stateMu.Unlock()
+
+	// Signed for exactly now+1h -- precisely the registry's TTL limit, not
+	// one second beyond it. The new check must allow this (it only rejects
+	// when IntentExpiry is STRICTLY greater than now+ttl), matching
+	// core/state/intent_registry.go's own clamp, which leaves a requested
+	// expiry exactly at the limit unclamped.
+	nonce := "withdraw-1"
+	signedExpiry := uint64(start.Add(time.Hour).Unix())
+	intentRef := LendingProtocolFeeWithdrawSigningHash(poolID, recipientStr, amount.String(), nonce, signedExpiry)
+	signature, err := ethcrypto.Sign(intentRef, adminKey.PrivateKey)
+	if err != nil {
+		t.Fatalf("sign withdrawal: %v", err)
+	}
+	payload, err := encodeLendingFeeWithdrawTransaction(poolID, recipientStr, amount, nonce, signature)
+	if err != nil {
+		t.Fatalf("encode withdrawal: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:      types.NHBChainID(),
+		Type:         types.TxTypeLendingWithdrawProtocolFees,
+		Data:         payload,
+		GasLimit:     0,
+		GasPrice:     big.NewInt(0),
+		IntentRef:    intentRef,
+		IntentExpiry: signedExpiry,
+	}
+
+	node.stateMu.Lock()
+	applyErr := node.state.ApplyTransaction(tx)
+	node.stateMu.Unlock()
+	if applyErr != nil {
+		t.Fatalf("expected legitimate withdrawal signed exactly at the TTL boundary to succeed, got %v", applyErr)
+	}
+
+	node.stateMu.Lock()
+	m := nhbstate.NewManager(node.state.Trie)
+	fees, ok, feesErr := m.LendingGetFeeAccrual(poolID)
+	recipientAcc, recipientErr := m.GetAccount(recipient.Bytes())
+	node.stateMu.Unlock()
+	if feesErr != nil || !ok {
+		t.Fatalf("read fee accrual: ok=%v err=%v", ok, feesErr)
+	}
+	if fees.ProtocolFeesWei.Sign() != 0 {
+		t.Fatalf("expected protocol fees drained to 0, got %s", fees.ProtocolFeesWei)
+	}
+	if recipientErr != nil {
+		t.Fatalf("read recipient account: %v", recipientErr)
+	}
+	if recipientAcc.BalanceNHB.Cmp(amount) != 0 {
+		t.Fatalf("expected recipient credited %s, got %s", amount, recipientAcc.BalanceNHB)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
+	"time"
 
 	"nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
@@ -87,7 +88,87 @@ var (
 	// expired record's registry key without the admin's/developer's
 	// original signature itself covering the new expiry too.
 	ErrLendingFeeWithdrawIntentMismatch = errors.New("lending: intent reference missing or does not match signed withdrawal")
+	// ErrLendingFeeWithdrawExpiryTooFar indicates tx.IntentExpiry -- the exact
+	// deadline the admin/developer actually SIGNED (see
+	// LendingProtocolFeeWithdrawSigningHash/LendingDeveloperFeeWithdrawSigningHash)
+	// -- reaches further into the future than
+	// core/state/intent_registry.go's IntentRegistryValidate will ever
+	// actually retain the registry record for.
+	//
+	// NHB-AUDIT TTL-clamp-gap fix: binding tx.IntentExpiry into the signed
+	// hash (see ErrLendingFeeWithdrawIntentMismatch's doc comment) stops a
+	// relayer from substituting a *different* IntentExpiry than the one
+	// signed, but it does nothing about the admin's own, legitimately signed
+	// IntentExpiry simply being set further out than the registry can
+	// actually honor. IntentRegistryValidate clamps every *stored* record's
+	// effective expiry to min(requestedExpiry, now+ttl) -- so if
+	// tx.IntentExpiry is, say, 10h out while the registry's TTL is 1h, the
+	// FIRST successful submission is stored with an effective expiry of only
+	// now+1h, even though the byte-identical signed transaction itself
+	// remains valid (hash matches, signature recovers, tx.IntentExpiry
+	// itself hasn't elapsed) all the way out to the full 10h. Once that
+	// stored, TTL-clamped record lapses, IntentRegistryValidate's own
+	// lazy-delete path purges it and reports ErrIntentExpired on the next
+	// lookup -- and an immediate subsequent resubmission of the EXACT SAME,
+	// UNCHANGED, originally-signed transaction then finds no stored record,
+	// validates cleanly against the registry's fresh now+ttl clamp (since
+	// the real signed tx.IntentExpiry still hasn't passed), and reaches this
+	// tx type's apply function again, which re-executes the withdrawal a
+	// second time -- with zero tampering anywhere and the admin's original
+	// signature intact throughout. This differs from the tampered-expiry
+	// replay ErrLendingFeeWithdrawIntentMismatch closes: there, the attacker
+	// changes tx.IntentExpiry after the fact; here, the admin's own honestly
+	// signed expiry simply outlives what the registry was ever going to
+	// retain, and nothing previously stopped that gap from existing in the
+	// first place. Rejecting any tx.IntentExpiry that exceeds
+	// now+registryTTL upfront, in this tx type's own apply function, before
+	// IntentRegistryValidate's clamp can ever produce a shorter stored
+	// expiry than what was signed, closes the gap at its source: a
+	// transaction of this type that is ever accepted can never have a
+	// signed expiry the registry wasn't always going to honor in full, so
+	// the purge-then-immediate-replay sequence described above can no
+	// longer arise.
+	ErrLendingFeeWithdrawExpiryTooFar = errors.New("lending: intent expiry exceeds registry retention window")
 )
+
+// lendingFeeWithdrawExpiryTTL returns the exact TTL window
+// core/state_transition.go's executeTransaction passes into
+// core/state/intent_registry.go's IntentRegistryValidate for every
+// intent-bearing transaction, including these two (sp.intentTTL, falling
+// back to defaultIntentTTL when unset) -- deliberately the registry's own
+// real clamp value rather than a second, independently-tracked constant,
+// so this bound can never silently drift out of sync with what the registry
+// will actually retain.
+func (sp *StateProcessor) lendingFeeWithdrawExpiryTTL() time.Duration {
+	ttl := sp.intentTTL
+	if ttl <= 0 {
+		ttl = defaultIntentTTL
+	}
+	return ttl
+}
+
+// checkLendingFeeWithdrawExpiryWithinTTL rejects a
+// TxTypeLendingWithdrawProtocolFees/TxTypeLendingWithdrawDeveloperFees
+// transaction whose SIGNED tx.IntentExpiry reaches further into the future
+// than core/state/intent_registry.go will ever actually retain the stored
+// record for -- see ErrLendingFeeWithdrawExpiryTooFar's doc comment for the
+// exploit this closes. Both apply functions call this before doing anything
+// else (including before decoding the Data payload or recovering the
+// embedded signature), so a transaction that can never be honored by the
+// registry for its full signed lifetime is rejected with zero side effects.
+func (sp *StateProcessor) checkLendingFeeWithdrawExpiryWithinTTL(tx *types.Transaction) error {
+	ttl := sp.lendingFeeWithdrawExpiryTTL()
+	now := sp.blockTimestamp().Unix()
+	if now < 0 {
+		now = 0
+	}
+	ttlSeconds := uint64(ttl / time.Second)
+	limit := uint64(now) + ttlSeconds
+	if tx.IntentExpiry > limit {
+		return ErrLendingFeeWithdrawExpiryTooFar
+	}
+	return nil
+}
 
 // lendingFeeWithdrawPayload is the canonical on-chain payload for both
 // TxTypeLendingWithdrawProtocolFees and TxTypeLendingWithdrawDeveloperFees
@@ -307,6 +388,13 @@ func (sp *StateProcessor) applyLendingWithdrawProtocolFeesTransaction(tx *types.
 	if tx == nil {
 		return fmt.Errorf("lending: transaction required")
 	}
+	// NHB-AUDIT TTL-clamp-gap fix: reject upfront, before touching the
+	// payload or any state, when the admin's own SIGNED tx.IntentExpiry
+	// reaches further out than the registry will ever retain the record
+	// for. See ErrLendingFeeWithdrawExpiryTooFar's doc comment.
+	if err := sp.checkLendingFeeWithdrawExpiryWithinTTL(tx); err != nil {
+		return err
+	}
 	poolID, recipientStr, amountStr, nonce, signature, err := decodeLendingFeeWithdrawTransaction(tx.Data)
 	if err != nil {
 		return err
@@ -379,6 +467,12 @@ func (sp *StateProcessor) applyLendingWithdrawProtocolFeesTransaction(tx *types.
 func (sp *StateProcessor) applyLendingWithdrawDeveloperFeesTransaction(tx *types.Transaction) error {
 	if tx == nil {
 		return fmt.Errorf("lending: transaction required")
+	}
+	// NHB-AUDIT TTL-clamp-gap fix: see
+	// applyLendingWithdrawProtocolFeesTransaction's identical comment and
+	// ErrLendingFeeWithdrawExpiryTooFar's doc comment.
+	if err := sp.checkLendingFeeWithdrawExpiryWithinTTL(tx); err != nil {
+		return err
 	}
 	poolID, recipientStr, amountStr, nonce, signature, err := decodeLendingFeeWithdrawTransaction(tx.Data)
 	if err != nil {

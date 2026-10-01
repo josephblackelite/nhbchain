@@ -2421,6 +2421,19 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 		if tx.IntentExpiry > 0 && uint64(time.Now().Unix()) > tx.IntentExpiry {
 			return fmt.Errorf("%w: transaction expired", ErrInvalidTransaction)
 		}
+		// Defense in depth for the NHB-AUDIT TTL-clamp-gap fix
+		// (core/lending_fee_withdraw_tx.go's ErrLendingFeeWithdrawExpiryTooFar):
+		// a transaction whose signed IntentExpiry already exceeds what the
+		// intent registry will ever retain can never pass apply-time
+		// validation, so reject it here too instead of letting it sit in the
+		// mempool until a proposer includes it only to have it fail then.
+		if (tx.Type == types.TxTypeLendingWithdrawProtocolFees || tx.Type == types.TxTypeLendingWithdrawDeveloperFees) && n.state != nil {
+			ttl := n.state.lendingFeeWithdrawExpiryTTL()
+			limit := uint64(time.Now().Unix()) + uint64(ttl/time.Second)
+			if tx.IntentExpiry > limit {
+				return fmt.Errorf("%w: %v", ErrInvalidTransaction, ErrLendingFeeWithdrawExpiryTooFar)
+			}
+		}
 	}
 	snapshot := n.globalConfigSnapshot()
 	txSize, err := transactionSize(tx)
