@@ -66,6 +66,26 @@ var (
 	// commits to poolId|recipient|amountWei|nonce via the admin's own
 	// signature -- pins the registry key to something only the authorizing
 	// key controls, closing that gap.
+	//
+	// NHB-AUDIT TTL-replay fix: the above alone only narrowed the replay
+	// window instead of closing it, because tx.IntentExpiry was still
+	// unsigned. core/state/intent_registry.go's IntentRegistryValidate
+	// clamps every record's *stored* expiry to
+	// min(requestedExpiry, now+defaultIntentTTL); once that stored (possibly
+	// shorter) expiry lapses, the next validate call deletes the consumed
+	// record as a side effect and reports ErrIntentExpired, instead of
+	// remembering the ref was ever used. A relayer could resubmit the same
+	// still-public signed Data payload with a freshly chosen, later
+	// tx.IntentExpiry: the first resubmission purges the stale record (and
+	// fails), and an immediate second resubmission then validates cleanly
+	// and re-executes the original admin-authorized withdrawal. Now that
+	// LendingProtocolFeeWithdrawSigningHash/LendingDeveloperFeeWithdrawSigningHash
+	// fold tx.IntentExpiry into the signed hash, the signing hash the apply
+	// functions recompute depends on the exact submitted tx.IntentExpiry, so
+	// this same IntentRef check also rejects any resubmission that swaps in
+	// a different IntentExpiry -- there is no longer a way to "renew" an
+	// expired record's registry key without the admin's/developer's
+	// original signature itself covering the new expiry too.
 	ErrLendingFeeWithdrawIntentMismatch = errors.New("lending: intent reference missing or does not match signed withdrawal")
 )
 
@@ -101,10 +121,10 @@ type lendingFeeWithdrawPayload struct {
 // must reproduce this exact hash byte-for-byte. Mirrors
 // core/swap_admin_tx.go's SwapVoucherReverseSigningHash's plain-keccak256,
 // pipe-delimited canonical-string convention rather than inventing a new
-// signing scheme. The four fields are hashed as the exact trimmed strings
-// the submitted payload carries (not a round-tripped/re-serialised amount),
-// so the caller must pass the same poolID/recipient/amountWei/nonce strings
-// it intends to submit.
+// signing scheme. The four string fields are hashed as the exact trimmed
+// strings the submitted payload carries (not a round-tripped/re-serialised
+// amount), so the caller must pass the same poolID/recipient/amountWei/nonce
+// strings it intends to submit.
 //
 // NHB-AUDIT replay fix: this same digest also doubles as the transaction's
 // core/state/intent_registry.go IntentRef (see
@@ -112,17 +132,30 @@ type lendingFeeWithdrawPayload struct {
 // intended withdrawal -- callers MUST use a fresh nonce for every
 // withdrawal they authorize, even repeats of the same poolID/recipient/
 // amountWei.
-func LendingProtocolFeeWithdrawSigningHash(poolID, recipient, amountWei, nonce string) []byte {
-	payload := fmt.Sprintf("%s|poolId=%s|recipient=%s|amountWei=%s|nonce=%s", LendingProtocolFeeWithdrawDomainV1, strings.TrimSpace(poolID), strings.TrimSpace(recipient), strings.TrimSpace(amountWei), strings.TrimSpace(nonce))
+//
+// NHB-AUDIT TTL-replay fix: intentExpiry is the exact tx.IntentExpiry value
+// the caller intends to submit (the UNIX-seconds deadline
+// core/state/intent_registry.go's IntentRegistryValidate checks). Folding it
+// into the signed hash means the apply function's tx.IntentRef-equals-hash
+// check (which recomputes this hash from the transaction's ACTUAL
+// tx.IntentExpiry) also authenticates IntentExpiry itself -- a relayer can no
+// longer resubmit this signature under a different, self-chosen
+// tx.IntentExpiry to "renew" a registry record whose TTL-clamped stored
+// expiry has lapsed, closing the gap left by only binding
+// poolId|recipient|amountWei|nonce.
+func LendingProtocolFeeWithdrawSigningHash(poolID, recipient, amountWei, nonce string, intentExpiry uint64) []byte {
+	payload := fmt.Sprintf("%s|poolId=%s|recipient=%s|amountWei=%s|nonce=%s|intentExpiry=%d", LendingProtocolFeeWithdrawDomainV1, strings.TrimSpace(poolID), strings.TrimSpace(recipient), strings.TrimSpace(amountWei), strings.TrimSpace(nonce), intentExpiry)
 	return ethcrypto.Keccak256([]byte(payload))
 }
 
 // LendingDeveloperFeeWithdrawSigningHash is
 // LendingProtocolFeeWithdrawSigningHash's counterpart for developer-fee
 // withdrawal, domain-separated so a developer's signature can never be
-// replayed as a protocol-admin withdrawal authorization or vice versa.
-func LendingDeveloperFeeWithdrawSigningHash(poolID, recipient, amountWei, nonce string) []byte {
-	payload := fmt.Sprintf("%s|poolId=%s|recipient=%s|amountWei=%s|nonce=%s", LendingDeveloperFeeWithdrawDomainV1, strings.TrimSpace(poolID), strings.TrimSpace(recipient), strings.TrimSpace(amountWei), strings.TrimSpace(nonce))
+// replayed as a protocol-admin withdrawal authorization or vice versa. See
+// LendingProtocolFeeWithdrawSigningHash's doc comment for why intentExpiry
+// (the exact tx.IntentExpiry being submitted) must be included here too.
+func LendingDeveloperFeeWithdrawSigningHash(poolID, recipient, amountWei, nonce string, intentExpiry uint64) []byte {
+	payload := fmt.Sprintf("%s|poolId=%s|recipient=%s|amountWei=%s|nonce=%s|intentExpiry=%d", LendingDeveloperFeeWithdrawDomainV1, strings.TrimSpace(poolID), strings.TrimSpace(recipient), strings.TrimSpace(amountWei), strings.TrimSpace(nonce), intentExpiry)
 	return ethcrypto.Keccak256([]byte(payload))
 }
 
@@ -278,7 +311,16 @@ func (sp *StateProcessor) applyLendingWithdrawProtocolFeesTransaction(tx *types.
 	if err != nil {
 		return err
 	}
-	hash := LendingProtocolFeeWithdrawSigningHash(poolID, recipientStr, amountStr, nonce)
+	// hash is recomputed from the transaction's ACTUAL tx.IntentExpiry (not a
+	// value decoded from Data), so this hash -- and therefore the
+	// tx.IntentRef comparison and the signature recovery below -- authenticate
+	// the exact IntentExpiry this transaction submits. See
+	// LendingProtocolFeeWithdrawSigningHash's and
+	// ErrLendingFeeWithdrawIntentMismatch's doc comments (NHB-AUDIT
+	// TTL-replay fix) for why this closes the gap a relayer would otherwise
+	// have by resubmitting the same signed Data under a different,
+	// self-chosen IntentExpiry once the registry's TTL-clamped record lapses.
+	hash := LendingProtocolFeeWithdrawSigningHash(poolID, recipientStr, amountStr, nonce, tx.IntentExpiry)
 	// The embedded signature is the only thing authenticating this senderless
 	// transaction -- tx.IntentRef/IntentExpiry carry no signature of their
 	// own (types.RequiresSignature is false for this TxType), so a relayer
@@ -352,7 +394,10 @@ func (sp *StateProcessor) applyLendingWithdrawDeveloperFeesTransaction(tx *types
 		return ErrLendingFeeWithdrawPoolNotFound
 	}
 
-	hash := LendingDeveloperFeeWithdrawSigningHash(poolID, recipientStr, amountStr, nonce)
+	// hash is recomputed from tx.IntentExpiry itself -- see
+	// applyLendingWithdrawProtocolFeesTransaction's identical comment
+	// (NHB-AUDIT TTL-replay fix).
+	hash := LendingDeveloperFeeWithdrawSigningHash(poolID, recipientStr, amountStr, nonce, tx.IntentExpiry)
 	// See applyLendingWithdrawProtocolFeesTransaction's identical comment:
 	// this senderless tx type has no whole-transaction signature covering
 	// tx.IntentRef, so the apply function itself must pin the registry key to
