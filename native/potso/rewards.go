@@ -255,10 +255,18 @@ func ComputeRewards(cfg RewardConfig, params WeightParams, snapshot RewardSnapsh
 		Winners:        []RewardPayout{},
 		WeightSnapshot: nil,
 	}
-	if budget.Sign() <= 0 {
-		return result, nil
-	}
 
+	// The weight snapshot (composite stake+engagement weights, which
+	// governance's CastVote reads as voting power for the epoch -- see
+	// core/state_transition.go's processPotsoRewardEpoch) must be computed
+	// unconditionally, independent of whether there is any reward budget to
+	// distribute this epoch. It is derived purely from stake/engagement
+	// inputs and never depends on budget/treasury state, so a zero-emission
+	// or empty-treasury epoch must never silently skip writing it -- doing so
+	// previously left governance voting permanently stuck with "potso
+	// snapshot unavailable" for that epoch. This is intentionally computed
+	// before the budget check below, separating "what are the weights" from
+	// "how much reward budget is there to pay out".
 	inputs := make([]WeightInput, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
 		inputs = append(inputs, WeightInput{
@@ -273,6 +281,10 @@ func ComputeRewards(cfg RewardConfig, params WeightParams, snapshot RewardSnapsh
 		return nil, err
 	}
 	result.WeightSnapshot = weights
+
+	if budget.Sign() <= 0 {
+		return result, nil
+	}
 	if weights == nil || len(weights.Entries) == 0 {
 		return result, nil
 	}
