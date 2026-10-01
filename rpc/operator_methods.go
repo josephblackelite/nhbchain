@@ -44,6 +44,16 @@ import (
 // (authenticateSwapRequest), which is a stronger, more specific control than
 // the shared operator role would add. See the comment at that exemption in
 // rpc/http.go's handle for the full reasoning.
+//
+// A second, separately-checked exception (isSelfAuthenticatedMintMethod):
+// mint_with_sig. It is listed here because nhbportal never wants a browser
+// session calling it either, not because this node treats it as an operator
+// surface -- it already carries its own on-chain secp256k1 voucher-signature
+// check plus a MINTER_NHB role requirement (core/state_transition.go's
+// applyMintTransaction), which the real, currently-deployed off-chain
+// fiat-settlement minting service relies on with no bearer credential at
+// all. See isSelfAuthenticatedMintMethod's doc comment in rpc/http.go for
+// why this is a separate check rather than folded into isPublicSwapMethod.
 var OperatorOnlyMethods = map[string]struct{}{
 	// --- p2p network control and node-internal sync (also covered by prefixes below)
 	"net_info":             {},
@@ -70,7 +80,7 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"swap_voucher_export":         {},
 	"nhb_swapMint":                {}, // stable-engine reservation for a caller-supplied account
 	"nhb_swapBurn":                {}, // stable-engine cash-out
-	"mint_with_sig":               {}, // NHB mint via signed voucher
+	"mint_with_sig":               {}, // NHB mint via signed voucher; exempt from the gate below, see isSelfAuthenticatedMintMethod
 
 	// --- oracle / reference-price submission
 	"buyback_submitRefPrice": {},

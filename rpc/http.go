@@ -1094,6 +1094,32 @@ func isPublicSwapMethod(method string) bool {
 	}
 }
 
+// isSelfAuthenticatedMintMethod reports whether method is exempt from the
+// operator-role gate for the same reason isPublicSwapMethod's methods are:
+// it already carries its own, independent, longer-standing authorization
+// control that is at least as strong as the shared operator role. It is kept
+// separate from isPublicSwapMethod -- rather than folded into that switch --
+// because isPublicSwapMethod is also used above (where s.swapAuth != nil) to
+// REQUIRE the per-partner swap HMAC check via authenticateSwapRequest.
+// mint_with_sig does not carry, and must not be made to carry, an HMAC swap
+// credential: its independent control is an on-chain secp256k1 voucher
+// signature, checked by handleMintWithSig/MintWithSignature and then by
+// applyMintTransaction's requirement that the recovered signer hold
+// MINTER_NHB (core/state_transition.go). Requiring an operator-role JWT on
+// top would not tighten anything -- a forged or stolen voucher signature
+// already fails independently of any JWT -- and would instead break every
+// legitimate caller of the real, currently-deployed off-chain
+// fiat-settlement minting service, which calls mint_with_sig with no
+// bearer credential at all (see docs/escrow/mint-settlement.md).
+func isSelfAuthenticatedMintMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "mint_with_sig":
+		return true
+	default:
+		return false
+	}
+}
+
 type BalanceResponse struct {
 	Address               string                `json:"address"`
 	BalanceNHB            *big.Int              `json:"balanceNHB"`
@@ -1432,7 +1458,15 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// per the recon this change is based on, a swapd-type caller whose
 	// credential could not be confirmed from this repo. See
 	// rpc/operator_methods.go's package comment for the full rationale.
-	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) {
+	//
+	// mint_with_sig is exempt for the same shape of reason, via the separate
+	// isSelfAuthenticatedMintMethod check (see its doc comment for why it is
+	// not simply folded into isPublicSwapMethod above): it already carries
+	// its own independent on-chain voucher-signature + MINTER_NHB-role check,
+	// and the real, currently-deployed off-chain fiat-settlement minting
+	// service calls it with no bearer credential at all, so gating it here
+	// too would halt production NHB minting rather than add any protection.
+	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) {
 		if authErr := s.requireOperatorInto(&r); authErr != nil {
 			status := http.StatusUnauthorized
 			if authErr.Code == codeOperatorOnly {
