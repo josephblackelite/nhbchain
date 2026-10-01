@@ -1,11 +1,11 @@
 package core
 
 import (
-	"errors"
 	"math/big"
 	"testing"
 	"time"
 
+	potsoevents "nhbchain/core/events"
 	nhbstate "nhbchain/core/state"
 	"nhbchain/crypto"
 	"nhbchain/native/governance"
@@ -18,13 +18,25 @@ import (
 // for ledger PL-DC-29, sub-issue 1: processPotsoRewardEpoch used to compute
 // the reward budget as min(emission, treasuryBalance) BEFORE calling
 // potso.ComputeRewards, which made totalPaid structurally incapable of ever
-// exceeding treasuryBalance -- the later `if totalPaid > treasuryBalance`
-// shortfall check could therefore never fire in the default/auto payout
-// path. With the fix, the budget is derived from emission alone, so a
-// treasury that genuinely cannot cover the configured emission is now
-// discovered by the real payout attempt and surfaces as
-// potso.ErrInsufficientTreasury instead of silently succeeding with a
-// quietly reduced payout.
+// exceeding treasuryBalance -- the shortfall check could therefore never fire
+// in the default/auto payout path. With the fix, the budget is derived from
+// emission alone, so a treasury that genuinely cannot cover the configured
+// emission is now discovered by the real payout attempt.
+//
+// Discovering the shortfall must NOT abort the block or the chain, though:
+// processPotsoRewardEpoch is invoked unconditionally on every block from
+// ProcessBlockLifecycle (core/epochs.go), not from a discretionary,
+// skippable transaction, and every ProcessBlockLifecycle caller in
+// core/node.go treats its error as an unconditional whole-block abort with
+// no per-epoch retry disposition (unlike classifyProposalError's
+// skip/prune handling for a single bad transaction). An error here would
+// therefore halt block production chain-wide, retried identically forever,
+// since maybeProcessPotsoRewards only marks an epoch processed after a
+// successful call. The correct, current behavior is: the block still
+// commits, the epoch is still marked processed (never retried), the payout
+// for this epoch is degraded to zero, and the shortfall is surfaced via the
+// persisted RewardEpochMeta.Shortfall flag and a dedicated
+// potso.reward.shortfall event for operators/monitoring to observe.
 func TestProcessPotsoRewardEpoch_TreasuryShortfallReachable(t *testing.T) {
 	db := storage.NewMemDB()
 	t.Cleanup(db.Close)
@@ -83,18 +95,143 @@ func TestProcessPotsoRewardEpoch_TreasuryShortfallReachable(t *testing.T) {
 	if err := sp.ProcessBlockLifecycle(1, now.Add(-time.Second).Unix()); err != nil {
 		t.Fatalf("process block 1: %v", err)
 	}
-	err = sp.ProcessBlockLifecycle(2, now.Unix())
-	if !errors.Is(err, potso.ErrInsufficientTreasury) {
-		t.Fatalf("expected ErrInsufficientTreasury from epoch close, got: %v", err)
+	// The block carrying the shortfall epoch's close must still succeed --
+	// this is the heart of the fix. Returning potso.ErrInsufficientTreasury
+	// here, as the pre-fix code did, would abort ProcessBlockLifecycle and
+	// therefore the whole block.
+	if err := sp.ProcessBlockLifecycle(2, now.Unix()); err != nil {
+		t.Fatalf("epoch close with a treasury shortfall must not abort the block, got: %v", err)
 	}
 
-	// The epoch must not be marked processed when the payout attempt fails
-	// outright -- a silently-succeeded, quietly-reduced payout is exactly
-	// the behavior this fix removes.
-	if _, ok, err := manager.PotsoRewardsLastProcessedEpoch(); err != nil {
+	// The epoch MUST be marked processed despite the shortfall -- otherwise
+	// it is retried, identically, on every subsequent block forever (the
+	// exact chain-halt this fix removes).
+	lastProcessed, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
 		t.Fatalf("last processed lookup: %v", err)
+	} else if !ok || lastProcessed != 0 {
+		t.Fatalf("expected epoch 0 to be marked processed despite the shortfall: ok=%v lastProcessed=%d", ok, lastProcessed)
+	}
+
+	// The shortfall must be durably surfaced, not silently swallowed: the
+	// persisted meta carries a Shortfall flag and TotalPaid of zero (the
+	// degraded outcome), not the unaffordable amount potso.ComputeRewards
+	// originally proposed.
+	meta, ok, err := manager.PotsoRewardsGetMeta(0)
+	if err != nil || !ok || meta == nil {
+		t.Fatalf("expected epoch 0 meta: ok=%v err=%v", ok, err)
+	}
+	if !meta.Shortfall {
+		t.Fatalf("expected meta.Shortfall to be true")
+	}
+	if meta.TotalPaid == nil || meta.TotalPaid.Sign() != 0 {
+		t.Fatalf("expected degraded TotalPaid of 0, got %v", meta.TotalPaid)
+	}
+	if meta.Winners != 0 {
+		t.Fatalf("expected 0 recorded winners for a skipped payout, got %d", meta.Winners)
+	}
+
+	// No claim should have been recorded for the participant: a shortfall
+	// epoch must not promise a reward it cannot pay.
+	if _, ok, err := manager.PotsoRewardsGetClaim(0, participant); err != nil {
+		t.Fatalf("claim lookup: %v", err)
 	} else if ok {
-		t.Fatalf("epoch should not be marked processed after a treasury shortfall")
+		t.Fatalf("expected no claim to be recorded for a skipped, underfunded epoch")
+	}
+
+	// The treasury must be untouched -- nothing was actually paid out.
+	reloaded, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("reload treasury: %v", err)
+	}
+	if reloaded.BalanceZNHB.Cmp(big.NewInt(10)) != 0 {
+		t.Fatalf("expected treasury balance to remain 10 after a skipped payout, got %s", reloaded.BalanceZNHB)
+	}
+
+	// Governance voting power must still have been recorded for this epoch
+	// -- the weight snapshot is computed unconditionally (sub-issue 3),
+	// independent of the shortfall.
+	if _, ok, err := manager.SnapshotPotsoWeights(0); err != nil {
+		t.Fatalf("snapshot potso weights: %v", err)
+	} else if !ok {
+		t.Fatalf("expected a governance-facing weight snapshot despite the shortfall")
+	}
+}
+
+// TestProcessPotsoRewardEpoch_TreasuryShortfallEventSurfacesAndAdvances
+// exercises processPotsoRewardEpoch directly (rather than through
+// ProcessBlockLifecycle) and asserts the shortfall is observable via the
+// dedicated potso.reward.shortfall event, in addition to the persisted
+// meta flag covered above -- the "operator/governance needs to be able to
+// see it happened" half of the fix.
+func TestProcessPotsoRewardEpoch_TreasuryShortfallEventSurfacesAndAdvances(t *testing.T) {
+	db := storage.NewMemDB()
+	t.Cleanup(db.Close)
+	trie, err := statetrie.NewTrie(db, nil)
+	if err != nil {
+		t.Fatalf("new trie: %v", err)
+	}
+	sp, err := NewStateProcessor(trie)
+	if err != nil {
+		t.Fatalf("state processor: %v", err)
+	}
+
+	treasury := [20]byte{0x53}
+	cfg := potso.RewardConfig{
+		EpochLengthBlocks:  2,
+		AlphaStakeBps:      7000,
+		MinPayoutWei:       big.NewInt(0),
+		EmissionPerEpoch:   big.NewInt(500),
+		TreasuryAddress:    treasury,
+		MaxWinnersPerEpoch: 10,
+		CarryRemainder:     true,
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	treasuryAcc, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("treasury account: %v", err)
+	}
+	treasuryAcc.BalanceZNHB = big.NewInt(50)
+	if err := manager.PutAccount(treasury[:], treasuryAcc); err != nil {
+		t.Fatalf("store treasury: %v", err)
+	}
+
+	participant := [20]byte{0x54}
+	if err := manager.PotsoStakeSetBondedTotal(participant, big.NewInt(100)); err != nil {
+		t.Fatalf("set stake: %v", err)
+	}
+	if err := manager.PotsoMetricsAddEngagement(0, participant, 0, 0, 30*60); err != nil {
+		t.Fatalf("seed engagement: %v", err)
+	}
+
+	const epochNumber = uint64(0)
+	if err := sp.processPotsoRewardEpoch(manager, cfg, epochNumber, "2026-01-01", time.Now().Unix()); err != nil {
+		t.Fatalf("process shortfall epoch directly: %v", err)
+	}
+	// The caller is responsible for marking the epoch processed on success,
+	// exactly as maybeProcessPotsoRewards does -- confirming this call
+	// returns nil (not potso.ErrInsufficientTreasury) is what lets that
+	// marker ever get written for a shortfall epoch.
+	if err := manager.PotsoRewardsSetLastProcessedEpoch(epochNumber); err != nil {
+		t.Fatalf("mark epoch processed: %v", err)
+	}
+
+	emitted := sp.Events()
+	found := false
+	for _, evt := range emitted {
+		if evt.Type == potsoevents.TypePotsoRewardShortfall {
+			found = true
+			if evt.Attributes["epoch"] != "0" {
+				t.Fatalf("expected shortfall event for epoch 0, got attributes: %+v", evt.Attributes)
+			}
+			if evt.Attributes["available"] != "50" {
+				t.Fatalf("expected available=50 in shortfall event, got: %+v", evt.Attributes)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected a %s event to be emitted for the underfunded epoch", potsoevents.TypePotsoRewardShortfall)
 	}
 }
 
@@ -192,31 +329,67 @@ func TestProcessPotsoRewardEpoch_ClaimModeReservesTreasuryAcrossEpochs(t *testin
 		t.Fatalf("epoch 0 reward should still be unclaimed")
 	}
 
-	// Epoch 1 (heights 3-4): identical participant/emission. Before the fix,
-	// this epoch's budget would be sized against the treasury's full,
-	// never-debited balance and silently approved. After the fix, the
-	// treasury's genuinely remaining 400 cannot cover another 600, and the
-	// shared shortfall check (now reachable per sub-issue 1's fix) catches
-	// it at this epoch's close.
+	// Epoch 1 (heights 3-4): identical participant/emission. Before the
+	// treasury-shortfall fix (sub-issue 1), this epoch's budget would be
+	// sized against the treasury's full, never-debited balance and silently
+	// approved. The shared shortfall check (now reachable per sub-issue 1)
+	// correctly detects that the treasury's genuinely remaining 400 cannot
+	// cover another 600 -- but, per the chain-halt fix, that detection must
+	// degrade this epoch's payout to zero and keep the block committing
+	// rather than aborting ProcessBlockLifecycle.
 	if err := manager.PotsoMetricsAddEngagement(1, participant, 0, 0, 30*60); err != nil {
 		t.Fatalf("seed engagement epoch 1: %v", err)
 	}
 	if err := sp.ProcessBlockLifecycle(3, base.Add(24*time.Hour-time.Second).Unix()); err != nil {
 		t.Fatalf("process block 3: %v", err)
 	}
-	err = sp.ProcessBlockLifecycle(4, base.Add(24*time.Hour).Unix())
-	if !errors.Is(err, potso.ErrInsufficientTreasury) {
-		t.Fatalf("expected epoch 1 close to be caught by the treasury shortfall check, got: %v", err)
+	if err := sp.ProcessBlockLifecycle(4, base.Add(24*time.Hour).Unix()); err != nil {
+		t.Fatalf("epoch 1 close with a treasury shortfall must not abort the block, got: %v", err)
 	}
 
-	// Epoch 0's reservation and claim record must be untouched by the
-	// failed epoch 1 attempt.
+	lastProcessed, ok, err := manager.PotsoRewardsLastProcessedEpoch()
+	if err != nil {
+		t.Fatalf("last processed lookup: %v", err)
+	} else if !ok || lastProcessed != 1 {
+		t.Fatalf("expected epoch 1 to be marked processed despite the shortfall: ok=%v lastProcessed=%d", ok, lastProcessed)
+	}
+
+	meta1, ok, err := manager.PotsoRewardsGetMeta(1)
+	if err != nil || !ok || meta1 == nil {
+		t.Fatalf("expected epoch 1 meta: ok=%v err=%v", ok, err)
+	}
+	if !meta1.Shortfall {
+		t.Fatalf("expected epoch 1 meta.Shortfall to be true")
+	}
+	if meta1.TotalPaid == nil || meta1.TotalPaid.Sign() != 0 {
+		t.Fatalf("expected epoch 1 degraded TotalPaid of 0, got %v", meta1.TotalPaid)
+	}
+
+	// Epoch 1 must not have recorded a claim either -- a claim-mode shortfall
+	// must not promise an obligation the treasury cannot cover.
+	if _, ok, err := manager.PotsoRewardsGetClaim(1, participant); err != nil {
+		t.Fatalf("epoch 1 claim lookup: %v", err)
+	} else if ok {
+		t.Fatalf("expected no claim recorded for epoch 1's skipped, underfunded payout")
+	}
+
+	// Epoch 0's reservation and claim record must be untouched by epoch 1's
+	// shortfall, and epoch 1's own (correctly skipped) payout must not have
+	// debited anything further from the treasury.
 	stillReserved, err := manager.GetAccount(treasury[:])
 	if err != nil {
-		t.Fatalf("reload treasury after epoch 1 failure: %v", err)
+		t.Fatalf("reload treasury after epoch 1: %v", err)
 	}
 	if stillReserved.BalanceZNHB.Cmp(big.NewInt(400)) != 0 {
-		t.Fatalf("epoch 0's reservation should be unaffected by epoch 1's failure, got %s", stillReserved.BalanceZNHB)
+		t.Fatalf("epoch 0's reservation should be unaffected by epoch 1's shortfall, got %s", stillReserved.BalanceZNHB)
+	}
+
+	claim0Again, ok, err := manager.PotsoRewardsGetClaim(0, participant)
+	if err != nil || !ok || claim0Again == nil {
+		t.Fatalf("expected epoch 0 claim record to remain: ok=%v err=%v", ok, err)
+	}
+	if claim0Again.Claimed {
+		t.Fatalf("epoch 0 reward should still be unclaimed")
 	}
 }
 
