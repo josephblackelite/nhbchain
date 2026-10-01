@@ -1506,8 +1506,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// operator-role JWT on top would not tighten anything (the HMAC check
 	// already rejects every caller without a provisioned partner key); it
 	// would only break every legitimate swap partner's traffic, including,
-	// per the recon this change is based on, a swapd-type caller whose
-	// credential could not be confirmed from this repo. See
+	// per the recon this change is based on, an off-chain swap-settlement
+	// caller whose credential could not be confirmed from this repo. See
 	// rpc/operator_methods.go's package comment for the full rationale.
 	//
 	// mint_with_sig is exempt for the same shape of reason, via the separate
