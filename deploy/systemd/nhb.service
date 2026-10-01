@@ -14,5 +14,15 @@ Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
 
+# Resource-isolation interim mitigation (2026-10-01): this node shares its
+# host with off-chain daemons and/or a portal process on some deployments.
+# A high scheduling weight does not cap other services, it just wins CPU/IO
+# contention against them under load, protecting block production without
+# needing a hard ceiling on the validator itself. Applied live via
+# `systemctl set-property` on existing hosts; kept here so a future
+# re-provision of this unit doesn't silently drop it.
+CPUWeight=9000
+IOWeight=9000
+
 [Install]
 WantedBy=multi-user.target
