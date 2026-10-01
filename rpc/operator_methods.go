@@ -54,6 +54,18 @@ import (
 // fiat-settlement minting service relies on with no bearer credential at
 // all. See isSelfAuthenticatedMintMethod's doc comment in rpc/http.go for
 // why this is a separate check rather than folded into isPublicSwapMethod.
+//
+// A third, separately-checked exception (isSignatureThresholdAuthorizedMethod):
+// buyback_submitRefPrice and lending_submitRefPrice. Unlike mint_with_sig,
+// their case arms in rpc/http.go's handle() already call requireAuthInto, so
+// a valid credential is still required -- only the additional operator-role
+// layer is skipped. Their real, independent control is an on-chain M-of-N
+// signature-threshold check against a genesis-declared signer quorum
+// (core/buyback_tx.go's applyBuybackRefPrice, core/lending_tx.go's
+// applyLendingRefPriceTransaction), which the real, currently-deployed
+// off-chain reference-price submission service relies on without an
+// operator-scoped credential. See isSignatureThresholdAuthorizedMethod's doc
+// comment in rpc/http.go for the full reasoning.
 var OperatorOnlyMethods = map[string]struct{}{
 	// --- p2p network control and node-internal sync (also covered by prefixes below)
 	"net_info":             {},
@@ -83,8 +95,8 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"mint_with_sig":               {}, // NHB mint via signed voucher; exempt from the gate below, see isSelfAuthenticatedMintMethod
 
 	// --- oracle / reference-price submission
-	"buyback_submitRefPrice": {},
-	"lending_submitRefPrice": {},
+	"buyback_submitRefPrice": {}, // M-of-N signed ref price; exempt from the gate below, see isSignatureThresholdAuthorizedMethod
+	"lending_submitRefPrice": {}, // M-of-N signed ref price; exempt from the gate below, see isSignatureThresholdAuthorizedMethod
 
 	// --- paymaster and POS operations
 	"tx_setSponsorshipEnabled": {},

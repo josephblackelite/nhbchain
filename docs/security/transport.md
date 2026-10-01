@@ -108,13 +108,23 @@ MaxSkewSeconds = 120
 ### Operator-only RPC methods
 
 A fixed table of admin-grade methods (`net_ban`, `sync_snapshot_import`,
-`swap_setManualQuote`, `buyback_submitRefPrice`, and the rest of
+`swap_setManualQuote`, `potso_reward_claim`, and the rest of
 `rpc.OperatorOnlyMethods`/`OperatorOnlyMethodPrefixes` in
 `rpc/operator_methods.go`) requires an **operator-scoped** credential, checked
 by the node itself -- not just by nhbportal's browser gateway deny-list
 (`src/routes/api/rpc/operatorMethods.ts`), which a caller that reaches this
 node directly (an off-chain daemon, a misconfigured client, a compromised
 credential) never passed through in the first place.
+
+A handful of methods in that same table are deliberately exempt from the
+operator-role requirement because they already carry their own independent,
+at-least-as-strong authorization: `mint_with_sig` (an on-chain voucher
+signature plus a minter-role check), and `buyback_submitRefPrice` /
+`lending_submitRefPrice` (an on-chain M-of-N signature-threshold check against
+a genesis-declared signer quorum -- these two still require their own
+authenticated, non-operator-scoped credential via the node's normal JWT/mTLS
+check). See `rpc/http.go`'s `isSelfAuthenticatedMintMethod` and
+`isSignatureThresholdAuthorizedMethod` for the full reasoning.
 
 A credential is operator-scoped when either is true:
 
