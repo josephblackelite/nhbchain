@@ -448,6 +448,20 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 		t.Fatalf("payout lookup B: %v", err)
 	}
 
+	// The full epoch obligation (both A and B's payouts) must already be
+	// reserved/debited from the treasury at epoch close -- before either
+	// winner has claimed anything -- so that a later epoch's budget can
+	// never be sized against ZNHB already promised here. See
+	// processPotsoRewardEpoch's RewardPayoutModeClaim branch.
+	reservedTreasury, err := manager.GetAccount(treasury[:])
+	if err != nil {
+		t.Fatalf("reload treasury after epoch close: %v", err)
+	}
+	wantReserved := new(big.Int).Sub(big.NewInt(900), new(big.Int).Add(payoutA, payoutB))
+	if reservedTreasury.BalanceZNHB.Cmp(wantReserved) != 0 {
+		t.Fatalf("treasury not reserved at epoch close: got %s want %s", reservedTreasury.BalanceZNHB, wantReserved)
+	}
+
 	paid, amount, err := node.PotsoRewardClaim(0, participantA)
 	if err != nil {
 		t.Fatalf("claim payout: %v", err)
@@ -486,14 +500,15 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 		t.Fatalf("expected idempotent claim to report paid=false")
 	}
 
+	// Claiming must NOT debit the treasury a second time -- the whole
+	// epoch's obligation (A+B) was already reserved at epoch close above, so
+	// the balance here must be unchanged by A's claim.
 	updatedTreasury, err := manager.GetAccount(treasury[:])
 	if err != nil {
 		t.Fatalf("reload treasury: %v", err)
 	}
-	expectedTreasury := big.NewInt(900)
-	expectedTreasury.Sub(expectedTreasury, payoutA)
-	if updatedTreasury.BalanceZNHB.Cmp(expectedTreasury) != 0 {
-		t.Fatalf("treasury not debited after claim: %s", updatedTreasury.BalanceZNHB)
+	if updatedTreasury.BalanceZNHB.Cmp(reservedTreasury.BalanceZNHB) != 0 {
+		t.Fatalf("treasury balance changed on claim (double-debit): before=%s after=%s", reservedTreasury.BalanceZNHB, updatedTreasury.BalanceZNHB)
 	}
 
 	eventsList = node.state.Events()
