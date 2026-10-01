@@ -96,7 +96,7 @@ fails with `dial tcp: address enode://...: too many colons in address`.
 
 ### What the script actually does, in order
 
-1. Installs Go 1.24.3 if it isn't already present.
+1. Installs Go 1.26.6 if it isn't already present.
 2. Adds a 4G swap file automatically on low-RAM/no-swap hosts. This exists
    because a real `t3.micro`-class box (908MB RAM, no swap) was OOM-killed
    compiling this dependency tree, even with plenty of disk free.

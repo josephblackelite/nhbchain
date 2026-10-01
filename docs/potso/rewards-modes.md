@@ -55,8 +55,9 @@ effect immediately after the configuration is reloaded; the next epoch will foll
    when future exports show mixed modes.
 3. **Monitor webhooks and history.** The new ledger records (`PotsoRewardsGetClaim`, `PotsoRewardsHistory`) expose the mode for
    every entry. Dashboards should surface the mode to differentiate auto vs. manual payouts.
-4. **Update off-chain automation.** Claim mode requires downstream workers (bots, finance ops) to submit signed claims. CLI
-   support is provided via `nhb-cli potso reward claim`.
+4. **Update off-chain automation.** Claim mode requires downstream workers (bots, finance ops) to submit signed claims. The
+   `potso_reward_claim` RPC and `nhb-cli potso reward claim` are retired (both report that and exit non-zero), so claim
+   mode has no way to pay a reward today.
 
 ## Operational Trade-offs
 
