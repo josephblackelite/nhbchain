@@ -21,6 +21,11 @@ type RPCProxyHeaders struct {
 }
 
 // RPCJWT captures JWT validation settings enforced by the RPC server.
+//
+// Operator-only RPC methods (see rpc/operator_methods.go) additionally
+// require the bearer JWT's 'role' claim to equal "operator" -- there is no
+// config knob for that; it is a property of the token itself, minted with
+// e.g. generate_operator_jwt.go.
 type RPCJWT struct {
 	Enable           bool     `toml:"Enable"`
 	Alg              string   `toml:"Alg"`

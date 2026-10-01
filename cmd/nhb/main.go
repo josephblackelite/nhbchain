@@ -582,6 +582,7 @@ func main() {
 		TLSCertFile:              cfg.RPCTLSCertFile,
 		TLSKeyFile:               cfg.RPCTLSKeyFile,
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
+		OperatorClientCertOU:     cfg.RPCOperatorClientCertOU,
 		AllowInsecure:            cfg.RPCAllowInsecure,
 		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
 		SwapAuth:                 swapAuthCfg,

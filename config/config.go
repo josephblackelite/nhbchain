@@ -108,9 +108,15 @@ type Config struct {
 	RPCTLSCertFile              string                       `toml:"RPCTLSCertFile"`
 	RPCTLSKeyFile               string                       `toml:"RPCTLSKeyFile"`
 	RPCTLSClientCAFile          string                       `toml:"RPCTLSClientCAFile"`
-	DataDir                     string                       `toml:"DataDir"`
-	GenesisFile                 string                       `toml:"GenesisFile"`
-	AllowAutogenesis            bool                         `toml:"AllowAutogenesis"`
+	// RPCOperatorClientCertOU, when set, marks a verified mTLS client
+	// certificate as carrying the operator role if any of its Subject
+	// OrganizationalUnit values case-insensitively match it. Leave empty (the
+	// default) unless RPCTLSClientCAFile is also configured; see
+	// rpc.ServerConfig.OperatorClientCertOU.
+	RPCOperatorClientCertOU string `toml:"RPCOperatorClientCertOU"`
+	DataDir                 string `toml:"DataDir"`
+	GenesisFile             string `toml:"GenesisFile"`
+	AllowAutogenesis        bool   `toml:"AllowAutogenesis"`
 	// QuorumCertActivationHeight enables NHB-TRIAGE-C1's quorum-certificate
 	// check on the untrusted P2P block-sync path once set: blocks at this
 	// height or below sync without one (grandfathering already-committed
@@ -124,35 +130,35 @@ type Config struct {
 	// height 1" via this config field specifically -- that only matters for
 	// a brand-new chain wanting the protection from genesis, not for
 	// upgrading an already-live one.
-	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
-	ValidatorKeystorePath       string                       `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI             string                       `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv             string                       `toml:"ValidatorKMSEnv"`
-	NetworkName                 string                       `toml:"NetworkName"`
-	Bootnodes                   []string                     `toml:"Bootnodes"`
-	PersistentPeers             []string                     `toml:"PersistentPeers"`
-	BootstrapPeers              []string                     `toml:"BootstrapPeers,omitempty"`
-	MaxPeers                    int                          `toml:"MaxPeers"`
-	MaxInbound                  int                          `toml:"MaxInbound"`
-	MaxOutbound                 int                          `toml:"MaxOutbound"`
-	MinPeers                    int                          `toml:"MinPeers"`
-	OutboundPeers               int                          `toml:"OutboundPeers"`
-	PeerBanSeconds              int                          `toml:"PeerBanSeconds"`
-	ReadTimeout                 int                          `toml:"ReadTimeout"`
-	WriteTimeout                int                          `toml:"WriteTimeout"`
-	MaxMsgBytes                 int                          `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond            float64                      `toml:"MaxMsgsPerSecond"`
-	ClientVersion               string                       `toml:"ClientVersion"`
-	P2P                         P2PSection                   `toml:"p2p"`
-	Potso                       PotsoConfig                  `toml:"potso"`
-	Governance                  GovConfig                    `toml:"governance"`
-	Swap                        swap.Config                  `toml:"swap"`
-	Lending                     lending.Config               `toml:"lending"`
-	Subscriptions               Subscriptions                `toml:"subscriptions"`
-	Mempool                     MempoolConfig                `toml:"mempool"`
-	Global                      Global                       `toml:"global"`
-	Consensus                   Consensus                    `toml:"consensus"`
-	NetworkSecurity             NetworkSecurity              `toml:"network_security"`
+	QuorumCertActivationHeight uint64          `toml:"QuorumCertActivationHeight"`
+	ValidatorKeystorePath      string          `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI            string          `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv            string          `toml:"ValidatorKMSEnv"`
+	NetworkName                string          `toml:"NetworkName"`
+	Bootnodes                  []string        `toml:"Bootnodes"`
+	PersistentPeers            []string        `toml:"PersistentPeers"`
+	BootstrapPeers             []string        `toml:"BootstrapPeers,omitempty"`
+	MaxPeers                   int             `toml:"MaxPeers"`
+	MaxInbound                 int             `toml:"MaxInbound"`
+	MaxOutbound                int             `toml:"MaxOutbound"`
+	MinPeers                   int             `toml:"MinPeers"`
+	OutboundPeers              int             `toml:"OutboundPeers"`
+	PeerBanSeconds             int             `toml:"PeerBanSeconds"`
+	ReadTimeout                int             `toml:"ReadTimeout"`
+	WriteTimeout               int             `toml:"WriteTimeout"`
+	MaxMsgBytes                int             `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond           float64         `toml:"MaxMsgsPerSecond"`
+	ClientVersion              string          `toml:"ClientVersion"`
+	P2P                        P2PSection      `toml:"p2p"`
+	Potso                      PotsoConfig     `toml:"potso"`
+	Governance                 GovConfig       `toml:"governance"`
+	Swap                       swap.Config     `toml:"swap"`
+	Lending                    lending.Config  `toml:"lending"`
+	Subscriptions              Subscriptions   `toml:"subscriptions"`
+	Mempool                    MempoolConfig   `toml:"mempool"`
+	Global                     Global          `toml:"global"`
+	Consensus                  Consensus       `toml:"consensus"`
+	NetworkSecurity            NetworkSecurity `toml:"network_security"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.
