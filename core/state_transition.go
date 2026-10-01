@@ -2335,10 +2335,17 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		treasuryAcc.BalanceZNHB = big.NewInt(0)
 	}
 	treasuryBalance := new(big.Int).Set(treasuryAcc.BalanceZNHB)
+	// Budget is derived from emission alone, deliberately uncapped by the
+	// treasury's current balance. Capping it here used to make the
+	// shortfall check below (ErrInsufficientTreasury) structurally
+	// unreachable, since totalPaid can never exceed an already-capped
+	// budget -- the actual payout attempt is what must discover a real
+	// shortfall. This mirrors every other POTSO/staking payout path in this
+	// codebase (PotsoRewardClaim in core/node.go, and the legacy-accrued and
+	// index-based staking reward mints above), all of which hard-fail on an
+	// insufficient treasury rather than silently paying out less than
+	// configured.
 	budget := new(big.Int).Set(emission)
-	if treasuryBalance.Cmp(budget) < 0 {
-		budget = new(big.Int).Set(treasuryBalance)
-	}
 
 	weightCfg := sp.potsoWeightConfig
 	weightCfg.AlphaStakeBps = cfg.AlphaStakeBps
@@ -2379,6 +2386,38 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 	}
 	switch payoutMode {
 	case potso.RewardPayoutModeClaim:
+		// Reserve/debit the full claim-mode obligation from the treasury's
+		// spendable balance NOW, at the moment the obligation is created,
+		// the same way the auto-payout branch below already debits
+		// immediately. The treasury balance read at the top of this
+		// function is a fresh, undebited read every epoch -- without this
+		// debit, successive claim-mode epochs would each size their budget
+		// against the same unreserved balance, promising more in claimable
+		// rewards across epochs than the treasury can actually pay out once
+		// claims are settled. The matching credit happens exactly once,
+		// later, in core/node.go's PotsoRewardClaim when the winner actually
+		// claims -- that path must never debit the treasury again, or this
+		// amount is double-spent.
+		if totalPaid.Sign() > 0 {
+			treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+			if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+				return err
+			}
+			// See the identical guard in the auto-payout branch below: when
+			// the reward treasury is the same wallet CheckZNHBSupplyInvariant
+			// tracks, debiting its balance without shrinking the pool label
+			// it backs mints ZNHB from nothing in the invariant's eyes. No
+			// self/external split is needed here (unlike the auto branch) --
+			// in claim mode nobody is credited yet, not even a winner who is
+			// the admin wallet itself, so the full amount leaves the tracked
+			// balance; PotsoRewardClaim adds the matching positive
+			// adjustment back when a self-winning admin wallet later claims.
+			if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
+				if err := sp.adjustRewardPoolForAdminZNHBMovement(new(big.Int).Neg(totalPaid)); err != nil {
+					return err
+				}
+			}
+		}
 		for _, winner := range outcome.Winners {
 			claim := &potso.RewardClaim{
 				Amount:    new(big.Int).Set(winner.Amount),
