@@ -158,6 +158,14 @@ func main() {
 		// made in config.toml, never inferred.
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
 	}
+	if cfg.FeeRouteAliasActivationHeight > 0 {
+		// See config.Config.FeeRouteAliasActivationHeight's doc comment --
+		// left unset (0) here means PL-R1-FEEROUTE's fix stays disabled,
+		// exactly like every prior release. Enabling it is a deliberate,
+		// coordinated, every-validator-at-once decision made in
+		// config.toml, never inferred.
+		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {

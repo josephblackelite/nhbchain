@@ -114,53 +114,72 @@ type Node struct {
 	// validator, as part of one coordinated upgrade -- deliberately NOT
 	// auto-detected from chain state, since that could let one validator
 	// silently enforce while its peers don't.
-	quorumCertActivationHeight   uint64
-	escrowTreasury               [20]byte
-	engagementMgr                *engagement.Manager
-	govPolicy                    governance.ProposalPolicy
-	govPolicyMu                  sync.RWMutex
-	swapCfgMu                    sync.RWMutex
-	swapCfg                      swap.Config
-	swapOracle                   swap.PriceOracle
-	swapManual                   *swap.ManualOracle
-	swapSanctions                swap.SanctionsChecker
-	swapStatusMu                 sync.RWMutex
-	swapOracleLast               int64
-	evidenceMaxAge               uint64
-	paymasterMu                  sync.RWMutex
-	paymasterEnabled             bool
-	paymasterLimits              PaymasterLimits
-	paymasterTopUpPolicy         PaymasterAutoTopUpPolicy
-	timestampTolerance           time.Duration
-	timeConfigMu                 sync.RWMutex
-	timeSource                   func() time.Time
-	lendingMu                    sync.RWMutex
-	lendingParams                lending.RiskParameters
-	lendingModuleAddr            crypto.Address
-	lendingCollateralAddr        crypto.Address
-	lendingDeveloperFeeBps       uint64
-	lendingDeveloperFeeCollector crypto.Address
-	lendingInterestModel         *lending.InterestModel
-	lendingReserveFactorBps      uint64
-	lendingProtocolFeeBps        uint64
-	lendingCollateralRouting     lending.CollateralRouting
-	creatorPayoutVaultAddr       crypto.Address
-	creatorRewardsTreasuryAddr   crypto.Address
-	modulePauseMu                sync.RWMutex
-	modulePauses                 map[string]bool
-	moduleQuotaMu                sync.RWMutex
-	moduleQuotas                 map[string]nativecommon.Quota
-	feesMu                       sync.RWMutex
-	feesPolicy                   fees.Policy
-	transferGasPolicy            TransferGasPolicy
-	potsoEngineMu                sync.Mutex
-	potsoEngine                  *potso.Engine
-	potsoLedger                  *statepotso.Ledger
-	globalCfgMu                  sync.RWMutex
-	globalCfg                    config.Global
-	networkMode                  string
-	networkBroadcaster           p2p.Broadcaster
-	blockSyncMu                  sync.Mutex
+	quorumCertActivationHeight uint64
+	// feeRouteAliasActivationHeight gates PL-R1-FEEROUTE's fix to
+	// applyTransactionFee (core/state_transition.go): below this height, a
+	// domain fee's route wallet that aliases the transfer's own sender or
+	// recipient is still credited through a separate, freshly-loaded
+	// account copy that the caller's own later persist silently overwrites
+	// (the original behavior, so already-committed history keeps replaying
+	// to the identical state root); at or above it, the credit lands on the
+	// caller's already-loaded sender/recipient object instead, so it
+	// survives. Mirrors quorumCertActivationHeight's gating shape exactly
+	// -- see StateProcessor.SetFeeRouteAliasActivationHeight's doc comment
+	// for the full rationale. NewNode defaults this to math.MaxUint64
+	// (disabled -- every existing caller, including the whole test suite,
+	// keeps today's behavior unchanged). Enabling this is an explicit,
+	// deploy-time decision, not automatic: SetFeeRouteAliasActivationHeight
+	// must be called with the chain's current tip height, on every
+	// validator, as part of one coordinated upgrade -- deliberately NOT
+	// auto-detected from chain state, for the same reason
+	// SetQuorumCertActivationHeight's doc comment gives.
+	feeRouteAliasActivationHeight uint64
+	escrowTreasury                [20]byte
+	engagementMgr                 *engagement.Manager
+	govPolicy                     governance.ProposalPolicy
+	govPolicyMu                   sync.RWMutex
+	swapCfgMu                     sync.RWMutex
+	swapCfg                       swap.Config
+	swapOracle                    swap.PriceOracle
+	swapManual                    *swap.ManualOracle
+	swapSanctions                 swap.SanctionsChecker
+	swapStatusMu                  sync.RWMutex
+	swapOracleLast                int64
+	evidenceMaxAge                uint64
+	paymasterMu                   sync.RWMutex
+	paymasterEnabled              bool
+	paymasterLimits               PaymasterLimits
+	paymasterTopUpPolicy          PaymasterAutoTopUpPolicy
+	timestampTolerance            time.Duration
+	timeConfigMu                  sync.RWMutex
+	timeSource                    func() time.Time
+	lendingMu                     sync.RWMutex
+	lendingParams                 lending.RiskParameters
+	lendingModuleAddr             crypto.Address
+	lendingCollateralAddr         crypto.Address
+	lendingDeveloperFeeBps        uint64
+	lendingDeveloperFeeCollector  crypto.Address
+	lendingInterestModel          *lending.InterestModel
+	lendingReserveFactorBps       uint64
+	lendingProtocolFeeBps         uint64
+	lendingCollateralRouting      lending.CollateralRouting
+	creatorPayoutVaultAddr        crypto.Address
+	creatorRewardsTreasuryAddr    crypto.Address
+	modulePauseMu                 sync.RWMutex
+	modulePauses                  map[string]bool
+	moduleQuotaMu                 sync.RWMutex
+	moduleQuotas                  map[string]nativecommon.Quota
+	feesMu                        sync.RWMutex
+	feesPolicy                    fees.Policy
+	transferGasPolicy             TransferGasPolicy
+	potsoEngineMu                 sync.Mutex
+	potsoEngine                   *potso.Engine
+	potsoLedger                   *statepotso.Ledger
+	globalCfgMu                   sync.RWMutex
+	globalCfg                     config.Global
+	networkMode                   string
+	networkBroadcaster            p2p.Broadcaster
+	blockSyncMu                   sync.Mutex
 	// externalCommitNotifier, if set, is called after a block committed via
 	// the peer-sync path (handleNetworkBlocks/commitSyncedBlock) so the BFT
 	// engine can immediately abandon a stale in-flight round for a height
@@ -375,6 +394,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(n.governancePolicy())
+	stateProcessor.SetFeeRouteAliasActivationHeight(n.feeRouteAliasActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -608,13 +628,18 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		// unchanged behavior unless SetQuorumCertActivationHeight is
 		// called explicitly to opt in.
 		quorumCertActivationHeight: math.MaxUint64,
-		lendingModuleAddr:          moduleAddr,
-		lendingCollateralAddr:      collateralAddr,
-		creatorPayoutVaultAddr:     creatorVaultAddr,
-		creatorRewardsTreasuryAddr: creatorRewardsAddr,
-		modulePauses:               make(map[string]bool),
-		moduleQuotas:               make(map[string]nativecommon.Quota),
-		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		// Disabled by default (see the field doc comment): every existing
+		// caller of NewNode, including the whole test suite, gets today's
+		// unchanged behavior unless SetFeeRouteAliasActivationHeight is
+		// called explicitly to opt in.
+		feeRouteAliasActivationHeight: math.MaxUint64,
+		lendingModuleAddr:             moduleAddr,
+		lendingCollateralAddr:         collateralAddr,
+		creatorPayoutVaultAddr:        creatorVaultAddr,
+		creatorRewardsTreasuryAddr:    creatorRewardsAddr,
+		modulePauses:                  make(map[string]bool),
+		moduleQuotas:                  make(map[string]nativecommon.Quota),
+		feesPolicy:                    fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		transferGasPolicy: TransferGasPolicy{
 			Enabled: true,
 			// 1000 NHB (18 decimals), not 1000 base units -- the founder's
@@ -688,6 +713,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetLendingDeveloperFee(node.lendingDeveloperFeeBps, node.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(node.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(node.governancePolicy())
+	stateProcessor.SetFeeRouteAliasActivationHeight(node.feeRouteAliasActivationHeight)
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -4300,6 +4326,28 @@ func (n *Node) SetQuorumCertActivationHeight(height uint64) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	n.quorumCertActivationHeight = height
+}
+
+// SetFeeRouteAliasActivationHeight configures the height at and above which
+// applyTransactionFee reuses the caller's already-loaded sender/recipient
+// account when a domain fee's route wallet aliases one of them, instead of
+// crediting a separate, freshly-loaded copy -- see the field doc comment on
+// Node.feeRouteAliasActivationHeight and
+// StateProcessor.SetFeeRouteAliasActivationHeight's doc comment
+// (core/state_transition.go) for the full PL-R1-FEEROUTE rationale. A live
+// chain being upgraded to enable this MUST call it with its current tip
+// height, identically on every validator, as part of a coordinated deploy.
+func (n *Node) SetFeeRouteAliasActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	n.feeRouteAliasActivationHeight = height
+	state := n.state
+	n.stateMu.Unlock()
+	if state != nil {
+		state.SetFeeRouteAliasActivationHeight(height)
+	}
 }
 
 // RemoveValidatorFromSet permanently removes addr from the active and

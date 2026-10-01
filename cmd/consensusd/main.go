@@ -194,6 +194,13 @@ func main() {
 	if cfg.QuorumCertActivationHeight > 0 {
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
 	}
+	// See cmd/nhb/main.go's matching FeeRouteAliasActivationHeight guard and
+	// config.Config.FeeRouteAliasActivationHeight's doc comment. Left unset
+	// (0) here means PL-R1-FEEROUTE's fix stays disabled, exactly like
+	// every prior release.
+	if cfg.FeeRouteAliasActivationHeight > 0 {
+		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
