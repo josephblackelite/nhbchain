@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -508,6 +509,151 @@ func TestRateLimiterIsolatesMethods(t *testing.T) {
 	}
 	if allowed["b"] != limitB {
 		t.Fatalf("expected method %s to allow %d requests, got %d", methodB, limitB, allowed["b"])
+	}
+}
+
+// TestRateLimiterDoesNotDoubleBurstAtWindowBoundary proves the sliding
+// token-bucket limiter does not reproduce the old fixed-window limiter's
+// boundary bug: a caller that exhausted its budget late in one window and
+// then bursts again just after what would have been the next window's reset
+// must still be held to roughly its single-window limit across that short
+// span, not allowed close to 2x it.
+func TestRateLimiterDoesNotDoubleBurstAtWindowBoundary(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{})
+	source := "198.51.100.90"
+	window := server.rateLimitWindow
+	limit := server.rateLimitMax[limiterScopeIP][""]
+	if limit < 2 {
+		t.Fatalf("test requires a limit of at least 2, got %d", limit)
+	}
+
+	t0 := time.Now()
+	totalAllowed := 0
+
+	// Prime the limiter at t0 so its bucket/window is anchored there.
+	if !server.allowSource(source, "", "", rateLimitTestMethod, t0) {
+		t.Fatalf("expected priming request at t0 to be allowed")
+	}
+	totalAllowed++
+
+	// Spend the rest of the budget right at the end of the first window --
+	// under the old fixed-window scheme this is still well inside the
+	// window that started at t0, so all of these are correctly allowed.
+	tEndOfWindow := t0.Add(window - time.Millisecond)
+	for i := 1; i < limit; i++ {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, tEndOfWindow) {
+			t.Fatalf("expected request %d near end of window to be allowed", i)
+		}
+		totalAllowed++
+	}
+
+	// Jump just past the old window boundary (t0+window) and hammer the
+	// limiter with a full burst of `limit` more requests. The old
+	// fixed-window code would reset count to 0 here and allow all of them,
+	// doubling the effective burst within a couple of milliseconds. The new
+	// sliding token bucket should only have refilled a negligible fraction
+	// of a token in that time and must reject nearly all of them.
+	tAfterBoundary := t0.Add(window + time.Millisecond)
+	burstAllowed := 0
+	for i := 0; i < limit; i++ {
+		if server.allowSource(source, "", "", rateLimitTestMethod, tAfterBoundary) {
+			burstAllowed++
+			totalAllowed++
+		}
+	}
+
+	if burstAllowed >= limit {
+		t.Fatalf("sliding window allowed a full extra burst (%d requests) right after the old window boundary; fixed-window double-burst bug is back", burstAllowed)
+	}
+	if totalAllowed > limit+1 {
+		t.Fatalf("expected at most ~%d requests allowed across the boundary-straddling span (2ms wide), got %d", limit+1, totalAllowed)
+	}
+}
+
+// TestRateLimiterAllowsSustainedRateWithoutThrottling proves a caller
+// spacing its requests evenly at a rate comfortably within its configured
+// limit is never incorrectly throttled by the token-bucket limiter, even
+// across many refill cycles.
+func TestRateLimiterAllowsSustainedRateWithoutThrottling(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{})
+	source := "198.51.100.91"
+	window := server.rateLimitWindow
+	limit := server.rateLimitMax[limiterScopeIP][""]
+	if limit < 1 {
+		t.Fatalf("test requires a positive limit, got %d", limit)
+	}
+
+	// Space requests out at 90% of the maximum sustained rate (limit per
+	// window) so floating point refill rounding can never cause a spurious
+	// rejection right at the edge.
+	interval := time.Duration(float64(window) / float64(limit) * 1.10)
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+
+	now := time.Now()
+	cycles := 3
+	iterations := int(window/interval)*cycles + 1
+	for i := 0; i < iterations; i++ {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, now) {
+			t.Fatalf("request %d at sustained rate (interval %s) was incorrectly throttled", i, interval)
+		}
+		now = now.Add(interval)
+	}
+}
+
+// TestRateLimitExceededResponseIncludesRetryAfter proves the "RPC rate limit
+// exceeded" 429 response carries a Retry-After header with a sensible,
+// positive value once a caller is throttled, and that the header is absent
+// from the preceding successful responses.
+func TestRateLimitExceededResponseIncludesRetryAfter(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{})
+	limit := server.rateLimitMax[limiterScopeIP][""]
+	window := server.rateLimitWindow
+	remoteAddr := "198.51.100.92:4000"
+
+	doRequest := func() *httptest.ResponseRecorder {
+		body := []byte(`{"jsonrpc":"2.0","id":1,"method":"` + rateLimitTestMethod + `","params":[]}`)
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		server.handle(recorder, req)
+		return recorder
+	}
+
+	for i := 0; i < limit; i++ {
+		recorder := doRequest()
+		if recorder.Code == http.StatusTooManyRequests {
+			t.Fatalf("request %d unexpectedly rate limited before exhausting budget", i)
+		}
+		if recorder.Header().Get("Retry-After") != "" {
+			t.Fatalf("request %d should not carry a Retry-After header", i)
+		}
+	}
+
+	recorder := doRequest()
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status 429 once budget is exhausted, got %d", recorder.Code)
+	}
+	retryAfter := recorder.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatalf("expected Retry-After header on rate-limited response")
+	}
+	seconds, err := strconv.Atoi(retryAfter)
+	if err != nil {
+		t.Fatalf("expected Retry-After to be an integer number of seconds, got %q: %v", retryAfter, err)
+	}
+	if seconds < 1 || time.Duration(seconds)*time.Second > window {
+		t.Fatalf("expected Retry-After to be between 1 second and the rate limit window (%s), got %d seconds", window, seconds)
+	}
+
+	var resp RPCResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Error == nil || resp.Error.Code != codeRateLimited {
+		t.Fatalf("expected rate limited rpc error, got %+v", resp.Error)
 	}
 }
 

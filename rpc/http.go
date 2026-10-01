@@ -39,6 +39,7 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
@@ -91,7 +92,18 @@ const (
 type rateLimiter struct {
 	count       int
 	windowStart time.Time
-	lastSeen    time.Time
+
+	// limiter is a golang.org/x/time/rate token-bucket limiter, built the
+	// same way gateway/middleware/ratelimit.go builds its own per-key
+	// limiter: rate.NewLimiter(limit/window tokens per second, limit burst).
+	// allowSourceWithRetryAfter uses it instead of count/windowStart so
+	// bursts are smoothed across a rolling window rather than reset hard at
+	// fixed window boundaries. It is nil for a scope with no configured
+	// limit. The swap-partner limiter below still uses count/windowStart for
+	// its own, unrelated fixed-window quota.
+	limiter *rate.Limiter
+
+	lastSeen time.Time
 }
 
 type txSeenEntry struct {
@@ -1371,7 +1383,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	if req.Method != "nhb_sendTransaction" {
 		source := s.clientSource(r)
 		identity, _ := r.Context().Value(clientIdentityContextKey).(string)
-		if !s.allowSource(source, identity, "", req.Method, time.Now()) {
+		if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, "", req.Method, time.Now()); !allowed {
+			recorder.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "RPC rate limit exceeded", source)
 			return
 		}
@@ -2515,7 +2528,34 @@ func (s *Server) swapNow() time.Time {
 	return time.Now()
 }
 
+// allowSource reports whether a request from the given source/identity/chain
+// scope is within its configured rate limits. It is a thin wrapper around
+// allowSourceWithRetryAfter for callers that don't need the suggested
+// Retry-After delay.
 func (s *Server) allowSource(source, identity, chainNonce, method string, now time.Time) bool {
+	allowed, _ := s.allowSourceWithRetryAfter(source, identity, chainNonce, method, now)
+	return allowed
+}
+
+// allowSourceWithRetryAfter is the same per-key limiter allowSource exposes,
+// extended to also report how long the caller should wait before its next
+// request would be let through when the answer is false.
+//
+// Each limiter key (identity+chain, identity, chain, IP -- same scopes and
+// same s.rateLimiters map/eviction mechanism as before) is now backed by a
+// golang.org/x/time/rate token bucket instead of a fixed window: tokens are
+// capped at the scope's configured limit and refill continuously at
+// limit/window tokens per second, rather than being reset to zero in a
+// single jump once a fixed window elapses. A fixed window let a caller near
+// the end of one window and the start of the next push close to 2x its
+// configured limit through in a short span straddling the boundary; a
+// continuously-refilling bucket closes that near-instant, zero-delay
+// boundary burst. It does not claim a stronger bound than any token bucket
+// actually provides: in the worst case -- a full burst immediately followed
+// by another full burst once the bucket has refilled, one window later --
+// up to 2x the configured limit can still go through, same as any
+// token-bucket limiter.
+func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method string, now time.Time) (bool, time.Duration) {
 	normalized := canonicalHost(source)
 	if normalized == "" {
 		normalized = "unknown"
@@ -2573,35 +2613,91 @@ func (s *Server) allowSource(source, identity, chainNonce, method string, now ti
 		}
 		return 0
 	}
-	limiters := make([]*rateLimiter, len(keys))
+	type reservation struct {
+		limiter *rateLimiter
+		limit   int
+	}
+	reservations := make([]reservation, len(keys))
 	for i, descriptor := range keys {
+		limit := lookupLimit(descriptor.scope)
 		limiter, ok := s.rateLimiters[descriptor.key]
 		if !ok {
 			if len(s.rateLimiters) >= rateLimiterMaxEntries {
 				s.evictOldestLimiterLocked()
 			}
-			limiter = &rateLimiter{windowStart: now, lastSeen: now}
+			limiter = &rateLimiter{lastSeen: now}
+			if limit > 0 {
+				limiter.limiter = newSourceRateLimiter(limit, s.rateLimitWindow)
+			}
 			s.rateLimiters[descriptor.key] = limiter
 		}
-		if now.Sub(limiter.windowStart) >= s.rateLimitWindow {
-			limiter.windowStart = now
-			limiter.count = 0
-		}
-		limit := lookupLimit(descriptor.scope)
-		if limit > 0 && limiter.count >= limit {
+		// Peek (non-destructive) at time now: TokensAt refills the bucket as
+		// of now without consuming anything, so every key in this request
+		// can be checked before any of them commit a token below.
+		if limit > 0 && limiter.limiter.TokensAt(now) < 1 {
 			limiter.lastSeen = now
+			retryAfter := rateLimiterRetryAfter(limiter.limiter, now)
 			s.mu.Unlock()
 			observability.RPC().RecordLimiterHit(descriptor.scope, moduleName, trimmedMethod)
-			return false
+			return false, retryAfter
 		}
-		limiters[i] = limiter
+		reservations[i] = reservation{limiter: limiter, limit: limit}
 	}
-	for _, limiter := range limiters {
-		limiter.count++
-		limiter.lastSeen = now
+	for _, reserved := range reservations {
+		if reserved.limit > 0 {
+			// Already confirmed available via TokensAt above at this same
+			// now, so this commits the token rather than re-deciding.
+			reserved.limiter.limiter.AllowN(now, 1)
+		}
+		reserved.limiter.lastSeen = now
 	}
 	s.mu.Unlock()
-	return true
+	return true, 0
+}
+
+// newSourceRateLimiter builds the golang.org/x/time/rate limiter backing a
+// single allowSourceWithRetryAfter cache key, the same way
+// gateway/middleware/ratelimit.go builds its own per-key limiter: tokens
+// refill continuously at limit/window tokens per second and are capped at
+// limit, so bursts are smoothed across a rolling window instead of being
+// reset hard at a fixed window boundary.
+func newSourceRateLimiter(limit int, window time.Duration) *rate.Limiter {
+	if window <= 0 {
+		window = defaultRateLimitWindow
+	}
+	return rate.NewLimiter(rate.Limit(float64(limit)/window.Seconds()), limit)
+}
+
+// rateLimiterRetryAfter estimates how long until limiter would hold another
+// whole token at time now, for use as the rejected caller's Retry-After
+// hint.
+func rateLimiterRetryAfter(limiter *rate.Limiter, now time.Time) time.Duration {
+	ratePerSecond := float64(limiter.Limit())
+	if ratePerSecond <= 0 {
+		return 0
+	}
+	missing := 1 - limiter.TokensAt(now)
+	if missing <= 0 {
+		return 0
+	}
+	return time.Duration(missing / ratePerSecond * float64(time.Second))
+}
+
+// retryAfterSeconds converts a limiter-estimated wait into the whole-second
+// delta-seconds value the Retry-After header expects, always at least 1
+// second when the caller was in fact throttled.
+func retryAfterSeconds(d time.Duration) int64 {
+	if d <= 0 {
+		return 1
+	}
+	seconds := int64(d / time.Second)
+	if d%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return seconds
 }
 
 func (s *Server) evictRateLimitersLocked(now time.Time) {
