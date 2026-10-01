@@ -210,6 +210,13 @@ func main() {
 	// Same setting as cmd/nhb/main.go: zero (the default) leaves the POS hold
 	// unstake guard off; see config.Config.POSHoldUnstakeGuardActivationHeight.
 	node.SetPOSHoldUnstakeGuardActivationHeight(cfg.POSHoldUnstakeGuardActivationHeight)
+	// See cmd/nhb/main.go's matching GovCreditPreservationActivationHeight
+	// guard and config.Config.GovCreditPreservationActivationHeight's doc
+	// comment. Left unset (0) here means PL-R1-GOVREFUND's fix stays
+	// disabled, exactly like every prior release.
+	if cfg.GovCreditPreservationActivationHeight > 0 {
+		node.SetGovCreditPreservationActivationHeight(cfg.GovCreditPreservationActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()

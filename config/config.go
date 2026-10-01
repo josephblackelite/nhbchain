@@ -214,6 +214,22 @@ type Config struct {
 	// refuses. As a top-level key it goes before the first [table] of the
 	// file. See core.StateProcessor.SetPOSHoldUnstakeGuardActivationHeight.
 	POSHoldUnstakeGuardActivationHeight uint64 `toml:"POSHoldUnstakeGuardActivationHeight"`
+	// GovCreditPreservationActivationHeight enables PL-R1-GOVREFUND's fix
+	// once set: TxTypeGovFinalize/TxTypeGovExecute transactions below this
+	// height keep persisting the pre-engine-call sender snapshot
+	// after their nonce bump (grandfathering already-committed history that
+	// may rely on today's behavior); transactions at or above it reload the
+	// sender's account fresh first, so a same-address credit
+	// engine.Finalize/Execute just wrote (a deposit refund, a
+	// forfeited-deposit sweep, or a treasury-directive payout) survives
+	// instead of being silently clobbered. 0 (the default/unset value)
+	// leaves the fix fully disabled -- this field must be explicitly set to
+	// the chain's current tip height, identically on every validator, as
+	// one coordinated deploy (see core.Node.SetGovCreditPreservationActivationHeight's
+	// doc comment and core.StateProcessor.SetGovCreditPreservationActivationHeight's
+	// doc comment in core/governance_tx.go for the full rationale, including
+	// why this ships gated rather than unconditional).
+	GovCreditPreservationActivationHeight uint64 `toml:"GovCreditPreservationActivationHeight"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.

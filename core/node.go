@@ -140,51 +140,70 @@ type Node struct {
 	// validator, as part of one coordinated upgrade -- deliberately NOT
 	// auto-detected from chain state, since that could let one validator
 	// silently enforce while its peers don't.
-	quorumCertActivationHeight   uint64
-	escrowTreasury               [20]byte
-	engagementMgr                *engagement.Manager
-	govPolicy                    governance.ProposalPolicy
-	govPolicyMu                  sync.RWMutex
-	swapCfgMu                    sync.RWMutex
-	swapCfg                      swap.Config
-	swapOracle                   swap.PriceOracle
-	swapManual                   *swap.ManualOracle
-	swapSanctions                swap.SanctionsChecker
-	swapStatusMu                 sync.RWMutex
-	swapOracleLast               int64
-	paymasterMu                  sync.RWMutex
-	paymasterEnabled             bool
-	paymasterLimits              PaymasterLimits
-	paymasterTopUpPolicy         PaymasterAutoTopUpPolicy
-	timestampTolerance           time.Duration
-	timeConfigMu                 sync.RWMutex
-	timeSource                   func() time.Time
-	lendingMu                    sync.RWMutex
-	lendingParams                lending.RiskParameters
-	lendingModuleAddr            crypto.Address
-	lendingCollateralAddr        crypto.Address
-	lendingDeveloperFeeBps       uint64
-	lendingDeveloperFeeCollector crypto.Address
-	lendingInterestModel         *lending.InterestModel
-	lendingReserveFactorBps      uint64
-	lendingProtocolFeeBps        uint64
-	lendingCollateralRouting     lending.CollateralRouting
-	creatorPayoutVaultAddr       crypto.Address
-	creatorRewardsTreasuryAddr   crypto.Address
-	modulePauseMu                sync.RWMutex
-	modulePauses                 map[string]bool
-	moduleQuotaMu                sync.RWMutex
-	moduleQuotas                 map[string]nativecommon.Quota
-	feesMu                       sync.RWMutex
-	feesPolicy                   fees.Policy
-	transferGasPolicy            TransferGasPolicy
-	potsoEngineMu                sync.Mutex
-	potsoEngine                  *potso.Engine
-	globalCfgMu                  sync.RWMutex
-	globalCfg                    config.Global
-	networkMode                  string
-	networkBroadcaster           p2p.Broadcaster
-	blockSyncMu                  sync.Mutex
+	quorumCertActivationHeight uint64
+	// govCreditPreservationActivationHeight gates PL-R1-GOVREFUND's fix to
+	// applyGovFinalizeTransaction/applyGovExecuteTransaction (core/governance_tx.go):
+	// below this height, a nonce-bump persist after engine.Finalize/Execute
+	// reuses the handler's pre-call sender snapshot (the original behavior,
+	// so already-committed history keeps replaying to the identical state
+	// root); at or above it, the sender account is reloaded fresh first, so
+	// a same-address credit the engine just wrote (a deposit refund, a
+	// forfeited-deposit sweep, or a treasury-directive payout) survives.
+	// Mirrors quorumCertActivationHeight's gating shape exactly -- see
+	// StateProcessor.SetGovCreditPreservationActivationHeight's doc comment
+	// for the full rationale. NewNode defaults this to math.MaxUint64
+	// (disabled -- every existing caller, including the whole test suite,
+	// keeps today's behavior unchanged). Enabling this is an explicit,
+	// deploy-time decision, not automatic: SetGovCreditPreservationActivationHeight
+	// must be called with the chain's current tip height, on every
+	// validator, as part of one coordinated upgrade -- deliberately NOT
+	// auto-detected from chain state, for the same reason
+	// SetQuorumCertActivationHeight's doc comment gives.
+	govCreditPreservationActivationHeight uint64
+	escrowTreasury                        [20]byte
+	engagementMgr                         *engagement.Manager
+	govPolicy                             governance.ProposalPolicy
+	govPolicyMu                           sync.RWMutex
+	swapCfgMu                             sync.RWMutex
+	swapCfg                               swap.Config
+	swapOracle                            swap.PriceOracle
+	swapManual                            *swap.ManualOracle
+	swapSanctions                         swap.SanctionsChecker
+	swapStatusMu                          sync.RWMutex
+	swapOracleLast                        int64
+	paymasterMu                           sync.RWMutex
+	paymasterEnabled                      bool
+	paymasterLimits                       PaymasterLimits
+	paymasterTopUpPolicy                  PaymasterAutoTopUpPolicy
+	timestampTolerance                    time.Duration
+	timeConfigMu                          sync.RWMutex
+	timeSource                            func() time.Time
+	lendingMu                             sync.RWMutex
+	lendingParams                         lending.RiskParameters
+	lendingModuleAddr                     crypto.Address
+	lendingCollateralAddr                 crypto.Address
+	lendingDeveloperFeeBps                uint64
+	lendingDeveloperFeeCollector          crypto.Address
+	lendingInterestModel                  *lending.InterestModel
+	lendingReserveFactorBps               uint64
+	lendingProtocolFeeBps                 uint64
+	lendingCollateralRouting              lending.CollateralRouting
+	creatorPayoutVaultAddr                crypto.Address
+	creatorRewardsTreasuryAddr            crypto.Address
+	modulePauseMu                         sync.RWMutex
+	modulePauses                          map[string]bool
+	moduleQuotaMu                         sync.RWMutex
+	moduleQuotas                          map[string]nativecommon.Quota
+	feesMu                                sync.RWMutex
+	feesPolicy                            fees.Policy
+	transferGasPolicy                     TransferGasPolicy
+	potsoEngineMu                         sync.Mutex
+	potsoEngine                           *potso.Engine
+	globalCfgMu                           sync.RWMutex
+	globalCfg                             config.Global
+	networkMode                           string
+	networkBroadcaster                    p2p.Broadcaster
+	blockSyncMu                           sync.Mutex
 	// blockSyncRequest* remember the last block request sent to the peers, so
 	// that a request for the same blocks is not sent again within
 	// networkBlockSyncRequestGap. Node-local pacing only: nothing here reaches
@@ -411,6 +430,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetGovernancePolicy(n.governancePolicy())
 	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
 	stateProcessor.SetPOSHoldUnstakeGuardActivationHeight(n.posHoldUnstakeGuardHeight)
+	stateProcessor.SetGovCreditPreservationActivationHeight(n.govCreditPreservationActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -644,13 +664,18 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		// unchanged behavior unless SetQuorumCertActivationHeight is
 		// called explicitly to opt in.
 		quorumCertActivationHeight: math.MaxUint64,
-		lendingModuleAddr:          moduleAddr,
-		lendingCollateralAddr:      collateralAddr,
-		creatorPayoutVaultAddr:     creatorVaultAddr,
-		creatorRewardsTreasuryAddr: creatorRewardsAddr,
-		modulePauses:               make(map[string]bool),
-		moduleQuotas:               make(map[string]nativecommon.Quota),
-		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		// Disabled by default (see the field doc comment): every existing
+		// caller of NewNode, including the whole test suite, gets today's
+		// unchanged behavior unless SetGovCreditPreservationActivationHeight
+		// is called explicitly to opt in.
+		govCreditPreservationActivationHeight: math.MaxUint64,
+		lendingModuleAddr:                     moduleAddr,
+		lendingCollateralAddr:                 collateralAddr,
+		creatorPayoutVaultAddr:                creatorVaultAddr,
+		creatorRewardsTreasuryAddr:            creatorRewardsAddr,
+		modulePauses:                          make(map[string]bool),
+		moduleQuotas:                          make(map[string]nativecommon.Quota),
+		feesPolicy:                            fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		transferGasPolicy: TransferGasPolicy{
 			Enabled: true,
 			// 1000 NHB (18 decimals), not 1000 base units -- the founder's
@@ -732,6 +757,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetLendingDeveloperFee(node.lendingDeveloperFeeBps, node.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(node.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(node.governancePolicy())
+	stateProcessor.SetGovCreditPreservationActivationHeight(node.govCreditPreservationActivationHeight)
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -4612,6 +4638,28 @@ func (n *Node) SetPOSHoldUnstakeGuardActivationHeight(height uint64) {
 	n.posHoldUnstakeGuardHeight = height
 	if n.state != nil {
 		n.state.SetPOSHoldUnstakeGuardActivationHeight(height)
+	}
+}
+
+// SetGovCreditPreservationActivationHeight configures the height at and
+// above which TxTypeGovFinalize/TxTypeGovExecute reload the sender's
+// account fresh before their nonce-bump persist instead of reusing the
+// pre-engine-call snapshot -- see the field doc comment on
+// Node.govCreditPreservationActivationHeight and
+// StateProcessor.SetGovCreditPreservationActivationHeight's doc comment
+// (core/governance_tx.go) for the full PL-R1-GOVREFUND rationale. A live
+// chain being upgraded to enable this MUST call it with its current tip
+// height, identically on every validator, as part of a coordinated deploy.
+func (n *Node) SetGovCreditPreservationActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	n.govCreditPreservationActivationHeight = height
+	state := n.state
+	n.stateMu.Unlock()
+	if state != nil {
+		state.SetGovCreditPreservationActivationHeight(height)
 	}
 }
 

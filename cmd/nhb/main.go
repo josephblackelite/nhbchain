@@ -180,6 +180,14 @@ func main() {
 	// config.Config.POSHoldUnstakeGuardActivationHeight. A chain rule, so
 	// the value is set identically on every validator in config.toml.
 	node.SetPOSHoldUnstakeGuardActivationHeight(cfg.POSHoldUnstakeGuardActivationHeight)
+	if cfg.GovCreditPreservationActivationHeight > 0 {
+		// See config.Config.GovCreditPreservationActivationHeight's doc
+		// comment -- left unset (0) here means PL-R1-GOVREFUND's fix stays
+		// disabled, exactly like every prior release. Enabling it is a
+		// deliberate, coordinated, every-validator-at-once decision made in
+		// config.toml, never inferred.
+		node.SetGovCreditPreservationActivationHeight(cfg.GovCreditPreservationActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {
