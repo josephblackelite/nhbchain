@@ -30,6 +30,12 @@ RPCAllowInsecureUnspecified = false
 RPCTLSCertFile = ""
 RPCTLSKeyFile = ""
 RPCTLSClientCAFile = ""
+# Only consulted when RPCTLSClientCAFile above is set (mTLS is off here, so
+# this is a no-op today). See rpc.ServerConfig.OperatorClientCertOU: a
+# verified client cert whose Subject OU matches this value is treated as an
+# operator credential for operator-only RPC methods, same as a JWT's 'role'
+# claim.
+RPCOperatorClientCertOU = ""
 DataDir = "./nhb-data"
 GenesisFile = "./config/genesis.phase-e.json"
 AllowAutogenesis = false
