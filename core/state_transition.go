@@ -561,9 +561,30 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 				ownerShare = new(big.Int).Sub(routed, buybackShare)
 			}
 		}
-		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
-		if err != nil {
-			return err
+		// The transfer's own sender/recipient accounts (fromAcc/toAcc) are
+		// still unpersisted objects in the caller -- applyTransferZNHB and the
+		// NHB transfer path each write them back only after this function
+		// returns. So when the domain-fee route wallet IS the sender or the
+		// recipient of this same transfer, the credit below must land on that
+		// same object, not on a separately loaded copy: a separate copy would
+		// hold the pre-transfer balance and be silently overwritten by the
+		// caller's later write, destroying the fee. This applies identically
+		// to both assets (PL-R1-FEEROUTE); it only used to be special-cased
+		// for ZNHB because the NHB half needed proof against production
+		// history first -- see the activation-height note in this function's
+		// test file before deploying this change.
+		var routeAcc *types.Account
+		switch {
+		case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
+			routeAcc = fromAcc
+		case toAcc != nil && bytes.Equal(result.OwnerWallet[:], tx.To):
+			routeAcc = toAcc
+		}
+		if routeAcc == nil {
+			routeAcc, err = sp.getAccount(result.OwnerWallet[:])
+			if err != nil {
+				return err
+			}
 		}
 		switch result.Asset {
 		case fees.AssetNHB:
