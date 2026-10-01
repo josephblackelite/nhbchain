@@ -23,6 +23,25 @@ const liveQuorumCertActivationHeight uint64 = 1380200
 // the release that changes the live value.
 const liveRewardsByStakeFromEpoch uint64 = 0
 
+// liveChainRules are the other settings that decide what a block leaves behind or
+// whether a transaction is valid, each an activation height that is off (0) on the
+// live chain. A node that starts from a snapshot executes every later block itself,
+// so one set to another value computes another state root at the first block it
+// applies to and stops following the network. A key left out of the file is the
+// default, 0. Change a value here, in config.toml and in the tests together, in the
+// release that changes the live value.
+var liveChainRules = []struct {
+	table string // "" for a top-level key
+	key   string
+	live  uint64
+}{
+	{"", "POSSweepSkipActivationHeight", 0},
+	{"", "POSHoldUnstakeGuardActivationHeight", 0},
+	{"", "GovCreditPreservationActivationHeight", 0},
+	{"", "FeeRouteAliasActivationHeight", 0},
+	{"swap", "PayoutReceiptActivationHeight", 0},
+}
+
 // A node that starts from a snapshot executes every later block itself, so the
 // consensus-relevant values of its config must be the ones the live validators
 // run with. Most of them are addresses of the network's treasury, which the
@@ -78,7 +97,12 @@ func checkLiveConfig(configPath, genesisPath string) ([]string, error) {
 		return nil, err
 	}
 	var cfg liveConfigView
-	if _, err := toml.Decode(string(bareNetworkID.ReplaceAll(raw, []byte(`$1"$2"$3`))), &cfg); err != nil {
+	text := string(bareNetworkID.ReplaceAll(raw, []byte(`$1"$2"$3`)))
+	if _, err := toml.Decode(text, &cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	var generic map[string]any
+	if _, err := toml.Decode(text, &generic); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", configPath, err)
 	}
 	spec, err := genesis.LoadGenesisSpec(genesisPath)
@@ -109,6 +133,26 @@ func checkLiveConfig(configPath, genesisPath string) ([]string, error) {
 	}
 	if cfg.RewardsByStakeFromEpoch != liveRewardsByStakeFromEpoch {
 		bad = append(bad, fmt.Sprintf("RewardsByStakeFromEpoch is %d, the live validators run with %d", cfg.RewardsByStakeFromEpoch, liveRewardsByStakeFromEpoch))
+	}
+	for _, rule := range liveChainRules {
+		scope := generic
+		label := rule.key
+		if rule.table != "" {
+			scope, _ = generic[rule.table].(map[string]any)
+			label = "[" + rule.table + "] " + rule.key
+		}
+		got := uint64(0)
+		switch v := scope[rule.key].(type) {
+		case nil:
+		case int64:
+			got = uint64(v)
+		default:
+			bad = append(bad, fmt.Sprintf("%s is %v, not a whole number", label, v))
+			continue
+		}
+		if got != rule.live {
+			bad = append(bad, fmt.Sprintf("%s is %d, the live validators run with %d", label, got, rule.live))
+		}
 	}
 	expect("[global.Fees] OwnerWallet", cfg.Global.Fees.OwnerWallet, admin.String())
 	assets := map[string]string{}

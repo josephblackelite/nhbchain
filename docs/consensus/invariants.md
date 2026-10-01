@@ -195,6 +195,13 @@ off the treasury wallet than the Reward Pool holds is rejected with
   (`native/swap/oracle.go`, `Config.PayoutReceiptActivationHeight`). Unlike the
   setting above it changes the state root of blocks that carry a swap payout
   receipt, so it is chosen as a height ahead of the tip.
+- `GovCreditPreservationActivationHeight` and `FeeRouteAliasActivationHeight` must be
+  identical on every validator (`config/config.go`). Each decides which of two
+  results a transaction leaves in state (a governance finalize or execute that keeps
+  a credit the engine wrote to the sender; an NHB domain fee whose route wallet is
+  the sender or recipient), so each is changed only with all validators restarted
+  together, to a height above the chain tip. The state processor copies carry both
+  (`StateProcessor.Copy`): a copy that dropped one would apply the fix from height 0.
 - `POSHoldUnstakeGuardActivationHeight` must be identical on every validator
   (`config/config.go`, `POSHoldUnstakeGuardActivationHeight`): it decides whether an
   unstake that would take funds backing a pending POS hold is valid.

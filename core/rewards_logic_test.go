@@ -66,10 +66,10 @@ func seedEligibleValidator(t *testing.T, sp *StateProcessor, stake int64, engage
 	}
 	addr := key.PubKey().Address().Bytes()
 	account := &types.Account{
-		BalanceNHB:      big.NewInt(0),
-		BalanceZNHB:     big.NewInt(0),
-		Stake:           big.NewInt(stake),
-		EngagementScore: engagement,
+		BalanceNHB:              big.NewInt(0),
+		BalanceZNHB:             big.NewInt(0),
+		Stake:                   big.NewInt(stake),
+		EngagementScore:         engagement,
 		EngagementLastHeartbeat: uint64(rewardBlockTimestamp1),
 		// This helper tests reward distribution/epoch-selection logic, not
 		// the item-1 explicit-registration gate itself -- register every

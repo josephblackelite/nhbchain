@@ -245,9 +245,16 @@ type StateProcessor struct {
 	// behavior unchanged unless SetGovCreditPreservationActivationHeight is
 	// called).
 	govCreditPreservationActivationHeight uint64
-	blockCtx                              BlockCtx
-	swapPayoutAuthorities                 map[string]struct{}
-	swapConfig                            swap.Config
+	// feeRouteAliasActivationHeight is the first block height at which an NHB
+	// domain fee whose route wallet is the transfer's own sender or recipient is
+	// credited to the caller's already-loaded account (see
+	// SetFeeRouteAliasActivationHeight). The ZNHB half of that fix is not gated
+	// and applies at every height. NewStateProcessor defaults this to
+	// math.MaxUint64 (off), and the copy StateProcessor.Copy returns carries it.
+	feeRouteAliasActivationHeight uint64
+	blockCtx                      BlockCtx
+	swapPayoutAuthorities         map[string]struct{}
+	swapConfig                    swap.Config
 	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
 	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
 	// must match. This is deliberately distinct from types.NHBChainID()
@@ -315,6 +322,7 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		marketEscrowAddr:                      deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
 		marketFeeCollectorAddr:                deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
 		govCreditPreservationActivationHeight: math.MaxUint64,
+		feeRouteAliasActivationHeight:         math.MaxUint64,
 		blockCtx:                              BlockCtx{},
 		swapPayoutAuthorities:                 make(map[string]struct{}),
 		swapConfig:                            swap.Config{},
@@ -598,15 +606,23 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 				ownerShare = new(big.Int).Sub(routed, buybackShare)
 			}
 		}
-		// For ZNHB the transfer's own sender/recipient accounts are still
-		// unpersisted objects in the caller (applyTransferZNHB writes them
-		// after this returns), so when the route wallet IS the sender or the
-		// recipient -- e.g. the fee wallet is the treasury and a user pays it
-		// -- credit that same object. A separately loaded copy would hold the
-		// pre-transfer balance and be overwritten by the caller's write,
-		// silently destroying the fee.
+		// The transfer's own sender/recipient accounts (fromAcc/toAcc) are
+		// still unpersisted objects in the caller -- applyTransferZNHB and the
+		// NHB transfer path each write them back only after this function
+		// returns. So when the domain-fee route wallet IS the sender or the
+		// recipient of this same transfer, the credit below must land on that
+		// same object, not on a separately loaded copy: a separate copy would
+		// hold the pre-transfer balance and be silently overwritten by the
+		// caller's later write, destroying the fee. The ZNHB half of this has
+		// been in force at every height since before PL-R1-FEEROUTE; the NHB
+		// half changes the state root of any past NHB transfer whose route
+		// wallet was its own sender or recipient, so it is gated by
+		// sp.feeRouteAliasActivationHeight -- see
+		// SetFeeRouteAliasActivationHeight's doc comment. Below that height an
+		// NHB fee falls through to sp.getAccount below, exactly as it always
+		// has.
 		var routeAcc *types.Account
-		if result.Asset == fees.AssetZNHB {
+		if result.Asset == fees.AssetZNHB || sp.blockHeight() >= sp.feeRouteAliasActivationHeight {
 			switch {
 			case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
 				routeAcc = fromAcc
@@ -2071,6 +2087,23 @@ func (sp *StateProcessor) SetPOSSweepSkipActivationHeight(height uint64) {
 	sp.posSweepSkipActivationHeight = height
 }
 
+// SetFeeRouteAliasActivationHeight sets the first block height at which
+// applyTransactionFee credits an NHB domain fee to the caller's already-loaded
+// sender or recipient account when the fee's route wallet is that account,
+// instead of to a separately loaded copy that the caller's own later write
+// overwrites (ledger PL-R1-FEEROUTE). Below the height the NHB fee is credited
+// to the separate copy, exactly as in every earlier release; the same fix for
+// ZNHB is not gated and applies at every height. The two behaviours leave
+// different state, so the value must be the same on every validator and is
+// changed only with all of them restarted together, to a height above the chain
+// tip. math.MaxUint64, the default, leaves the fix off.
+func (sp *StateProcessor) SetFeeRouteAliasActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.feeRouteAliasActivationHeight = height
+}
+
 // posSweepSkipActive reports whether the block being applied is at or past the
 // activation height. Outside a block (no execution context, height 0) it is
 // never active.
@@ -2833,6 +2866,12 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 
 		posSweepSkipActivationHeight:  sp.posSweepSkipActivationHeight,
 		posHoldUnstakeGuardFromHeight: sp.posHoldUnstakeGuardFromHeight,
+
+		// A field left out of this literal is zero on the copy, which for these
+		// two (the default is math.MaxUint64, off) would switch the fix on from
+		// height 0 on every copy a block is built, validated or committed on.
+		govCreditPreservationActivationHeight: sp.govCreditPreservationActivationHeight,
+		feeRouteAliasActivationHeight:         sp.feeRouteAliasActivationHeight,
 	}, nil
 }
 

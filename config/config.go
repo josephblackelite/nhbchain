@@ -230,6 +230,18 @@ type Config struct {
 	// doc comment in core/governance_tx.go for the full rationale, including
 	// why this ships gated rather than unconditional).
 	GovCreditPreservationActivationHeight uint64 `toml:"GovCreditPreservationActivationHeight"`
+	// FeeRouteAliasActivationHeight is the first block height from which an NHB
+	// domain fee whose route wallet is the transfer's own sender or recipient is
+	// credited to that account as the transfer leaves it, instead of to a
+	// separately loaded copy the transfer's own later write overwrites, which
+	// destroys the fee (PL-R1-FEEROUTE). The same fix for ZNHB is already in
+	// force at every height. 0 (the default) leaves the NHB half off. A chain
+	// rule, not a node setting: it changes the state a block leaves behind, so
+	// set the same non-zero height on every validator, above the chain tip, with
+	// all of them restarted together, or they disagree on every block that
+	// routes such a fee. As a top-level key it goes before the first [table] of
+	// the file. See core.StateProcessor.SetFeeRouteAliasActivationHeight.
+	FeeRouteAliasActivationHeight uint64 `toml:"FeeRouteAliasActivationHeight"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.

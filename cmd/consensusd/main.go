@@ -217,6 +217,11 @@ func main() {
 	if cfg.GovCreditPreservationActivationHeight > 0 {
 		node.SetGovCreditPreservationActivationHeight(cfg.GovCreditPreservationActivationHeight)
 	}
+	// Same setting and rule as in cmd/nhb/main.go: 0 (unset) keeps the NHB
+	// fee-route credit exactly as every prior release.
+	if cfg.FeeRouteAliasActivationHeight > 0 {
+		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()

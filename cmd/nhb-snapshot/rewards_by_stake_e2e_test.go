@@ -46,7 +46,9 @@ import (
 )
 
 var (
-	zn = func(whole int64) *big.Int { return new(big.Int).Mul(big.NewInt(whole), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)) }
+	zn = func(whole int64) *big.Int {
+		return new(big.Int).Mul(big.NewInt(whole), new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil))
+	}
 )
 
 // prepareRewardsDir writes this test's keys and a genesis that funds the validator and the two test wallets with enough ZNHB to stake and delegate, in the
@@ -111,12 +113,12 @@ func (e *e2eEnv) startWith(bin string, n *e2eNode) {
 }
 
 type accountView struct {
-	Nonce              uint64 `json:"nonce"`
+	Nonce              uint64      `json:"nonce"`
 	Stake              json.Number `json:"stake"`
 	LockedZNHB         json.Number `json:"lockedZNHB"`
 	BalanceZNHB        json.Number `json:"balanceZNHB"`
-	DelegatedValidator string `json:"delegatedValidator"`
-	EngagementScore    uint64 `json:"engagementScore"`
+	DelegatedValidator string      `json:"delegatedValidator"`
+	EngagementScore    uint64      `json:"engagementScore"`
 }
 
 func (n *e2eNode) account(addr string) (*accountView, error) {

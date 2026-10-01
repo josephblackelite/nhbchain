@@ -345,6 +345,17 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 	if got := all(`(?m)^RewardsByStakeFromEpoch\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
 		t.Errorf("config.toml: RewardsByStakeFromEpoch is %v, the live validators pay the earlier split (0)", got)
 	}
+	for _, key := range []string{
+		"POSSweepSkipActivationHeight",
+		"POSHoldUnstakeGuardActivationHeight",
+		"GovCreditPreservationActivationHeight",
+		"FeeRouteAliasActivationHeight",
+		"PayoutReceiptActivationHeight",
+	} {
+		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
+			t.Errorf("config.toml: %s is %v, the live validators run with it off (0)", key, got)
+		}
+	}
 	// No other treasury of an earlier network is left behind.
 	if bytes.Contains(cfg, []byte("10lephh6ffd79cc7lk6edc6rkxe9ha8xe")) {
 		t.Errorf("config.toml still names the treasury of an earlier network")

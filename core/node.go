@@ -160,50 +160,62 @@ type Node struct {
 	// auto-detected from chain state, for the same reason
 	// SetQuorumCertActivationHeight's doc comment gives.
 	govCreditPreservationActivationHeight uint64
-	escrowTreasury                        [20]byte
-	engagementMgr                         *engagement.Manager
-	govPolicy                             governance.ProposalPolicy
-	govPolicyMu                           sync.RWMutex
-	swapCfgMu                             sync.RWMutex
-	swapCfg                               swap.Config
-	swapOracle                            swap.PriceOracle
-	swapManual                            *swap.ManualOracle
-	swapSanctions                         swap.SanctionsChecker
-	swapStatusMu                          sync.RWMutex
-	swapOracleLast                        int64
-	paymasterMu                           sync.RWMutex
-	paymasterEnabled                      bool
-	paymasterLimits                       PaymasterLimits
-	paymasterTopUpPolicy                  PaymasterAutoTopUpPolicy
-	timestampTolerance                    time.Duration
-	timeConfigMu                          sync.RWMutex
-	timeSource                            func() time.Time
-	lendingMu                             sync.RWMutex
-	lendingParams                         lending.RiskParameters
-	lendingModuleAddr                     crypto.Address
-	lendingCollateralAddr                 crypto.Address
-	lendingDeveloperFeeBps                uint64
-	lendingDeveloperFeeCollector          crypto.Address
-	lendingInterestModel                  *lending.InterestModel
-	lendingReserveFactorBps               uint64
-	lendingProtocolFeeBps                 uint64
-	lendingCollateralRouting              lending.CollateralRouting
-	creatorPayoutVaultAddr                crypto.Address
-	creatorRewardsTreasuryAddr            crypto.Address
-	modulePauseMu                         sync.RWMutex
-	modulePauses                          map[string]bool
-	moduleQuotaMu                         sync.RWMutex
-	moduleQuotas                          map[string]nativecommon.Quota
-	feesMu                                sync.RWMutex
-	feesPolicy                            fees.Policy
-	transferGasPolicy                     TransferGasPolicy
-	potsoEngineMu                         sync.Mutex
-	potsoEngine                           *potso.Engine
-	globalCfgMu                           sync.RWMutex
-	globalCfg                             config.Global
-	networkMode                           string
-	networkBroadcaster                    p2p.Broadcaster
-	blockSyncMu                           sync.Mutex
+	// feeRouteAliasActivationHeight gates the NHB half of PL-R1-FEEROUTE's fix
+	// to applyTransactionFee (core/state_transition.go): below this height an
+	// NHB domain fee whose route wallet is the transfer's own sender or
+	// recipient is credited to a separately loaded copy that the caller's own
+	// later write overwrites (the behavior every earlier release has, so
+	// already-committed history keeps replaying to the identical state root);
+	// at or above it the credit lands on the caller's already-loaded account
+	// and survives. The ZNHB half is not gated. NewNode defaults this to
+	// math.MaxUint64 (off); SetFeeRouteAliasActivationHeight is an explicit,
+	// coordinated, every-validator-at-once decision, never inferred from chain
+	// state (see SetQuorumCertActivationHeight for the same reason).
+	feeRouteAliasActivationHeight uint64
+	escrowTreasury                [20]byte
+	engagementMgr                 *engagement.Manager
+	govPolicy                     governance.ProposalPolicy
+	govPolicyMu                   sync.RWMutex
+	swapCfgMu                     sync.RWMutex
+	swapCfg                       swap.Config
+	swapOracle                    swap.PriceOracle
+	swapManual                    *swap.ManualOracle
+	swapSanctions                 swap.SanctionsChecker
+	swapStatusMu                  sync.RWMutex
+	swapOracleLast                int64
+	paymasterMu                   sync.RWMutex
+	paymasterEnabled              bool
+	paymasterLimits               PaymasterLimits
+	paymasterTopUpPolicy          PaymasterAutoTopUpPolicy
+	timestampTolerance            time.Duration
+	timeConfigMu                  sync.RWMutex
+	timeSource                    func() time.Time
+	lendingMu                     sync.RWMutex
+	lendingParams                 lending.RiskParameters
+	lendingModuleAddr             crypto.Address
+	lendingCollateralAddr         crypto.Address
+	lendingDeveloperFeeBps        uint64
+	lendingDeveloperFeeCollector  crypto.Address
+	lendingInterestModel          *lending.InterestModel
+	lendingReserveFactorBps       uint64
+	lendingProtocolFeeBps         uint64
+	lendingCollateralRouting      lending.CollateralRouting
+	creatorPayoutVaultAddr        crypto.Address
+	creatorRewardsTreasuryAddr    crypto.Address
+	modulePauseMu                 sync.RWMutex
+	modulePauses                  map[string]bool
+	moduleQuotaMu                 sync.RWMutex
+	moduleQuotas                  map[string]nativecommon.Quota
+	feesMu                        sync.RWMutex
+	feesPolicy                    fees.Policy
+	transferGasPolicy             TransferGasPolicy
+	potsoEngineMu                 sync.Mutex
+	potsoEngine                   *potso.Engine
+	globalCfgMu                   sync.RWMutex
+	globalCfg                     config.Global
+	networkMode                   string
+	networkBroadcaster            p2p.Broadcaster
+	blockSyncMu                   sync.Mutex
 	// blockSyncRequest* remember the last block request sent to the peers, so
 	// that a request for the same blocks is not sent again within
 	// networkBlockSyncRequestGap. Node-local pacing only: nothing here reaches
@@ -431,6 +443,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
 	stateProcessor.SetPOSHoldUnstakeGuardActivationHeight(n.posHoldUnstakeGuardHeight)
 	stateProcessor.SetGovCreditPreservationActivationHeight(n.govCreditPreservationActivationHeight)
+	stateProcessor.SetFeeRouteAliasActivationHeight(n.feeRouteAliasActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -669,13 +682,16 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		// unchanged behavior unless SetGovCreditPreservationActivationHeight
 		// is called explicitly to opt in.
 		govCreditPreservationActivationHeight: math.MaxUint64,
-		lendingModuleAddr:                     moduleAddr,
-		lendingCollateralAddr:                 collateralAddr,
-		creatorPayoutVaultAddr:                creatorVaultAddr,
-		creatorRewardsTreasuryAddr:            creatorRewardsAddr,
-		modulePauses:                          make(map[string]bool),
-		moduleQuotas:                          make(map[string]nativecommon.Quota),
-		feesPolicy:                            fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		// Same for the NHB fee-route fix: off unless
+		// SetFeeRouteAliasActivationHeight is called.
+		feeRouteAliasActivationHeight: math.MaxUint64,
+		lendingModuleAddr:             moduleAddr,
+		lendingCollateralAddr:         collateralAddr,
+		creatorPayoutVaultAddr:        creatorVaultAddr,
+		creatorRewardsTreasuryAddr:    creatorRewardsAddr,
+		modulePauses:                  make(map[string]bool),
+		moduleQuotas:                  make(map[string]nativecommon.Quota),
+		feesPolicy:                    fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		transferGasPolicy: TransferGasPolicy{
 			Enabled: true,
 			// 1000 NHB (18 decimals), not 1000 base units -- the founder's
@@ -758,6 +774,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetLendingCollateralRouting(node.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(node.governancePolicy())
 	stateProcessor.SetGovCreditPreservationActivationHeight(node.govCreditPreservationActivationHeight)
+	stateProcessor.SetFeeRouteAliasActivationHeight(node.feeRouteAliasActivationHeight)
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -4660,6 +4677,27 @@ func (n *Node) SetGovCreditPreservationActivationHeight(height uint64) {
 	n.stateMu.Unlock()
 	if state != nil {
 		state.SetGovCreditPreservationActivationHeight(height)
+	}
+}
+
+// SetFeeRouteAliasActivationHeight configures the height at and above which
+// applyTransactionFee credits an NHB domain fee to the caller's already-loaded
+// sender or recipient account when the fee's route wallet is that account -- see
+// the field doc comment on Node.feeRouteAliasActivationHeight and
+// StateProcessor.SetFeeRouteAliasActivationHeight's doc comment
+// (core/state_transition.go) for the PL-R1-FEEROUTE rationale. A live chain
+// being upgraded to enable this MUST call it with a height above its tip,
+// identically on every validator, as part of a coordinated restart.
+func (n *Node) SetFeeRouteAliasActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	n.feeRouteAliasActivationHeight = height
+	state := n.state
+	n.stateMu.Unlock()
+	if state != nil {
+		state.SetFeeRouteAliasActivationHeight(height)
 	}
 }
 

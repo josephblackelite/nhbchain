@@ -74,6 +74,36 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 			},
 			"RewardsByStakeFromEpoch",
 		},
+		"POS expiry sweep skip switched on": {
+			func(s string) string {
+				return strings.Replace(s, "POSSweepSkipActivationHeight = 0", "POSSweepSkipActivationHeight = 1800000", 1)
+			},
+			"POSSweepSkipActivationHeight",
+		},
+		"POS hold unstake guard switched on": {
+			func(s string) string {
+				return strings.Replace(s, "POSHoldUnstakeGuardActivationHeight = 0", "POSHoldUnstakeGuardActivationHeight = 1800000", 1)
+			},
+			"POSHoldUnstakeGuardActivationHeight",
+		},
+		"governance credit preservation switched on": {
+			func(s string) string {
+				return strings.Replace(s, "GovCreditPreservationActivationHeight = 0", "GovCreditPreservationActivationHeight = 1800000", 1)
+			},
+			"GovCreditPreservationActivationHeight",
+		},
+		"NHB fee route aliasing fix switched on": {
+			func(s string) string {
+				return strings.Replace(s, "FeeRouteAliasActivationHeight = 0", "FeeRouteAliasActivationHeight = 1800000", 1)
+			},
+			"FeeRouteAliasActivationHeight",
+		},
+		"swap payout receipt rules switched on": {
+			func(s string) string {
+				return strings.Replace(s, "PayoutReceiptActivationHeight = 0", "PayoutReceiptActivationHeight = 1800000", 1)
+			},
+			"[swap] PayoutReceiptActivationHeight",
+		},
 		"potso treasury": {
 			func(s string) string {
 				return strings.Replace(s, "TreasuryAddress = \""+liveZNHB, "TreasuryAddress = \""+oldTreasury, 1)

@@ -82,6 +82,23 @@ POSSweepSkipActivationHeight = 0
 # set it identically on every validator, to a height above the chain tip,
 # restarting all of them together.
 POSHoldUnstakeGuardActivationHeight = 0
+# First block height from which a governance finalize or execute transaction keeps
+# a credit the governance engine wrote to the sender's own account (a deposit
+# refund, a forfeited-deposit sweep) instead of overwriting it with the account as
+# it was before the call (see config/config.go's
+# GovCreditPreservationActivationHeight doc comment). 0 leaves it off, which is what
+# both live validators run with. It changes the state a block leaves behind: set it
+# identically on every validator, to a height above the chain tip, restarting all of
+# them together.
+GovCreditPreservationActivationHeight = 0
+# First block height from which an NHB domain fee whose route wallet is the
+# transfer's own sender or recipient is credited to that account instead of to a
+# separate copy the transfer then overwrites (see config/config.go's
+# FeeRouteAliasActivationHeight doc comment; the same fix for ZNHB is always on).
+# 0 leaves the NHB half off, which is what both live validators run with. It
+# changes the state a block leaves behind: set it identically on every validator,
+# to a height above the chain tip, restarting all of them together.
+FeeRouteAliasActivationHeight = 0
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
