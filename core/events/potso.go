@@ -24,6 +24,12 @@ const (
 	TypePotsoRewardReady = "potso.reward.ready"
 	// TypePotsoRewardPaid captures individual reward payouts.
 	TypePotsoRewardPaid = "potso.reward.paid"
+	// TypePotsoRewardShortfall is emitted when an epoch's computed reward
+	// payout could not be covered by the reward treasury's balance. The
+	// payout is degraded to zero for that epoch rather than aborting block
+	// processing (see core/state_transition.go's processPotsoRewardEpoch);
+	// this event is the operator/governance-facing signal that happened.
+	TypePotsoRewardShortfall = "potso.reward.shortfall"
 )
 
 // PotsoHeartbeat captures a processed heartbeat submission.
@@ -138,6 +144,35 @@ func (e PotsoRewardEpoch) Event() *types.Event {
 		attrs["remainder"] = amountString(e.Remainder)
 	}
 	return &types.Event{Type: TypePotsoRewardEpoch, Attributes: attrs}
+}
+
+// PotsoRewardShortfall captures an epoch whose computed reward payout
+// exceeded the treasury's available balance. Required is the payout that
+// would have been needed to honour every winner in full; Available is the
+// treasury balance that was actually on hand. The payout for this epoch was
+// degraded to zero rather than paid out partially or aborting the block.
+type PotsoRewardShortfall struct {
+	Epoch     uint64
+	Required  *big.Int
+	Available *big.Int
+	Budget    *big.Int
+	Emission  *big.Int
+}
+
+// Event converts the shortfall notification into a generic event representation.
+func (e PotsoRewardShortfall) Event() *types.Event {
+	attrs := map[string]string{
+		"epoch":     fmt.Sprintf("%d", e.Epoch),
+		"required":  amountString(e.Required),
+		"available": amountString(e.Available),
+	}
+	if e.Budget != nil {
+		attrs["budget"] = amountString(e.Budget)
+	}
+	if e.Emission != nil {
+		attrs["emission"] = amountString(e.Emission)
+	}
+	return &types.Event{Type: TypePotsoRewardShortfall, Attributes: attrs}
 }
 
 // PotsoRewardReady captures a claimable payout becoming available for settlement.

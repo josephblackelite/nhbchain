@@ -111,6 +111,15 @@ type RewardEpochMeta struct {
 	TotalPaid       *big.Int
 	Remainder       *big.Int
 	Winners         uint64
+	// Shortfall is additive (rlp:"optional") so meta records written before
+	// this field existed still decode cleanly as Shortfall == false -- see
+	// core/state_transition.go's processPotsoRewardEpoch for the treasury
+	// shortfall handling this records. It is set when the treasury could not
+	// cover the epoch's computed payout and the payout was degraded to zero
+	// (rather than aborting block processing) as a result: a durable,
+	// on-chain-queryable signal for operators/monitoring that this epoch's
+	// participants were not paid for lack of treasury funds.
+	Shortfall bool `rlp:"optional"`
 }
 
 // Clone produces a deep copy of the metadata to protect internal references.
@@ -119,10 +128,11 @@ func (m *RewardEpochMeta) Clone() RewardEpochMeta {
 		return RewardEpochMeta{}
 	}
 	clone := RewardEpochMeta{
-		Epoch:    m.Epoch,
-		Day:      m.Day,
-		AlphaBps: m.AlphaBps,
-		Winners:  m.Winners,
+		Epoch:     m.Epoch,
+		Day:       m.Day,
+		AlphaBps:  m.AlphaBps,
+		Winners:   m.Winners,
+		Shortfall: m.Shortfall,
 	}
 	clone.StakeTotal = copyBigInt(m.StakeTotal)
 	clone.EngagementTotal = copyBigInt(m.EngagementTotal)
@@ -255,10 +265,18 @@ func ComputeRewards(cfg RewardConfig, params WeightParams, snapshot RewardSnapsh
 		Winners:        []RewardPayout{},
 		WeightSnapshot: nil,
 	}
-	if budget.Sign() <= 0 {
-		return result, nil
-	}
 
+	// The weight snapshot (composite stake+engagement weights, which
+	// governance's CastVote reads as voting power for the epoch -- see
+	// core/state_transition.go's processPotsoRewardEpoch) must be computed
+	// unconditionally, independent of whether there is any reward budget to
+	// distribute this epoch. It is derived purely from stake/engagement
+	// inputs and never depends on budget/treasury state, so a zero-emission
+	// or empty-treasury epoch must never silently skip writing it -- doing so
+	// previously left governance voting permanently stuck with "potso
+	// snapshot unavailable" for that epoch. This is intentionally computed
+	// before the budget check below, separating "what are the weights" from
+	// "how much reward budget is there to pay out".
 	inputs := make([]WeightInput, 0, len(snapshot.Entries))
 	for _, entry := range snapshot.Entries {
 		inputs = append(inputs, WeightInput{
@@ -273,6 +291,10 @@ func ComputeRewards(cfg RewardConfig, params WeightParams, snapshot RewardSnapsh
 		return nil, err
 	}
 	result.WeightSnapshot = weights
+
+	if budget.Sign() <= 0 {
+		return result, nil
+	}
 	if weights == nil || len(weights.Entries) == 0 {
 		return result, nil
 	}

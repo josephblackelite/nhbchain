@@ -5185,17 +5185,11 @@ func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, er
 		return false, amount, nil
 	}
 
-	treasury, err := manager.GetAccount(cfg.TreasuryAddress[:])
-	if err != nil {
-		return false, nil, err
-	}
-	if treasury.BalanceZNHB == nil {
-		treasury.BalanceZNHB = big.NewInt(0)
-	}
-	if treasury.BalanceZNHB.Cmp(amount) < 0 {
-		return false, nil, potso.ErrInsufficientTreasury
-	}
-
+	// The treasury was already reserved/debited for this exact amount at
+	// epoch close (core/state_transition.go's processPotsoRewardEpoch,
+	// RewardPayoutModeClaim branch), the same moment this claim record was
+	// created -- not here. Debiting it again on this path would double-spend
+	// that reservation; this function now only ever credits the winner.
 	account, err := manager.GetAccount(addr[:])
 	if err != nil {
 		return false, nil, err
@@ -5204,14 +5198,21 @@ func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, er
 		account.BalanceZNHB = big.NewInt(0)
 	}
 
-	treasury.BalanceZNHB = new(big.Int).Sub(treasury.BalanceZNHB, amount)
 	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
 
-	if err := manager.PutAccount(cfg.TreasuryAddress[:], treasury); err != nil {
-		return false, nil, err
-	}
 	if err := manager.PutAccount(addr[:], account); err != nil {
 		return false, nil, err
+	}
+
+	if amount.Sign() > 0 && n.state.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], n.state.adminWallet[:]) && bytes.Equal(addr[:], n.state.adminWallet[:]) {
+		// Mirrors processPotsoRewardEpoch's negative adjustment at the point
+		// this amount was reserved: a self-winning admin/treasury wallet's
+		// own claim is ZNHB finally landing back on the exact tracked
+		// balance that was debited at epoch close, so the pool label must
+		// grow back by the same amount or CheckZNHBSupplyInvariant breaks.
+		if err := n.state.adjustRewardPoolForAdminZNHBMovement(new(big.Int).Set(amount)); err != nil {
+			return false, nil, err
+		}
 	}
 
 	claim.Claimed = true

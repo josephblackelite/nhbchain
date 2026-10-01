@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"sort"
@@ -2335,10 +2336,19 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		treasuryAcc.BalanceZNHB = big.NewInt(0)
 	}
 	treasuryBalance := new(big.Int).Set(treasuryAcc.BalanceZNHB)
+	// Budget is derived from emission alone, deliberately uncapped by the
+	// treasury's current balance. Capping it here used to make the
+	// shortfall check below structurally unreachable, since totalPaid could
+	// never exceed an already-capped budget -- the actual payout attempt is
+	// what must discover a real shortfall. Unlike PotsoRewardClaim in
+	// core/node.go (and the legacy-accrued and index-based staking reward
+	// mints above), which hard-fail with potso.ErrInsufficientTreasury
+	// because they run from a discretionary, retryable user transaction,
+	// this function runs unconditionally from ProcessBlockLifecycle on every
+	// block: a shortfall here cannot hard-fail without halting the whole
+	// chain, so it is detected the same way and then degraded gracefully
+	// instead -- see the shortfall handling below.
 	budget := new(big.Int).Set(emission)
-	if treasuryBalance.Cmp(budget) < 0 {
-		budget = new(big.Int).Set(treasuryBalance)
-	}
 
 	weightCfg := sp.potsoWeightConfig
 	weightCfg.AlphaStakeBps = cfg.AlphaStakeBps
@@ -2369,100 +2379,179 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 
 	payoutMode := cfg.EffectivePayoutMode()
 	totalPaid := new(big.Int).Set(outcome.TotalPaid)
-	for _, winner := range outcome.Winners {
-		if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
-			return err
+
+	// A treasury shortfall must be detected BEFORE any payout/claim/debit
+	// state is written for this epoch (unlike the old ordering, which called
+	// PotsoRewardsSetPayout for the full, unaffordable amount first and only
+	// then checked). processPotsoRewardEpoch is invoked unconditionally on
+	// every block from core/epochs.go's ProcessBlockLifecycle -- not from a
+	// discretionary, skippable transaction. Unlike the ApplyTransaction loop
+	// in core/node.go's CreateBlock, which has classifyProposalError to
+	// skip/prune a single bad transaction and keep building the block, a
+	// ProcessBlockLifecycle error has no such disposition: every caller
+	// (core/node.go's CreateBlock and both CommitBlock paths) treats it as an
+	// unconditional whole-block abort. Returning potso.ErrInsufficientTreasury
+	// here would therefore halt the chain, and since maybeProcessPotsoRewards
+	// only marks an epoch processed AFTER this function returns successfully,
+	// the shortfall -- a routine operational condition, e.g. emission
+	// configured richer than the treasury, or the treasury drawn down by
+	// ordinary claims -- would be retried identically on every subsequent
+	// block, forever, by every validator. Instead, the shortfall is surfaced
+	// (logged, emitted as an event, and recorded in the persisted epoch
+	// meta's Shortfall flag for monitoring) and this epoch's payout is
+	// degraded to zero: no winners, no claims, no treasury debit. The caller
+	// still marks the epoch processed, so it is never retried. Every input
+	// to this decision (treasuryBalance, outcome.TotalPaid) is derived
+	// purely from on-chain state and this epoch's own deterministic inputs,
+	// so every validator -- proposer building the block or peer validating
+	// it -- independently computes the identical shortfall verdict and the
+	// identical (zero) payout for this epoch.
+	shortfall := totalPaid.Sign() > 0 && treasuryBalance.Cmp(totalPaid) < 0
+	if shortfall {
+		required := new(big.Int).Set(totalPaid)
+		available := new(big.Int).Set(treasuryBalance)
+		slog.Error("potso: reward epoch underfunded, payout skipped",
+			slog.Uint64("epoch", epochNumber),
+			slog.String("required", required.String()),
+			slog.String("available", available.String()),
+			slog.String("emission", emission.String()),
+		)
+		if evt := (events.PotsoRewardShortfall{
+			Epoch:     epochNumber,
+			Required:  required,
+			Available: available,
+			Budget:    new(big.Int).Set(outcome.Budget),
+			Emission:  new(big.Int).Set(emission),
+		}).Event(); evt != nil {
+			sp.AppendEvent(evt)
 		}
-	}
-	if totalPaid.Sign() > 0 && treasuryBalance.Cmp(totalPaid) < 0 {
-		return potso.ErrInsufficientTreasury
-	}
-	switch payoutMode {
-	case potso.RewardPayoutModeClaim:
+		winnersAddrs = winnersAddrs[:0]
+		totalPaid = big.NewInt(0)
+	} else {
 		for _, winner := range outcome.Winners {
-			claim := &potso.RewardClaim{
-				Amount:    new(big.Int).Set(winner.Amount),
-				Claimed:   false,
-				ClaimedAt: 0,
-				Mode:      potso.RewardPayoutModeClaim,
-			}
-			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+			if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
 				return err
-			}
-			if winner.Amount.Sign() > 0 {
-				if evt := (events.PotsoRewardReady{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeClaim}).Event(); evt != nil {
-					sp.AppendEvent(evt)
-				}
 			}
 		}
-	default:
-		if totalPaid.Sign() > 0 {
-			treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
-			if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
-				return err
-			}
-			// POTSO's reward treasury commonly points at the same
-			// admin/treasury wallet the ZNHB Reward Pool ledger backs (see
-			// CheckZNHBSupplyInvariant). Debiting that wallet's balance
-			// above without also shrinking the pool label it backs mints
-			// ZNHB from nothing in the invariant's eyes -- mirrors the
-			// identical fix already applied to settleEpochRewards for the
-			// halving-schedule payout path.
-			if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
-				selfPaid := big.NewInt(0)
-				for _, winner := range outcome.Winners {
-					if bytes.Equal(winner.Address[:], sp.adminWallet[:]) {
-						selfPaid.Add(selfPaid, winner.Amount)
+		switch payoutMode {
+		case potso.RewardPayoutModeClaim:
+			// Reserve/debit the full claim-mode obligation from the treasury's
+			// spendable balance NOW, at the moment the obligation is created,
+			// the same way the auto-payout branch below already debits
+			// immediately. The treasury balance read at the top of this
+			// function is a fresh, undebited read every epoch -- without this
+			// debit, successive claim-mode epochs would each size their budget
+			// against the same unreserved balance, promising more in claimable
+			// rewards across epochs than the treasury can actually pay out once
+			// claims are settled. The matching credit happens exactly once,
+			// later, in core/node.go's PotsoRewardClaim when the winner actually
+			// claims -- that path must never debit the treasury again, or this
+			// amount is double-spent.
+			if totalPaid.Sign() > 0 {
+				treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+				if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+					return err
+				}
+				// See the identical guard in the auto-payout branch below: when
+				// the reward treasury is the same wallet CheckZNHBSupplyInvariant
+				// tracks, debiting its balance without shrinking the pool label
+				// it backs mints ZNHB from nothing in the invariant's eyes. No
+				// self/external split is needed here (unlike the auto branch) --
+				// in claim mode nobody is credited yet, not even a winner who is
+				// the admin wallet itself, so the full amount leaves the tracked
+				// balance; PotsoRewardClaim adds the matching positive
+				// adjustment back when a self-winning admin wallet later claims.
+				if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
+					if err := sp.adjustRewardPoolForAdminZNHBMovement(new(big.Int).Neg(totalPaid)); err != nil {
+						return err
 					}
 				}
-				externalPaid := new(big.Int).Sub(totalPaid, selfPaid)
-				if externalPaid.Sign() > 0 {
-					rewardPool, err := manager.ZNHBRewardPoolBalance()
+			}
+			for _, winner := range outcome.Winners {
+				claim := &potso.RewardClaim{
+					Amount:    new(big.Int).Set(winner.Amount),
+					Claimed:   false,
+					ClaimedAt: 0,
+					Mode:      potso.RewardPayoutModeClaim,
+				}
+				if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+					return err
+				}
+				if winner.Amount.Sign() > 0 {
+					if evt := (events.PotsoRewardReady{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeClaim}).Event(); evt != nil {
+						sp.AppendEvent(evt)
+					}
+				}
+			}
+		default:
+			if totalPaid.Sign() > 0 {
+				treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+				if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+					return err
+				}
+				// POTSO's reward treasury commonly points at the same
+				// admin/treasury wallet the ZNHB Reward Pool ledger backs (see
+				// CheckZNHBSupplyInvariant). Debiting that wallet's balance
+				// above without also shrinking the pool label it backs mints
+				// ZNHB from nothing in the invariant's eyes -- mirrors the
+				// identical fix already applied to settleEpochRewards for the
+				// halving-schedule payout path.
+				if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
+					selfPaid := big.NewInt(0)
+					for _, winner := range outcome.Winners {
+						if bytes.Equal(winner.Address[:], sp.adminWallet[:]) {
+							selfPaid.Add(selfPaid, winner.Amount)
+						}
+					}
+					externalPaid := new(big.Int).Sub(totalPaid, selfPaid)
+					if externalPaid.Sign() > 0 {
+						rewardPool, err := manager.ZNHBRewardPoolBalance()
+						if err != nil {
+							return err
+						}
+						newRewardPool := new(big.Int).Sub(rewardPool, externalPaid)
+						if newRewardPool.Sign() < 0 {
+							// Unreachable in practice (the pool dwarfs any single
+							// POTSO epoch's emission), but never let the ledger
+							// go negative regardless of formula/rounding edges.
+							newRewardPool = big.NewInt(0)
+						}
+						if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+							return err
+						}
+					}
+				}
+			}
+			for _, winner := range outcome.Winners {
+				if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
+					account, err := manager.GetAccount(winner.Address[:])
 					if err != nil {
 						return err
 					}
-					newRewardPool := new(big.Int).Sub(rewardPool, externalPaid)
-					if newRewardPool.Sign() < 0 {
-						// Unreachable in practice (the pool dwarfs any single
-						// POTSO epoch's emission), but never let the ledger
-						// go negative regardless of formula/rounding edges.
-						newRewardPool = big.NewInt(0)
+					if account.BalanceZNHB == nil {
+						account.BalanceZNHB = big.NewInt(0)
 					}
-					if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
+					account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
+					if err := manager.PutAccount(winner.Address[:], account); err != nil {
 						return err
 					}
 				}
-			}
-		}
-		for _, winner := range outcome.Winners {
-			if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
-				account, err := manager.GetAccount(winner.Address[:])
-				if err != nil {
+				claim := &potso.RewardClaim{
+					Amount:    new(big.Int).Set(winner.Amount),
+					Claimed:   winner.Amount.Sign() <= 0 || totalPaid.Sign() > 0,
+					ClaimedAt: uint64(settledAt),
+					Mode:      potso.RewardPayoutModeAuto,
+				}
+				if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
 					return err
 				}
-				if account.BalanceZNHB == nil {
-					account.BalanceZNHB = big.NewInt(0)
-				}
-				account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
-				if err := manager.PutAccount(winner.Address[:], account); err != nil {
-					return err
-				}
-			}
-			claim := &potso.RewardClaim{
-				Amount:    new(big.Int).Set(winner.Amount),
-				Claimed:   winner.Amount.Sign() <= 0 || totalPaid.Sign() > 0,
-				ClaimedAt: uint64(settledAt),
-				Mode:      potso.RewardPayoutModeAuto,
-			}
-			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
-				return err
-			}
-			if winner.Amount.Sign() > 0 && totalPaid.Sign() > 0 {
-				if err := manager.PotsoRewardsAppendHistory(winner.Address, potso.RewardHistoryEntry{Epoch: epochNumber, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}); err != nil {
-					return err
-				}
-				if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}).Event(); evt != nil {
-					sp.AppendEvent(evt)
+				if winner.Amount.Sign() > 0 && totalPaid.Sign() > 0 {
+					if err := manager.PotsoRewardsAppendHistory(winner.Address, potso.RewardHistoryEntry{Epoch: epochNumber, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}); err != nil {
+						return err
+					}
+					if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}).Event(); evt != nil {
+						sp.AppendEvent(evt)
+					}
 				}
 			}
 		}
@@ -2481,6 +2570,16 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		engagementTotal = new(big.Int).SetUint64(outcome.WeightSnapshot.TotalEngagement)
 	}
 
+	// remainder/winners reflect the ACTUAL outcome of this epoch -- totalPaid
+	// and winnersAddrs, both already degraded to zero above when a treasury
+	// shortfall was detected -- not outcome's pre-degradation figures, so a
+	// shortfall epoch's persisted meta and event honestly show nothing was
+	// paid rather than the unaffordable amount potso.ComputeRewards proposed.
+	remainder := new(big.Int).Sub(outcome.Budget, totalPaid)
+	if remainder.Sign() < 0 {
+		remainder = big.NewInt(0)
+	}
+
 	meta := &potso.RewardEpochMeta{
 		Epoch:           epochNumber,
 		Day:             snapshot.Day,
@@ -2489,9 +2588,10 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		AlphaBps:        cfg.AlphaStakeBps,
 		Emission:        new(big.Int).Set(emission),
 		Budget:          new(big.Int).Set(outcome.Budget),
-		TotalPaid:       new(big.Int).Set(outcome.TotalPaid),
-		Remainder:       new(big.Int).Set(outcome.Remainder),
-		Winners:         uint64(len(outcome.Winners)),
+		TotalPaid:       new(big.Int).Set(totalPaid),
+		Remainder:       remainder,
+		Winners:         uint64(len(winnersAddrs)),
+		Shortfall:       shortfall,
 	}
 	if err := manager.PotsoRewardsSetMeta(epochNumber, meta); err != nil {
 		return err
@@ -2499,11 +2599,11 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 
 	if evt := (events.PotsoRewardEpoch{
 		Epoch:     epochNumber,
-		TotalPaid: new(big.Int).Set(outcome.TotalPaid),
-		Winners:   uint64(len(outcome.Winners)),
+		TotalPaid: new(big.Int).Set(totalPaid),
+		Winners:   uint64(len(winnersAddrs)),
 		Emission:  new(big.Int).Set(emission),
 		Budget:    new(big.Int).Set(outcome.Budget),
-		Remainder: new(big.Int).Set(outcome.Remainder),
+		Remainder: new(big.Int).Set(remainder),
 	}).Event(); evt != nil {
 		sp.AppendEvent(evt)
 	}
