@@ -79,6 +79,7 @@ const (
 	codeMethodNotFound          = -32601
 	codeInvalidParams           = -32602
 	codeUnauthorized            = -32001
+	codeOperatorOnly            = -32002
 	codeServerError             = -32000
 	codeDuplicateTx             = -32010
 	codeRateLimited             = -32020
@@ -206,6 +207,14 @@ type ServerConfig struct {
 	// TLSClientCAFile enables mutual TLS by providing the path to a PEM-encoded
 	// certificate authority bundle used to verify client certificates.
 	TLSClientCAFile string
+	// OperatorClientCertOU, when set, marks a verified mTLS client certificate
+	// as operator-scoped if any of its Subject OrganizationalUnit values
+	// case-insensitively match it. Every other verified certificate -- which,
+	// as of this change, is every certificate the node sees today, since no
+	// deployed config sets TLSClientCAFile -- authenticates the caller but
+	// never grants the operator role. Leave this empty (the default) to never
+	// treat mTLS as a source of the operator role; see requireOperatorInto.
+	OperatorClientCertOU string
 	// AllowInsecure permits plaintext HTTP when running on loopback interfaces.
 	// This should only be enabled for local development.
 	AllowInsecure bool
@@ -255,6 +264,7 @@ type Server struct {
 	tlsKeyFile               string
 	clientCAFile             string
 	requireClientCert        bool
+	operatorClientCertOU     string
 	allowInsecure            bool
 	allowInsecureUnspecified bool
 	proxyPolicy              proxyPolicy
@@ -318,10 +328,27 @@ type jwtVerifier struct {
 	now      func() time.Time
 }
 
+// rpcClaims extends the standard registered JWT claims with an optional
+// 'role' claim. A credential is operator-scoped only when this claim is
+// present and case-insensitively equal to "operator" (see operatorRoleClaim);
+// any other value, or its absence -- true of every credential minted by
+// generate_jwt.go, update_env.go and services/gov-keeper/main.go's mintJWT
+// as of this change -- defaults to non-operator. See requireOperatorInto.
+type rpcClaims struct {
+	jwt.RegisteredClaims
+	Role string `json:"role,omitempty"`
+}
+
 type contextKey string
 
 const clientIPContextKey contextKey = "rpc_client_ip"
 const clientIdentityContextKey contextKey = "rpc_client_identity"
+const clientRoleContextKey contextKey = "rpc_client_role"
+
+// operatorRoleClaim is the 'role' JWT claim value (and the clientRoleContextKey
+// value derived from a qualifying mTLS certificate) that marks a credential as
+// operator-scoped. See requireOperatorInto and OperatorOnlyMethods.
+const operatorRoleClaim = "operator"
 
 func normalizeProxyMode(mode ProxyHeaderMode) ProxyHeaderMode {
 	switch strings.ToLower(string(mode)) {
@@ -555,6 +582,7 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		tlsKeyFile:               strings.TrimSpace(cfg.TLSKeyFile),
 		clientCAFile:             clientCAPath,
 		requireClientCert:        requireClientCert,
+		operatorClientCertOU:     strings.TrimSpace(cfg.OperatorClientCertOU),
 		allowInsecure:            cfg.AllowInsecure,
 		allowInsecureUnspecified: cfg.AllowInsecureUnspecified,
 		proxyPolicy:              policy,
@@ -683,7 +711,7 @@ func parseRSAPublicKey(data []byte) (*rsa.PublicKey, error) {
 	return nil, errors.New("no RSA public key found in PEM data")
 }
 
-func (v *jwtVerifier) Verify(token string) (*jwt.RegisteredClaims, error) {
+func (v *jwtVerifier) Verify(token string) (*rpcClaims, error) {
 	if v == nil {
 		return nil, errors.New("JWT verifier not configured")
 	}
@@ -697,7 +725,7 @@ func (v *jwtVerifier) Verify(token string) (*jwt.RegisteredClaims, error) {
 	if v.now != nil {
 		opts = append(opts, jwt.WithTimeFunc(func() time.Time { return v.now() }))
 	}
-	claims := &jwt.RegisteredClaims{}
+	claims := &rpcClaims{}
 	parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
 		return v.key, nil
 	}, opts...)
@@ -708,7 +736,7 @@ func (v *jwtVerifier) Verify(token string) (*jwt.RegisteredClaims, error) {
 		return nil, errors.New("token validation failed")
 	}
 	if len(v.audience) > 0 {
-		if claims, ok := parsed.Claims.(*jwt.RegisteredClaims); ok {
+		if claims, ok := parsed.Claims.(*rpcClaims); ok {
 			matched := false
 			for _, aud := range v.audience {
 				for _, claimAud := range claims.Audience {
@@ -1066,6 +1094,70 @@ func isPublicSwapMethod(method string) bool {
 	}
 }
 
+// isSelfAuthenticatedMintMethod reports whether method is exempt from the
+// operator-role gate for the same reason isPublicSwapMethod's methods are:
+// it already carries its own, independent, longer-standing authorization
+// control that is at least as strong as the shared operator role. It is kept
+// separate from isPublicSwapMethod -- rather than folded into that switch --
+// because isPublicSwapMethod is also used above (where s.swapAuth != nil) to
+// REQUIRE the per-partner swap HMAC check via authenticateSwapRequest.
+// mint_with_sig does not carry, and must not be made to carry, an HMAC swap
+// credential: its independent control is an on-chain secp256k1 voucher
+// signature, checked by handleMintWithSig/MintWithSignature and then by
+// applyMintTransaction's requirement that the recovered signer hold
+// MINTER_NHB (core/state_transition.go). Requiring an operator-role JWT on
+// top would not tighten anything -- a forged or stolen voucher signature
+// already fails independently of any JWT -- and would instead break every
+// legitimate caller of the real, currently-deployed off-chain
+// fiat-settlement minting service, which calls mint_with_sig with no
+// bearer credential at all (see docs/escrow/mint-settlement.md).
+func isSelfAuthenticatedMintMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "mint_with_sig":
+		return true
+	default:
+		return false
+	}
+}
+
+// isSignatureThresholdAuthorizedMethod reports whether method is exempt from
+// the operator-role gate for a related but narrower reason than
+// isSelfAuthenticatedMintMethod's: unlike mint_with_sig, buyback_submitRefPrice
+// and lending_submitRefPrice's case arms in handle() already call
+// requireAuthInto themselves (and have since before any operator-role concept
+// existed here), so they already require a validly-authenticated credential.
+// What this exemption removes is only the ADDITIONAL operator-role
+// requirement layered on top of that pre-existing check -- it does not, and
+// must not, make either method reachable with no credential at all.
+//
+// Both methods' real, independent authorization is an M-of-N signature
+// threshold against a genesis-declared signer quorum, verified on-chain
+// (core/buyback_tx.go's applyBuybackRefPrice and core/lending_tx.go's
+// applyLendingRefPriceTransaction, via AddTransaction's synchronous
+// simulation -- see core/buyback_submission_test.go's
+// TestSubmitBuybackRefPrice_InsufficientSignaturesRejected and
+// TestSubmitBuybackRefPrice_WrongEpochRejected for that pre-existing control,
+// unrelated to this branch). This handler layer does no cryptographic
+// verification itself; it only decodes the request and forwards it.
+//
+// A real, currently-deployed off-chain reference-price submission service
+// authenticates to both endpoints today with a credential that does not, and
+// should not, carry the operator role: requiring one would not tighten
+// anything (a forged or below-threshold signature bundle already fails
+// independently of any JWT role), and would instead force a narrow-purpose
+// price-feed submitter to be issued a blanket operator-role credential it
+// doesn't need and shouldn't have -- operator role also grants net_ban,
+// sync_snapshot_import, and every other operator-only method, which is real
+// privilege creep for this caller.
+func isSignatureThresholdAuthorizedMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "buyback_submitRefPrice", "lending_submitRefPrice":
+		return true
+	default:
+		return false
+	}
+}
+
 type BalanceResponse struct {
 	Address               string                `json:"address"`
 	BalanceNHB            *big.Int              `json:"balanceNHB"`
@@ -1373,6 +1465,65 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		identity, _ := r.Context().Value(clientIdentityContextKey).(string)
 		if !s.allowSource(source, identity, "", req.Method, time.Now()) {
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "RPC rate limit exceeded", source)
+			return
+		}
+	}
+
+	// Node-level operator-only enforcement. This runs for EVERY method in
+	// OperatorOnlyMethods / OperatorOnlyMethodPrefixes before any case below
+	// gets a chance to run, independent of whether that case also calls
+	// requireAuthInto itself (several do, as defense-in-depth; several --
+	// e.g. net_info, sync_status, potso_submitEvidence -- previously had no
+	// auth check at all here). Without this, the deny-list enforced by
+	// nhbportal's browser gateway (src/routes/api/rpc/operatorMethods.ts) was
+	// the ONLY thing stopping a caller with a valid-but-non-operator node
+	// credential -- e.g. a compromised or buggy off-chain daemon -- from
+	// calling any method below directly against this node, bypassing that
+	// gateway entirely. See rpc/operator_methods.go and requireOperatorInto.
+	//
+	// isPublicSwapMethod's methods are deliberately exempt even though
+	// several of them (swap_submitVoucher, swap_voucher_get/list/export,
+	// nhb_swapMint, nhb_swapBurn) are also in OperatorOnlyMethods: nhbportal
+	// lists them because a random BROWSER session should never reach them,
+	// not because this node treats them as an operator/admin surface. They
+	// already carry their own, longer-standing authorization model --
+	// authenticateSwapRequest's per-partner HMAC API key, checked just above
+	// -- scoped per swap partner, which is a stronger and more specific
+	// control than one shared 'operator' role would be. Requiring an
+	// operator-role JWT on top would not tighten anything (the HMAC check
+	// already rejects every caller without a provisioned partner key); it
+	// would only break every legitimate swap partner's traffic, including,
+	// per the recon this change is based on, a swapd-type caller whose
+	// credential could not be confirmed from this repo. See
+	// rpc/operator_methods.go's package comment for the full rationale.
+	//
+	// mint_with_sig is exempt for the same shape of reason, via the separate
+	// isSelfAuthenticatedMintMethod check (see its doc comment for why it is
+	// not simply folded into isPublicSwapMethod above): it already carries
+	// its own independent on-chain voucher-signature + MINTER_NHB-role check,
+	// and the real, currently-deployed off-chain fiat-settlement minting
+	// service calls it with no bearer credential at all, so gating it here
+	// too would halt production NHB minting rather than add any protection.
+	//
+	// buyback_submitRefPrice and lending_submitRefPrice are exempt via the
+	// separate isSignatureThresholdAuthorizedMethod check, for a related but
+	// narrower reason (see its doc comment): their case arms below already
+	// call requireAuthInto themselves, so a credential is still required --
+	// only the additional operator-role requirement is skipped here. Their
+	// real, independent control is an on-chain M-of-N signature-threshold
+	// check against a genesis-declared signer quorum, and the real,
+	// currently-deployed off-chain reference-price submission service
+	// authenticates to them today with a credential that does not carry the
+	// operator role, so adding that requirement here would only force
+	// issuing that narrow-purpose caller a blanket operator credential it
+	// doesn't need, without tightening any real control.
+	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) && !isSignatureThresholdAuthorizedMethod(req.Method) {
+		if authErr := s.requireOperatorInto(&r); authErr != nil {
+			status := http.StatusUnauthorized
+			if authErr.Code == codeOperatorOnly {
+				status = http.StatusForbidden
+			}
+			writeError(recorder, status, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
 	}
@@ -2393,6 +2544,9 @@ func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, _ *http.Request, req
 
 func (s *Server) requireAuth(r *http.Request) (*http.Request, *RPCError) {
 	if s.requireClientCert && hasVerifiedClientCert(r) {
+		if s.operatorClientCertOU != "" && certHasOperatorOU(r, s.operatorClientCertOU) {
+			r = r.WithContext(context.WithValue(r.Context(), clientRoleContextKey, operatorRoleClaim))
+		}
 		return r, nil
 	}
 	if s.jwtVerifierErr != nil {
@@ -2412,8 +2566,10 @@ func (s *Server) requireAuth(r *http.Request) (*http.Request, *RPCError) {
 	if claims != nil {
 		identity := strings.TrimSpace(claims.Subject)
 		if identity != "" {
-			ctx := context.WithValue(r.Context(), clientIdentityContextKey, identity)
-			r = r.WithContext(ctx)
+			r = r.WithContext(context.WithValue(r.Context(), clientIdentityContextKey, identity))
+		}
+		if strings.EqualFold(strings.TrimSpace(claims.Role), operatorRoleClaim) {
+			r = r.WithContext(context.WithValue(r.Context(), clientRoleContextKey, operatorRoleClaim))
 		}
 	}
 	return r, nil
@@ -2429,6 +2585,69 @@ func (s *Server) requireAuthInto(r **http.Request) *RPCError {
 	}
 	*r = updated
 	return nil
+}
+
+// requireOperatorInto authenticates the request exactly as requireAuthInto
+// does, then additionally requires that the authenticated credential carry
+// the operator role (see rpcClaims.Role / OperatorClientCertOU). Use this in
+// place of requireAuthInto for any method in OperatorOnlyMethods or under an
+// OperatorOnlyMethodPrefixes namespace.
+//
+// The two failure modes are deliberately distinguished: a missing or invalid
+// credential still returns requireAuthInto's codeUnauthorized error, while a
+// valid, non-operator credential returns the distinct codeOperatorOnly error
+// below -- so a caller (or an operator debugging a daemon) can tell "you're
+// not authenticated" apart from "you're authenticated but not allowed to
+// call this method" instead of both looking like generic auth failures.
+func (s *Server) requireOperatorInto(r **http.Request) *RPCError {
+	if authErr := s.requireAuthInto(r); authErr != nil {
+		return authErr
+	}
+	if !callerHasOperatorRole(*r) {
+		return &RPCError{
+			Code:    codeOperatorOnly,
+			Message: "operator role required for this method",
+			Data:    "this credential authenticated successfully but does not carry the 'operator' role claim required to call this method",
+		}
+	}
+	return nil
+}
+
+// callerHasOperatorRole reports whether r carries the operator role set by a
+// prior requireAuth/requireAuthInto call on the same request.
+func callerHasOperatorRole(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	role, _ := r.Context().Value(clientRoleContextKey).(string)
+	return strings.EqualFold(strings.TrimSpace(role), operatorRoleClaim)
+}
+
+// certHasOperatorOU reports whether r's verified mTLS client certificate
+// carries ou (case-insensitive) in its Subject.OrganizationalUnit. It looks
+// at the first verified chain's leaf certificate when one is present
+// (TLSClientCAFile configured), falling back to the first peer certificate
+// otherwise -- mirroring exactly what hasVerifiedClientCert itself treats as
+// "verified".
+func certHasOperatorOU(r *http.Request, ou string) bool {
+	if r == nil || r.TLS == nil {
+		return false
+	}
+	var leaf *x509.Certificate
+	if len(r.TLS.VerifiedChains) > 0 && len(r.TLS.VerifiedChains[0]) > 0 {
+		leaf = r.TLS.VerifiedChains[0][0]
+	} else if len(r.TLS.PeerCertificates) > 0 {
+		leaf = r.TLS.PeerCertificates[0]
+	}
+	if leaf == nil {
+		return false
+	}
+	for _, candidate := range leaf.Subject.OrganizationalUnit {
+		if strings.EqualFold(strings.TrimSpace(candidate), ou) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractBearerToken(header string) (string, error) {

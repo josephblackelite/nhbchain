@@ -105,6 +105,52 @@ MaxSkewSeconds = 120
   automation must refresh the bearer presented in `Authorization: Bearer <token>`
   before it expires.
 
+### Operator-only RPC methods
+
+A fixed table of admin-grade methods (`net_ban`, `sync_snapshot_import`,
+`swap_setManualQuote`, `potso_reward_claim`, and the rest of
+`rpc.OperatorOnlyMethods`/`OperatorOnlyMethodPrefixes` in
+`rpc/operator_methods.go`) requires an **operator-scoped** credential, checked
+by the node itself -- not just by nhbportal's browser gateway deny-list
+(`src/routes/api/rpc/operatorMethods.ts`), which a caller that reaches this
+node directly (an off-chain daemon, a misconfigured client, a compromised
+credential) never passed through in the first place.
+
+A handful of methods in that same table are deliberately exempt from the
+operator-role requirement because they already carry their own independent,
+at-least-as-strong authorization: `mint_with_sig` (an on-chain voucher
+signature plus a minter-role check), and `buyback_submitRefPrice` /
+`lending_submitRefPrice` (an on-chain M-of-N signature-threshold check against
+a genesis-declared signer quorum -- these two still require their own
+authenticated, non-operator-scoped credential via the node's normal JWT/mTLS
+check). See `rpc/http.go`'s `isSelfAuthenticatedMintMethod` and
+`isSignatureThresholdAuthorizedMethod` for the full reasoning.
+
+A credential is operator-scoped when either is true:
+
+* its JWT carries a `role` claim equal to `operator` (case-insensitive); or
+* mTLS is enabled (`RPCTLSClientCAFile` above) **and** `RPCOperatorClientCertOU`
+  is set to a value present in the verified client certificate's Subject
+  Organizational Unit.
+
+Every credential minted by `generate_jwt.go`, `update_env.go`, and
+`services/gov-keeper/main.go`'s `mintJWT` carries no `role` claim today, so
+they default to non-operator -- as does any token that predates this change.
+Mint an operator credential with:
+
+```sh
+NHB_RPC_JWT_SECRET=... go run generate_operator_jwt.go [subject]
+```
+
+Treat its output like any other admin credential: share it only with the
+specific human or automation that legitimately needs to call one of these
+methods, prefer the tool's default 24h expiry over a long-lived token, and
+re-mint rather than widen that expiry. A request for an operator-only method
+from a credential that authenticates but lacks the role is rejected with a
+distinct JSON-RPC error (`-32002`, HTTP 403) rather than the generic
+`-32001` auth failure, so a daemon's own logs make clear it needs the role,
+not a fresh ordinary token.
+
 After restarting the node, validate the transport:
 
 ```bash
