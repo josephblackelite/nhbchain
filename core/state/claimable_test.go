@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
@@ -23,6 +24,64 @@ func fundAccount(t *testing.T, manager *Manager, addr [20]byte, nhb, znhb int64)
 	}
 }
 
+// TestClaimableCreateUsesDeterministicBlockTime guards PL-DC-40:
+// CreateClaimable used to stamp CreatedAt with time.Now().Unix() -- real
+// wall-clock time -- instead of the deterministic block timestamp every
+// validator agrees on. Two validators (or one validator replaying the same
+// block later, e.g. during catch-up sync) would then compute different
+// CreatedAt/ExpiresAt values for an identical claimable purely because of
+// clock drift or elapsed wall-clock time, which is a state-root divergence
+// hazard the moment this code is reachable. This test proves CreatedAt
+// tracks the caller-supplied block time exactly -- identical across two
+// independent calls at the same simulated block time, even with real
+// wall-clock time elapsing between them -- and never falls back to
+// time.Now().
+func TestClaimableCreateUsesDeterministicBlockTime(t *testing.T) {
+	const fixedBlockTime = int64(1) // deliberately nowhere near real wall-clock time
+	const deadline = int64(1_000_000)
+
+	var hashLock [32]byte
+
+	manager1 := newTestManager(t)
+	var payer1 [20]byte
+	payer1[19] = 1
+	fundAccount(t, manager1, payer1, 1000, 0)
+	claim1, err := manager1.CreateClaimable(payer1, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, fixedBlockTime)
+	if err != nil {
+		t.Fatalf("create claimable 1: %v", err)
+	}
+
+	// Real wall-clock time elapses here, simulating a validator replaying
+	// this exact block well after it was first produced.
+	time.Sleep(10 * time.Millisecond)
+
+	manager2 := newTestManager(t)
+	var payer2 [20]byte
+	payer2[19] = 1
+	fundAccount(t, manager2, payer2, 1000, 0)
+	claim2, err := manager2.CreateClaimable(payer2, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, fixedBlockTime)
+	if err != nil {
+		t.Fatalf("create claimable 2: %v", err)
+	}
+
+	if claim1.CreatedAt != fixedBlockTime {
+		t.Fatalf("CreatedAt must equal the supplied block time exactly: got %d want %d", claim1.CreatedAt, fixedBlockTime)
+	}
+	if claim1.ExpiresAt != deadline {
+		t.Fatalf("ExpiresAt must equal the supplied deadline exactly: got %d want %d", claim1.ExpiresAt, deadline)
+	}
+	if claim2.CreatedAt != fixedBlockTime {
+		t.Fatalf("CreatedAt must equal the supplied block time exactly: got %d want %d", claim2.CreatedAt, fixedBlockTime)
+	}
+	if claim1.CreatedAt != claim2.CreatedAt {
+		t.Fatalf("two calls at the same simulated block time produced different CreatedAt values (%d vs %d) despite wall-clock time elapsing between them -- this is a determinism/consensus hazard", claim1.CreatedAt, claim2.CreatedAt)
+	}
+
+	if now := time.Now().Unix(); claim1.CreatedAt == now {
+		t.Fatalf("CreatedAt matched wall-clock time.Now() (%d) -- CreateClaimable must stamp CreatedAt from the supplied block time, never time.Now()", now)
+	}
+}
+
 func TestClaimableCreateAndClaim(t *testing.T) {
 	manager := newTestManager(t)
 	var payer [20]byte
@@ -35,7 +94,8 @@ func TestClaimableCreateAndClaim(t *testing.T) {
 	copy(hashLock[:], hash)
 
 	deadline := int64(500)
-	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	blockTime := int64(1)
+	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, blockTime)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -105,7 +165,8 @@ func TestClaimableClaimRejectsAfterDeadline(t *testing.T) {
 	copy(hashLock[:], hash)
 
 	deadline := int64(1000)
-	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	blockTime := int64(1)
+	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, blockTime)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -155,7 +216,8 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 
 	var hashLock [32]byte
 	deadline := int64(100)
-	claim, err := manager.CreateClaimable(payer, "ZNHB", big.NewInt(200), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	blockTime := int64(1)
+	claim, err := manager.CreateClaimable(payer, "ZNHB", big.NewInt(200), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, blockTime)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -190,7 +252,7 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 	// Expire path
 	fundAccount(t, manager, payer, 500, 1000) // replenish NHB for second claimable
 	deadlineExpire := int64(50)
-	second, err := manager.CreateClaimable(payer, "NHB", big.NewInt(300), hashLock, deadlineExpire, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	second, err := manager.CreateClaimable(payer, "NHB", big.NewInt(300), hashLock, deadlineExpire, [32]byte{}, "test-chain", claimable.RecipientKindNone, blockTime)
 	if err != nil {
 		t.Fatalf("create second claimable: %v", err)
 	}

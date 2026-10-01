@@ -7383,7 +7383,7 @@ func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, ha
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	chainID := fmt.Sprintf("%d", n.ChainID())
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID, claimable.RecipientKindNone)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID, claimable.RecipientKindNone, n.state.blockTimestamp().Unix())
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -7411,7 +7411,7 @@ func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big
 	var hashLock [32]byte
 	copy(hashLock[:], hash)
 	chainID := fmt.Sprintf("%d", n.ChainID())
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID, recipientKind)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID, recipientKind, n.state.blockTimestamp().Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -7494,7 +7494,7 @@ func (n *Node) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) erro
 	if err := n.authorizeClaimablePayee(manager, record, payee); err != nil {
 		return err
 	}
-	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, time.Now().Unix())
+	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, n.state.blockTimestamp().Unix())
 	if err != nil {
 		return err
 	}
@@ -7533,7 +7533,7 @@ func (n *Node) IdentityClaim(id [32]byte, preimage []byte, payee [20]byte) (*cla
 	if err := n.authorizeClaimablePayee(manager, record, payee); err != nil {
 		return nil, err
 	}
-	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, time.Now().Unix())
+	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, n.state.blockTimestamp().Unix())
 	if err != nil {
 		return nil, err
 	}
