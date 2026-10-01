@@ -24,9 +24,9 @@ const (
 	keystoreImportPrivateKeyEnv = "NHB_KEYSTORE_IMPORT_PRIVATE_KEY"
 	// NHB_KEYSTORE_IMPORT_PASSPHRASE must hold the passphrase used to
 	// encrypt the resulting keystore file. This is the same passphrase an
-	// operator later points services/swapd's price_proof.signer.passphrase_env
-	// at (see localsigner.Config) or supplies to any other consumer of the
-	// resulting file.
+	// operator later points the off-chain swap settlement service's
+	// price_proof.signer.passphrase_env at (see localsigner.Config) or
+	// supplies to any other consumer of the resulting file.
 	keystoreImportPassphraseEnv = "NHB_KEYSTORE_IMPORT_PASSPHRASE"
 )
 
@@ -62,8 +62,8 @@ Subcommands:
                          and prints the resulting public address so you can
                          visually confirm it matches the wallet you meant to
                          import before trusting the file for anything (e.g.
-                         pointing services/swapd's local price-proof signer
-                         at it).
+                         pointing the off-chain swap settlement service's
+                         local price-proof signer at it).
 `)
 }
 
@@ -81,8 +81,8 @@ Subcommands:
 //     with the same passphrase, and confirm the recovered address matches
 //     the address derived in step 2. This catches a corrupted or
 //     unexpectedly-wrong write right here, at import time, instead of
-//     leaving it to surface later as a cryptic decrypt failure when
-//     something like swapd tries to start with this file.
+//     leaving it to surface later as a cryptic decrypt failure when the
+//     off-chain swap settlement service tries to start with this file.
 //  5. Print the public address. The operator is expected to visually
 //     compare it against the address they expect for the wallet being
 //     imported -- this command has no independent way to know whether the
@@ -155,7 +155,7 @@ func runKeystoreImport(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "Verified: decrypting the written file recovers the same address.")
 	fmt.Fprintln(stdout, "")
 	fmt.Fprintln(stdout, "CONFIRM the address above matches the wallet you intended to import")
-	fmt.Fprintln(stdout, "before pointing anything (e.g. services/swapd's local price-proof")
-	fmt.Fprintln(stdout, "signer) at this file.")
+	fmt.Fprintln(stdout, "before pointing anything (e.g. the off-chain swap settlement")
+	fmt.Fprintln(stdout, "service's local price-proof signer) at this file.")
 	return 0
 }

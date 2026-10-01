@@ -29,9 +29,11 @@ The target builds fresh images for:
 - `p2pd`
 - `consensusd`
 - `lendingd` (preview – disabled by default in Helm)
-- `swapd`
 - `governd`
 - `gateway`
+
+The off-chain swap settlement service runs separately and is not part of
+this compose stack.
 
 Compose mounts configuration files from `deploy/compose/config`. All stateful
 services write data to named Docker volumes so containers can be restarted
@@ -42,7 +44,6 @@ without losing state.
 | Service      | Port | Notes |
 |--------------|------|-------|
 | gateway      | 127.0.0.1:8080 | REST gateway |
-| swapd        | 127.0.0.1:7074 | HTTP oracle |
 | governd      | 127.0.0.1:50061 | gRPC |
 | lendingd     | 127.0.0.1:50053 | gRPC (preview – returns UNIMPLEMENTED) |
 | consensusd   | 127.0.0.1:9090 | gRPC (public) |
@@ -78,5 +79,5 @@ command in the Makefile before stopping the services.
 - If `consensusd` or `p2pd` exit immediately, ensure the Docker engine has read
   and write permissions on the named volumes in `docker volume ls`.
 - Swap oracle calls external APIs by default. For fully offline development,
-  remove the NowPayments source from `config/swapd.yaml` and rely on
-  the CoinGecko feed or stub data.
+  remove the NowPayments source from the off-chain swap settlement
+  service's configuration and rely on the CoinGecko feed or stub data.

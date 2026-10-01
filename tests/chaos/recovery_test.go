@@ -113,14 +113,14 @@ func TestSwapMintRedeemWithChaos(t *testing.T) {
 
 	redeem := map[string]any{"account": account, "amount": 250, "request_id": "redeem-chaos"}
 	if err := cl.Kill(ctx, cluster.ServiceSwap); err != nil {
-		t.Fatalf("kill swapd: %v", err)
+		t.Fatalf("kill swap service: %v", err)
 	}
 	if err := postExpectError(client, fmt.Sprintf("%s/v1/swap/redeem", base), redeem); err == nil {
 		t.Fatalf("expected redeem failure while service stopped")
 	}
 
 	if _, err := cl.Restart(ctx, cluster.ServiceSwap); err != nil {
-		t.Fatalf("restart swapd: %v", err)
+		t.Fatalf("restart swap service: %v", err)
 	}
 
 	var redeemResp swapResponse

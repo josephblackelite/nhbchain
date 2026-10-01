@@ -385,26 +385,27 @@ type SwapStableMetrics struct {
 	errors   *prometheus.CounterVec
 }
 
-// SwapStable returns the singleton metrics registry for swapd stable endpoints.
+// SwapStable returns the singleton metrics registry for the off-chain swap
+// settlement service's stable endpoints.
 func SwapStable() *SwapStableMetrics {
 	swapStableOnce.Do(func() {
 		swapStableReg = &SwapStableMetrics{
 			requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Namespace: "nhb",
-				Subsystem: "swapd_stable",
+				Subsystem: "swap_stable",
 				Name:      "requests_total",
 				Help:      "Count of stable swap operations segmented by step and outcome.",
 			}, []string{"operation", "outcome"}),
 			latency: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 				Namespace: "nhb",
-				Subsystem: "swapd_stable",
+				Subsystem: "swap_stable",
 				Name:      "request_duration_seconds",
 				Help:      "Latency distribution for stable swap operations.",
 				Buckets:   prometheus.DefBuckets,
 			}, []string{"operation"}),
 			errors: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Namespace: "nhb",
-				Subsystem: "swapd_stable",
+				Subsystem: "swap_stable",
 				Name:      "errors_total",
 				Help:      "Count of stable swap failures segmented by operation and reason.",
 			}, []string{"operation", "reason"}),

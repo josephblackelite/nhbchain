@@ -6,9 +6,12 @@ runtime service required in a production NHB stack:
 - `p2pd`
 - `consensusd`
 - `lendingd` (preview – disabled by default)
-- `swapd`
 - `governd`
 - `gateway`
+
+The off-chain swap settlement service is deployed separately (its own
+private repo and charts) and is not part of this stack; the gateway reaches
+it over `NHB_GATEWAY_SWAP_URL`.
 
 Each chart packages:
 
@@ -42,7 +45,6 @@ helm upgrade --install consensusd deploy/helm/consensusd -f deploy/helm/values/s
 # (Optional once RPCs are implemented)
 # helm upgrade --install lendingd deploy/helm/lendingd -f deploy/helm/values/staging/lendingd.yaml \
 #   --set replicaCount=1
-helm upgrade --install swapd deploy/helm/swapd -f deploy/helm/values/staging/swapd.yaml
 helm upgrade --install governd deploy/helm/governd -f deploy/helm/values/staging/governd.yaml \
   --set secrets.signerKey="$(kubectl get secret nhb-governance -o jsonpath='{.data.signer-key}' | base64 -d)"
 helm upgrade --install gateway deploy/helm/gateway -f deploy/helm/values/staging/gateway.yaml \
@@ -78,7 +80,8 @@ covers:
 - `nhb-validator` – validator keystore password
 - `nhb-governance` – hex-encoded private key for governd signing
 - `nhb-gateway-auth` – optional gateway HMAC secret
-- `nhb-swapd-apis` – external oracle API tokens
+- `nhb-swap-service-apis` – external oracle API tokens for the off-chain
+  swap settlement service
 
 ## Chart releases & CI
 

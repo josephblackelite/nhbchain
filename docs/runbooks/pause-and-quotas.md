@@ -44,36 +44,38 @@ the latest block root, decodes `system/pauses`, and prints the module map.【F:e
    a module replace `--state pause` with `--state resume`.
 
 > **ZNHB redemption tip:** Disabling cash-outs cleanly requires pausing both the on-chain
-> swap module (`global.pauses.swap`) and the `swapd` stable engine (`stable.paused` in
-> the YAML). Pause the service first to drain in-flight requests, then toggle the
-> on-chain flag. When restoring service, unpause `swapd` only after the governance
-> update clears the module pause so submitted redemptions will execute successfully.
+> swap module (`global.pauses.swap`) and the off-chain swap settlement service's stable
+> engine (`stable.paused` in its config). Pause the service first to drain in-flight
+> requests, then toggle the on-chain flag. When restoring service, unpause the swap
+> settlement service only after the governance update clears the module pause so
+> submitted redemptions will execute successfully.
 
 ### Pause playbooks (mints vs. redemptions)
 
 * **Pause minting:** run the helper above with `--module swap --state pause` and
   capture the transaction hash for the incident log.
-* **Pause redemptions:** flip `stable.paused=true` in the active swapd overlay
-  while leaving the mint flag untouched. For example:
+* **Pause redemptions:** flip `stable.paused=true` in the swap settlement
+  service's active config overlay (owned by its own private repo/deploy,
+  not this one) while leaving the mint flag untouched. For example:
 
   ```bash
-  yq -i '.stable.paused = true' deploy/environments/prod/swapd.yaml
-  kubectl rollout restart deployment swapd -n <your-namespace>
+  yq -i '.stable.paused = true' <swap-settlement-service-config>.yaml
+  kubectl rollout restart deployment <swap-settlement-service> -n <your-namespace>
   ```
 
   The restart ensures the new flag propagates. Reverting to `stable.paused=false`
   re-opens redemptions once the on-chain pause clears.
-* **Observe toggles:** combine the consensus snapshot with the swapd status
-  endpoint to confirm the desired state landed:
+* **Observe toggles:** combine the consensus snapshot with the swap settlement
+  service's status endpoint to confirm the desired state landed:
 
   ```bash
   go run ./examples/docs/ops/swap_pause_inspect \
     --db ./nhb-data \
     --consensus localhost:9090 \
-    --swapd https://swapd.internal.example
+    --swap-service https://swap-settlement.internal.example
   ```
 
-  The helper prints `global.pauses.swap` and whether `/v1/stable/status` is
+  The helper prints `global.pauses.swap` and whether the service's `/v1/stable/status` is
   returning `501 stable engine not enabled` (paused) or live counters (active).
 
 ## Inspect quota usage for an address

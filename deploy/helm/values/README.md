@@ -6,7 +6,7 @@ Sample per-environment overrides for the NHB Helm charts live in the nested fold
 - `staging/`
 - `prod/`
 
-Each directory mirrors the chart names (`gateway`, `consensusd`, `p2pd`, `lendingd`, `swapd`, `governd`).
+Each directory mirrors the chart names (`gateway`, `consensusd`, `p2pd`, `lendingd`, `governd`).
 Use them with `helm upgrade --install` by passing the relevant file with `-f`. For example:
 
 ```sh

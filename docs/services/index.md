@@ -5,8 +5,8 @@ following references to configure, monitor, and integrate with each component.
 
 ## Gateway Service
 
-- **Endpoint:** HTTPS / REST, proxying to lendingd, swapd, governd, and
-  consensusd.
+- **Endpoint:** HTTPS / REST, proxying to lendingd, the off-chain swap
+  settlement service, governd, and consensusd.
 - **Responsibilities:** Request authentication, REST to gRPC translation, rate
   limiting, and transaction memo enrichment.
 - **Key configuration:** `cmd/gateway` (`cmd/gateway/main.go`) is configured via
