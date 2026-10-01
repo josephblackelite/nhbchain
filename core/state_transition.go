@@ -92,8 +92,8 @@ var (
 	// ErrNonceTooLow this is genuinely order-dependent -- a different
 	// attempt (later round, different candidate set) can succeed once the
 	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
-	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
-	ErrInvalidChainID      = errors.New("invalid chain id")
+	ErrNonceTooHigh   = errors.New("transaction nonce mismatch: not yet reached")
+	ErrInvalidChainID = errors.New("invalid chain id")
 	// ErrTransactionExpired indicates executeTransaction rejected a
 	// transaction whose MaxBlockHeight has already passed, or whose
 	// IntentExpiry has already passed (NHB-AUDIT-R2) -- checked here,
@@ -103,7 +103,7 @@ var (
 	// never succeed later either; classifyProposalError treats it as
 	// PRUNE-safe, the same disposition ErrSwapExpired already gets for the
 	// identical reason.
-	ErrTransactionExpired = errors.New("transaction expired")
+	ErrTransactionExpired  = errors.New("transaction expired")
 	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
 	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
@@ -221,9 +221,20 @@ type StateProcessor struct {
 	marketEscrowAddr           crypto.Address
 	marketFeeCollectorAddr     crypto.Address
 	govPolicy                  governance.ProposalPolicy
-	blockCtx                   BlockCtx
-	swapPayoutAuthorities      map[string]struct{}
-	swapConfig                 swap.Config
+	// feeRouteAliasActivationHeight gates PL-R1-FEEROUTE's fix to
+	// applyTransactionFee -- see SetFeeRouteAliasActivationHeight's doc
+	// comment for the full rationale. Mirrors
+	// Node.quorumCertActivationHeight's gating shape: blocks below this
+	// height keep the original (buggy) always-fetch-a-fresh-copy behavior
+	// so already-committed history keeps replaying to the identical state
+	// root; blocks at or above it get the fix. NewStateProcessor defaults
+	// this to math.MaxUint64 (disabled -- every existing caller, including
+	// the whole test suite, keeps today's behavior unchanged unless
+	// SetFeeRouteAliasActivationHeight is called).
+	feeRouteAliasActivationHeight uint64
+	blockCtx                      BlockCtx
+	swapPayoutAuthorities         map[string]struct{}
+	swapConfig                    swap.Config
 	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
 	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
 	// must match. This is deliberately distinct from types.NHBChainID()
@@ -278,9 +289,14 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 		lendingCollateralRouting: lending.CollateralRouting{},
 		marketEscrowAddr:         deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
 		marketFeeCollectorAddr:   deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
-		blockCtx:                 BlockCtx{},
-		swapPayoutAuthorities:    make(map[string]struct{}),
-		swapConfig:               swap.Config{},
+		// Disabled by default (see the field doc comment): every existing
+		// caller of NewStateProcessor, including the whole test suite, gets
+		// today's unchanged behavior unless SetFeeRouteAliasActivationHeight
+		// is called explicitly to opt in.
+		feeRouteAliasActivationHeight: math.MaxUint64,
+		blockCtx:                      BlockCtx{},
+		swapPayoutAuthorities:         make(map[string]struct{}),
+		swapConfig:                    swap.Config{},
 	}
 	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
@@ -450,6 +466,49 @@ func (sp *StateProcessor) quotaStoreHandle() (*systemquotas.Store, error) {
 	return store, nil
 }
 
+// SetFeeRouteAliasActivationHeight configures the height at and above which
+// applyTransactionFee reuses the caller's already-loaded fromAcc/toAcc
+// object for the domain fee's route wallet when that wallet aliases the
+// transfer's own sender or recipient, instead of always fetching a second,
+// separately-loaded copy via sp.getAccount.
+//
+// Bug this gates (ledger id PL-R1-FEEROUTE): applyTransactionFee always
+// loaded the domain fee's OwnerWallet with a fresh sp.getAccount call before
+// crediting it. applyTransferZNHB and the NHB transfer path each persist
+// their own fromAcc/toAcc objects only after applyTransactionFee returns.
+// So when the route wallet IS the sender or the recipient of the very
+// transfer it is being paid out of, the credit lands on a separate,
+// throwaway *types.Account object that the caller's later
+// sp.setAccount(sender/recipient, ...) call silently overwrites once this
+// function returns -- the fee is debited but the credit vanishes.
+//
+// This is gated rather than applied unconditionally because this repo has
+// no history-replay tooling and no confirmed record of whether any past NHB
+// or ZNHB transfer's domain-fee route wallet ever equaled its own sender or
+// recipient; an unconditional fix could not be conclusively ruled safe
+// against already-committed state roots. Two of this chain's live fee
+// domains ("p2p" and "otc") already point their OwnerWallet at a single
+// configured address, and ordinary transfer categories -- not just a
+// theoretical edge case -- could trigger this aliasing condition, so
+// assuming safety from the fee config alone is not warranted. Mirrors
+// Node.quorumCertActivationHeight's gating shape exactly: below this
+// height, the original (buggy) always-fetch-a-fresh-copy behavior runs, so
+// any already-committed history keeps replaying to the identical state root
+// it always has. At or above it, the fixed, alias-aware credit runs.
+// NewStateProcessor defaults this to math.MaxUint64 (disabled -- every
+// existing caller, including the whole test suite, keeps today's behavior
+// unchanged). Enabling this is an explicit, deploy-time decision, not
+// automatic: it must be set to the chain's current tip height, identically
+// on every validator, as part of one coordinated upgrade -- deliberately
+// NOT auto-detected from chain state, for the same reason
+// SetQuorumCertActivationHeight's doc comment gives.
+func (sp *StateProcessor) SetFeeRouteAliasActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.feeRouteAliasActivationHeight = height
+}
+
 func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []byte, fromAcc, toAcc *types.Account) error {
 	if sp == nil || tx == nil {
 		return nil
@@ -569,16 +628,21 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		// same object, not on a separately loaded copy: a separate copy would
 		// hold the pre-transfer balance and be silently overwritten by the
 		// caller's later write, destroying the fee. This applies identically
-		// to both assets (PL-R1-FEEROUTE); it only used to be special-cased
-		// for ZNHB because the NHB half needed proof against production
-		// history first -- see the activation-height note in this function's
-		// test file before deploying this change.
+		// to both assets (PL-R1-FEEROUTE). Gated by
+		// sp.feeRouteAliasActivationHeight -- see
+		// SetFeeRouteAliasActivationHeight's doc comment for the full
+		// rationale, including why this is not applied unconditionally.
+		// Below the activation height, routeAcc is always nil here, so the
+		// code below always falls through to sp.getAccount, reproducing the
+		// original (buggy) behavior byte-for-byte.
 		var routeAcc *types.Account
-		switch {
-		case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
-			routeAcc = fromAcc
-		case toAcc != nil && bytes.Equal(result.OwnerWallet[:], tx.To):
-			routeAcc = toAcc
+		if sp.blockHeight() >= sp.feeRouteAliasActivationHeight {
+			switch {
+			case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
+				routeAcc = fromAcc
+			case toAcc != nil && bytes.Equal(result.OwnerWallet[:], tx.To):
+				routeAcc = toAcc
+			}
 		}
 		if routeAcc == nil {
 			routeAcc, err = sp.getAccount(result.OwnerWallet[:])
@@ -3284,10 +3348,10 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 
 	msg := gethcore.Message{
-		From:          fromAddr,
-		To:            toAddrPtr,
-		Nonce:         tx.Nonce,
-		Value:         originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
+		From:  fromAddr,
+		To:    toAddrPtr,
+		Nonce: tx.Nonce,
+		Value: originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
 		// comment used to describe was removed from execution; getGlobalFeeRate is hardcoded to 0.
 		GasLimit:      tx.GasLimit,
 		GasPrice:      tx.GasPrice,

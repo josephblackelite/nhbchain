@@ -125,34 +125,50 @@ type Config struct {
 	// a brand-new chain wanting the protection from genesis, not for
 	// upgrading an already-live one.
 	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
-	ValidatorKeystorePath       string                       `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI             string                       `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv             string                       `toml:"ValidatorKMSEnv"`
-	NetworkName                 string                       `toml:"NetworkName"`
-	Bootnodes                   []string                     `toml:"Bootnodes"`
-	PersistentPeers             []string                     `toml:"PersistentPeers"`
-	BootstrapPeers              []string                     `toml:"BootstrapPeers,omitempty"`
-	MaxPeers                    int                          `toml:"MaxPeers"`
-	MaxInbound                  int                          `toml:"MaxInbound"`
-	MaxOutbound                 int                          `toml:"MaxOutbound"`
-	MinPeers                    int                          `toml:"MinPeers"`
-	OutboundPeers               int                          `toml:"OutboundPeers"`
-	PeerBanSeconds              int                          `toml:"PeerBanSeconds"`
-	ReadTimeout                 int                          `toml:"ReadTimeout"`
-	WriteTimeout                int                          `toml:"WriteTimeout"`
-	MaxMsgBytes                 int                          `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond            float64                      `toml:"MaxMsgsPerSecond"`
-	ClientVersion               string                       `toml:"ClientVersion"`
-	P2P                         P2PSection                   `toml:"p2p"`
-	Potso                       PotsoConfig                  `toml:"potso"`
-	Governance                  GovConfig                    `toml:"governance"`
-	Swap                        swap.Config                  `toml:"swap"`
-	Lending                     lending.Config               `toml:"lending"`
-	Subscriptions               Subscriptions                `toml:"subscriptions"`
-	Mempool                     MempoolConfig                `toml:"mempool"`
-	Global                      Global                       `toml:"global"`
-	Consensus                   Consensus                    `toml:"consensus"`
-	NetworkSecurity             NetworkSecurity              `toml:"network_security"`
+	// FeeRouteAliasActivationHeight enables PL-R1-FEEROUTE's fix once set:
+	// a TxTypeTransfer/TxTypeTransferZNHB whose domain fee route wallet
+	// aliases the transfer's own sender or recipient, below this height,
+	// keeps crediting a separate, freshly-loaded copy of that wallet
+	// that the caller's own later persist silently overwrites
+	// (grandfathering already-committed history that may rely on today's
+	// behavior); transactions at or above it credit the caller's
+	// already-loaded sender/recipient object instead, so the fee survives
+	// rather than being silently dropped. 0 (the default/unset value) leaves the fix
+	// fully disabled -- this field must be explicitly set to the chain's
+	// current tip height, identically on every validator, as one
+	// coordinated deploy (see core.Node.SetFeeRouteAliasActivationHeight's
+	// doc comment and core.StateProcessor.SetFeeRouteAliasActivationHeight's
+	// doc comment in core/state_transition.go for the full rationale,
+	// including why this ships gated rather than unconditional).
+	FeeRouteAliasActivationHeight uint64          `toml:"FeeRouteAliasActivationHeight"`
+	ValidatorKeystorePath         string          `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI               string          `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv               string          `toml:"ValidatorKMSEnv"`
+	NetworkName                   string          `toml:"NetworkName"`
+	Bootnodes                     []string        `toml:"Bootnodes"`
+	PersistentPeers               []string        `toml:"PersistentPeers"`
+	BootstrapPeers                []string        `toml:"BootstrapPeers,omitempty"`
+	MaxPeers                      int             `toml:"MaxPeers"`
+	MaxInbound                    int             `toml:"MaxInbound"`
+	MaxOutbound                   int             `toml:"MaxOutbound"`
+	MinPeers                      int             `toml:"MinPeers"`
+	OutboundPeers                 int             `toml:"OutboundPeers"`
+	PeerBanSeconds                int             `toml:"PeerBanSeconds"`
+	ReadTimeout                   int             `toml:"ReadTimeout"`
+	WriteTimeout                  int             `toml:"WriteTimeout"`
+	MaxMsgBytes                   int             `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond              float64         `toml:"MaxMsgsPerSecond"`
+	ClientVersion                 string          `toml:"ClientVersion"`
+	P2P                           P2PSection      `toml:"p2p"`
+	Potso                         PotsoConfig     `toml:"potso"`
+	Governance                    GovConfig       `toml:"governance"`
+	Swap                          swap.Config     `toml:"swap"`
+	Lending                       lending.Config  `toml:"lending"`
+	Subscriptions                 Subscriptions   `toml:"subscriptions"`
+	Mempool                       MempoolConfig   `toml:"mempool"`
+	Global                        Global          `toml:"global"`
+	Consensus                     Consensus       `toml:"consensus"`
+	NetworkSecurity               NetworkSecurity `toml:"network_security"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.
