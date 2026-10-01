@@ -476,7 +476,42 @@ const (
 	// re-checking for newly added types above this comment.
 	TxTypeSubmitEvidence TxType = 0x4C
 
-	// Next free TxType byte is 0x4D.
+	// TxTypeLendingWithdrawProtocolFees/TxTypeLendingWithdrawDeveloperFees
+	// give native/lending's Engine.WithdrawProtocolFees/WithdrawDeveloperFees
+	// (core/lending_fee_withdraw_tx.go) their first and only callers --
+	// before this, both methods were fully implemented but completely
+	// unreachable (no transaction type, no RPC handler), so protocol and
+	// developer fees accrued forever with no way to withdraw them
+	// (ledger PL-DC-19).
+	//
+	// Senderless/envelope-unsigned, like TxTypeSwapVoucherReverse/
+	// TxTypeSwapMarkReconciled just above: the payload carries its own
+	// embedded secp256k1 signature (see core/lending_fee_withdraw_tx.go's
+	// LendingProtocolFeeWithdrawSigningHash/
+	// LendingDeveloperFeeWithdrawSigningHash), because the authorizing key is
+	// not necessarily this node's own -- the exact same "operator key, not a
+	// node's own account" reasoning RoleSwapAdmin's doc comment
+	// (core/state_transition.go) gives for TxTypeSwapVoucherReverse/
+	// TxTypeSwapMarkReconciled.
+	//
+	// The two withdrawals use different authorities, each the appropriate
+	// *existing* one rather than an invented check:
+	//   - TxTypeLendingWithdrawProtocolFees is gated by RoleLendingProtocolAdmin
+	//     (a chain-wide, genesis/governance-granted role, the same mechanism
+	//     RoleSwapAdmin uses), since protocol fees are a chain-wide treasury
+	//     concern with no single pool to scope a check to.
+	//   - TxTypeLendingWithdrawDeveloperFees is gated by the target pool's own
+	//     Market.DeveloperOwner (native/lending/types.go), which that field's
+	//     doc comment already documents as "entitled to the developer fee
+	//     stream" -- developer-fee entitlement is inherently per-pool, so a
+	//     global role would let one pool's developer withdraw another's fees.
+	// 0x4D/0x4E are the next free bytes after TxTypeSubmitEvidence (0x4C) --
+	// verified against this file's real, current tip; do not reuse without
+	// re-checking for newly added types above this comment.
+	TxTypeLendingWithdrawProtocolFees  TxType = 0x4D
+	TxTypeLendingWithdrawDeveloperFees TxType = 0x4E
+
+	// Next free TxType byte is 0x4F.
 )
 
 // RequiresSignature reports whether the transaction type must carry an
@@ -485,7 +520,8 @@ const (
 func RequiresSignature(t TxType) bool {
 	switch t {
 	case TxTypeMint, TxTypeSwapVoucherMint, TxTypeBuybackRefPrice, TxTypeLendingRefPrice,
-		TxTypeSwapVoucherReverse, TxTypeSwapMarkReconciled, TxTypeSubmitEvidence:
+		TxTypeSwapVoucherReverse, TxTypeSwapMarkReconciled, TxTypeSubmitEvidence,
+		TxTypeLendingWithdrawProtocolFees, TxTypeLendingWithdrawDeveloperFees:
 		return false
 	default:
 		return true

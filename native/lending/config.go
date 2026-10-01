@@ -4,14 +4,39 @@ import "math/big"
 
 // Config captures the runtime configuration for the native lending module.
 type Config struct {
-	MaxLTVBps               uint64                  `toml:"MaxLTVBps"`
-	LiquidationThresholdBps uint64                  `toml:"LiquidationThresholdBps"`
-	ReserveFactorBps        uint64                  `toml:"ReserveFactorBps"`
-	Breaker                 BreakerThresholds       `toml:"breaker"`
-	ProtocolFeeBps          uint64                  `toml:"ProtocolFeeBps"`
-	DeveloperFeeBps         uint64                  `toml:"DeveloperFeeBps"`
-	DeveloperFeeCollector   string                  `toml:"DeveloperFeeCollector"`
-	CollateralRouting       CollateralRoutingConfig `toml:"collateralRouting"`
+	MaxLTVBps               uint64 `toml:"MaxLTVBps"`
+	LiquidationThresholdBps uint64 `toml:"LiquidationThresholdBps"`
+	// LiquidationBonusBps captures the discount applied to collateral during
+	// liquidation, expressed in basis points -- see RiskParameters.LiquidationBonus,
+	// which this is wired into exactly like MaxLTVBps/LiquidationThresholdBps are
+	// (cmd/nhb/main.go's lendingRiskParametersFromConfig).
+	LiquidationBonusBps uint64 `toml:"LiquidationBonusBps"`
+	// CircuitBreakerActive signals whether new borrowing should be halted,
+	// mirroring RiskParameters.CircuitBreakerActive. Unlike Pauses below
+	// (which can pause individual flows), this is the engine-wide borrow
+	// kill switch for oracle issues or governance intervention.
+	CircuitBreakerActive bool `toml:"CircuitBreakerActive"`
+	// BorrowCaps aggregates the per-block/global/utilisation throttles
+	// applied to borrow growth -- see RiskParameters.BorrowCaps. Reuses the
+	// engine's own BorrowCaps type (native/lending/params.go) rather than a
+	// duplicate Config-only shape.
+	BorrowCaps            BorrowCaps              `toml:"borrowCaps"`
+	ReserveFactorBps      uint64                  `toml:"ReserveFactorBps"`
+	Breaker               BreakerThresholds       `toml:"breaker"`
+	ProtocolFeeBps        uint64                  `toml:"ProtocolFeeBps"`
+	DeveloperFeeBps       uint64                  `toml:"DeveloperFeeBps"`
+	DeveloperFeeCollector string                  `toml:"DeveloperFeeCollector"`
+	CollateralRouting     CollateralRoutingConfig `toml:"collateralRouting"`
+	// Pauses exposes fine-grained switches for halting individual market
+	// operations (supply/borrow/repay/liquidate) -- see
+	// RiskParameters.Pauses. This is distinct from and does not replace the
+	// module-wide lending pause (config/global.go's Pauses.Lending, wired via
+	// core/node.go's SetPauses/engine.SetPauses): that one halts every
+	// lending flow at once via nativecommon.Guard, while this one lets
+	// governance/ops halt a single flow (e.g. just Borrow) without touching
+	// the others. Reuses the engine's own ActionPauses type (native/lending/
+	// params.go) rather than a duplicate Config-only shape.
+	Pauses ActionPauses `toml:"pauses"`
 	// OracleMaxAgeBlocks bounds how many blocks may elapse since a market's
 	// last ref-price update (Market.OracleUpdatedBlock) before guardOracle
 	// treats the quote as stale and refuses to Borrow/WithdrawCollateral/
@@ -127,5 +152,11 @@ func (c *Config) EnsureDefaults() {
 	}
 	if c.Breaker.MaxTotalCollateral == nil {
 		c.Breaker.MaxTotalCollateral = big.NewInt(0)
+	}
+	if c.BorrowCaps.PerBlock == nil {
+		c.BorrowCaps.PerBlock = big.NewInt(0)
+	}
+	if c.BorrowCaps.Total == nil {
+		c.BorrowCaps.Total = big.NewInt(0)
 	}
 }
