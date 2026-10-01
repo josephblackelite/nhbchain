@@ -1409,7 +1409,11 @@ func createDefault(path string, passphrase string) (*Config, error) {
 		return nil, err
 	}
 
-	return cfg, nil
+	// Return what the next start reads from the file just written rather than
+	// the literal above: Load fills in every unset default (subscriptions,
+	// swap, POTSO weights, ...), and a first run without them panicked at
+	// startup while every later run was fine.
+	return Load(path, WithKeystorePassphrase(passphrase))
 }
 
 func persist(path string, cfg *Config) error {

@@ -44,7 +44,7 @@ helm upgrade --install consensusd deploy/helm/consensusd -f deploy/helm/values/s
 #   --set replicaCount=1
 helm upgrade --install swapd deploy/helm/swapd -f deploy/helm/values/staging/swapd.yaml
 helm upgrade --install governd deploy/helm/governd -f deploy/helm/values/staging/governd.yaml \
-  --set secrets.signerKey="$(kubectl get secret nhb-governance -o jsonpath='{.data.signer-key}' | base64 -d)"
+  --set secrets.signerKey="$(kubectl get secret governd-secrets -o jsonpath='{.data.signer-key}' | base64 -d)"
 helm upgrade --install gateway deploy/helm/gateway -f deploy/helm/values/staging/gateway.yaml \
   --set secrets.gatewayHMAC="$(kubectl get secret nhb-gateway-auth -o jsonpath='{.data.hmac-secret}' | base64 -d)"
 ```
@@ -76,7 +76,7 @@ Customize the placeholder values with production credentials. The example
 covers:
 
 - `nhb-validator` – validator keystore password
-- `nhb-governance` – hex-encoded private key for governd signing
+- `governd-secrets` – hex-encoded private key for governd signing
 - `nhb-gateway-auth` – optional gateway HMAC secret
 - `nhb-swapd-apis` – external oracle API tokens
 
