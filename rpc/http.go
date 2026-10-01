@@ -1120,6 +1120,44 @@ func isSelfAuthenticatedMintMethod(method string) bool {
 	}
 }
 
+// isSignatureThresholdAuthorizedMethod reports whether method is exempt from
+// the operator-role gate for a related but narrower reason than
+// isSelfAuthenticatedMintMethod's: unlike mint_with_sig, buyback_submitRefPrice
+// and lending_submitRefPrice's case arms in handle() already call
+// requireAuthInto themselves (and have since before any operator-role concept
+// existed here), so they already require a validly-authenticated credential.
+// What this exemption removes is only the ADDITIONAL operator-role
+// requirement layered on top of that pre-existing check -- it does not, and
+// must not, make either method reachable with no credential at all.
+//
+// Both methods' real, independent authorization is an M-of-N signature
+// threshold against a genesis-declared signer quorum, verified on-chain
+// (core/buyback_tx.go's applyBuybackRefPrice and core/lending_tx.go's
+// applyLendingRefPriceTransaction, via AddTransaction's synchronous
+// simulation -- see core/buyback_submission_test.go's
+// TestSubmitBuybackRefPrice_InsufficientSignaturesRejected and
+// TestSubmitBuybackRefPrice_WrongEpochRejected for that pre-existing control,
+// unrelated to this branch). This handler layer does no cryptographic
+// verification itself; it only decodes the request and forwards it.
+//
+// A real, currently-deployed off-chain reference-price submission service
+// authenticates to both endpoints today with a credential that does not, and
+// should not, carry the operator role: requiring one would not tighten
+// anything (a forged or below-threshold signature bundle already fails
+// independently of any JWT role), and would instead force a narrow-purpose
+// price-feed submitter to be issued a blanket operator-role credential it
+// doesn't need and shouldn't have -- operator role also grants net_ban,
+// sync_snapshot_import, and every other operator-only method, which is real
+// privilege creep for this caller.
+func isSignatureThresholdAuthorizedMethod(method string) bool {
+	switch strings.TrimSpace(method) {
+	case "buyback_submitRefPrice", "lending_submitRefPrice":
+		return true
+	default:
+		return false
+	}
+}
+
 type BalanceResponse struct {
 	Address               string                `json:"address"`
 	BalanceNHB            *big.Int              `json:"balanceNHB"`
@@ -1466,7 +1504,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// and the real, currently-deployed off-chain fiat-settlement minting
 	// service calls it with no bearer credential at all, so gating it here
 	// too would halt production NHB minting rather than add any protection.
-	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) {
+	//
+	// buyback_submitRefPrice and lending_submitRefPrice are exempt via the
+	// separate isSignatureThresholdAuthorizedMethod check, for a related but
+	// narrower reason (see its doc comment): their case arms below already
+	// call requireAuthInto themselves, so a credential is still required --
+	// only the additional operator-role requirement is skipped here. Their
+	// real, independent control is an on-chain M-of-N signature-threshold
+	// check against a genesis-declared signer quorum, and the real,
+	// currently-deployed off-chain reference-price submission service
+	// authenticates to them today with a credential that does not carry the
+	// operator role, so adding that requirement here would only force
+	// issuing that narrow-purpose caller a blanket operator credential it
+	// doesn't need, without tightening any real control.
+	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) && !isSignatureThresholdAuthorizedMethod(req.Method) {
 		if authErr := s.requireOperatorInto(&r); authErr != nil {
 			status := http.StatusUnauthorized
 			if authErr.Code == codeOperatorOnly {
