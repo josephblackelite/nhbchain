@@ -142,6 +142,17 @@ var (
 	// RegisterIdentity happens to apply first wins), the same reasoning as
 	// ErrNonceTooHigh above.
 	ErrIdentityUsernameTaken = errors.New("username already taken")
+	// ErrEscrowCreateInsufficientBalance indicates a TxTypeCreateEscrow
+	// transaction's sender does not currently hold at least the amount they
+	// are declaring they will escrow, in the token they declared (PL-CO-D1-5:
+	// applyCreateEscrow only recorded escrow metadata and never checked this,
+	// so a brand-new, zero-balance keypair could get a block-including
+	// transaction for free -- a low-cost state-bloat/spam vector). Like
+	// ErrRedeemInsufficientBalance above, this is transient: a same-block
+	// ordering effect (another transaction crediting this address first) or a
+	// later resubmission could make it succeed, so classifyProposalError
+	// treats it as skippable, not prunable, the same reasoning applied there.
+	ErrEscrowCreateInsufficientBalance = errors.New("create escrow: insufficient balance")
 )
 
 const stakePauseReasonGovernance = "paused by governance"
@@ -4370,6 +4381,34 @@ func (sp *StateProcessor) applyCreateEscrow(tx *types.Transaction, sender []byte
 		return fmt.Errorf("meta payload must be <= 32 bytes")
 	}
 	copy(meta[:], payload.Meta)
+
+	// PL-CO-D1-5: Create only records escrow metadata -- the actual debit
+	// happens later, in a separate Fund/Lock step -- so until now a
+	// brand-new, zero-balance keypair could get a TxTypeCreateEscrow
+	// included for free (validateSenderAccount above checks only the nonce,
+	// and applyQuota in handleNativeTransaction is a separate, optional,
+	// config-driven rate limiter, not a balance check). Mirror the "can the
+	// sender actually pay" precondition applyTransferZNHB already enforces
+	// before mutating state (this file, ~line 3516: BalanceZNHB.Cmp(required)
+	// < 0 => "insufficient balance") rather than inventing a new validation
+	// framework: the payer must already hold at least the amount they are
+	// declaring they will escrow, in the token they declared, so a
+	// zero-balance account can never create an escrow it could never fund.
+	normalizedToken, err := escrow.NormalizeToken(payload.Token)
+	if err != nil {
+		return err
+	}
+	payerBalance := senderAccount.BalanceNHB
+	if normalizedToken == "ZNHB" {
+		payerBalance = senderAccount.BalanceZNHB
+	}
+	if payerBalance == nil {
+		payerBalance = big.NewInt(0)
+	}
+	if payerBalance.Cmp(payload.Amount) < 0 {
+		return fmt.Errorf("create escrow: insufficient balance: %w", ErrEscrowCreateInsufficientBalance)
+	}
+
 	if _, err := sp.EscrowEngine.Create(payer, payee, payload.Token, payload.Amount, payload.FeeBps, payload.Deadline, payload.Nonce, &mediatorAddr, meta, strings.TrimSpace(payload.Realm)); err != nil {
 		return err
 	}

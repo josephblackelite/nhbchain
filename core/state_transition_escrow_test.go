@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -172,6 +173,176 @@ func TestEscrowNativeLifecycle(t *testing.T) {
 	}
 	if treasuryAccount.BalanceNHB.Cmp(big.NewInt(1)) != 0 {
 		t.Fatalf("unexpected treasury balance: %s", treasuryAccount.BalanceNHB)
+	}
+}
+
+// TestCreateEscrowRejectsZeroBalancePayer is the direct regression test for
+// PL-CO-D1-5: applyCreateEscrow only ever checked validateSenderAccount's
+// nonce precondition, so a brand-new keypair with zero NHB/ZNHB could get a
+// block-including TxTypeCreateEscrow transaction for free (applyQuota is a
+// separate, optional, config-driven rate limiter, not a balance check, and
+// never closed this). This proves a zero-balance payer's create is now
+// rejected -- with the escrow never stored and the payer's nonce never
+// consumed -- while an otherwise-identical transaction from a funded payer
+// still succeeds exactly as before this fix.
+func TestCreateEscrowRejectsZeroBalancePayer(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee key: %v", err)
+	}
+	payeeAddr := payeeKey.PubKey().Address()
+	deadline := time.Now().Add(2 * time.Hour).Unix()
+
+	buildCreatePayload := func(nonce uint64) []byte {
+		payload := struct {
+			Payee    []byte   `json:"payee"`
+			Token    string   `json:"token"`
+			Amount   *big.Int `json:"amount"`
+			FeeBps   uint32   `json:"feeBps"`
+			Deadline int64    `json:"deadline"`
+			Nonce    uint64   `json:"nonce"`
+		}{
+			Payee:    payeeAddr.Bytes(),
+			Token:    "NHB",
+			Amount:   big.NewInt(100),
+			FeeBps:   0,
+			Deadline: deadline,
+			Nonce:    nonce,
+		}
+		data, err := jsonMarshal(payload)
+		if err != nil {
+			t.Fatalf("marshal create payload: %v", err)
+		}
+		return data
+	}
+	escrowIDFor := func(payerAddr crypto.Address, nonce uint64) [32]byte {
+		var nonceBytes [8]byte
+		binary.BigEndian.PutUint64(nonceBytes[:], nonce)
+		meta := [32]byte{}
+		return ethcrypto.Keccak256Hash(payerAddr.Bytes(), payeeAddr.Bytes(), meta[:], nonceBytes[:])
+	}
+
+	// --- Zero-balance payer: must be rejected. ---
+	zeroPayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate zero-balance payer key: %v", err)
+	}
+	zeroPayerAddr := zeroPayerKey.PubKey().Address()
+	var zeroPayerAccountAddr [20]byte
+	copy(zeroPayerAccountAddr[:], zeroPayerAddr.Bytes())
+	writeAccount(t, sp, zeroPayerAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	zeroTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeCreateEscrow,
+		Nonce:    0,
+		Data:     buildCreatePayload(1),
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := zeroTx.Sign(zeroPayerKey.PrivateKey); err != nil {
+		t.Fatalf("sign zero-balance create: %v", err)
+	}
+
+	applyErr := sp.ApplyTransaction(zeroTx)
+	if applyErr == nil {
+		t.Fatalf("expected a zero-balance payer's create escrow to be rejected")
+	}
+	if !errors.Is(applyErr, ErrEscrowCreateInsufficientBalance) {
+		t.Fatalf("expected ErrEscrowCreateInsufficientBalance, got %v", applyErr)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	if _, ok := manager.EscrowGet(escrowIDFor(zeroPayerAddr, 1)); ok {
+		t.Fatalf("SAFETY REGRESSION: escrow was created for a zero-balance payer")
+	}
+	zeroPayerAccount, err := sp.getAccount(zeroPayerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load zero-balance payer: %v", err)
+	}
+	if zeroPayerAccount.Nonce != 0 {
+		t.Fatalf("rejected create escrow must not consume the payer's nonce, got %d", zeroPayerAccount.Nonce)
+	}
+
+	// --- Funded payer, otherwise-identical transaction: must still succeed. ---
+	fundedPayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate funded payer key: %v", err)
+	}
+	fundedPayerAddr := fundedPayerKey.PubKey().Address()
+	var fundedPayerAccountAddr [20]byte
+	copy(fundedPayerAccountAddr[:], fundedPayerAddr.Bytes())
+	writeAccount(t, sp, fundedPayerAccountAddr, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	fundedTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeCreateEscrow,
+		Nonce:    0,
+		Data:     buildCreatePayload(1),
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := fundedTx.Sign(fundedPayerKey.PrivateKey); err != nil {
+		t.Fatalf("sign funded create: %v", err)
+	}
+	if err := sp.ApplyTransaction(fundedTx); err != nil {
+		t.Fatalf("apply funded create: %v", err)
+	}
+	esc, ok := manager.EscrowGet(escrowIDFor(fundedPayerAddr, 1))
+	if !ok {
+		t.Fatalf("expected the funded payer's escrow to be created")
+	}
+	if esc.Status != escrow.EscrowInit {
+		t.Fatalf("unexpected escrow status after funded create: %v", esc.Status)
+	}
+	if esc.Amount.Cmp(big.NewInt(100)) != 0 {
+		t.Fatalf("unexpected escrow amount: %s", esc.Amount)
+	}
+	fundedPayerAccount, err := sp.getAccount(fundedPayerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load funded payer: %v", err)
+	}
+	if fundedPayerAccount.Nonce != 1 {
+		t.Fatalf("expected funded payer's nonce to advance to 1, got %d", fundedPayerAccount.Nonce)
+	}
+
+	// A funded payer declaring MORE than they hold must still be rejected the
+	// same way the zero-balance payer was.
+	underfundedTx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeCreateEscrow,
+		Nonce:    1,
+		Data:     buildCreatePayload(2),
+		GasLimit: 21000,
+		GasPrice: big.NewInt(1),
+	}
+	underfundedPayload := struct {
+		Payee    []byte   `json:"payee"`
+		Token    string   `json:"token"`
+		Amount   *big.Int `json:"amount"`
+		FeeBps   uint32   `json:"feeBps"`
+		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
+	}{
+		Payee:    payeeAddr.Bytes(),
+		Token:    "NHB",
+		Amount:   big.NewInt(1_000_000),
+		FeeBps:   0,
+		Deadline: deadline,
+		Nonce:    2,
+	}
+	underfundedData, err := jsonMarshal(underfundedPayload)
+	if err != nil {
+		t.Fatalf("marshal underfunded create payload: %v", err)
+	}
+	underfundedTx.Data = underfundedData
+	if err := underfundedTx.Sign(fundedPayerKey.PrivateKey); err != nil {
+		t.Fatalf("sign underfunded create: %v", err)
+	}
+	if err := sp.ApplyTransaction(underfundedTx); !errors.Is(err, ErrEscrowCreateInsufficientBalance) {
+		t.Fatalf("expected a payer declaring more than they hold to be rejected with ErrEscrowCreateInsufficientBalance, got %v", err)
 	}
 }
 

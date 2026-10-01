@@ -1,11 +1,14 @@
 package core
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/big"
 	"testing"
 	"time"
+
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"nhbchain/config"
 	nhbstate "nhbchain/core/state"
@@ -712,5 +715,154 @@ func TestUsernameCollisionSkipsNotAbortsProposal(t *testing.T) {
 	}
 	if gotUsername == "" {
 		t.Fatalf("expected exactly one of A/B to have claimed the username, neither did")
+	}
+}
+
+// TestCreateEscrowZeroBalanceSkipsNotAbortsProposal is the CreateBlock-level
+// regression test for PL-CO-D1-5, mirroring TestUsernameCollisionSkipsNot
+// AbortsProposal (NHB-AUDIT-C2) above: before ErrEscrowCreateInsufficientBalance
+// existed, applyCreateEscrow's new balance check would have returned a bare,
+// unwrapped error, so classifyProposalError would have fallen through to its
+// default ABORT case -- failing the ENTIRE candidate block over one
+// zero-balance account's TxTypeCreateEscrow and blocking every other
+// unrelated pending transaction in the same attempt too. This proves: (1) the
+// block still builds and commits, containing the unrelated funded
+// transaction, (2) the zero-balance create is excluded from the block but
+// left resident in the mempool (skipped, not pruned -- its sender's balance
+// is ordinary mutable state, not a permanently malformed transaction), and
+// (3) no escrow is ever recorded on-chain for it.
+func TestCreateEscrowZeroBalanceSkipsNotAbortsProposal(t *testing.T) {
+	node := newTestNode(t)
+
+	zeroPayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate zero-balance payer key: %v", err)
+	}
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee key: %v", err)
+	}
+	zeroPayerAddr := toAddress(zeroPayerKey)
+	payeeAddr := payeeKey.PubKey().Address()
+
+	node.stateMu.Lock()
+	err = node.state.setAccount(zeroPayerAddr[:], &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(0),
+		Stake:       big.NewInt(0),
+	})
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("seed zero-balance payer: %v", err)
+	}
+
+	escrowNonce := uint64(1)
+	createPayload := struct {
+		Payee    []byte   `json:"payee"`
+		Token    string   `json:"token"`
+		Amount   *big.Int `json:"amount"`
+		FeeBps   uint32   `json:"feeBps"`
+		Deadline int64    `json:"deadline"`
+		Nonce    uint64   `json:"nonce"`
+	}{
+		Payee:    payeeAddr.Bytes(),
+		Token:    "NHB",
+		Amount:   big.NewInt(100),
+		FeeBps:   0,
+		Deadline: time.Now().Add(2 * time.Hour).Unix(),
+		Nonce:    escrowNonce,
+	}
+	createData, err := jsonMarshal(createPayload)
+	if err != nil {
+		t.Fatalf("marshal create payload: %v", err)
+	}
+	zeroTx := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeCreateEscrow,
+		Nonce: 0, GasLimit: 21_000, GasPrice: big.NewInt(1),
+		Data: createData,
+	}
+	if err := zeroTx.Sign(zeroPayerKey.PrivateKey); err != nil {
+		t.Fatalf("sign zero-balance create: %v", err)
+	}
+
+	// An unrelated, unaffected transaction from a distinct, funded sender in
+	// the same attempt -- the default-ABORT bug would have taken this down
+	// too.
+	senderKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("sender key: %v", err)
+	}
+	senderAddr := senderKey.PubKey().Address().Bytes()
+	node.stateMu.Lock()
+	err = node.state.setAccount(senderAddr, &types.Account{
+		BalanceNHB:  big.NewInt(0),
+		BalanceZNHB: big.NewInt(1_000),
+		Stake:       big.NewInt(0),
+	})
+	node.stateMu.Unlock()
+	if err != nil {
+		t.Fatalf("seed sender: %v", err)
+	}
+	recipient := make([]byte, 20)
+	recipient[19] = 0x0A
+	transferTx := &types.Transaction{
+		ChainID: types.NHBChainID(), Type: types.TxTypeTransferZNHB,
+		Nonce: 0, To: recipient, Value: big.NewInt(100),
+		GasLimit: 25_000, GasPrice: big.NewInt(1),
+	}
+	if err := transferTx.Sign(senderKey.PrivateKey); err != nil {
+		t.Fatalf("sign transfer: %v", err)
+	}
+
+	node.mempoolMu.Lock()
+	node.mempool = append(node.mempool, zeroTx, transferTx)
+	node.mempoolMu.Unlock()
+
+	pending := append([]*types.Transaction(nil), node.mempool...)
+	block, err := node.CreateBlock(pending)
+	if err != nil {
+		t.Fatalf("CreateBlock must not abort the whole proposal over one zero-balance create escrow: %v", err)
+	}
+	if block == nil {
+		t.Fatalf("expected a block to be produced")
+	}
+	if got := len(block.Transactions); got != 1 {
+		t.Fatalf("expected exactly 1 transaction in the block (the unrelated transfer), got %d", got)
+	}
+	if block.Transactions[0].Type != types.TxTypeTransferZNHB {
+		t.Fatalf("expected the unrelated transfer to be the one included transaction, got type 0x%02X", byte(block.Transactions[0].Type))
+	}
+
+	if err := node.CommitBlock(block); err != nil {
+		t.Fatalf("commit block: %v", err)
+	}
+
+	// The zero-balance create escrow must still be resident in the mempool --
+	// skipped, not pruned.
+	node.mempoolMu.Lock()
+	stillPending := len(node.mempool)
+	var stillPendingIsCreateEscrow bool
+	if stillPending == 1 {
+		stillPendingIsCreateEscrow = node.mempool[0].Type == types.TxTypeCreateEscrow
+	}
+	node.mempoolMu.Unlock()
+	if stillPending != 1 {
+		t.Fatalf("expected exactly the zero-balance create escrow still resident in mempool after commit, got %d pending", stillPending)
+	}
+	if !stillPendingIsCreateEscrow {
+		t.Fatalf("expected the still-pending transaction to be the zero-balance create escrow")
+	}
+
+	// No escrow was ever recorded on-chain for the zero-balance payer.
+	var nonceBytes [8]byte
+	binary.BigEndian.PutUint64(nonceBytes[:], escrowNonce)
+	meta := [32]byte{}
+	escrowID := ethcrypto.Keccak256Hash(zeroPayerAddr[:], payeeAddr.Bytes(), meta[:], nonceBytes[:])
+	node.stateMu.Lock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	_, ok := manager.EscrowGet(escrowID)
+	node.stateMu.Unlock()
+	if ok {
+		t.Fatalf("SAFETY REGRESSION: escrow was recorded on-chain for a zero-balance payer")
 	}
 }
