@@ -28,6 +28,8 @@ var (
 	errPayoutVaultNotSet      = errors.New("creator engine: payout vault not configured")
 	errRewardsTreasuryNotSet  = errors.New("creator engine: rewards treasury not configured")
 	errPayoutVaultUnderfunded = errors.New("creator engine: payout vault underfunded")
+	errStakeVaultNotSet       = errors.New("creator engine: stake vault not configured")
+	errStakeVaultUnderfunded  = errors.New("creator engine: stake vault underfunded")
 	errSharesDepleted         = errors.New("creator engine: share supply depleted")
 	errInsufficientShares     = errors.New("creator engine: insufficient shares")
 	errRedeemTooSmall         = errors.New("creator engine: redeem value below precision")
@@ -72,6 +74,7 @@ type Engine struct {
 	nowFn           func() int64
 	payoutVault     [20]byte
 	rewardsTreasury [20]byte
+	stakeVault      [20]byte
 	mu              sync.Mutex
 	stakeWindows    map[[20]byte]*stakeWindow
 	tipWindows      map[[20]byte]*tipWindow
@@ -169,6 +172,14 @@ func (e *Engine) SetPayoutVault(addr [20]byte) { e.payoutVault = addr }
 
 // SetRewardsTreasury configures the treasury that funds staking rewards.
 func (e *Engine) SetRewardsTreasury(addr [20]byte) { e.rewardsTreasury = addr }
+
+// SetStakeVault configures the module-owned account that holds fan stake
+// principal while it is staked behind a creator. This is a distinct account
+// from the payout vault: the payout vault's balance backs amounts owed to
+// creators (tips and staking yield pending distribution), while the stake
+// vault's balance backs principal owed back to fans on unstake. Keeping them
+// separate avoids commingling the two liabilities in a single balance.
+func (e *Engine) SetStakeVault(addr [20]byte) { e.stakeVault = addr }
 
 func (e *Engine) emit(evt *types.Event) {
 	if e == nil || evt == nil || e.emitter == nil {
@@ -580,6 +591,9 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	if isZeroAddress(e.payoutVault) {
 		return nil, nil, errPayoutVaultNotSet
 	}
+	if isZeroAddress(e.stakeVault) {
+		return nil, nil, errStakeVaultNotSet
+	}
 	deposit := new(big.Int).Set(amount)
 	if err := e.enforceStakeLimit(fan, deposit); err != nil {
 		return nil, nil, err
@@ -624,6 +638,19 @@ func (e *Engine) StakeCreator(fan [20]byte, creator [20]byte, amount *big.Int) (
 	}
 	fanAccount.BalanceNHB = new(big.Int).Sub(fanAccount.BalanceNHB, deposit)
 	if err := e.state.PutAccount(fan[:], fanAccount); err != nil {
+		return nil, nil, err
+	}
+	// The deposit principal moves into the module-owned stake vault rather
+	// than vanishing from total supply -- it is held there until the fan
+	// unstakes. This mirrors the rewardsTreasury->payoutVault transfer below,
+	// which only ever moves the separate staking-yield amount.
+	stakeVaultAccount, err := e.state.GetAccount(e.stakeVault[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	stakeVaultAccount = ensureAccount(stakeVaultAccount)
+	stakeVaultAccount.BalanceNHB = new(big.Int).Add(stakeVaultAccount.BalanceNHB, deposit)
+	if err := e.state.PutAccount(e.stakeVault[:], stakeVaultAccount); err != nil {
 		return nil, nil, err
 	}
 	stake.Amount = new(big.Int).Add(stake.Amount, deposit)
@@ -692,6 +719,9 @@ func (e *Engine) UnstakeCreator(fan [20]byte, creator [20]byte, amount *big.Int)
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, errInvalidAmount
 	}
+	if isZeroAddress(e.stakeVault) {
+		return nil, errStakeVaultNotSet
+	}
 	stake, ok, err := e.state.CreatorStakeGet(creator, fan)
 	if err != nil {
 		return nil, err
@@ -750,6 +780,25 @@ func (e *Engine) UnstakeCreator(fan [20]byte, creator [20]byte, amount *big.Int)
 		}
 	}
 	if err := e.state.CreatorPayoutLedgerPut(ledger); err != nil {
+		return nil, err
+	}
+	// assetsOut is bounded above: calculateRedeemAssets rejects shares greater
+	// than ledger.TotalShares, and amount (the shares being redeemed) was
+	// already checked against stake.Shares -- this fan's own recorded
+	// position -- above. So assetsOut can never exceed this fan's fair-value
+	// share of what the vault actually holds. The vault debit below moves
+	// that same amount out of real token custody rather than materializing it
+	// from nothing.
+	stakeVaultAccount, err := e.state.GetAccount(e.stakeVault[:])
+	if err != nil {
+		return nil, err
+	}
+	stakeVaultAccount = ensureAccount(stakeVaultAccount)
+	if stakeVaultAccount.BalanceNHB.Cmp(assetsOut) < 0 {
+		return nil, errStakeVaultUnderfunded
+	}
+	stakeVaultAccount.BalanceNHB = new(big.Int).Sub(stakeVaultAccount.BalanceNHB, assetsOut)
+	if err := e.state.PutAccount(e.stakeVault[:], stakeVaultAccount); err != nil {
 		return nil, err
 	}
 	fanAccount, err := e.state.GetAccount(fan[:])

@@ -146,6 +146,7 @@ type Node struct {
 	lendingCollateralRouting     lending.CollateralRouting
 	creatorPayoutVaultAddr       crypto.Address
 	creatorRewardsTreasuryAddr   crypto.Address
+	creatorStakeVaultAddr        crypto.Address
 	modulePauseMu                sync.RWMutex
 	modulePauses                 map[string]bool
 	moduleQuotaMu                sync.RWMutex
@@ -569,6 +570,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	collateralAddr := deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix)
 	creatorVaultAddr := deriveModuleAddress("module/creator/payout", crypto.NHBPrefix)
 	creatorRewardsAddr := deriveModuleAddress("module/creator/rewards", crypto.NHBPrefix)
+	creatorStakeAddr := deriveModuleAddress("module/creator/stake", crypto.NHBPrefix)
 
 	potsoEngine, err := potso.NewEngine(potso.DefaultEngineParams())
 	if err != nil {
@@ -612,6 +614,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		lendingCollateralAddr:      collateralAddr,
 		creatorPayoutVaultAddr:     creatorVaultAddr,
 		creatorRewardsTreasuryAddr: creatorRewardsAddr,
+		creatorStakeVaultAddr:      creatorStakeAddr,
 		modulePauses:               make(map[string]bool),
 		moduleQuotas:               make(map[string]nativecommon.Quota),
 		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
@@ -5555,6 +5558,9 @@ func (n *Node) newCreatorEngine(manager *nhbstate.Manager) *creator.Engine {
 	var rewardsTreasury [20]byte
 	copy(rewardsTreasury[:], n.creatorRewardsTreasuryAddr.Bytes())
 	engine.SetRewardsTreasury(rewardsTreasury)
+	var stakeVault [20]byte
+	copy(stakeVault[:], n.creatorStakeVaultAddr.Bytes())
+	engine.SetStakeVault(stakeVault)
 	return engine
 }
 
