@@ -92,8 +92,8 @@ var (
 	// ErrNonceTooLow this is genuinely order-dependent -- a different
 	// attempt (later round, different candidate set) can succeed once the
 	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
-	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
-	ErrInvalidChainID      = errors.New("invalid chain id")
+	ErrNonceTooHigh   = errors.New("transaction nonce mismatch: not yet reached")
+	ErrInvalidChainID = errors.New("invalid chain id")
 	// ErrTransactionExpired indicates executeTransaction rejected a
 	// transaction whose MaxBlockHeight has already passed, or whose
 	// IntentExpiry has already passed (NHB-AUDIT-R2) -- checked here,
@@ -103,7 +103,7 @@ var (
 	// never succeed later either; classifyProposalError treats it as
 	// PRUNE-safe, the same disposition ErrSwapExpired already gets for the
 	// identical reason.
-	ErrTransactionExpired = errors.New("transaction expired")
+	ErrTransactionExpired  = errors.New("transaction expired")
 	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
 	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
@@ -221,9 +221,21 @@ type StateProcessor struct {
 	marketEscrowAddr           crypto.Address
 	marketFeeCollectorAddr     crypto.Address
 	govPolicy                  governance.ProposalPolicy
-	blockCtx                   BlockCtx
-	swapPayoutAuthorities      map[string]struct{}
-	swapConfig                 swap.Config
+	// govCreditPreservationActivationHeight gates PL-R1-GOVREFUND's fix to
+	// applyGovFinalizeTransaction/applyGovExecuteTransaction -- see the
+	// SetGovCreditPreservationActivationHeight doc comment (core/governance_tx.go)
+	// for the full rationale. Mirrors Node.quorumCertActivationHeight's
+	// gating shape: blocks below this height keep the original (buggy)
+	// nonce-persist behavior so already-committed history keeps replaying
+	// to the identical state root; blocks at or above it get the fix.
+	// NewStateProcessor defaults this to math.MaxUint64 (disabled -- every
+	// existing caller, including the whole test suite, keeps today's
+	// behavior unchanged unless SetGovCreditPreservationActivationHeight is
+	// called).
+	govCreditPreservationActivationHeight uint64
+	blockCtx                              BlockCtx
+	swapPayoutAuthorities                 map[string]struct{}
+	swapConfig                            swap.Config
 	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
 	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
 	// must match. This is deliberately distinct from types.NHBChainID()
@@ -241,46 +253,47 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	escEngine := escrow.NewEngine()
 	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
-		Trie:                     tr,
-		stateDB:                  stateDB,
-		LoyaltyEngine:            loyalty.NewEngine(),
-		EscrowEngine:             escEngine,
-		TradeEngine:              tradeEngine,
-		usernameToAddr:           make(map[string][]byte),
-		ValidatorSet:             make(map[string]*big.Int),
-		EligibleValidators:       make(map[string]*big.Int),
-		committedRoot:            tr.Root(),
-		events:                   make([]types.Event, 0),
-		nowFunc:                  time.Now,
-		execContext:              nil,
-		engagementConfig:         engagement.DefaultConfig(),
-		epochConfig:              epoch.DefaultConfig(),
-		epochHistory:             make([]epoch.Snapshot, 0),
-		rewardConfig:             rewards.DefaultConfig(),
-		rewardHistory:            make([]rewards.EpochSettlement, 0),
-		stakeRewardEngine:        rewards.NewEngine(),
-		stakeRewardAPR:           0,
-		potsoRewardConfig:        potso.DefaultRewardConfig(),
-		potsoWeightConfig:        potso.DefaultWeightParams(),
-		paymasterEnabled:         true,
-		paymasterLimits:          PaymasterLimits{},
-		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: "ZNHB"},
-		quotaConfig:              make(map[string]nativecommon.Quota),
-		intentTTL:                defaultIntentTTL,
-		feePolicy:                fees.Policy{Domains: map[string]fees.DomainPolicy{}},
-		transferGasPolicy:        TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
-		lendingParams:            lending.RiskParameters{},
-		lendingModuleAddr:        deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix),
-		lendingCollateralAddr:    deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix),
-		lendingInterestModel:     lending.DefaultInterestModel.Clone(),
-		lendingReserveFactorBps:  0,
-		lendingProtocolFeeBps:    0,
-		lendingCollateralRouting: lending.CollateralRouting{},
-		marketEscrowAddr:         deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
-		marketFeeCollectorAddr:   deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
-		blockCtx:                 BlockCtx{},
-		swapPayoutAuthorities:    make(map[string]struct{}),
-		swapConfig:               swap.Config{},
+		Trie:                                  tr,
+		stateDB:                               stateDB,
+		LoyaltyEngine:                         loyalty.NewEngine(),
+		EscrowEngine:                          escEngine,
+		TradeEngine:                           tradeEngine,
+		usernameToAddr:                        make(map[string][]byte),
+		ValidatorSet:                          make(map[string]*big.Int),
+		EligibleValidators:                    make(map[string]*big.Int),
+		committedRoot:                         tr.Root(),
+		events:                                make([]types.Event, 0),
+		nowFunc:                               time.Now,
+		execContext:                           nil,
+		engagementConfig:                      engagement.DefaultConfig(),
+		epochConfig:                           epoch.DefaultConfig(),
+		epochHistory:                          make([]epoch.Snapshot, 0),
+		rewardConfig:                          rewards.DefaultConfig(),
+		rewardHistory:                         make([]rewards.EpochSettlement, 0),
+		stakeRewardEngine:                     rewards.NewEngine(),
+		stakeRewardAPR:                        0,
+		potsoRewardConfig:                     potso.DefaultRewardConfig(),
+		potsoWeightConfig:                     potso.DefaultWeightParams(),
+		paymasterEnabled:                      true,
+		paymasterLimits:                       PaymasterLimits{},
+		paymasterTopUp:                        PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		quotaConfig:                           make(map[string]nativecommon.Quota),
+		intentTTL:                             defaultIntentTTL,
+		feePolicy:                             fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		transferGasPolicy:                     TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
+		lendingParams:                         lending.RiskParameters{},
+		lendingModuleAddr:                     deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix),
+		lendingCollateralAddr:                 deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix),
+		lendingInterestModel:                  lending.DefaultInterestModel.Clone(),
+		lendingReserveFactorBps:               0,
+		lendingProtocolFeeBps:                 0,
+		lendingCollateralRouting:              lending.CollateralRouting{},
+		marketEscrowAddr:                      deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
+		marketFeeCollectorAddr:                deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
+		govCreditPreservationActivationHeight: math.MaxUint64,
+		blockCtx:                              BlockCtx{},
+		swapPayoutAuthorities:                 make(map[string]struct{}),
+		swapConfig:                            swap.Config{},
 	}
 	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
@@ -3263,10 +3276,10 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 
 	msg := gethcore.Message{
-		From:          fromAddr,
-		To:            toAddrPtr,
-		Nonce:         tx.Nonce,
-		Value:         originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
+		From:  fromAddr,
+		To:    toAddrPtr,
+		Nonce: tx.Nonce,
+		Value: originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
 		// comment used to describe was removed from execution; getGlobalFeeRate is hardcoded to 0.
 		GasLimit:      tx.GasLimit,
 		GasPrice:      tx.GasPrice,
