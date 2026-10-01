@@ -295,8 +295,10 @@ func TestStakeClaimUnstakeKeepsBalancesConserved(t *testing.T) {
 	engine.SetState(state)
 	payoutVault := addr(0xCC)
 	rewards := addr(0xDD)
+	stakeVault := addr(0xEE)
 	engine.SetPayoutVault(payoutVault)
 	engine.SetRewardsTreasury(rewards)
+	engine.SetStakeVault(stakeVault)
 
 	fan := addr(0x10)
 	creator := addr(0x11)
@@ -304,13 +306,14 @@ func TestStakeClaimUnstakeKeepsBalancesConserved(t *testing.T) {
 	state.setAccount(creator, 0)
 	state.setAccount(payoutVault, 0)
 	state.setAccount(rewards, 500)
+	state.setAccount(stakeVault, 0)
 
 	ledger := newLedger(creator)
 	if err := state.CreatorPayoutLedgerPut(ledger); err != nil {
 		t.Fatalf("failed to seed ledger: %v", err)
 	}
 
-	initialTotal := sumBalances(state, fan, creator, payoutVault, rewards)
+	initialTotal := sumBalances(state, fan, creator, payoutVault, rewards, stakeVault)
 
 	deposit := big.NewInt(5_000)
 	stake, reward, err := engine.StakeCreator(fan, creator, deposit)
@@ -331,6 +334,16 @@ func TestStakeClaimUnstakeKeepsBalancesConserved(t *testing.T) {
 	if treasuryBalance.Cmp(big.NewInt(375)) != 0 {
 		t.Fatalf("treasury not debited correctly, got %s", treasuryBalance)
 	}
+	// The deposit PRINCIPAL (separate from the yield reward above) must have
+	// moved into the stake vault, not vanished from total supply.
+	stakeVaultBalance := state.account(stakeVault).BalanceNHB
+	if stakeVaultBalance.Cmp(deposit) != 0 {
+		t.Fatalf("deposit principal not held in stake vault: got %s want %s", stakeVaultBalance, deposit)
+	}
+	fanBalanceAfterStake := state.account(fan).BalanceNHB
+	if fanBalanceAfterStake.Cmp(big.NewInt(5_000)) != 0 {
+		t.Fatalf("fan balance not debited by deposit: got %s want %s", fanBalanceAfterStake, big.NewInt(5_000))
+	}
 
 	if _, amt, err := engine.ClaimPayouts(creator); err != nil {
 		t.Fatalf("claim failed: %v", err)
@@ -346,8 +359,157 @@ func TestStakeClaimUnstakeKeepsBalancesConserved(t *testing.T) {
 		t.Fatalf("unstake failed: %v", err)
 	}
 
-	finalTotal := sumBalances(state, fan, creator, payoutVault, rewards)
+	// Unstaking the full position must drain the stake vault back to zero and
+	// return the fan's balance to its pre-stake level -- the principal came
+	// back from the vault, not from nowhere.
+	if got := state.account(stakeVault).BalanceNHB; got.Sign() != 0 {
+		t.Fatalf("stake vault not drained after full unstake: got %s", got)
+	}
+	if got := state.account(fan).BalanceNHB; got.Cmp(big.NewInt(10_000)) != 0 {
+		t.Fatalf("fan balance not restored after full unstake: got %s want %s", got, big.NewInt(10_000))
+	}
+
+	finalTotal := sumBalances(state, fan, creator, payoutVault, rewards, stakeVault)
 	if initialTotal.Cmp(finalTotal) != 0 {
 		t.Fatalf("total supply changed after stake cycle: want %s got %s", initialTotal, finalTotal)
+	}
+}
+
+// TestStakeThenUnstakeConservesSupply is the direct conservation proof
+// requested alongside the PL-DC-39 fix: a stake must move the deposit
+// principal from the fan to the vault (fan down, vault up by the exact same
+// amount), and an unstake must move it back the same way (vault down, fan up
+// by the exact same amount), with total NHB held across the two accounts
+// unchanged at every step.
+func TestStakeThenUnstakeConservesSupply(t *testing.T) {
+	state := newMockState()
+	engine := NewEngine()
+	engine.SetState(state)
+	payoutVault := addr(0xF0)
+	rewards := addr(0xF1)
+	stakeVault := addr(0xF2)
+	engine.SetPayoutVault(payoutVault)
+	engine.SetRewardsTreasury(rewards)
+	engine.SetStakeVault(stakeVault)
+
+	fan := addr(0x30)
+	creatorAddr := addr(0x31)
+	state.setAccount(fan, 50_000)
+	state.setAccount(payoutVault, 0)
+	// Leave the rewards treasury unfunded (0) so the yield-reward branch,
+	// which is a separate and already-correct mechanism, never engages here
+	// -- this test isolates the principal-conservation fix.
+	state.setAccount(rewards, 0)
+	state.setAccount(stakeVault, 0)
+
+	fanBefore := state.account(fan).BalanceNHB
+	vaultBefore := state.account(stakeVault).BalanceNHB
+	totalBefore := new(big.Int).Add(fanBefore, vaultBefore)
+
+	deposit := big.NewInt(12_345)
+	stake, reward, err := engine.StakeCreator(fan, creatorAddr, deposit)
+	if err != nil {
+		t.Fatalf("stake failed: %v", err)
+	}
+	if reward.Sign() != 0 {
+		t.Fatalf("expected no yield reward with an unfunded treasury, got %s", reward)
+	}
+
+	fanAfterStake := state.account(fan).BalanceNHB
+	vaultAfterStake := state.account(stakeVault).BalanceNHB
+	if got, want := new(big.Int).Sub(fanBefore, fanAfterStake), deposit; got.Cmp(want) != 0 {
+		t.Fatalf("fan balance decreased by %s, want %s", got, want)
+	}
+	if got, want := new(big.Int).Sub(vaultAfterStake, vaultBefore), deposit; got.Cmp(want) != 0 {
+		t.Fatalf("vault balance increased by %s, want %s", got, want)
+	}
+	totalAfterStake := new(big.Int).Add(fanAfterStake, vaultAfterStake)
+	if totalBefore.Cmp(totalAfterStake) != 0 {
+		t.Fatalf("total NHB changed on stake: before %s after %s", totalBefore, totalAfterStake)
+	}
+
+	if _, err := engine.UnstakeCreator(fan, creatorAddr, stake.Shares); err != nil {
+		t.Fatalf("unstake failed: %v", err)
+	}
+
+	fanAfterUnstake := state.account(fan).BalanceNHB
+	vaultAfterUnstake := state.account(stakeVault).BalanceNHB
+	if got, want := new(big.Int).Sub(fanAfterUnstake, fanAfterStake), deposit; got.Cmp(want) != 0 {
+		t.Fatalf("fan balance increased by %s on unstake, want %s", got, want)
+	}
+	if got, want := new(big.Int).Sub(vaultAfterStake, vaultAfterUnstake), deposit; got.Cmp(want) != 0 {
+		t.Fatalf("vault balance decreased by %s on unstake, want %s", got, want)
+	}
+	totalAfterUnstake := new(big.Int).Add(fanAfterUnstake, vaultAfterUnstake)
+	if totalBefore.Cmp(totalAfterUnstake) != 0 {
+		t.Fatalf("total NHB changed on unstake: before %s after %s", totalBefore, totalAfterUnstake)
+	}
+	if fanAfterUnstake.Cmp(fanBefore) != 0 {
+		t.Fatalf("fan balance not restored to pre-stake level: got %s want %s", fanAfterUnstake, fanBefore)
+	}
+	if vaultAfterUnstake.Sign() != 0 {
+		t.Fatalf("vault not fully drained after full unstake: got %s", vaultAfterUnstake)
+	}
+}
+
+// TestUnstakeCannotExceedFansOwnStake proves a fan can never redeem more than
+// they themselves ever deposited, even when another fan's larger stake sits
+// in the same creator's pool and vault account.
+func TestUnstakeCannotExceedFansOwnStake(t *testing.T) {
+	state := newMockState()
+	engine := NewEngine()
+	engine.SetState(state)
+	payoutVault := addr(0xF3)
+	rewards := addr(0xF4)
+	stakeVault := addr(0xF5)
+	engine.SetPayoutVault(payoutVault)
+	engine.SetRewardsTreasury(rewards)
+	engine.SetStakeVault(stakeVault)
+
+	creatorAddr := addr(0x40)
+	smallFan := addr(0x41)
+	bigFan := addr(0x42)
+	state.setAccount(smallFan, 10_000)
+	state.setAccount(bigFan, 10_000)
+	state.setAccount(payoutVault, 0)
+	state.setAccount(rewards, 0)
+	state.setAccount(stakeVault, 0)
+
+	smallDeposit := big.NewInt(1_000)
+	smallStake, _, err := engine.StakeCreator(smallFan, creatorAddr, smallDeposit)
+	if err != nil {
+		t.Fatalf("small fan stake failed: %v", err)
+	}
+	bigDeposit := big.NewInt(9_000)
+	if _, _, err := engine.StakeCreator(bigFan, creatorAddr, bigDeposit); err != nil {
+		t.Fatalf("big fan stake failed: %v", err)
+	}
+
+	// The small fan recorded only smallStake.Shares; asking to redeem more
+	// shares than that must be rejected outright by the existing shares
+	// check, regardless of how much total value now sits in the pool/vault.
+	tooManyShares := new(big.Int).Add(smallStake.Shares, big.NewInt(1))
+	if _, err := engine.UnstakeCreator(smallFan, creatorAddr, tooManyShares); !errors.Is(err, errInsufficientShares) {
+		t.Fatalf("expected errInsufficientShares redeeming more than recorded stake, got %v", err)
+	}
+
+	// Redeeming exactly what was recorded must never return more NHB than
+	// that fan ever put in, even though the vault also holds the big fan's
+	// much larger deposit.
+	smallFanBalanceBefore := state.account(smallFan).BalanceNHB
+	if _, err := engine.UnstakeCreator(smallFan, creatorAddr, smallStake.Shares); err != nil {
+		t.Fatalf("small fan unstake failed: %v", err)
+	}
+	smallFanBalanceAfter := state.account(smallFan).BalanceNHB
+	withdrawn := new(big.Int).Sub(smallFanBalanceAfter, smallFanBalanceBefore)
+	if withdrawn.Cmp(smallDeposit) > 0 {
+		t.Fatalf("small fan withdrew more than their own deposit: got %s want <= %s", withdrawn, smallDeposit)
+	}
+
+	// The vault must still be fully solvent for the big fan's untouched
+	// stake: it must hold at least the big fan's deposit.
+	remainingVault := state.account(stakeVault).BalanceNHB
+	if remainingVault.Cmp(bigDeposit) < 0 {
+		t.Fatalf("vault underfunded for remaining stake: got %s want >= %s", remainingVault, bigDeposit)
 	}
 }
