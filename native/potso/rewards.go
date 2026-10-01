@@ -111,6 +111,15 @@ type RewardEpochMeta struct {
 	TotalPaid       *big.Int
 	Remainder       *big.Int
 	Winners         uint64
+	// Shortfall is additive (rlp:"optional") so meta records written before
+	// this field existed still decode cleanly as Shortfall == false -- see
+	// core/state_transition.go's processPotsoRewardEpoch for the treasury
+	// shortfall handling this records. It is set when the treasury could not
+	// cover the epoch's computed payout and the payout was degraded to zero
+	// (rather than aborting block processing) as a result: a durable,
+	// on-chain-queryable signal for operators/monitoring that this epoch's
+	// participants were not paid for lack of treasury funds.
+	Shortfall bool `rlp:"optional"`
 }
 
 // Clone produces a deep copy of the metadata to protect internal references.
@@ -119,10 +128,11 @@ func (m *RewardEpochMeta) Clone() RewardEpochMeta {
 		return RewardEpochMeta{}
 	}
 	clone := RewardEpochMeta{
-		Epoch:    m.Epoch,
-		Day:      m.Day,
-		AlphaBps: m.AlphaBps,
-		Winners:  m.Winners,
+		Epoch:     m.Epoch,
+		Day:       m.Day,
+		AlphaBps:  m.AlphaBps,
+		Winners:   m.Winners,
+		Shortfall: m.Shortfall,
 	}
 	clone.StakeTotal = copyBigInt(m.StakeTotal)
 	clone.EngagementTotal = copyBigInt(m.EngagementTotal)
