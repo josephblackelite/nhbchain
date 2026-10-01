@@ -2795,7 +2795,8 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		err           error
 	)
 	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice && tx.Type != types.TxTypeLendingRefPrice &&
-		tx.Type != types.TxTypeSwapVoucherReverse && tx.Type != types.TxTypeSwapMarkReconciled && tx.Type != types.TxTypeSubmitEvidence {
+		tx.Type != types.TxTypeSwapVoucherReverse && tx.Type != types.TxTypeSwapMarkReconciled && tx.Type != types.TxTypeSubmitEvidence &&
+		tx.Type != types.TxTypeLendingWithdrawProtocolFees && tx.Type != types.TxTypeLendingWithdrawDeveloperFees {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -2818,6 +2819,12 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	case types.TxTypeSubmitEvidence:
 		err = sp.applySubmitEvidenceTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeLendingWithdrawProtocolFees:
+		err = sp.applyLendingWithdrawProtocolFeesTransaction(tx)
+		result = &SimulationResult{}
+	case types.TxTypeLendingWithdrawDeveloperFees:
+		err = sp.applyLendingWithdrawDeveloperFeesTransaction(tx)
 		result = &SimulationResult{}
 	case types.TxTypeBuybackRefPrice:
 		err = sp.applyBuybackRefPrice(tx)
@@ -5477,6 +5484,24 @@ const RoleEscrowRealmAdmin = "ROLE_ESCROW_REALM_ADMIN"
 // manager.SetRole("ROLE_LOYALTY_ADMIN", addr)) authorizes both the
 // registry-internal checks and this dispatch-layer-only check uniformly.
 const RoleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
+
+// RoleLendingProtocolAdmin gates TxTypeLendingWithdrawProtocolFees
+// (core/lending_fee_withdraw_tx.go), authorizing withdrawal of the lending
+// module's accrued protocol fee share (native/lending's
+// Engine.WithdrawProtocolFees) to an admin-designated recipient. Checked
+// against the transaction's own embedded-signature recovered signer, not
+// tx.From() -- senderless like TxTypeSwapVoucherReverse/
+// TxTypeSwapMarkReconciled, for the same reason RoleSwapAdmin is (see its own
+// doc comment above): the authorizing operator key is not necessarily this
+// node's own. Granted the same way RoleSwapAdmin is, via genesis or
+// governance roles.
+//
+// Deliberately a distinct role from developer-fee withdrawal's authority
+// (TxTypeLendingWithdrawDeveloperFees checks the target pool's own
+// Market.DeveloperOwner instead, not this role): protocol fees are a
+// chain-wide treasury concern with no single pool to scope a check to, while
+// developer-fee entitlement already belongs to one specific address per pool.
+const RoleLendingProtocolAdmin = "ROLE_LENDING_PROTOCOL_ADMIN"
 
 // applyRedeemNHB lets a user burn their own NHB to request an off-chain
 // stablecoin payout (swap-out). Per the founder's explicit design, the burn
