@@ -46,6 +46,86 @@ func (sp *StateProcessor) SetGovernancePolicy(policy governance.ProposalPolicy) 
 	sp.govPolicy = cloneGovernancePolicy(policy)
 }
 
+// SetGovCreditPreservationActivationHeight configures the height at and
+// above which applyGovFinalizeTransaction/applyGovExecuteTransaction reload
+// the sender's account fresh (sp.getAccount) immediately before the
+// nonce-bump persist, instead of reusing the pre-engine-call senderAccount
+// snapshot handed in by executeTransaction.
+//
+// Bug this gates (ledger id PL-R1-GOVREFUND): engine.Finalize/engine.Execute
+// (native/governance/engine.go) can write a balance credit directly into
+// state for the proposal's credited address -- a deposit refund, a
+// forfeited-deposit sweep, or a treasury-directive payout. Both apply
+// functions then unconditionally did senderAccount.Nonce++;
+// sp.setAccount(sender, senderAccount) using the CALLER's pre-call account
+// snapshot. Whenever the sender/caller IS the credited address (e.g.
+// finalizing or executing your own proposal), that stale-snapshot persist
+// silently erases whatever credit the engine just wrote to that same
+// address. applyGovProposeTransaction already avoids the equivalent
+// mistake by reloading via sp.incrementNativeAccountNonce after
+// SubmitProposal's own debit (see its comment above); this activation
+// height lets Finalize/Execute adopt the identical reload-fresh pattern.
+// A core/znhb_treasury_pool.go introduced on other, not-yet-merged
+// hardening branches (see commit a2c8984, "Book every ZNHB movement on the
+// treasury wallet into the Reward Pool in the same state transition" --
+// that file does not exist on this branch/origin/main) books net-ZNHB
+// movement on the treasury wallet into the Reward Pool; per its own
+// commentary that mitigates only this mechanism's CHAIN-HALT side effect
+// (the supply invariant tripping on a silently-dropped credit) and does not
+// restore the user's lost credit, which is what this activation height's
+// gated branch fixes.
+//
+// This is gated rather than applied unconditionally because the chain's
+// first two governance proposals were reportedly self-proposed-and-finalized
+// historically, and nothing in this repository (no replay tooling, no
+// ledger/runbook record of those specific proposals' kinds or amounts) lets
+// that be conclusively confirmed one way or the other as safe to silently
+// change. Mirrors Node.quorumCertActivationHeight's gating shape exactly:
+// below this height, the original (buggy) persist runs, so any
+// already-committed history -- including those two proposals, whatever
+// they did -- keeps replaying to the identical state root it always has.
+// At or above it, the fixed, reload-fresh persist runs. NewStateProcessor
+// defaults this to math.MaxUint64 (disabled -- every existing caller,
+// including the whole test suite, keeps today's behavior unchanged).
+// Enabling this is an explicit, deploy-time decision, not automatic: it
+// must be set to the chain's current tip height, identically on every
+// validator, as part of one coordinated upgrade -- deliberately NOT
+// auto-detected from chain state, for the same reason
+// SetQuorumCertActivationHeight's doc comment gives.
+func (sp *StateProcessor) SetGovCreditPreservationActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.govCreditPreservationActivationHeight = height
+}
+
+// persistGovActorNonce bumps and persists the governance actor's (sender's)
+// nonce after a successful engine.Finalize/engine.Execute call. Below
+// sp.govCreditPreservationActivationHeight it reuses the pre-call
+// senderAccount snapshot (the original behavior, preserved for
+// already-committed history); at or above it, it reloads the account fresh
+// first so a same-address credit the engine just wrote survives. See
+// SetGovCreditPreservationActivationHeight's doc comment for the full
+// rationale.
+func (sp *StateProcessor) persistGovActorNonce(sender []byte, senderAccount *types.Account, opName string) error {
+	if sp.blockHeight() >= sp.govCreditPreservationActivationHeight {
+		fresh, err := sp.getAccount(sender)
+		if err != nil {
+			return fmt.Errorf("%s: reload sender for nonce persist: %w", opName, err)
+		}
+		fresh.Nonce++
+		if err := sp.setAccount(sender, fresh); err != nil {
+			return fmt.Errorf("%s: persist sender nonce: %w", opName, err)
+		}
+		return nil
+	}
+	senderAccount.Nonce++
+	if err := sp.setAccount(sender, senderAccount); err != nil {
+		return fmt.Errorf("%s: persist sender nonce: %w", opName, err)
+	}
+	return nil
+}
+
 // governanceEngine constructs a fresh governance.Engine wired against this
 // StateProcessor's trie, event stream, and deployment policy -- mirroring
 // Node.newGovernanceEngine (core/node.go), but for use from within
@@ -174,11 +254,7 @@ func (sp *StateProcessor) applyGovFinalizeTransaction(tx *types.Transaction, sen
 		return fmt.Errorf("govFinalize: %w", err)
 	}
 
-	senderAccount.Nonce++
-	if err := sp.setAccount(sender, senderAccount); err != nil {
-		return fmt.Errorf("govFinalize: persist sender nonce: %w", err)
-	}
-	return nil
+	return sp.persistGovActorNonce(sender, senderAccount, "govFinalize")
 }
 
 // applyGovQueueTransaction handles TxTypeGovQueue -- same shape and
@@ -223,9 +299,5 @@ func (sp *StateProcessor) applyGovExecuteTransaction(tx *types.Transaction, send
 		return fmt.Errorf("govExecute: %w", err)
 	}
 
-	senderAccount.Nonce++
-	if err := sp.setAccount(sender, senderAccount); err != nil {
-		return fmt.Errorf("govExecute: persist sender nonce: %w", err)
-	}
-	return nil
+	return sp.persistGovActorNonce(sender, senderAccount, "govExecute")
 }
