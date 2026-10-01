@@ -1,4 +1,4 @@
-package swapd
+package swapstable
 
 import "testing"
 

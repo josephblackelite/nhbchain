@@ -22,7 +22,7 @@ const (
 	ServiceConsensus ServiceName = "consensusd"
 	ServiceP2P       ServiceName = "p2pd"
 	ServiceLending   ServiceName = "lendingd"
-	ServiceSwap      ServiceName = "swapd"
+	ServiceSwap      ServiceName = "swapsvc"
 	ServiceGov       ServiceName = "governd"
 	ServiceGateway   ServiceName = "gateway"
 )

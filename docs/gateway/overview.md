@@ -18,7 +18,7 @@ The gateway supersedes the legacy JSON-RPC node in the service-oriented topology
 according to the following prefixes:
 
 - `/v1/lending/*` → `lendingd`
-- `/v1/swap/*` → `swapd`
+- `/v1/swap/*` → the off-chain swap settlement service
 - `/v1/gov/*` → `governd`
 - `/v1/consensus/*` → `consensusd`
 
@@ -83,7 +83,7 @@ The default ports for the internal services are:
 | Service | Default URL |
 | ------- | ----------- |
 | `lendingd` | `http://127.0.0.1:7101` |
-| `swapd` | `http://127.0.0.1:7102` |
+| off-chain swap settlement service | `http://127.0.0.1:7102` |
 | `governd` | `http://127.0.0.1:7103` |
 | `consensusd` | `http://127.0.0.1:7104` |
 

@@ -2,7 +2,7 @@
   "info": {
     "name": "Stable Funding & Cashout",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "description": "Regression coverage for swapd's `/v1/stable/*` endpoints. The collection exercises quote \u2192 reserve \u2192 cashout flows and encodes \"preview\" assertions so auditors can verify that disabled deployments still return a 501 with an explicit `stable engine not enabled` error. Set the `stable_state` collection variable to `enabled` once the engine is live to enforce success-path contracts."
+    "description": "Regression coverage for the off-chain swap settlement service's `/v1/stable/*` endpoints. The collection exercises quote \u2192 reserve \u2192 cashout flows and encodes \"preview\" assertions so auditors can verify that disabled deployments still return a 501 with an explicit `stable engine not enabled` error. Set the `stable_state` collection variable to `enabled` once the engine is live to enforce success-path contracts."
   },
   "variable": [
     {

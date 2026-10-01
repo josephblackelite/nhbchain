@@ -7,8 +7,8 @@ validator keys (see `crypto/keystore.go`'s `SaveToKeystore` /
 just a safe, scriptable way to produce a keystore file from a key you
 already hold.
 
-The primary use case today is producing the keystore file for
-`services/swapd`'s local price-proof signer
+The primary use case today is producing the keystore file for the off-chain
+swap settlement service's local price-proof signer
 (`price_proof.signer.type: local`, see `docs/swap/staging-deploy.md`), but
 the resulting file is a standard keystore usable anywhere this repo already
 accepts one (e.g. `--keystore` flags on other tools that call
@@ -32,8 +32,9 @@ NHB_KEYSTORE_IMPORT_PASSPHRASE=<passphrase> \
   shells never write a one-shot prefix assignment to history either.
 - `NHB_KEYSTORE_IMPORT_PASSPHRASE` -- **environment variable, required.**
   The passphrase used to encrypt the resulting keystore file. Whatever
-  reads the file back later (e.g. swapd's local price-proof signer) must be
-  configured with this exact same passphrase, via its own environment
+  reads the file back later (e.g. the off-chain swap settlement service's
+  local price-proof signer) must be configured with this exact same
+  passphrase, via its own environment
   variable indirection -- never copy the passphrase into a config file.
 - `--out <path>` -- **flag, required.** Output path for the encrypted
   keystore JSON file. The parent directory is created if it doesn't exist
@@ -51,8 +52,8 @@ NHB_KEYSTORE_IMPORT_PASSPHRASE=<passphrase> \
    recovered address matches the address derived in step 1. This is a
    write-then-verify round trip -- a corrupted or unexpectedly-wrong write
    is caught right here, at import time, rather than surfacing later as an
-   opaque decrypt failure when something like swapd tries to start with the
-   file.
+   opaque decrypt failure when the off-chain swap settlement service tries
+   to start with the file.
 4. Prints the public address.
 
 ## Confirming you imported the right key
@@ -60,13 +61,13 @@ NHB_KEYSTORE_IMPORT_PASSPHRASE=<passphrase> \
 The command's final output looks like:
 
 ```
-Keystore written to: /etc/nhbchain/secrets/swapd-price-signer.keystore.json
+Keystore written to: /etc/nhbchain/secrets/swap-settlement-price-signer.keystore.json
 Public address:      nhb1...
 Verified: decrypting the written file recovers the same address.
 
 CONFIRM the address above matches the wallet you intended to import
-before pointing anything (e.g. services/swapd's local price-proof
-signer) at this file.
+before pointing anything (e.g. the off-chain swap settlement service's
+local price-proof signer) at this file.
 ```
 
 **You must manually compare the printed address against the wallet you

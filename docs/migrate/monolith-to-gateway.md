@@ -20,14 +20,14 @@ the service-specific REST and gRPC surfaces exposed behind the gateway.
 | `lending_borrowNHBWithFee` | `/v1/lending/borrow/with-fee` | `POST` | `lendingd` |
 | `lending_repayNHB` | `/v1/lending/repay` | `POST` | `lendingd` |
 | `lending_liquidate` | `/v1/lending/liquidate` | `POST` | `lendingd` |
-| `swap_submitVoucher` | `/v1/swap/voucher/submit` | `POST` | `swapd` |
-| `swap_voucher_get` | `/v1/swap/voucher/get` | `POST` | `swapd` |
-| `swap_voucher_list` | `/v1/swap/voucher/list` | `POST` | `swapd` |
-| `swap_voucher_export` | `/v1/swap/voucher/export` | `POST` | `swapd` |
-| `swap_limits` | `/v1/swap/limits` | `GET` | `swapd` |
-| `swap_provider_status` | `/v1/swap/providers/status` | `GET` | `swapd` |
-| `swap_burn_list` | `/v1/swap/burn/list` | `GET` | `swapd` |
-| `swap_voucher_reverse` | `/v1/swap/voucher/reverse` | `POST` | `swapd` |
+| `swap_submitVoucher` | `/v1/swap/voucher/submit` | `POST` | swap service |
+| `swap_voucher_get` | `/v1/swap/voucher/get` | `POST` | swap service |
+| `swap_voucher_list` | `/v1/swap/voucher/list` | `POST` | swap service |
+| `swap_voucher_export` | `/v1/swap/voucher/export` | `POST` | swap service |
+| `swap_limits` | `/v1/swap/limits` | `GET` | swap service |
+| `swap_provider_status` | `/v1/swap/providers/status` | `GET` | swap service |
+| `swap_burn_list` | `/v1/swap/burn/list` | `GET` | swap service |
+| `swap_voucher_reverse` | `/v1/swap/voucher/reverse` | `POST` | swap service |
 | `gov_getProposal` | `/v1/gov/proposals/get` | `POST` | `governd` |
 | `gov_listProposals` | `/v1/gov/proposals` | `GET` | `governd` |
 | `gov_getTally` | `/v1/gov/proposals/tally` | `POST` | `governd` |

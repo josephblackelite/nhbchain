@@ -1,7 +1,7 @@
 // Package stablequote defines the wire contract between the validator's RPC
 // surface (rpc/swap_stable_handlers.go) and a stable-quote engine that
-// implements it -- nothing more. 2026-09-17: split out of
-// services/swapd/stable so the public nhbchain repo (this one) can keep
+// implements it -- nothing more. 2026-09-17: split out of the off-chain
+// swap settlement service's stable engine so the public nhbchain repo (this one) can keep
 // exposing the *shape* of the stable-quote RPC methods (asset/quote/
 // reservation/cash-out request and response fields -- what any RPC client
 // already sees on the wire) without also exposing the engine's actual

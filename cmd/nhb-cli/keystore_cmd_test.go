@@ -20,7 +20,7 @@ func TestRunKeystoreImportWriteThenVerifyRoundTrip(t *testing.T) {
 	t.Setenv(keystoreImportPrivateKeyEnv, hex.EncodeToString(key.Bytes()))
 	t.Setenv(keystoreImportPassphraseEnv, "correct horse battery staple")
 
-	outPath := filepath.Join(t.TempDir(), "swapd-price-signer.keystore.json")
+	outPath := filepath.Join(t.TempDir(), "swap-settlement-price-signer.keystore.json")
 	var stdout, stderr bytes.Buffer
 	code := runKeystoreImport([]string{"--out", outPath}, &stdout, &stderr)
 	if code != 0 {
