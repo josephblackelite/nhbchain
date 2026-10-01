@@ -3416,6 +3416,19 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// RegisterIdentity, don't abort the whole block over it. See
 		// ErrIdentityUsernameTaken's doc comment (core/state_transition.go).
 		errors.Is(err, ErrIdentityUsernameTaken),
+		// PL-R8-DELEGATEDESCROW (sibling of PL-CO-D1-5 above): a
+		// TxTypeCreateEscrow/TxTypeDelegatedCreateEscrow payer's balance is
+		// ordinary mutable state -- a same-attempt transaction crediting them
+		// earlier (or a later resubmission once they are funded) could make
+		// this succeed, mirroring ErrRedeemInsufficientBalance's reasoning
+		// above -- so this is skippable, not prunable, and must not abort the
+		// whole candidate block the way an unwrapped error would (see
+		// ErrIdentityUsernameTaken's NHB-AUDIT-C2 doc comment immediately
+		// above for the incident class this avoids repeating). Referenced
+		// directly from the escrow package rather than re-wrapped in a
+		// core-package sentinel, the same way lending.ErrHealthCheckFailed/
+		// ErrMaxLTVExceeded are below.
+		errors.Is(err, escrow.ErrCreateInsufficientBalance),
 		// A ref price for an epoch the chain has not reached yet becomes
 		// valid the moment that epoch opens, so it is skippable (kept in
 		// the mempool, offered again), not prunable -- mirroring the

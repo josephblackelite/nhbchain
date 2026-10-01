@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -612,6 +613,150 @@ func TestDelegatedCreateEscrowLifecycle(t *testing.T) {
 	}
 	if payerAccount.BalanceNHB.Cmp(big.NewInt(1_000)) != 0 {
 		t.Fatalf("expected payer refunded in full, got %s", payerAccount.BalanceNHB)
+	}
+}
+
+// TestDelegatedCreateEscrowRejectsZeroBalancePayer is the direct regression
+// test for PL-R8-DELEGATEDESCROW, mirroring TestCreateEscrowRejectsZero
+// BalancePayer's own test (PL-CO-D1-5) for the delegated entry point:
+// applyDelegatedCreateEscrow calls EscrowEngine.CreateWithSignature directly,
+// a completely separate code path from applyCreateEscrow with no balance
+// check anywhere in its chain, so a brand-new, zero-balance keypair could
+// sign a create envelope declaring an arbitrary amount, have a relayer
+// (itself unfunded and uninvolved) submit it via TxTypeDelegatedCreateEscrow,
+// and get escrow metadata recorded on-chain for free. This proves a
+// zero-balance signer's delegated create is now rejected -- with the escrow
+// never stored and neither the signer's nor the relayer's nonce consumed --
+// while an otherwise-identical envelope signed by a funded payer still
+// succeeds exactly as before this fix, relayed by the very same relayer.
+func TestDelegatedCreateEscrowRejectsZeroBalancePayer(t *testing.T) {
+	sp := newStakingStateProcessor(t)
+
+	payeeKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate payee key: %v", err)
+	}
+	payeeAddr := payeeKey.PubKey().Address()
+	var payeeRaw [20]byte
+	copy(payeeRaw[:], payeeAddr.Bytes())
+	deadline := time.Now().Add(2 * time.Hour).Unix()
+
+	relayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate relayer key: %v", err)
+	}
+	relayerAddr := relayerKey.PubKey().Address()
+	var relayerAccountAddr [20]byte
+	copy(relayerAccountAddr[:], relayerAddr.Bytes())
+	// The relayer itself is unfunded too -- it never becomes the escrow's
+	// payer, so its own balance must be irrelevant to this check.
+	writeAccount(t, sp, relayerAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	submitDelegatedCreate := func(payload, sig []byte, relayerTxNonce uint64) error {
+		delegatedCreate := struct {
+			Payload   []byte `json:"payload"`
+			Signature []byte `json:"signature"`
+		}{Payload: payload, Signature: sig}
+		delegatedData, err := rlp.EncodeToBytes(delegatedCreate)
+		if err != nil {
+			t.Fatalf("rlp encode delegated create payload: %v", err)
+		}
+		delegatedTx := &types.Transaction{ChainID: types.NHBChainID(), Type: types.TxTypeDelegatedCreateEscrow, Nonce: relayerTxNonce, Data: delegatedData, GasLimit: 21000, GasPrice: big.NewInt(1)}
+		if err := delegatedTx.Sign(relayerKey.PrivateKey); err != nil {
+			t.Fatalf("sign delegated create: %v", err)
+		}
+		return sp.ApplyTransaction(delegatedTx)
+	}
+
+	// --- Zero-balance signer: must be rejected. ---
+	zeroPayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate zero-balance payer key: %v", err)
+	}
+	zeroPayerAddr := zeroPayerKey.PubKey().Address()
+	var zeroPayerRaw [20]byte
+	copy(zeroPayerRaw[:], zeroPayerAddr.Bytes())
+	var zeroPayerAccountAddr [20]byte
+	copy(zeroPayerAccountAddr[:], zeroPayerAddr.Bytes())
+	writeAccount(t, sp, zeroPayerAccountAddr, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	zeroPayload, zeroSig := signEscrowCreateEnvelope(t, zeroPayerRaw, payeeRaw, "NHB", big.NewInt(100), 0, deadline, 1, zeroPayerKey.PrivateKey)
+	applyErr := submitDelegatedCreate(zeroPayload, zeroSig, 0)
+	if applyErr == nil {
+		t.Fatalf("expected a zero-balance signer's delegated create to be rejected")
+	}
+	if !errors.Is(applyErr, escrow.ErrCreateInsufficientBalance) {
+		t.Fatalf("expected escrow.ErrCreateInsufficientBalance, got %v", applyErr)
+	}
+
+	manager := nhbstate.NewManager(sp.Trie)
+	var zeroNonceBytes [8]byte
+	binary.BigEndian.PutUint64(zeroNonceBytes[:], 1)
+	meta := [32]byte{}
+	zeroEscrowID := ethcrypto.Keccak256Hash(zeroPayerRaw[:], payeeRaw[:], meta[:], zeroNonceBytes[:])
+	if _, ok := manager.EscrowGet(zeroEscrowID); ok {
+		t.Fatalf("SAFETY REGRESSION: escrow was created for a zero-balance delegated payer")
+	}
+	zeroPayerAccount, err := sp.getAccount(zeroPayerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load zero-balance payer: %v", err)
+	}
+	if zeroPayerAccount.Nonce != 0 {
+		t.Fatalf("rejected delegated create must not consume the signer's nonce, got %d", zeroPayerAccount.Nonce)
+	}
+	relayerAccount, err := sp.getAccount(relayerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load relayer account: %v", err)
+	}
+	if relayerAccount.Nonce != 0 {
+		t.Fatalf("rejected delegated create must not consume the relayer's nonce either, got %d", relayerAccount.Nonce)
+	}
+
+	// --- Funded signer, otherwise-identical envelope: must still succeed,
+	// relayed by the very same relayer. ---
+	fundedPayerKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate funded payer key: %v", err)
+	}
+	fundedPayerAddr := fundedPayerKey.PubKey().Address()
+	var fundedPayerRaw [20]byte
+	copy(fundedPayerRaw[:], fundedPayerAddr.Bytes())
+	var fundedPayerAccountAddr [20]byte
+	copy(fundedPayerAccountAddr[:], fundedPayerAddr.Bytes())
+	writeAccount(t, sp, fundedPayerAccountAddr, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
+
+	// The relayer's rejected first attempt above never consumed its nonce, so
+	// this delegated submission is still the relayer's tx #0.
+	fundedPayload, fundedSig := signEscrowCreateEnvelope(t, fundedPayerRaw, payeeRaw, "NHB", big.NewInt(100), 0, deadline, 1, fundedPayerKey.PrivateKey)
+	if err := submitDelegatedCreate(fundedPayload, fundedSig, 0); err != nil {
+		t.Fatalf("apply funded delegated create: %v", err)
+	}
+	var fundedNonceBytes [8]byte
+	binary.BigEndian.PutUint64(fundedNonceBytes[:], 1)
+	fundedEscrowID := ethcrypto.Keccak256Hash(fundedPayerRaw[:], payeeRaw[:], meta[:], fundedNonceBytes[:])
+	esc, ok := manager.EscrowGet(fundedEscrowID)
+	if !ok {
+		t.Fatalf("expected the funded payer's delegated escrow to be created")
+	}
+	if esc.Payer != fundedPayerRaw {
+		t.Fatalf("expected the signer to become payer, got %x want %x", esc.Payer, fundedPayerRaw)
+	}
+	if esc.Status != escrow.EscrowInit {
+		t.Fatalf("unexpected escrow status after funded delegated create: %v", esc.Status)
+	}
+	relayerAccount, err = sp.getAccount(relayerAddr.Bytes())
+	if err != nil {
+		t.Fatalf("load relayer account after funded create: %v", err)
+	}
+	if relayerAccount.Nonce != 1 {
+		t.Fatalf("expected relayer's nonce to have advanced by exactly one accepted delegated submission, got %d", relayerAccount.Nonce)
+	}
+
+	// A funded signer declaring MORE than they hold must still be rejected
+	// the same way the zero-balance signer was.
+	underfundedPayload, underfundedSig := signEscrowCreateEnvelope(t, fundedPayerRaw, payeeRaw, "NHB", big.NewInt(1_000_000), 0, deadline, 2, fundedPayerKey.PrivateKey)
+	if err := submitDelegatedCreate(underfundedPayload, underfundedSig, 1); !errors.Is(err, escrow.ErrCreateInsufficientBalance) {
+		t.Fatalf("expected a signer declaring more than they hold to be rejected with escrow.ErrCreateInsufficientBalance, got %v", err)
 	}
 }
 

@@ -411,6 +411,7 @@ func TestCreateValidations(t *testing.T) {
 	payee := newTestAddress(0x02)
 	meta := [32]byte{}
 	meta[0] = 0xFF
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(10_000), BalanceZNHB: big.NewInt(10_000), Stake: big.NewInt(0)})
 
 	cases := []struct {
 		name     string
@@ -452,6 +453,7 @@ func TestCreateIsIdempotent(t *testing.T) {
 	payee := newTestAddress(0x11)
 	meta := [32]byte{}
 	meta[0] = 0x01
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 
 	nonce := uint64(10)
 	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 50, 1_700_000_500, nonce, nil, meta, "")
@@ -477,6 +479,7 @@ func TestCreateWithDifferentNonceYieldsDistinctIDs(t *testing.T) {
 	payee := newTestAddress(0x21)
 	meta := [32]byte{}
 	meta[0] = 0xAB
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 
 	first, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 0, 1_700_001_000, 11, nil, meta, "")
 	if err != nil {
@@ -517,6 +520,7 @@ func TestCreateWithRealmFreezesPolicy(t *testing.T) {
 	payer := newTestAddress(0x31)
 	payee := newTestAddress(0x32)
 	meta := [32]byte{0xAB}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(200), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 1_700_000_800, 21, nil, meta, "core")
 	if err != nil {
 		t.Fatalf("create with realm: %v", err)
@@ -573,6 +577,7 @@ func TestCreateWithUnknownRealmFails(t *testing.T) {
 	payer := newTestAddress(0x41)
 	payee := newTestAddress(0x42)
 	meta := [32]byte{0xCC}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(150), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	if _, err := engine.Create(payer, payee, "NHB", big.NewInt(150), 0, 1_700_000_900, 22, nil, meta, "missing"); err == nil || !errors.Is(err, errRealmNotFound) {
 		t.Fatalf("expected realm not found error, got %v", err)
 	}
@@ -672,11 +677,11 @@ func TestFundTransfersToVaultAndIsIdempotent(t *testing.T) {
 	payer := newTestAddress(0x21)
 	payee := newTestAddress(0x22)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 1_700_001_000, 30, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	vault, _ := state.EscrowVaultAddress("NHB")
 
 	if err := engine.Fund(esc.ID, payer); err != nil {
@@ -706,11 +711,11 @@ func TestFundRejectsWrongCaller(t *testing.T) {
 	payer := newTestAddress(0x31)
 	payee := newTestAddress(0x32)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(200), Stake: big.NewInt(0)})
 	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 1_700_001_000, 31, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: big.NewInt(200), Stake: big.NewInt(0)})
 
 	if err := engine.Fund(esc.ID, payee); err == nil {
 		t.Fatalf("expected unauthorized error")
@@ -724,11 +729,11 @@ func TestReleaseDistributesFees(t *testing.T) {
 	payee := newTestAddress(0x42)
 	mediator := newTestAddress(0x43)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(5_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_000), 250, 1_700_002_000, 32, &mediator, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(5_000), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -784,11 +789,11 @@ func TestReleaseHandlesFeeEdgeCases(t *testing.T) {
 			payer := newTestAddress(0x51)
 			payee := newTestAddress(0x52)
 			meta := [32]byte{}
+			state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(2_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
 			esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(1_000), tc.fee, 1_700_003_000, 40, nil, meta, "")
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
-			state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(2_000), BalanceNHB: big.NewInt(0), Stake: big.NewInt(0)})
 			if err := engine.Fund(esc.ID, payer); err != nil {
 				t.Fatalf("fund: %v", err)
 			}
@@ -815,11 +820,11 @@ func TestReleaseZeroFeeWithoutTreasury(t *testing.T) {
 
 	payer := newTestAddress(0x5A)
 	payee := newTestAddress(0x5B)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(2_000)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(1_200), 0, 1_700_004_000, 41, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(2_000)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -848,11 +853,11 @@ func TestRefundHonorsDeadlineAndCaller(t *testing.T) {
 	payer := newTestAddress(0x61)
 	payee := newTestAddress(0x62)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_000_500, 42, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -883,11 +888,11 @@ func TestRefundAfterDeadlineFails(t *testing.T) {
 		t.Fatalf("expected create error for deadline before now")
 	}
 	engine.SetNowFunc(func() int64 { return 1_600_000_000 })
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(200)})
 	esc, err = engine.Create(payer, payee, "NHB", big.NewInt(100), 0, 1_600_000_500, 44, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(200)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -911,11 +916,11 @@ func TestDisputeRejectsUnauthorizedCallerOnAlreadyDisputedEscrow(t *testing.T) {
 	payee := newTestAddress(0x72)
 	outsider := newTestAddress(0x73)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 9_999_999_999, 21, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -940,11 +945,11 @@ func TestDisputeRejectsOversizedReason(t *testing.T) {
 	payer := newTestAddress(0x74)
 	payee := newTestAddress(0x75)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(100), 0, 9_999_999_999, 22, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -960,11 +965,11 @@ func TestExpireRefundsAfterDeadline(t *testing.T) {
 	payer := newTestAddress(0x81)
 	payee := newTestAddress(0x82)
 	meta := [32]byte{}
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(200), 0, 1_700_000_500, 45, nil, meta, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1014,6 +1019,7 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 
 	payer := newTestAddress(0x91)
 	payee := newTestAddress(0x92)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(600), 500, 1_700_001_000, 46, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -1021,7 +1027,6 @@ func TestResolveWithSignaturesRelease(t *testing.T) {
 	if esc.FrozenArb == nil || esc.FrozenArb.FeeSchedule == nil {
 		t.Fatalf("expected frozen fee schedule")
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1122,11 +1127,11 @@ func TestResolveWithSignaturesRefundRoutesFees(t *testing.T) {
 
 	payer := newTestAddress(0x93)
 	payee := newTestAddress(0x94)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(500), 400, 1_700_001_100, 47, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1185,11 +1190,11 @@ func TestArbitratedReleaseZeroFeeWithoutTreasury(t *testing.T) {
 
 	payer := newTestAddress(0xA5)
 	payee := newTestAddress(0xA6)
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(1_500)})
 	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(900), 0, 1_700_005_000, 47, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(1_500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1243,11 +1248,11 @@ func TestResolveWithSignaturesRejectsUnderQuorum(t *testing.T) {
 
 	payer := newTestAddress(0xA1)
 	payee := newTestAddress(0xA2)
+	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(600)})
 	esc, err := engine.Create(payer, payee, "ZNHB", big.NewInt(300), 0, 1_700_001_500, 48, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceZNHB: big.NewInt(600)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1292,11 +1297,11 @@ func TestResolveWithSignaturesReplay(t *testing.T) {
 
 	payer := newTestAddress(0xB1)
 	payee := newTestAddress(0xB2)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(800)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(400), 0, 1_700_002_000, 49, nil, [32]byte{}, realm.ID)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(800)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1372,6 +1377,7 @@ func TestCreateWithSignatureAuthorizesEmbeddedPayer(t *testing.T) {
 	engine := newTestEngine(state)
 	payerKey, payer := mustGenerateArbitrator(t)
 	_, payee := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(150), BalanceZNHB: big.NewInt(0), Stake: big.NewInt(0)})
 
 	payload := buildEscrowCreateEnvelope(t, payer, payee, "NHB", big.NewInt(150), 100, 9_999_999_999, 71, nil, "")
 	sig := signEscrowActionPayload(t, payload, payerKey)
@@ -1418,11 +1424,11 @@ func TestReleaseWithSignatureAuthorizesEmbeddedPayee(t *testing.T) {
 	engine := newTestEngine(state)
 	_, payer := mustGenerateArbitrator(t)
 	payeeKey, payee := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 61, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1448,11 +1454,11 @@ func TestReleaseWithSignatureRejectsWrongSigner(t *testing.T) {
 	_, payer := mustGenerateArbitrator(t)
 	_, payee := mustGenerateArbitrator(t)
 	outsiderKey, _ := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 62, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1474,11 +1480,11 @@ func TestRefundWithSignatureAuthorizesEmbeddedPayer(t *testing.T) {
 	engine := newTestEngine(state)
 	payerKey, payer := mustGenerateArbitrator(t)
 	_, payee := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 9_999_999_999, 63, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1499,11 +1505,11 @@ func TestDisputeWithSignatureCarriesReasonAndEnforcesLengthCap(t *testing.T) {
 	engine := newTestEngine(state)
 	payerKey, payer := mustGenerateArbitrator(t)
 	_, payee := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(300), 0, 9_999_999_999, 64, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(1_000)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1544,11 +1550,11 @@ func TestDelegatedActionSignatureCannotBeReusedForADifferentAction(t *testing.T)
 	engine := newTestEngine(state)
 	_, payer := mustGenerateArbitrator(t)
 	payeeKey, payee := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 66, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
@@ -1575,11 +1581,11 @@ func TestReleaseWithSignatureReplayIsIdempotent(t *testing.T) {
 	engine.SetEmitter(emitter)
 	_, payer := mustGenerateArbitrator(t)
 	payeeKey, payee := mustGenerateArbitrator(t)
+	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	esc, err := engine.Create(payer, payee, "NHB", big.NewInt(200), 0, 9_999_999_999, 67, nil, [32]byte{}, "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	state.setAccount(payer, &types.Account{BalanceNHB: big.NewInt(500)})
 	if err := engine.Fund(esc.ID, payer); err != nil {
 		t.Fatalf("fund: %v", err)
 	}
