@@ -57,6 +57,43 @@ func convertModuleQuota(q config.Quota) nativecommon.Quota {
 	}
 }
 
+// lendingRiskParametersFromConfig converts the [lending] config/genesis
+// section into the lending.RiskParameters the lending engine actually reads
+// on every Supply/Borrow/Repay/Liquidate call (native/lending/engine.go).
+// Previously only MaxLTV/LiquidationThreshold/DeveloperFeeCapBps/Oracle were
+// wired here -- BorrowCaps, Pauses, CircuitBreakerActive, and
+// LiquidationBonus were silently dropped, so a configured borrow cap,
+// per-action pause, circuit breaker, or liquidation bonus never reached the
+// engine: it always saw the RiskParameters zero value for those four fields,
+// even though the engine already reads and enforces them (see e.g.
+// Engine.Borrow's BorrowCaps/CircuitBreakerActive checks and Engine.Liquidate's
+// LiquidationBonus-scaled seize amount). Extracted into its own function
+// (rather than inlined at the SetLendingRiskParameters call site) so a test
+// can prove every configured field survives this conversion and actually
+// changes engine behaviour, without needing to drive the whole node startup
+// path -- see lending_risk_params_test.go.
+//
+// This does NOT wire the module-wide lending pause (config/global.go's
+// Pauses.Lending, applied via node.SetPauses/engine.SetPauses) -- that is a
+// separate, already-correctly-wired mechanism that halts every lending flow
+// at once; cfg.Lending.Pauses here only gates individual flows
+// (RiskParameters.Pauses.Supply/Borrow/Repay/Liquidate).
+func lendingRiskParametersFromConfig(cfg lending.Config) lending.RiskParameters {
+	return lending.RiskParameters{
+		MaxLTV:               cfg.MaxLTVBps,
+		LiquidationThreshold: cfg.LiquidationThresholdBps,
+		LiquidationBonus:     cfg.LiquidationBonusBps,
+		CircuitBreakerActive: cfg.CircuitBreakerActive,
+		DeveloperFeeCapBps:   cfg.DeveloperFeeBps,
+		BorrowCaps:           cfg.BorrowCaps.Clone(),
+		Oracle: lending.OracleConfig{
+			MaxAgeBlocks:    cfg.OracleMaxAgeBlocks,
+			MaxDeviationBps: cfg.OracleMaxDeviationBps,
+		},
+		Pauses: cfg.Pauses,
+	}
+}
+
 func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
@@ -248,15 +285,7 @@ func main() {
 		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
 	}
 
-	node.SetLendingRiskParameters(lending.RiskParameters{
-		MaxLTV:               cfg.Lending.MaxLTVBps,
-		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
-		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
-		Oracle: lending.OracleConfig{
-			MaxAgeBlocks:    cfg.Lending.OracleMaxAgeBlocks,
-			MaxDeviationBps: cfg.Lending.OracleMaxDeviationBps,
-		},
-	})
+	node.SetLendingRiskParameters(lendingRiskParametersFromConfig(cfg.Lending))
 
 	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)
 
