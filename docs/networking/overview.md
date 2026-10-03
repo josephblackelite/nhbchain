@@ -70,7 +70,7 @@ followed by `\n` (this initial frame is not wrapped in the `Message` envelope):
 | `genesisHash` | `0x` hex of the genesis hash. Must equal the local one. |
 | `nodeId` | Sender's node ID, canonical lower-case `0x` hex. |
 | `nonce` | 12 random bytes, `0x` hex. |
-| `clientVersion` | Non-empty free-form string (config `ClientVersion`, default `nhbchain/node`). |
+| `clientVersion` | Non-empty string of at most 256 bytes made of printable characters (config `ClientVersion`, default `nhbchain/node`; a configured value that does not fit is replaced by the default, with a warning). It is not covered by the signature. |
 | `listenAddrs` | Optional list of the sender's dialable `host:port` addresses (its `ListenAddress` and `ExternalAddress`; unspecified hosts and port `0` are dropped). The receiver looks at the first 64 entries and keeps at most 8 (`sanitizeListenAddrs`). |
 | `sig` | 65-byte secp256k1 signature, `0x` hex. |
 
@@ -88,7 +88,8 @@ keccak256( "nhb-handshake-v1"
 node ID from it, and requires it to equal the claimed `nodeId`.
 
 Checks run in this order (`verifyHandshake`): protocol version; non-empty
-`clientVersion`; non-empty canonical `nodeId`; canonical 12-byte nonce; chain ID;
+`clientVersion` of at most 256 printable bytes (a refusal for this holds nothing
+against the node ID, since the field is not signed); non-empty canonical `nodeId`; canonical 12-byte nonce; chain ID;
 genesis hash; signature length and recovery; nonce replay. A chain ID or genesis
 mismatch bans the node it names only when the packet's signature really comes
 from that node, and never when that node is a configured persistent peer. A

@@ -46,7 +46,7 @@ sends it to no peer, logs it and ends no connection over it.
 | `genesisHash` | `0x` hex of the genesis hash; must equal the local value. |
 | `nodeId` | Canonical lowercase `0x` hex node id. |
 | `nonce` | 12 random bytes, `0x` hex. |
-| `clientVersion` | Non-empty string, default `nhbchain/node`. |
+| `clientVersion` | Non-empty string of at most 256 bytes made of printable characters, default `nhbchain/node`. Not covered by the signature. |
 | `listenAddrs` | Optional list of dialable `host:port` addresses (unspecified and port-0 addresses are dropped; only the first 64 entries are looked at and at most 8 are kept, `sanitizeListenAddrs`). |
 | `sig` | 65-byte secp256k1 signature, `0x` hex. |
 
@@ -148,7 +148,7 @@ Defaults are those applied by `config.Load` when a key is `0`/empty.
 | `ReadTimeout` / `WriteTimeout` | 90 s / 5 s | Socket deadlines. |
 | `MaxMsgBytes` | 1048576 | Maximum frame size. |
 | `MaxMsgsPerSecond` (`[p2p] RateMsgsPerSec`) | 32 | Per-peer token refill rate. |
-| `ClientVersion` | `nhbchain/node` | Sent in the handshake. |
+| `ClientVersion` | `nhbchain/node` | Sent in the handshake. At most 256 bytes of printable characters; a value that does not fit is replaced by the default and a warning is logged. |
 | `[p2p] NetworkId` | 18346390202490284624 in a config file the node creates when none exists; no default when the key is absent from an existing file | Parsed from the config (decimal string or integer; a bare integer above the signed 64-bit range is accepted) but not used by the node: the handshake `chainId` is the node's chain id (`Node.ChainID`), the first 8 bytes of the genesis block hash, which is 18346390202490284624 for `config/genesis.relaunch.json`. |
 | `[p2p] ExternalAddress` | empty | This node's publicly dialable `host:port`, advertised in the handshake when `ListenAddress` is unspecified. |
 | `[p2p] Seeds` | `[]` | Seed entries. |

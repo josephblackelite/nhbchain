@@ -13,6 +13,8 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
@@ -27,6 +29,11 @@ const (
 	// first maxHandshakeListenAddrScan entries of the list are looked at.
 	maxHandshakeListenAddrs    = 8
 	maxHandshakeListenAddrScan = 64
+
+	// The client version is chosen by whoever sends the handshake and is not
+	// covered by its signature. It is kept in the peer record and written to the
+	// log, so it is limited in size.
+	maxClientVersionLen = 256
 )
 
 var (
@@ -139,6 +146,11 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	if packet.ClientVersion == "" {
 		return fmt.Errorf("handshake missing client version")
 	}
+	if !validClientVersion(packet.ClientVersion) {
+		// The field is not signed, so nothing is held against the node ID, and the
+		// value is left out of the message because the message is logged.
+		return fmt.Errorf("handshake client version is longer than %d bytes or has characters that are not printable", maxClientVersionLen)
+	}
 	if strings.TrimSpace(packet.NodeID) == "" {
 		return fmt.Errorf("handshake missing node ID")
 	}
@@ -219,6 +231,22 @@ func (s *Server) verifyHandshake(packet *handshakePacket) error {
 	packet.pubKey = recovered
 	packet.NodeID = derived
 	return nil
+}
+
+// validClientVersion reports whether a client version may be kept and logged:
+// it is not empty, has at most maxClientVersionLen bytes and holds only
+// printable characters.
+func validClientVersion(v string) bool {
+	if v == "" || len(v) > maxClientVersionLen {
+		return false
+	}
+	for _, r := range v {
+		// Bytes that are not valid UTF-8 decode to utf8.RuneError.
+		if r == utf8.RuneError || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // signatureMismatch builds the error for a handshake whose signature does not

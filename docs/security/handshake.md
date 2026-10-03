@@ -13,7 +13,7 @@ Each side writes one newline-terminated JSON object, then reads the peer's. The 
 | `genesisHash` | `0x` hex; must equal the local genesis hash. |
 | `nodeId` | Canonical node ID (below). |
 | `nonce` | 12 random bytes, `0x`-prefixed lowercase hex. |
-| `clientVersion` | Required, non-empty. |
+| `clientVersion` | Required, non-empty, at most 256 bytes (`maxClientVersionLen`) made of printable characters. It is not covered by the signature. |
 | `listenAddrs` | Optional list of `host:port` strings; entries with an empty host, port `0` or an unspecified IP are dropped. Only the first 64 entries are examined and at most 8 are kept (`maxHandshakeListenAddrScan`, `maxHandshakeListenAddrs` in `p2p/handshake.go`). |
 | `sig` | 65-byte recoverable secp256k1 signature, hex. |
 
@@ -64,5 +64,5 @@ After the signature checks pass, the receiver records `(node ID, canonical nonce
 
 * **Banned (when the packet is signed by the claimed node):** chain ID mismatch and genesis hash mismatch. The ban is applied in the reputation tracker and the peer store for `[p2p].BanDurationSeconds` (when unset it takes the top-level `PeerBanSeconds`, which defaults to 3600 seconds in `config/config.go`; `p2p/handshake.go` falls back to 15 minutes, `defaultPeerBan`, only if it is handed a non-positive duration), and a violation is recorded in the peer store.
 * **Refused without a ban:** any signature failure (bad encoding, wrong length, recovery failure, node ID mismatch), and nonce replay. A replayed handshake is a copy that anyone who saw the original could send, so nothing is held against the node that signed it.
-* **Also refused without a ban:** unsupported protocol version, missing fields, non-canonical node ID or nonce.
+* **Also refused without a ban:** unsupported protocol version, missing fields, a `clientVersion` that is too long or not printable, non-canonical node ID or nonce.
 * **Never banned on handshake evidence:** a node ID that is a configured persistent peer (`isConfiguredPersistentPeer`), so that it can reconnect as soon as its fault is fixed.

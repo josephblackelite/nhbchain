@@ -538,7 +538,13 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = ":0"
 	}
-	if cfg.ClientVersion == "" {
+	// The version goes into every handshake this node sends, and peers refuse a
+	// handshake whose version is empty, too long or not printable. A value of
+	// this node's own that peers would refuse is replaced by the default, so
+	// that it does not cut the node off from all of them.
+	rejectedVersionLen := 0
+	if !validClientVersion(cfg.ClientVersion) {
+		rejectedVersionLen = len(cfg.ClientVersion)
 		cfg.ClientVersion = "nhbchain/node"
 	}
 	if cfg.MaxPeers <= 0 {
@@ -613,6 +619,12 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	})
 
 	baseLogger := slog.Default().With(slog.String("component", "p2p_server"))
+	if rejectedVersionLen > 0 {
+		baseLogger.Warn("Configured client version cannot be sent in a handshake; using the default",
+			slog.Int("configured_length", rejectedVersionLen),
+			slog.Int("max_length", maxClientVersionLen),
+			slog.String("client_version", cfg.ClientVersion))
+	}
 
 	server := &Server{
 		cfg:               cfg,
