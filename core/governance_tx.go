@@ -28,6 +28,8 @@ func cloneGovernancePolicy(policy governance.ProposalPolicy) governance.Proposal
 		AllowedRoles:                   append([]string{}, policy.AllowedRoles...),
 		TreasuryAllowList:              append([][20]byte{}, policy.TreasuryAllowList...),
 		BlockTimestampToleranceSeconds: policy.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: policy.RejectAmbiguousParamKeysFromUnix,
 	}
 	if policy.MinDepositWei != nil {
 		clone.MinDepositWei = new(big.Int).Set(policy.MinDepositWei)

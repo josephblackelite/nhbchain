@@ -556,6 +556,53 @@ ValidatorKeystorePath = %s
 	}
 }
 
+func TestLoadGovernanceAmbiguousParamKeyActivation(t *testing.T) {
+	load := func(t *testing.T, governance string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		keystorePath := filepath.Join(dir, "validator.keystore")
+		contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+[governance]
+%s`, tomlQuoted(keystorePath), governance)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	// Left out, the check stays off and the policy keeps today's behaviour.
+	cfg := load(t, "QuorumBps = 2500\n")
+	if cfg.Governance.RejectAmbiguousParamKeysFromUnix != 0 {
+		t.Fatalf("expected the check to default to off, got %d", cfg.Governance.RejectAmbiguousParamKeysFromUnix)
+	}
+	policy, err := cfg.Governance.Policy()
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	if policy.RejectAmbiguousParamKeysFromUnix != 0 {
+		t.Fatalf("expected the policy to leave the check off, got %d", policy.RejectAmbiguousParamKeysFromUnix)
+	}
+
+	cfg = load(t, "RejectAmbiguousParamKeysFromUnix = 1900000000\n")
+	if cfg.Governance.RejectAmbiguousParamKeysFromUnix != 1900000000 {
+		t.Fatalf("unexpected activation time: %d", cfg.Governance.RejectAmbiguousParamKeysFromUnix)
+	}
+	policy, err = cfg.Governance.Policy()
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	if policy.RejectAmbiguousParamKeysFromUnix != 1900000000 {
+		t.Fatalf("policy dropped the activation time: %d", policy.RejectAmbiguousParamKeysFromUnix)
+	}
+}
+
 func TestGovPolicyParsing(t *testing.T) {
 	cfg := GovConfig{
 		MinDepositWei:                  "1.25e3",

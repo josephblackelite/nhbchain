@@ -352,6 +352,7 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 		"FeeRouteAliasActivationHeight",
 		"LendingFixedTermIDActivationHeight",
 		"PayoutReceiptActivationHeight",
+		"RejectAmbiguousParamKeysFromUnix",
 	} {
 		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
 			t.Errorf("config.toml: %s is %v, the live validators run with it off (0)", key, got)

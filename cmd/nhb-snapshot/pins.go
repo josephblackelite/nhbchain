@@ -41,6 +41,7 @@ var liveChainRules = []struct {
 	{"", "FeeRouteAliasActivationHeight", 0},
 	{"", "LendingFixedTermIDActivationHeight", 0},
 	{"swap", "PayoutReceiptActivationHeight", 0},
+	{"governance", "RejectAmbiguousParamKeysFromUnix", 0},
 }
 
 // A node that starts from a snapshot executes every later block itself, so the

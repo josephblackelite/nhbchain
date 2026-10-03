@@ -54,7 +54,13 @@ For the struct-based kinds the payload is decoded with `json.Unmarshal` into a
 Go struct, so unknown JSON fields are ignored, not rejected. For the `param.*`
 kinds every key must be in `AllowedParams` and have a validator; unknown keys
 fail with `governance: parameter "<key>" not in allow-list` or `... missing
-validation rule`.
+validation rule`. Payload keys are trimmed of surrounding whitespace before the
+lookup, so two keys that differ only in whitespace name the same parameter. From
+the `RejectAmbiguousParamKeysFromUnix` block time (see the table below) such a
+payload is refused with `governance: parameter "<key>" given more than once with
+different values` at submission and at execution, unless the values are
+byte-identical; before that time, or while the key is `0`, the earlier behaviour
+applies and the stored value is not defined.
 
 ## Policy configuration
 
@@ -73,6 +79,7 @@ applied when a field is empty or zero (`config/config.go`):
 | `AllowedRoles` | empty (role proposals disabled) | Role names `role.allowlist` may grant or revoke. |
 | `TreasuryAllowList` | empty (treasury directives disabled) | Bech32 source accounts for `treasury.directive`. |
 | `BlockTimestampToleranceSeconds` | `0` (the node then uses `DefaultBlockTimestampTolerance`) | Block timestamp tolerance (`Node.applyTimestampTolerance`). |
+| `RejectAmbiguousParamKeysFromUnix` | `0` (off) | Unix time of the first block timestamp from which `param.*` payloads that repeat a parameter under whitespace-variant keys with different values are refused. Choose a time after the chain tip and after every validator has restarted with the same value: validators configured differently disagree on blocks that carry such a payload. |
 
 These values come from the local config file, not from chain state. The
 `gov.deposit.MinProposalDeposit`, `gov.tally.QuorumBps`, `gov.tally.ThresholdBps`

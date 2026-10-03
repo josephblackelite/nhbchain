@@ -1444,6 +1444,8 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 		AllowedRoles:                   append([]string{}, policy.AllowedRoles...),
 		TreasuryAllowList:              append([][20]byte{}, policy.TreasuryAllowList...),
 		BlockTimestampToleranceSeconds: policy.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: policy.RejectAmbiguousParamKeysFromUnix,
 	}
 	if policy.MinDepositWei != nil {
 		copyPolicy.MinDepositWei = new(big.Int).Set(policy.MinDepositWei)
@@ -1804,6 +1806,8 @@ func (n *Node) governancePolicy() governance.ProposalPolicy {
 		AllowedRoles:                   append([]string{}, n.govPolicy.AllowedRoles...),
 		TreasuryAllowList:              append([][20]byte{}, n.govPolicy.TreasuryAllowList...),
 		BlockTimestampToleranceSeconds: n.govPolicy.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: n.govPolicy.RejectAmbiguousParamKeysFromUnix,
 	}
 	if n.govPolicy.MinDepositWei != nil {
 		policy.MinDepositWei = new(big.Int).Set(n.govPolicy.MinDepositWei)

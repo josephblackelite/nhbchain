@@ -96,6 +96,14 @@ type ProposalPolicy struct {
 	AllowedRoles                   []string
 	TreasuryAllowList              [][20]byte
 	BlockTimestampToleranceSeconds uint64
+
+	// RejectAmbiguousParamKeysFromUnix is the block timestamp (Unix seconds)
+	// from which a parameter payload is refused when two of its keys name the
+	// same parameter once surrounding whitespace is trimmed and carry different
+	// values. Zero keeps the earlier behaviour, so a validator that does not set
+	// it executes already-committed blocks exactly as before. Every validator
+	// must be configured with the same value.
+	RejectAmbiguousParamKeysFromUnix uint64
 }
 
 // Engine orchestrates proposal admission and bookkeeping for governance
@@ -116,6 +124,10 @@ type Engine struct {
 	policyValidator     PolicyValidator
 	adminWallet         [20]byte
 	hasAdminWallet      bool
+
+	// rejectAmbiguousParamKeysFromUnix mirrors the policy field of the same
+	// name; zero means the check is off.
+	rejectAmbiguousParamKeysFromUnix uint64
 }
 
 // NewEngine constructs a governance engine with default no-op dependencies.
@@ -322,6 +334,7 @@ func (e *Engine) SetPolicy(policy ProposalPolicy) {
 	}
 	e.quorumBps = policy.QuorumBps
 	e.passThresholdBps = policy.PassThresholdBps
+	e.rejectAmbiguousParamKeysFromUnix = policy.RejectAmbiguousParamKeysFromUnix
 }
 
 var (
@@ -955,8 +968,19 @@ func (e *Engine) validateParamPayload(payloadJSON string) (map[string]json.RawMe
 	} else if ok {
 		payload = normalized
 	}
+	strict := e.rejectAmbiguousParamKeys()
+	keys := make([]string, 0, len(payload))
+	for key := range payload {
+		keys = append(keys, key)
+	}
+	if strict {
+		// Visit the keys in a fixed order so the verdict and the error text are
+		// the same on every validator.
+		sort.Strings(keys)
+	}
 	validated := make(map[string]json.RawMessage, len(payload))
-	for key, raw := range payload {
+	for _, key := range keys {
+		raw := payload[key]
 		trimmed := strings.TrimSpace(key)
 		if trimmed == "" {
 			return nil, fmt.Errorf("governance: payload key must not be empty")
@@ -971,9 +995,29 @@ func (e *Engine) validateParamPayload(payloadJSON string) (map[string]json.RawMe
 		if err := validator(raw); err != nil {
 			return nil, err
 		}
+		if strict {
+			// Keys that differ only in surrounding whitespace name one
+			// parameter. Identical values store the same bytes whichever key is
+			// kept; differing values leave no single value to store.
+			if previous, seen := validated[trimmed]; seen && !bytes.Equal(previous, raw) {
+				return nil, fmt.Errorf("governance: parameter %q given more than once with different values", trimmed)
+			}
+		}
 		validated[trimmed] = append(json.RawMessage(nil), raw...)
 	}
 	return validated, nil
+}
+
+// rejectAmbiguousParamKeys reports whether, at the engine's current block time,
+// parameter payloads must not repeat a parameter under keys that differ only in
+// surrounding whitespace with different values. It is off until the policy sets
+// an activation time.
+func (e *Engine) rejectAmbiguousParamKeys() bool {
+	if e == nil || e.rejectAmbiguousParamKeysFromUnix == 0 {
+		return false
+	}
+	now := e.now().Unix()
+	return now >= 0 && uint64(now) >= e.rejectAmbiguousParamKeysFromUnix
 }
 
 func normalizeLegacyParamPayload(payload map[string]json.RawMessage) (map[string]json.RawMessage, bool, error) {

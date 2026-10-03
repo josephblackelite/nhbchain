@@ -104,6 +104,12 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 			},
 			"LendingFixedTermIDActivationHeight",
 		},
+		"duplicate parameter keys refused from a time": {
+			func(s string) string {
+				return strings.Replace(s, "RejectAmbiguousParamKeysFromUnix = 0", "RejectAmbiguousParamKeysFromUnix = 1900000000", 1)
+			},
+			"[governance] RejectAmbiguousParamKeysFromUnix",
+		},
 		"swap payout receipt rules switched on": {
 			func(s string) string {
 				return strings.Replace(s, "PayoutReceiptActivationHeight = 0", "PayoutReceiptActivationHeight = 1800000", 1)

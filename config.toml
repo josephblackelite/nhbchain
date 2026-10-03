@@ -214,6 +214,14 @@ ClientVersion = ""
   AllowedRoles = ["MINTER_NHB", "ROLE_SWAP_PAYOUT_ATTESTOR", "ROLE_ESCROW_REALM_ADMIN", "ROLE_LOYALTY_ADMIN"]
   AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps", "market.flatFeeWei"]
   BlockTimestampToleranceSeconds = 5
+  # Block time (Unix seconds) from which a parameter-update payload that names one
+  # parameter under two keys differing only in surrounding whitespace, with
+  # different values, is refused at submission and at execution (see
+  # config/config.go's RejectAmbiguousParamKeysFromUnix doc comment). 0 keeps the
+  # earlier behaviour, which is what both live validators run with. It decides
+  # whether a transaction is valid: set it identically on every validator, to a
+  # time after the chain's current block time, restarting all of them together.
+  RejectAmbiguousParamKeysFromUnix = 0
 
 [swap]
   AllowedFiat = ["USD", "EUR", "GBP"]

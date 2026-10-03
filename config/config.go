@@ -549,6 +549,12 @@ type GovConfig struct {
 	AllowedRoles                   []string `toml:"AllowedRoles"`
 	TreasuryAllowList              []string `toml:"TreasuryAllowList"`
 	BlockTimestampToleranceSeconds uint64   `toml:"BlockTimestampToleranceSeconds"`
+
+	// RejectAmbiguousParamKeysFromUnix is the block timestamp (Unix seconds)
+	// from which a parameter payload that repeats one parameter under keys
+	// differing only in surrounding whitespace, with different values, is
+	// rejected. Zero (the default) leaves the earlier behaviour in place.
+	RejectAmbiguousParamKeysFromUnix uint64 `toml:"RejectAmbiguousParamKeysFromUnix"`
 }
 
 type LoadOption func(*loadOptions)
@@ -1279,6 +1285,8 @@ func (cfg GovConfig) Policy() (governance.ProposalPolicy, error) {
 		PassThresholdBps:               cfg.PassThresholdBps,
 		AllowedRoles:                   append([]string{}, cfg.AllowedRoles...),
 		BlockTimestampToleranceSeconds: cfg.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: cfg.RejectAmbiguousParamKeysFromUnix,
 	}
 	amount, err := parseUintAmount(cfg.MinDepositWei)
 	if err != nil {
