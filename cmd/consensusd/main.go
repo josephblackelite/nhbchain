@@ -207,6 +207,9 @@ func main() {
 		slog.Info("POS expiry sweep skips holds the payer cannot cover from block height",
 			slog.Uint64("height", cfg.POSSweepSkipActivationHeight))
 	}
+	// Same setting as cmd/nhb/main.go: zero (the default) leaves the POS hold
+	// unstake guard off; see config.Config.POSHoldUnstakeGuardActivationHeight.
+	node.SetPOSHoldUnstakeGuardActivationHeight(cfg.POSHoldUnstakeGuardActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()

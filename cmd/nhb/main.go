@@ -176,6 +176,10 @@ func main() {
 		logger.Info("POS expiry sweep skips holds the payer cannot cover from block height",
 			slog.Uint64("height", cfg.POSSweepSkipActivationHeight))
 	}
+	// Zero (the default) leaves the POS hold unstake guard off; see
+	// config.Config.POSHoldUnstakeGuardActivationHeight. A chain rule, so
+	// the value is set identically on every validator in config.toml.
+	node.SetPOSHoldUnstakeGuardActivationHeight(cfg.POSHoldUnstakeGuardActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {

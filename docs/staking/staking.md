@@ -50,6 +50,22 @@ The handlers are in `core/state_transition.go`; the type constants are in
   the governance parameter `staking.unbondingDays`; when it is unset it is 7 days
   (`unbondingPeriod`, `stakingUnbondingPeriod`).
 - When no locked stake remains, `DelegatedValidator` is cleared.
+- A POS authorization locks its amount in the same `LockedZNHB`
+  (`docs/specs/pos-lifecycle.md`), so an account can hold both. From the block
+  height given by the `POSHoldUnstakeGuardActivationHeight` key of the node
+  configuration, an unstake may take no more than `LockedZNHB` minus the total of
+  the account's pending POS authorizations (`Lifecycle.PendingHeld`). Beyond that
+  it fails with `staking: unstake would release funds that back pending POS holds`
+  (`ErrStakeBackedByPOSHold`), because unbonding funds that back a hold would
+  debit the validator for stake that was never delegated and leave a hold its
+  payer cannot cover. The part above the holds is unaffected, and the rest comes
+  free as the holds are captured, voided or expire. The key defaults to `0`, which
+  leaves the rule off and the unstake rules as described above. It is a chain rule,
+  not a local setting: put the same height in the top level of `config.toml` (before
+  the first `[table]`) on every validator, above the chain tip and before the chain
+  reaches it. Validators that disagree on it disagree on any block that carries an
+  unstake the rule refuses. It does not change reward accrual, validator
+  eligibility or the evidence reporter bond, which still read `LockedZNHB` as a whole.
 
 ### Claiming an unbond (`StakeClaim`)
 
@@ -103,7 +119,7 @@ unpaused but the on-chain value is paused; the node enforces the on-chain value)
 | Field | Meaning |
 | --- | --- |
 | `Stake` | Voting power attributed to the account as a validator: its own self-stake plus stake delegated to it. |
-| `LockedZNHB` | ZNHB the account has locked in a delegation. |
+| `LockedZNHB` | ZNHB the account has locked: its delegation, plus the amount of its pending POS authorizations. |
 | `DelegatedValidator` | 20-byte address the account delegates to; empty when it has no delegation. |
 | `PendingUnbonds` | Unbonding entries awaiting their release time. |
 | `NextUnbondingID` | Counter used to assign unbond IDs. |

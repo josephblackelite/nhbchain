@@ -96,6 +96,12 @@ that differ in it refuse each other's blocks from the first block whose sweep
 reaches an expired hold its payer cannot cover with another expired
 authorization queued behind it.
 
+A hold shares `LockedZNHB` with a delegation, and an unstake used to be able to take
+funds a hold still needed, which is how a payer's locked balance ends up below its
+hold. From the height set by `POSHoldUnstakeGuardActivationHeight` (default `0`, off;
+see [staking](../staking/staking.md#unbonding-stakeundelegate)) an unstake may only
+take what is locked above the payer's pending holds, `Lifecycle.PendingHeld`.
+
 If a persistence step fails inside a lifecycle call, the balance changes made by
 that call are rolled back before the error is returned.
 

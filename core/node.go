@@ -216,6 +216,12 @@ type Node struct {
 	// evict a still-live cache entry while the second is still present.
 	posIntentTxHash      map[string][]byte
 	posIntentTxHashOrder []string
+
+	// posHoldUnstakeGuardHeight is the activation height of the POS hold
+	// unstake guard (see SetPOSHoldUnstakeGuardActivationHeight). Zero leaves
+	// it off. Kept here as well as on the state processor so a rebuilt
+	// state processor carries it. Guarded by stateMu.
+	posHoldUnstakeGuardHeight uint64
 }
 
 const (
@@ -404,6 +410,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(n.governancePolicy())
 	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
+	stateProcessor.SetPOSHoldUnstakeGuardActivationHeight(n.posHoldUnstakeGuardHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -4589,6 +4596,23 @@ func (n *Node) SetPOSSweepSkipActivationHeight(height uint64) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	n.state.SetPOSSweepSkipActivationHeight(height)
+}
+
+// SetPOSHoldUnstakeGuardActivationHeight sets the first block height from
+// which an unstake may not unbond ZNHB that backs pending POS holds (see
+// StateProcessor.SetPOSHoldUnstakeGuardActivationHeight). Zero, the default,
+// leaves the guard off. It is a chain rule and must be the same on every
+// validator, set before the chain reaches the height.
+func (n *Node) SetPOSHoldUnstakeGuardActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.posHoldUnstakeGuardHeight = height
+	if n.state != nil {
+		n.state.SetPOSHoldUnstakeGuardActivationHeight(height)
+	}
 }
 
 // RemoveValidatorFromSet permanently removes addr from the active and

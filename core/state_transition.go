@@ -110,6 +110,14 @@ var (
 	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
 	// ErrStakePaused indicates governance has paused staking mutations.
 	ErrStakePaused = errors.New("staking: module paused")
+	// ErrStakeBackedByPOSHold indicates StakeUndelegate refused an amount that
+	// reaches into the part of the account's LockedZNHB that pending POS
+	// authorizations hold. Delegation and POS holds draw on the same locked
+	// balance, so unbonding that part would leave a hold the payer can no longer
+	// cover. Only raised from the POS hold unstake guard's activation height
+	// (see SetPOSHoldUnstakeGuardActivationHeight); the amount becomes available
+	// again once the holds are captured, voided or expired.
+	ErrStakeBackedByPOSHold = errors.New("staking: unstake would release funds that back pending POS holds")
 	// ErrHeartbeatTooSoon indicates applyHeartbeat rejected a heartbeat
 	// transaction because not enough time has elapsed since the account's
 	// on-chain EngagementLastHeartbeat (the rate-limit check) or because
@@ -245,6 +253,11 @@ type StateProcessor struct {
 	// leaves behind, so every validator must run with the same value; see
 	// config.Config.POSSweepSkipActivationHeight.
 	posSweepSkipActivationHeight uint64
+	// posHoldUnstakeGuardFromHeight is the first block height at which
+	// StakeUndelegate refuses to unbond funds that back pending POS holds. Zero
+	// (the default) leaves the guard off. See
+	// SetPOSHoldUnstakeGuardActivationHeight.
+	posHoldUnstakeGuardFromHeight uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -2805,7 +2818,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		hasSubscriptionsConfig:     sp.hasSubscriptionsConfig,
 		govPolicy:                  cloneGovernancePolicy(sp.govPolicy),
 
-		posSweepSkipActivationHeight: sp.posSweepSkipActivationHeight,
+		posSweepSkipActivationHeight:  sp.posSweepSkipActivationHeight,
+		posHoldUnstakeGuardFromHeight: sp.posHoldUnstakeGuardFromHeight,
 	}, nil
 }
 
@@ -6066,6 +6080,32 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 	return delegatorAcc, nil
 }
 
+// SetPOSHoldUnstakeGuardActivationHeight sets the first block height from which
+// StakeUndelegate refuses to unbond ZNHB that backs pending POS holds. Zero, the
+// default, leaves the guard off and the unstake rules exactly as they were.
+//
+// This is a chain rule: it makes unstakes fail that used to succeed. Every
+// validator must run with the same value, chosen above the chain tip and above
+// the height at which each validator has restarted with it; validators that
+// disagree on it disagree on any block that carries a refused unstake. The value
+// comes from node configuration, not from chain state.
+func (sp *StateProcessor) SetPOSHoldUnstakeGuardActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.posHoldUnstakeGuardFromHeight = height
+}
+
+// posHoldUnstakeGuardActive reports whether the block being applied is at or
+// above the guard's activation height. Outside block execution there is no
+// height (blockHeight reports 0), so the guard is off there.
+func (sp *StateProcessor) posHoldUnstakeGuardActive() bool {
+	if sp == nil || sp.posHoldUnstakeGuardFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.posHoldUnstakeGuardFromHeight
+}
+
 func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*types.StakeUnbond, error) {
 	if len(delegator) == 0 {
 		return nil, fmt.Errorf("delegator address required")
@@ -6093,6 +6133,24 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	}
 	if len(delegatorAcc.DelegatedValidator) == 0 {
 		return nil, fmt.Errorf("no active delegation")
+	}
+	if sp.posHoldUnstakeGuardActive() {
+		// LockedZNHB is shared with POS holds: Authorize adds a hold to it and
+		// capture, void and expiry take it back out. Only the part above the
+		// pending holds is delegated stake, so only that part may be unbonded.
+		// Taking more would debit the validator for funds that were never
+		// delegated and leave a hold its payer cannot cover. When the holds
+		// already exceed the locked balance nothing is unbonded until they clear
+		// or the payer delegates more.
+		var payer [20]byte
+		copy(payer[:], delegator)
+		held, err := pos.NewLifecycle(nhbstate.NewManager(sp.Trie)).PendingHeld(payer)
+		if err != nil {
+			return nil, err
+		}
+		if new(big.Int).Sub(delegatorAcc.LockedZNHB, held).Cmp(amount) < 0 {
+			return nil, ErrStakeBackedByPOSHold
+		}
 	}
 
 	validator := append([]byte(nil), delegatorAcc.DelegatedValidator...)

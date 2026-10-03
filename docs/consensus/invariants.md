@@ -191,3 +191,6 @@ off the treasury wallet than the Reward Pool holds is rejected with
   it changes the state a block leaves behind (the POS expiry sweep, see
   `docs/specs/pos-lifecycle.md`), so it is changed only with all validators
   restarted together, to a height above the chain tip.
+- `POSHoldUnstakeGuardActivationHeight` must be identical on every validator
+  (`config/config.go`, `POSHoldUnstakeGuardActivationHeight`): it decides whether an
+  unstake that would take funds backing a pending POS hold is valid.

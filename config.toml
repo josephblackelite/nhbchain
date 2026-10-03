@@ -75,6 +75,13 @@ RewardsByStakeFromEpoch = 0
 # block leaves behind: set it identically on every validator, to a height above
 # the chain tip, restarting all of them together.
 POSSweepSkipActivationHeight = 0
+# First block height from which an unstake may not unbond ZNHB that backs a
+# pending POS hold (see config/config.go's POSHoldUnstakeGuardActivationHeight
+# doc comment and docs/staking/staking.md). 0 leaves the rule off, which is what
+# both live validators run with. It decides whether a transaction is valid, so
+# set it identically on every validator, to a height above the chain tip,
+# restarting all of them together.
+POSHoldUnstakeGuardActivationHeight = 0
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

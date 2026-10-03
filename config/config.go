@@ -203,6 +203,17 @@ type Config struct {
 	// every validator restarted together, with the height chosen above the
 	// chain tip at that moment. See docs/specs/pos-lifecycle.md.
 	POSSweepSkipActivationHeight uint64 `toml:"POSSweepSkipActivationHeight"`
+	// POSHoldUnstakeGuardActivationHeight is the first block height from which
+	// an unstake may not unbond ZNHB that backs pending POS holds. A POS hold
+	// and a delegation both sit in the account's locked ZNHB, and without this
+	// rule an unstake can take more than was delegated, leaving a hold its
+	// payer cannot cover. 0 (the default) leaves the rule off. Unlike a node
+	// setting it is a chain rule: set the same non-zero height on every
+	// validator, above the chain tip and before the chain reaches it, or
+	// validators disagree on any block that carries an unstake the rule
+	// refuses. As a top-level key it goes before the first [table] of the
+	// file. See core.StateProcessor.SetPOSHoldUnstakeGuardActivationHeight.
+	POSHoldUnstakeGuardActivationHeight uint64 `toml:"POSHoldUnstakeGuardActivationHeight"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.

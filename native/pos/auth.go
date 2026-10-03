@@ -673,6 +673,42 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 	return expired, nil
 }
 
+// PendingHeld returns the total amount the payer's pending authorizations hold
+// in the payer's LockedZNHB. That part of the locked balance belongs to the POS
+// lifecycle: capturing, voiding or expiring the holds takes it back out, so it
+// has to stay locked for as long as they are pending. It is a read and writes
+// nothing. An index entry whose record is missing or no longer pending is
+// skipped, the way the expiry sweep treats it.
+func (l *Lifecycle) PendingHeld(payer [20]byte) (*big.Int, error) {
+	if l == nil || l.state == nil {
+		return nil, errLifecycleUninitialised
+	}
+	ids, err := l.pendingAuthorizationIDs()
+	if err != nil {
+		return nil, err
+	}
+	held := big.NewInt(0)
+	for _, entry := range ids {
+		if len(entry) != 32 {
+			continue
+		}
+		var id [32]byte
+		copy(id[:], entry)
+		auth, err := l.loadAuthorization(id)
+		if err != nil {
+			if errors.Is(err, errAuthorizationNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if auth.Status != AuthorizationStatusPending || auth.Payer != payer || auth.Amount == nil {
+			continue
+		}
+		held.Add(held, auth.Amount)
+	}
+	return held, nil
+}
+
 func (l *Lifecycle) nextAuthorizationID(payer [20]byte) ([32]byte, uint64, error) {
 	var counter storedAuthorizationNonce
 	key := authorizationNonceKey(payer)
