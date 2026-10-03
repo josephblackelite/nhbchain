@@ -90,10 +90,11 @@ Enforced in `consensus/bft/bft.go` and `consensus/bft/round_sync.go`:
    node's committed height, and every height starts in round 1 (see
    [BFT height sync](bft-height-sync.md)).
 4. **Round bounds.** The engine adopts a later round only when validators
-   holding strictly more than a third of the voting power, together with its own
-   power a quorum, have been seen there; it is never in a round above
-   `math.MaxInt32`, and it keeps future-round messages only within 8 rounds of
-   its own (`round_sync.go`).
+   holding at least a third of the voting power have been seen there (a group of
+   that size has an honest validator in it while less than a third is faulty,
+   and the validators outside it cannot make a quorum without it); it is never
+   in a round above `math.MaxInt32`, and it keeps future-round messages only
+   within 8 rounds of its own (`round_sync.go`).
 5. **Lock discipline.** A round timeout does not clear the proof-of-lock state;
    lock, valid block and polka history are reset only when the height changes
    (`startNewRound`, `resetLockStateLocked`), and the lock is persisted to

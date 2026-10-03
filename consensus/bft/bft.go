@@ -1746,8 +1746,8 @@ func (e *Engine) startNewRound() {
 	e.resetProposerCacheLocked()
 	// Move on to a later round than the next one only when enough of the voting
 	// power has been seen there (round_sync.go, supportedRoundLocked) -- never on
-	// a single validator's message, and to the highest round that is supported,
-	// not to the lowest one anyone has mentioned.
+	// the word of validators that hold less than a third of it, and to the highest
+	// round that is supported, not to the lowest one anyone has mentioned.
 	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
 		e.currentState.Round = min(target, maxJumpRound)
 	}

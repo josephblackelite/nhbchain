@@ -37,9 +37,9 @@ import (
 //     one round number per validator (roundClaim), so it costs nothing to keep
 //     however far ahead the message was;
 //   - this validator moves to a higher round only on the evidence of those
-//     round numbers (supportedRoundLocked): never on one message, never to the
-//     lowest round anyone mentioned, and at once instead of at the end of the
-//     round it is in.
+//     round numbers (supportedRoundLocked): never on the word of validators that
+//     hold less than a third of the power, never to the lowest round anyone
+//     mentioned, and at once instead of at the end of the round it is in.
 //
 // Nothing here changes what a valid message is, what is signed, or which blocks
 // commit: every message keeps its encoding, and the vote and lock rules
@@ -122,8 +122,9 @@ const (
 // message at one height. It is only ever taken from a message whose signature
 // checked out and whose signer is in the validator set, so a claim is a fact
 // about what that validator signed -- though not a fact about which round it is
-// in NOW (it may since have moved on, or restarted), which is why one claim is
-// never enough to move (see supportedRoundLocked).
+// in NOW (it may since have moved on, or restarted), which is why claims move this
+// validator only when the validators who made them hold a third of the voting power
+// (see supportedRoundLocked).
 type roundClaim struct {
 	height uint64
 	round  int
@@ -172,18 +173,6 @@ func (e *Engine) noteDropLocked(reason, what string, signer []byte, height uint6
 	note.dropped = 0
 }
 
-// ownPowerLocked returns this validator's own voting power (zero when it is not
-// in the validator set). Must be called with e.mu held.
-func (e *Engine) ownPowerLocked() *big.Int {
-	if len(e.selfAddr) == 0 {
-		return new(big.Int)
-	}
-	if w := e.validatorSet[string(e.selfAddr)]; w != nil && w.Sign() > 0 {
-		return w
-	}
-	return new(big.Int)
-}
-
 // recordRoundClaimLocked notes that signer sent a message for round at height.
 // Must be called with e.mu held. This validator's own messages are not recorded:
 // its own round is currentState.Round.
@@ -206,12 +195,12 @@ func (e *Engine) recordRoundClaimLocked(signer []byte, height uint64, round int)
 	}
 }
 
-// moreThanOneThird reports whether power is strictly more than a third of total.
-func moreThanOneThird(power, total *big.Int) bool {
+// atLeastOneThird reports whether power is at least a third of total.
+func atLeastOneThird(power, total *big.Int) bool {
 	if power == nil || total == nil || total.Sign() <= 0 {
 		return false
 	}
-	return new(big.Int).Mul(power, big.NewInt(3)).Cmp(total) > 0
+	return new(big.Int).Mul(power, big.NewInt(3)).Cmp(total) >= 0
 }
 
 // supportedRoundLocked returns the highest round above this validator's own that
@@ -220,26 +209,29 @@ func moreThanOneThird(power, total *big.Int) bool {
 //
 // "Seen in round R" means: a message signed by that validator for a round of R or
 // later at this height (roundClaim). R is supported when the validators seen in
-// it hold
+// it hold at least a third of the voting power. That is the least that is safe to
+// follow, and it is enough:
 //
-//  1. strictly more than a third of the voting power -- so that at least one of
-//     them is honest while less than a third is faulty, which is what makes it
-//     safe to follow them (a validator, or a coalition below a third, cannot move
-//     anyone by claiming any round it likes; the claim of a validator above
-//     round R only counts towards R and below, never beyond it), and
-//  2. together with this validator's own power, a quorum (types.HasQuorum,
-//     strictly more than two thirds) -- so that the round can actually reach a
-//     decision with this validator in it, which is the only reason to move to
-//     it. A polka or a commit for a round is more than two thirds of the power
-//     signing in that round, so it satisfies both conditions by itself.
+//   - while less than a third of the power is faulty, a group that holds a third
+//     has an honest validator in it, so a validator, or a coalition below a third,
+//     cannot move anyone by claiming any round it likes (the claim of a validator
+//     above round R only counts towards R and below, never beyond it);
+//   - the validators that are not in the group hold at most two thirds, which is not
+//     a quorum (types.HasQuorum, strictly more than two thirds), so a round that
+//     the group has left cannot decide anything without it, and there is nothing to
+//     wait for in it. A polka or a commit for a round is more than two thirds of the
+//     power signing in that round, so it satisfies the condition by itself.
 //
-// This validator's own power is counted in 2 because it is the one about to move:
-// counting only the others would make it impossible to rejoin a network whose
-// other validators cannot make a quorum without it -- every network of two
-// validators, and any larger one that has lost a validator to a restart -- so
-// the validator that restarted could never leave the rounds it is behind in.
-// The result is the highest round for which both hold, so a validator that
-// claims a round far above everyone else's does not raise it.
+// A rule that asked for more -- strictly more than a third, or enough that the group
+// and this validator together make a quorum -- left validators that were split into
+// groups a round or more apart split for good whenever the group ahead held exactly a
+// third, or too little to make a quorum with one validator of the group behind (three
+// equal validators with one ahead, five with two ahead, six split three and three):
+// rounds last as long for everyone, what the group behind sends is for a round the
+// group ahead has left and is dropped, and neither group can decide alone. This
+// validator's own power is not counted: it is the one about to move.
+// The result is the highest round for which the condition holds, so a validator
+// that claims a round far above everyone else's does not raise it.
 func (e *Engine) supportedRoundLocked() (int, bool) {
 	total := e.totalVotingPower
 	if total == nil || total.Sign() <= 0 || len(e.roundClaims) == 0 {
@@ -274,11 +266,10 @@ func (e *Engine) supportedRoundLocked() (int, bool) {
 		}
 		return claims[i].key < claims[j].key
 	})
-	own := e.ownPowerLocked()
 	power := new(big.Int)
 	for _, c := range claims {
 		power.Add(power, c.power)
-		if moreThanOneThird(power, total) && types.HasQuorum(new(big.Int).Add(power, own), total) {
+		if atLeastOneThird(power, total) {
 			return c.round, true
 		}
 	}

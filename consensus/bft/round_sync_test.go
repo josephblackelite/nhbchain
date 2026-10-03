@@ -179,20 +179,36 @@ func TestOnlyEnoughVotingPowerMovesAValidatorToALaterRound(t *testing.T) {
 		{"the highest supported round, not the lowest and not the highest", []int64{1, 1, 1, 1}, map[int]int{1: 9, 2: 6, 3: 4}, 6},
 		{"a claim far above the rest does not raise the jump", []int64{1, 1, 1, 1}, map[int]int{1: 1_000_000, 2: 5, 3: 4}, 5},
 		{"a round before the next one moves nothing", []int64{1, 1, 1, 1}, map[int]int{1: 2, 2: 2, 3: 1}, 2},
-		{"one of three is not enough", []int64{1, 1, 1}, map[int]int{1: 6}, 2},
+		// Exactly a third of the power is enough: while less than a third is faulty,
+		// a group holding a third has an honest validator in it, and the others,
+		// holding no more than two thirds, cannot make a quorum without it. Three
+		// equal validators with one of them ahead are this case.
+		{"one of three is enough", []int64{1, 1, 1}, map[int]int{1: 6}, 6},
 		{"two of three are enough", []int64{1, 1, 1}, map[int]int{1: 6, 2: 6}, 6},
 		// Two validators cannot make a quorum without each other, so the one that is
 		// behind has to follow the other on its word: this is the network a
 		// restarted validator has to rejoin.
 		{"the other of two", []int64{1, 1}, map[int]int{1: 6}, 6},
-		// Exactly a third of the power is not "more than a third": a coalition of a
-		// third cannot move a validator that holds two thirds itself.
-		{"exactly a third is not enough", []int64{10, 3, 2}, map[int]int{1: 6, 2: 6}, 2},
+		{"the smaller of two staked two to one", []int64{2, 1}, map[int]int{1: 6}, 6},
+		{"exactly a third is enough", []int64{10, 3, 2}, map[int]int{1: 6, 2: 6}, 6},
+		// A third of the power is the least that moves anyone: a coalition below it
+		// cannot, whatever round it claims and however much power the validator that
+		// would move holds itself.
+		{"a little less than a third is not enough", []int64{6, 2, 1, 1}, map[int]int{1: 6, 2: 6}, 2},
+		{"a little more than a third is enough", []int64{6, 2, 1, 1}, map[int]int{1: 6, 2: 6, 3: 6}, 6},
 		{"a small validator cannot move a large one", []int64{10, 4}, map[int]int{1: 6}, 2},
 		{"more than a third can", []int64{10, 4, 2}, map[int]int{1: 6, 2: 6}, 6},
 		// The other validators are the network the first one has to join: the
 		// large one alone is a quorum with it.
 		{"a large validator moves a small one", []int64{1, 10}, map[int]int{1: 6}, 6},
+		// The group ahead plus this validator is not a quorum in these, and the
+		// group behind is not one either, so only a move can end the split.
+		{"two of five are enough", []int64{1, 1, 1, 1, 1}, map[int]int{1: 6, 2: 6}, 6},
+		{"two of six are enough", []int64{1, 1, 1, 1, 1, 1}, map[int]int{1: 6, 2: 6}, 6},
+		{"three of six are enough", []int64{1, 1, 1, 1, 1, 1}, map[int]int{1: 6, 2: 6, 3: 6}, 6},
+		{"three of seven are enough", []int64{1, 1, 1, 1, 1, 1, 1}, map[int]int{1: 6, 2: 6, 3: 6}, 6},
+		{"two of seven are not enough", []int64{1, 1, 1, 1, 1, 1, 1}, map[int]int{1: 6, 2: 6}, 2},
+		{"one of six is not enough", []int64{1, 1, 1, 1, 1, 1}, map[int]int{1: 6}, 2},
 	}
 	for _, tc := range cases {
 		tc := tc

@@ -79,10 +79,14 @@ Round numbers are bounded (`consensus/bft/round_sync.go`):
   height in all; 16 votes per validator per height).
 - What a signed message says about where its sender is is remembered as one round
   number per validator. The engine moves to a later round only when the
-  validators seen in it hold strictly more than a third of the voting power and,
-  together with this validator's own power, a quorum (`supportedRoundLocked`).
-  It never moves on a single message, and it moves to the highest round that is
-  supported.
+  validators seen in it hold at least a third of the voting power
+  (`supportedRoundLocked`): a group of that size has an honest validator in it
+  while less than a third of the power is faulty, and the validators outside it
+  hold at most two thirds, which is not a quorum. A coalition below a third moves
+  nobody. Round timers are the same for everyone, so validators split into groups a
+  round or more apart (three equal validators with one ahead, five with two ahead)
+  stay apart unless the group behind follows the group ahead. The engine moves to
+  the highest round that is supported.
 - On (re)start the engine skips every round it has already signed in
   (`signedRoundFloor`, from the vote record described below).
 
