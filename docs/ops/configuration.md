@@ -127,6 +127,20 @@ The run stops at the governance check. Restore `QuorumBPS = 6000` and change
 
 ## RPC limits and other keys
 
+### Block byte budget
+
+`CreateBlock` keeps the JSON of the block it proposes under 600,000 bytes
+(`defaultMaxBlockBytes`), so the proposal and the committed block fit one p2p
+frame (`MaxMsgBytes`, 1 MiB by default, once base64 has added a third). A smaller
+`MaxMsgBytes` lowers the budget (`SetProposalFrameLimit`, called at start-up); a
+larger one does not raise it. When the transactions on offer are over the budget
+the block holds the longest prefix that fits, logs
+`block proposal trimmed to the byte budget`, and leaves the rest in the mempool
+for later blocks. A transaction whose own JSON is over the budget is dropped from
+the mempool (`transaction dropped: too large for a block`), and admission refuses
+it. This limit is local to the proposer: `ValidateBlock` and `commitBlock` do not
+check block size.
+
 The RPC keys `RPCQueryMaxConcurrent`, `RPCQueryMaxPerClient`, `RPCQueryQueueDepth`,
 `RPCQueryQueueWaitMS`, `RPCQueryTimeoutSeconds` and `RPCDisableExplorerLoop` are
 described in [RPC query limits](rpc-query-limits.md). `RPCWebSocketOrigins`,

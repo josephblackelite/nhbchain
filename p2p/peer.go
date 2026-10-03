@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -48,6 +50,11 @@ type Peer struct {
 	queueByteLimit int64
 	dropped        atomic.Uint64
 	lastDropLog    atomic.Int64
+
+	// maxFrameBytes is the largest frame the other side accepts, taken to be this
+	// node's own MaxMessageBytes (zero means no limit). Enqueue refuses a message
+	// whose frame would be larger.
+	maxFrameBytes int
 }
 
 const (
@@ -95,7 +102,23 @@ func newPeer(id string, clientVersion string, conn net.Conn, reader *bufio.Reade
 		closed:        make(chan struct{}),
 
 		queueByteLimit: queueByteLimit(server.cfg.MaxMessageBytes),
+		maxFrameBytes:  server.cfg.MaxMessageBytes,
 	}
+}
+
+// frameSize is the length in bytes of the frame msg is written as, not counting
+// the newline that ends it: the length of the JSON object writeMessage produces
+// and the length readLoop compares with MaxMessageBytes. Payload is a byte slice
+// and so travels base64-encoded, one third larger than it is in memory.
+func frameSize(msg *Message) int {
+	if msg == nil {
+		return len("null")
+	}
+	payload := len("null")
+	if msg.Payload != nil {
+		payload = len(`""`) + base64.StdEncoding.EncodedLen(len(msg.Payload))
+	}
+	return len(`{"Type":`) + len(strconv.Itoa(int(msg.Type))) + len(`,"Payload":`) + payload + len(`}`)
 }
 
 func queueByteLimit(maxMessageBytes int) int64 {
@@ -149,12 +172,19 @@ func (p *Peer) start() {
 // Enqueue queues a message for this peer alone. It never blocks: when the queue
 // is full, by count or by bytes, the message is not queued and errQueueFull is
 // returned. A queue that cannot keep up costs that peer messages, not the
-// connection.
+// connection. A message whose frame is larger than MaxMessageBytes is not queued
+// either, and ErrMessageTooLarge is returned: the peer would end the connection
+// and score this node down for sending it.
 func (p *Peer) Enqueue(msg *Message) error {
 	select {
 	case <-p.ctx.Done():
 		return fmt.Errorf("peer shutting down")
 	default:
+	}
+	if p.maxFrameBytes > 0 {
+		if size := frameSize(msg); size > p.maxFrameBytes {
+			return fmt.Errorf("%w: %d bytes, limit %d", ErrMessageTooLarge, size, p.maxFrameBytes)
+		}
 	}
 	if msg != nil && msg.Type == MsgTypePexRequest && p.server != nil {
 		p.server.noteOutgoingPexRequest(p.id, msg)

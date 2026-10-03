@@ -94,6 +94,11 @@ var (
 
 var errQueueFull = errors.New("peer outbound queue full")
 
+// ErrMessageTooLarge is returned, wrapped, by Peer.Enqueue and Server.Broadcast
+// for a message whose frame is larger than MaxMessageBytes. Nothing is sent: a
+// frame that size is refused by the receiver as a protocol violation.
+var ErrMessageTooLarge = errors.New("p2p: message larger than the frame limit")
+
 // ServerConfig encapsulates runtime settings for the p2p server.
 type ServerConfig struct {
 	ListenAddress    string
@@ -1312,7 +1317,9 @@ func (s *Server) Connect(addr string) error {
 // Broadcast sends a message to all connected peers with backpressure. A peer
 // whose queue has no room for it misses this one message and keeps its
 // connection: one slow peer must not be able to cost the node another peer, and
-// a peer that stops reading altogether is ended by its own write deadline.
+// a peer that stops reading altogether is ended by its own write deadline. A
+// message whose frame is larger than MaxMessageBytes is sent to nobody, no peer
+// is disconnected over it, and the error returned wraps ErrMessageTooLarge.
 func (s *Server) Broadcast(msg *Message) error {
 	s.mu.RLock()
 	peers := make([]*Peer, 0, len(s.peers))
@@ -1322,8 +1329,25 @@ func (s *Server) Broadcast(msg *Message) error {
 	s.mu.RUnlock()
 
 	var errs []error
+	tooLarge := false
 	for _, peer := range peers {
 		if err := peer.Enqueue(msg); err != nil {
+			if errors.Is(err, ErrMessageTooLarge) {
+				// Every peer shares this node's limit, so report it once.
+				if !tooLarge {
+					tooLarge = true
+					msgType := -1
+					if msg != nil {
+						msgType = int(msg.Type)
+					}
+					s.log().Error("Message not sent: larger than the frame limit",
+						slog.Int("message_type", msgType),
+						slog.Int("frame_bytes", frameSize(msg)),
+						slog.Int("max_message_bytes", s.cfg.MaxMessageBytes))
+					errs = append(errs, err)
+				}
+				continue
+			}
 			if errors.Is(err, errQueueFull) {
 				if dropped, logNow := peer.noteDrop(); logNow {
 					s.log().Warn("Peer send queue full; dropping messages for this peer",

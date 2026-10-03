@@ -498,6 +498,9 @@ func main() {
 	// validation, the broadcast and the peer's validation all follow it, and
 	// the peer's round timers are already running while this node builds.
 	node.SetProposalBuildBudget(cfg.Consensus.ProposalTimeout / 2)
+	// Keep the blocks this node proposes small enough for one p2p frame, whatever
+	// frame limit is configured.
+	node.SetProposalFrameLimit(cfg.MaxMsgBytes)
 	// Optional Prometheus listener (NHB_METRICS_ADDR); a failure to start it is
 	// logged and never stops the validator.
 	observability.StartMetricsServerFromEnv(logger)

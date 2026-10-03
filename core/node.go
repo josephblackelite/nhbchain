@@ -2418,7 +2418,20 @@ func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload, send func(*p
 	if err != nil {
 		return err
 	}
-	return send(msg)
+	if err := send(msg); err != nil {
+		if errors.Is(err, p2p.ErrMessageTooLarge) {
+			// The first block alone is too large for a frame, so nothing can
+			// be sent for this request; peers asking for it get no reply.
+			slog.Error("block sync reply is larger than the p2p frame limit and was not sent",
+				slog.Uint64("from", from),
+				slog.Int("blocks", len(blocks)),
+				slog.Any("error", err),
+			)
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // syncBatch returns the blocks from height from up to height to, stopping
@@ -2554,6 +2567,16 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	if err != nil {
 		return fmt.Errorf("%w: encode transaction: %w", ErrInvalidTransaction, err)
 	}
+	// A transaction whose encoding could not fit a block by itself is refused
+	// before anything else looks at it: it could never be proposed, and the
+	// replace-by-fee branch below does not look at sizes.
+	encoded, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("%w: encode transaction: %w", ErrInvalidTransaction, err)
+	}
+	if limit := n.maxTransactionBytes(); len(encoded) > limit {
+		return fmt.Errorf("%w: transaction encodes to %d bytes, over the %d byte limit", ErrInvalidTransaction, len(encoded), limit)
+	}
 	var sender []byte
 	var senderKey string
 	var nonce uint64
@@ -2604,6 +2627,11 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 					}
 
 					if newFee.Cmp(existingFee) > 0 {
+						// The swap is not exempt from the byte limits: it may
+						// only grow the pool as far as a new transaction could.
+						if err := n.replacementWithinLimitsLocked(existing, senderKey, txSize, snapshot.Mempool.MaxBytes); err != nil {
+							return err
+						}
 						// The replaced transaction leaves the mempool: drop its
 						// in-flight lease and failure history with it.
 						if replacedKey, replacedErr := transactionKey(existing); replacedErr == nil {
@@ -2692,25 +2720,7 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	var senderBytes int64
 	maxBytes := snapshot.Mempool.MaxBytes
 	if maxBytes > 0 || senderKey != "" {
-		for _, existing := range n.mempool {
-			if existing == nil {
-				continue
-			}
-			sz, sizeErr := transactionSize(existing)
-			if sizeErr != nil {
-				continue
-			}
-			if maxBytes > 0 {
-				currentBytes += int64(sz)
-			}
-			if senderKey != "" && types.RequiresSignature(existing.Type) {
-				existingFrom, fromErr := existing.From()
-				if fromErr == nil && hex.EncodeToString(existingFrom) == senderKey {
-					senderCount++
-					senderBytes += int64(sz)
-				}
-			}
-		}
+		currentBytes, senderCount, senderBytes = n.mempoolUsageLocked(senderKey, maxBytes > 0)
 	}
 	if maxBytes > 0 && currentBytes+int64(txSize) > maxBytes {
 		return ErrMempoolByteLimit
@@ -2757,6 +2767,58 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 				Timestamp: n.currentTime().Unix(),
 			})
 		}
+	}
+	return nil
+}
+
+// mempoolUsageLocked measures the mempool: the encoded bytes of every
+// transaction (only when wantTotal), and the number and encoded bytes of the
+// transactions senderKey has in it (only when senderKey is set). The caller
+// must hold n.mempoolMu.
+func (n *Node) mempoolUsageLocked(senderKey string, wantTotal bool) (total int64, senderCount int, senderBytes int64) {
+	for _, existing := range n.mempool {
+		if existing == nil {
+			continue
+		}
+		sz, sizeErr := transactionSize(existing)
+		if sizeErr != nil {
+			continue
+		}
+		if wantTotal {
+			total += int64(sz)
+		}
+		if senderKey != "" && types.RequiresSignature(existing.Type) {
+			existingFrom, fromErr := existing.From()
+			if fromErr == nil && hex.EncodeToString(existingFrom) == senderKey {
+				senderCount++
+				senderBytes += int64(sz)
+			}
+		}
+	}
+	return total, senderCount, senderBytes
+}
+
+// replacementWithinLimitsLocked applies the mempool byte limit and the
+// per-sender byte window to a replace-by-fee swap of replaced for a transaction
+// of newSize bytes. A swap that does not make the pool larger always fits; one
+// that does must stay within the limits, as a new transaction of that growth
+// would. maxBytes is the aggregate limit, zero for none. The caller must hold
+// n.mempoolMu.
+func (n *Node) replacementWithinLimitsLocked(replaced *types.Transaction, senderKey string, newSize int, maxBytes int64) error {
+	oldSize, err := transactionSize(replaced)
+	if err != nil {
+		oldSize = 0
+	}
+	growth := int64(newSize) - int64(oldSize)
+	if growth <= 0 {
+		return nil
+	}
+	total, _, senderBytes := n.mempoolUsageLocked(senderKey, maxBytes > 0)
+	if maxBytes > 0 && total+growth > maxBytes {
+		return ErrMempoolByteLimit
+	}
+	if senderKey != "" && senderBytes+growth > mempoolMaxSenderBytes {
+		return ErrMempoolSenderLimit
 	}
 	return nil
 }

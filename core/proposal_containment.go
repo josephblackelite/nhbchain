@@ -29,6 +29,12 @@ package core
 //     wave is re-verified and used; failing that, an EMPTY block is built.
 //     That is exactly the block a proposer already builds on every idle
 //     round, so validators already accept it.
+//   - Block size. The JSON of a block must fit one p2p frame together with the
+//     proposal wrapper, or the peers refuse it. A build whose applied set is
+//     over the byte budget (defaultMaxBlockBytes) keeps the longest prefix that
+//     fits and verifies it in a wave of its own before sealing; what was left
+//     out stays in the mempool for later blocks. A single transaction over the
+//     budget is dropped from the mempool in precheck.
 //   - Mempool hygiene (strike book, backoff, TTL, leases) so that whatever
 //     cannot apply stops being offered and is eventually evicted locally.
 //
@@ -56,6 +62,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -111,6 +118,28 @@ const (
 	// that reaches logs or retained state.
 	maxLoggedErrorLen = 160
 	maxPanicStackLen  = 4 << 10
+
+	// defaultMaxBlockBytes is the most JSON one proposed block may hold. A block
+	// travels as the payload of a p2p message, and the wire encoding makes a
+	// payload a third larger, so 600,000 bytes of block become about 800,000 on
+	// the wire. That leaves room under the default 1 MiB frame limit for the
+	// proposal wrapper and for the quorum certificate a committed block gains. A
+	// proposer-side limit only: nothing a validator checks depends on it.
+	defaultMaxBlockBytes = 600_000
+	// minMaxBlockBytes is the least SetProposalFrameLimit will lower the block
+	// budget to, so a very small frame limit cannot make the proposer refuse
+	// every transaction.
+	minMaxBlockBytes = 32 << 10
+	// blockHeaderAllowance is what a block's JSON holds besides its transactions
+	// (the header and the framing around the transaction list), counted against
+	// the budget before any transaction is.
+	blockHeaderAllowance = 1 << 10
+	// frameEnvelopeBytes and blockFrameReserve are what SetProposalFrameLimit
+	// subtracts from a frame limit before turning it into a block budget: the
+	// message framing, and the room for the proposal wrapper and quorum
+	// certificate.
+	frameEnvelopeBytes = 64
+	blockFrameReserve  = 64 << 10
 )
 
 // buildConfig holds the tunables of block-production containment. The zero
@@ -153,6 +182,10 @@ type buildConfig struct {
 	// MaxEvictions caps evictions per build so confirmed-eviction work cannot
 	// dominate a build.
 	MaxEvictions int
+	// MaxBlockBytes bounds the JSON of the block a build returns, so that the
+	// proposal and the committed block still fit one p2p frame. Zero means
+	// defaultMaxBlockBytes. See SetProposalFrameLimit.
+	MaxBlockBytes int
 	// AllowClockDependent disables the wall-clock read detector (dev networks).
 	AllowClockDependent bool
 	// ExcludeTypes is a static operator deny-list of transaction types this
@@ -174,7 +207,24 @@ func defaultBuildConfig() buildConfig {
 		IsolationK:      defaultIsolationK,
 		IsolationBudget: defaultIsolationBudget,
 		MaxEvictions:    defaultMaxEvictions,
+		MaxBlockBytes:   defaultMaxBlockBytes,
 	}
+}
+
+// blockTxBudget is how many bytes of encoded transactions one block may hold:
+// MaxBlockBytes less the allowance for the rest of the block.
+func (c buildConfig) blockTxBudget() int {
+	limit := c.MaxBlockBytes
+	if limit <= 0 {
+		limit = defaultMaxBlockBytes
+	}
+	return limit - blockHeaderAllowance
+}
+
+// maxTransactionBytes is the largest JSON encoding one transaction may have and
+// still fit a block by itself (the budget less the comma that follows it).
+func (n *Node) maxTransactionBytes() int {
+	return n.buildConfigSnapshot().blockTxBudget() - 1
 }
 
 // loadBuildConfig applies environment overrides on top of base. Malformed
@@ -314,6 +364,34 @@ func (n *Node) SetProposalBuildBudget(d time.Duration) {
 		}
 		cfg.Budget = d
 	})
+}
+
+// SetProposalFrameLimit tells the proposer the largest p2p frame the network
+// accepts (the configured MaxMsgBytes), so that it does not build a block whose
+// proposal or gossip frame the peers would refuse. The block budget is
+// defaultMaxBlockBytes, or less when that would not fit the frame: it is never
+// raised above the default.
+func (n *Node) SetProposalFrameLimit(maxMessageBytes int) {
+	if n == nil || maxMessageBytes <= 0 {
+		return
+	}
+	budget := blockBytesForFrame(maxMessageBytes)
+	n.setBuildConfig(func(cfg *buildConfig) { cfg.MaxBlockBytes = budget })
+}
+
+// blockBytesForFrame is the block budget for a frame limit of maxMessageBytes:
+// the payload that fits the frame once base64 has added a third, less the room
+// kept for the proposal wrapper and the quorum certificate, capped at
+// defaultMaxBlockBytes and floored at minMaxBlockBytes.
+func blockBytesForFrame(maxMessageBytes int) int {
+	budget := (maxMessageBytes-frameEnvelopeBytes)/4*3 - blockFrameReserve
+	if budget > defaultMaxBlockBytes {
+		budget = defaultMaxBlockBytes
+	}
+	if budget < minMaxBlockBytes {
+		budget = minMaxBlockBytes
+	}
+	return budget
 }
 
 // localNow is the proposer-local operations clock used for budgets, TTLs and
@@ -659,6 +737,7 @@ type buildCtx struct {
 	deadline time.Time // zero means unbounded
 
 	keys       map[*types.Transaction]string
+	sizes      map[*types.Transaction]int
 	pruned     []*types.Transaction
 	prunedKeys map[string]struct{}
 	failedKeys map[string]struct{}
@@ -686,6 +765,7 @@ func (n *Node) newBuildCtx(txs []*types.Transaction) *buildCtx {
 		input:      txs,
 		now:        n.localNow,
 		keys:       make(map[*types.Transaction]string),
+		sizes:      make(map[*types.Transaction]int),
 		prunedKeys: make(map[string]struct{}),
 		failedKeys: make(map[string]struct{}),
 	}
@@ -719,6 +799,45 @@ func (c *buildCtx) keyOf(tx *types.Transaction) string {
 	}
 	c.keys[tx] = key
 	return key
+}
+
+// blockTxBudget is how many bytes of encoded transactions one block may hold.
+func (c *buildCtx) blockTxBudget() int { return c.cfg.blockTxBudget() }
+
+// encodedSize is what tx adds to a block's JSON: its own encoding and the comma
+// that separates it from the next transaction.
+func (c *buildCtx) encodedSize(tx *types.Transaction) (int, error) {
+	if size, ok := c.sizes[tx]; ok {
+		return size, nil
+	}
+	raw, err := json.Marshal(tx)
+	if err != nil {
+		return 0, err
+	}
+	size := len(raw) + 1
+	c.sizes[tx] = size
+	return size, nil
+}
+
+// fitBlockBudget returns the longest prefix of txs that fits the block byte
+// budget. It stops at the first transaction that does not fit, so the order in
+// which the caller ranked the transactions is kept, and so are the nonce
+// sequences of a sender: nothing is taken from behind a transaction that was
+// left out.
+func (c *buildCtx) fitBlockBudget(txs []*types.Transaction) []*types.Transaction {
+	budget := c.blockTxBudget()
+	total := 0
+	for i, tx := range txs {
+		size, err := c.encodedSize(tx)
+		if err != nil {
+			return txs[:i:i]
+		}
+		total += size
+		if total > budget {
+			return txs[:i:i]
+		}
+	}
+	return txs
 }
 
 func (c *buildCtx) markPruned(tx *types.Transaction, key string) {
@@ -810,6 +929,18 @@ func (n *Node) buildWithContainment(ctx *buildCtx) (*types.Block, error) {
 			return nil, err
 		}
 		if w.clean() {
+			if fit := ctx.fitBlockBudget(w.Kept); len(fit) < len(w.Kept) {
+				// Every candidate applied, but together they would make a block
+				// too large to send. Discard this wave and run the longest
+				// prefix that fits instead; what is left stays in the mempool
+				// for later blocks. The prefix is checked by a wave of its own,
+				// like every other block, before it is sealed.
+				w.State.EndBlock()
+				n.noteBlockTrimmed(ctx, len(w.Kept), len(fit))
+				cands = fit
+				last = &waveResult{Wave: wave, CleanPrefix: fit}
+				continue
+			}
 			return n.seal(ctx, w)
 		}
 		last = w
@@ -820,6 +951,17 @@ func (n *Node) buildWithContainment(ctx *buildCtx) (*types.Block, error) {
 		cands = w.Kept
 	}
 	return n.prefixFallback(ctx, last)
+}
+
+// noteBlockTrimmed reports a build that left transactions out of its block to
+// stay within the block byte budget.
+func (n *Node) noteBlockTrimmed(ctx *buildCtx, applied, kept int) {
+	slog.Info("block proposal trimmed to the byte budget",
+		slog.Uint64("height", ctx.height),
+		slog.Int("applied", applied),
+		slog.Int("included", kept),
+		slog.Int("max_block_bytes", ctx.blockTxBudget()+blockHeaderAllowance),
+	)
 }
 
 // buildEmpty builds a block with no transactions. Only state set-up,
@@ -850,7 +992,9 @@ func (n *Node) prefixFallback(ctx *buildCtx, last *waveResult) (*types.Block, er
 	if last.BudgetHit || ctx.expired() {
 		exhausted = errBuildBudget
 	}
-	prefix := last.CleanPrefix
+	// The prefix of a wave that did not finish may itself be too large for a
+	// block.
+	prefix := ctx.fitBlockBudget(last.CleanPrefix)
 	if len(prefix) == 0 {
 		return nil, exhausted
 	}
@@ -913,6 +1057,19 @@ func (n *Node) precheck(ctx *buildCtx, txs []*types.Transaction) []*types.Transa
 			ctx.stats.pruned++
 			continue
 		}
+		// A transaction too large for a block by itself could never be sent
+		// to a peer in one, and left in place it would sit at the head of every
+		// build, so it is dropped like one that cannot be encoded.
+		size, sizeErr := ctx.encodedSize(tx)
+		if sizeErr != nil || size > ctx.blockTxBudget() {
+			ctx.markPruned(tx, ctx.keyOf(tx))
+			n.dropTransactionsFromMempool([]*types.Transaction{tx})
+			ctx.stats.pruned++
+			if sizeErr == nil {
+				n.logOversizedTransaction(ctx, tx, size)
+			}
+			continue
+		}
 		if _, denied := ctx.cfg.ExcludeTypes[tx.Type]; denied {
 			ctx.stats.denied++
 			continue
@@ -926,6 +1083,23 @@ func (n *Node) precheck(ctx *buildCtx, txs []*types.Transaction) []*types.Transa
 		n.markTransactionsCommitted(expiredVouchers)
 	}
 	return out
+}
+
+// logOversizedTransaction logs at most maxPerTxLogLines per build at warn level,
+// like logTxFailure; the rest are only counted.
+func (n *Node) logOversizedTransaction(ctx *buildCtx, tx *types.Transaction, size int) {
+	level := slog.LevelDebug
+	if ctx.stats.perTxLogged < maxPerTxLogLines {
+		ctx.stats.perTxLogged++
+		level = slog.LevelWarn
+	}
+	slog.Log(context.Background(), level, "transaction dropped: too large for a block",
+		slog.Uint64("height", ctx.height),
+		slog.String("txType", types.TxTypeName(tx.Type)),
+		slog.String("key", truncateText(ctx.keyOf(tx), 24)),
+		slog.Int("encoded_bytes", size),
+		slog.Int("max_tx_bytes", ctx.blockTxBudget()),
+	)
 }
 
 // ---- waves -----------------------------------------------------------------

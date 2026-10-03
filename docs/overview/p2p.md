@@ -36,6 +36,10 @@ Both sides send a signed JSON handshake and read the other's
 (`p2p/handshake.go`), within `HandshakeTimeoutMs`. Fields:
 
 | Field | Meaning |
+
+A node does not send a frame larger than `MaxMsgBytes`: `Peer.Enqueue` refuses a
+message whose frame would be larger (`ErrMessageTooLarge`), and `Server.Broadcast`
+sends it to no peer, logs it and ends no connection over it.
 | --- | --- |
 | `protoVersion` | Protocol version; must be `1`. |
 | `chainId` | uint64 network id; must equal the local value. |
