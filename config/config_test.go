@@ -514,6 +514,48 @@ func TestLoadPOSSweepSkipActivationHeight(t *testing.T) {
 	}
 }
 
+func TestLoadSwapPayoutReceiptActivation(t *testing.T) {
+	load := func(t *testing.T, swapSection string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		keystorePath := filepath.Join(dir, "validator.keystore")
+		contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+[swap]
+%s`, tomlQuoted(keystorePath), swapSection)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	// Left out, the block-time rules for payout receipts stay off.
+	cfg := load(t, "SlippageBps = 75\n")
+	if got := cfg.Swap.PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected the activation height to default to off, got %d", got)
+	}
+	if got := cfg.SwapSettings().PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected the swap settings to leave the rule off, got %d", got)
+	}
+	if got := (*Config)(nil).SwapSettings().PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected a missing config to leave the rule off, got %d", got)
+	}
+
+	cfg = load(t, "PayoutReceiptActivationHeight = 452000\n")
+	if got := cfg.Swap.PayoutReceiptActivationHeight; got != 452000 {
+		t.Fatalf("unexpected activation height: %d", got)
+	}
+	if got := cfg.SwapSettings().PayoutReceiptActivationHeight; got != 452000 {
+		t.Fatalf("swap settings dropped the activation height: %d", got)
+	}
+}
+
 func TestGovPolicyParsing(t *testing.T) {
 	cfg := GovConfig{
 		MinDepositWei:                  "1.25e3",

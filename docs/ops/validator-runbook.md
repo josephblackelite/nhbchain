@@ -102,15 +102,18 @@ transactions fixes it; it is alarmed (below) and needs an operator.
 
 ### Transactions that read the wall clock
 
-The proposer watches every transaction it applies for reads of the wall clock. A value
+The proposer counts reads of the wall clock made through the state processor's own
+clock while it applies each transaction. A value
 taken from the wall clock and written into state differs from one execution to the next,
 so a block containing such a transaction could not be re-executed identically by another
 validator. The proposer never proposes one (`NONDETERMINISM:` log line, metric
 `nhb_mempool_tx_failures_total{disposition="nondeterministic"}`). No shipped transaction
 type does this: escrow and trade timestamps (creation, update and the deadline checks)
 and the legacy escrow migration come from the block time, as every other engine's do.
-The detector is the guard against a change that brings such a read back, so a
-`NONDETERMINISM:` line is a bug to report, not an operating condition.
+The detector is a partial check: it does not see a direct `time.Now` call or an engine
+that keeps its own clock, so the absence of the line does not show that no transaction
+depends on the wall clock. A `NONDETERMINISM:` line is a bug to report, not an
+operating condition.
 `NHB_ALLOW_CLOCK_DEPENDENT_TXS=true` disables the detector and is for development
 networks only.
 
@@ -124,7 +127,7 @@ networks only.
 | `LIVENESS: failed to propose block` | The consensus engine could not produce this round's proposal. |
 | `LIVENESS: local validation of own proposal failed` | The block this node built failed this node's own validation. |
 | `LIVENESS: panic in block build` | A panic escaped every inner guard and was contained at the top. |
-| `NONDETERMINISM: transaction type ...` | A transaction that read the wall clock while applying was excluded. |
+| `NONDETERMINISM: transaction type ...` | A transaction that read the wall clock through the state processor's clock while applying was excluded. |
 | `proposal containment` | One aggregated line per build that had any exclusion, with counts and the top error classes. |
 
 Every `LIVENESS:` line carries structured fields (`height`, `since_commit_s`,

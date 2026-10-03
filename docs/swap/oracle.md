@@ -68,6 +68,7 @@ lives in memory and is lost on restart.
 | `TwapSampleCap` | `128` | `128` |
 | `PriceProofMaxDeviationBps` | `100` | `0` (resolves to `100`) |
 | `PayoutAuthorities` | `["treasury"]` | `["treasury"]` |
+| `PayoutReceiptActivationHeight` | `0` (off; see `docs/swap/stable-ledger.md`) | `0` |
 
 ## Provider status
 

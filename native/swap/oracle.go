@@ -867,6 +867,14 @@ type Config struct {
 	TwapSampleCap             int
 	PriceProofMaxDeviationBps uint64
 	PayoutAuthorities         []string
+	// PayoutReceiptActivationHeight is the first block height at which a swap
+	// payout receipt (transaction type 0x0F) takes the times it records from
+	// the block timestamp and consumes the attestor's nonce. Zero, the default,
+	// keeps the earlier behaviour: the times come from the host clock and the
+	// nonce is left alone. Choosing a height changes the state root of every
+	// block that carries a receipt, so every validator must be configured with
+	// the same value, and be running this build, before the chain reaches it.
+	PayoutReceiptActivationHeight uint64
 	// Risk configures the mint-side (fiat-gateway voucher mint) guardrails
 	// still left in local config -- velocity, sanctions,
 	// price-proof-signature enforcement, cash-out. The numeric circuit
@@ -894,6 +902,8 @@ func (c Config) Normalise() Config {
 		Risk:                      c.Risk.Normalise(),
 		Providers:                 c.Providers.Normalise(),
 		Sanctions:                 c.Sanctions.Normalise(),
+
+		PayoutReceiptActivationHeight: c.PayoutReceiptActivationHeight,
 	}
 	if len(cfg.AllowedFiat) == 0 {
 		cfg.AllowedFiat = []string{"USD"}

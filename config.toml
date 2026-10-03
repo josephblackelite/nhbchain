@@ -200,6 +200,14 @@ ClientVersion = ""
   TwapSampleCap = 128
   PriceProofMaxDeviationBps = 0
   PayoutAuthorities = ["treasury"]
+  # First block height at which a swap payout receipt (transaction type 0x0F)
+  # takes its recorded times from the block timestamp and consumes the
+  # attestor's nonce. 0 keeps the earlier behaviour (host clock, nonce left
+  # alone), which is what both live validators run with. Changing it changes
+  # the state root of every block that carries a receipt, so set the same
+  # value on every validator, and restart them together, well before the chain
+  # reaches that height (see docs/swap/stable-ledger.md).
+  PayoutReceiptActivationHeight = 0
   # This section's numeric circuit-breaker caps (per-tx min/max, per-address
   # daily/monthly) are a static, config.toml-driven mint-side defense in
   # depth -- worst-case exposure is already bounded by the fixed,

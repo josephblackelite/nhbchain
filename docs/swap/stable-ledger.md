@@ -39,6 +39,17 @@ are accepted (`StableAsset` in `native/swap/types.go`). Intent statuses are
    is a protobuf `Any` of `swap.v1.MsgPayoutReceipt`
    (`core/state_transition.go` `applySwapPayoutReceipt`). Because no live path
    creates an intent, it fails with `stable: intent <id> not found`.
+
+   Until the activation height below is reached, the store stamps the settlement
+   times (`SettledAt`, `BurnedAt`, the inventory's `UpdatedAt`) from the host
+   clock and the attestor's nonce is not consumed, so a receipt that applied
+   would leave a different state root on each validator unless they happened to
+   read the same second. `[swap].PayoutReceiptActivationHeight` (default `0`,
+   off) is the first block height from which the times come from the block
+   timestamp and the attestor's nonce is consumed on success. It changes the
+   state root of every block that carries a receipt, so it must be identical on
+   every validator and set to a height no validator has reached yet; a value of
+   `0` never activates it.
 4. **`AbortCashOutIntent`** - requires a `pending` intent whose escrow is not
    burned; sets the status to `aborted`. It has no caller in non-test code.
    The store only flips the status; it does not move any balance.

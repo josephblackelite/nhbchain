@@ -191,6 +191,10 @@ off the treasury wallet than the Reward Pool holds is rejected with
   it changes the state a block leaves behind (the POS expiry sweep, see
   `docs/specs/pos-lifecycle.md`), so it is changed only with all validators
   restarted together, to a height above the chain tip.
+- `[swap] PayoutReceiptActivationHeight` must be identical on every validator
+  (`native/swap/oracle.go`, `Config.PayoutReceiptActivationHeight`). Unlike the
+  setting above it changes the state root of blocks that carry a swap payout
+  receipt, so it is chosen as a height ahead of the tip.
 - `POSHoldUnstakeGuardActivationHeight` must be identical on every validator
   (`config/config.go`, `POSHoldUnstakeGuardActivationHeight`): it decides whether an
   unstake that would take funds backing a pending POS hold is valid.

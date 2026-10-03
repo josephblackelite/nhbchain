@@ -208,9 +208,12 @@ func (n *Node) noteBuildSucceeded(ctx *buildCtx) {
 }
 
 // noteNondeterminism logs, at most once a minute per transaction type, that a
-// type was not proposed because it read the wall clock while applying. No
-// shipped type does (escrow and trade timestamps come from the block time), so
-// this line means a new code path reintroduced a wall-clock read.
+// type was not proposed because it read the wall clock while applying. The
+// detector only sees reads made through StateProcessor.now(), which the
+// processor does not call once a block context is set, so this line is a partial
+// signal: its absence does not show that no transaction reads the wall clock
+// directly. That guarantee has to come from every handler taking its time from
+// the block timestamp.
 func (n *Node) noteNondeterminism(t types.TxType, now time.Time) {
 	n.build.mu.Lock()
 	if n.build.nondetLogAt == nil {

@@ -5344,10 +5344,40 @@ func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 		return err
 	}
 	store := swap.NewStableStore(manager)
+	// From the activation height the store stamps settlement and inventory
+	// times from the block, as every other swap engine does, so all validators
+	// record the same values, and the attestor's nonce is consumed below.
+	// Before it (and always while the setting is zero) the store keeps its
+	// default host clock and the nonce is left alone, exactly as in the build
+	// that committed the earlier blocks.
+	blockRules := sp.payoutReceiptBlockRulesActive()
+	if blockRules {
+		store.SetClock(func() time.Time { return sp.blockTimestamp() })
+	}
 	if err := store.RecordPayoutReceipt(receipt); err != nil {
 		return fmt.Errorf("swap: record payout receipt: %w", err)
 	}
+	if blockRules {
+		// Consume the attestor's nonce, as applyAttestRedemption does, so the
+		// same signed receipt cannot be applied twice.
+		if err := sp.incrementNativeAccountNonce(sender); err != nil {
+			return fmt.Errorf("swap: increment nonce: %w", err)
+		}
+	}
 	return nil
+}
+
+// payoutReceiptBlockRulesActive reports whether the block being executed is at
+// or past swap.Config.PayoutReceiptActivationHeight. It is false while the
+// setting is zero and outside a block context, so only a block that carries its
+// own height can switch the rule on, and every validator executing that block
+// with the same setting reaches the same answer.
+func (sp *StateProcessor) payoutReceiptBlockRulesActive() bool {
+	if sp == nil || sp.execContext == nil {
+		return false
+	}
+	from := sp.swapConfig.PayoutReceiptActivationHeight
+	return from != 0 && sp.execContext.height >= from
 }
 
 func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt, error) {

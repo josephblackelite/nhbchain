@@ -675,7 +675,10 @@ func realWallClock(fn func() time.Time) bool {
 // counted. It returns the same values the underlying clock does -- it adds no
 // new time source and changes no result -- and touches only this wave's own
 // copy. A nil return means the guard is not needed (a deterministic clock is
-// installed, or the operator disabled the detector).
+// installed, or the operator disabled the detector). It counts only reads made
+// through StateProcessor.now(); a direct time.Now call, or an engine that keeps
+// its own clock, is not seen, and with a block context set the processor does not
+// read this clock at all, so a zero count is not proof of determinism.
 func installClockGuard(sp *StateProcessor, allow bool) *atomic.Uint64 {
 	if sp == nil || allow || !realWallClock(sp.nowFunc) {
 		return nil
