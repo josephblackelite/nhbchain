@@ -1381,6 +1381,10 @@ func (e *Engine) NotifyExternalCommit() {
 	}
 }
 
+// requestCatchUp asks the peers for the blocks this node lacks. currentHeight is
+// the height the engine is deciding, which is the block after the node's last
+// one, so that is where the request starts: a request that starts one block
+// later is answered by nothing from a peer that is exactly one block ahead.
 func (e *Engine) requestCatchUp(currentHeight uint64) {
 	if e == nil || e.broadcaster == nil {
 		return
@@ -1393,7 +1397,14 @@ func (e *Engine) requestCatchUp(currentHeight uint64) {
 	}
 	e.lastCatchUpAt = now
 	e.mu.Unlock()
-	msg, err := p2p.NewGetBlocksMessage(currentHeight + 1)
+	// The node's own chain is what the blocks are asked after, as the node's
+	// block sync does, so a request is right even if the engine's height has
+	// not caught up with a block the node took from a peer.
+	from := currentHeight
+	if e.node != nil {
+		from = e.node.GetHeight() + 1
+	}
+	msg, err := p2p.NewGetBlocksMessage(from)
 	if err != nil {
 		fmt.Printf("failed to build catch-up request: %v\n", err)
 		return
