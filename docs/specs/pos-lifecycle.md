@@ -70,6 +70,32 @@ authorizations with `expiry <= block time` are voided with status `expired`,
 reason `expired`. Each emits `payments.voided` (`expired=true`) and
 `pos.auth_auto_voided`, and increments `nhb_pos_auth_expired_total`.
 
+An expired authorization whose payer has less `LockedZNHB` than the authorized
+amount cannot be released without creating balance, so the sweep never releases
+it (a manual void or a capture of it fails with `pos: locked balance
+inconsistent`). What the sweep does next depends on `POSSweepSkipActivationHeight`
+in `config.toml`:
+
+- Below that height, and at every height while it is `0` (the default), the sweep
+  ends at that authorization with the error, which the block discards. It stays
+  `pending`, and so do the authorizations queued behind it, even if they are
+  expired; the ones queued ahead of it have already been released.
+- From that height (the first block at it and every block after), the sweep
+  leaves that authorization `pending` and goes on to the authorizations queued
+  behind it. The skipped authorization is tried again on every block and is
+  released once the payer's locked balance covers it. The node logs a `WARN`
+  line, `pos: expired authorizations left pending because the payer's locked
+  balance is below the hold`, every 100 blocks while one is waiting.
+
+The two behaviours leave different state, so this is a consensus setting. It must
+have the same value on every validator, and it is changed only with every
+validator restarted together, to a height above the chain tip at that moment.
+Both validators log `POS expiry sweep skips holds the payer cannot cover from
+block height` at start when it is set, so the value can be compared. Validators
+that differ in it refuse each other's blocks from the first block whose sweep
+reaches an expired hold its payer cannot cover with another expired
+authorization queued behind it.
+
 If a persistence step fails inside a lifecycle call, the balance changes made by
 that call are rolled back before the error is returned.
 

@@ -403,6 +403,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(n.governancePolicy())
+	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -4570,6 +4571,24 @@ func (n *Node) SetQuorumCertActivationHeight(height uint64) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	n.quorumCertActivationHeight = height
+}
+
+// SetPOSSweepSkipActivationHeight configures the block height from which the
+// end-of-block POS expiry sweep carries on past an expired hold the payer's
+// locked balance no longer covers, instead of ending at it. Zero, the default,
+// keeps the earlier behaviour at every height. The two behaviours leave
+// different state, so every validator MUST be given the same value, and a live
+// chain may only change it with every validator restarted together and the
+// height set above the chain tip at that moment. Call it before the node
+// processes blocks (startup wiring); every state copy a block is built or
+// validated on inherits it from the node's state processor.
+func (n *Node) SetPOSSweepSkipActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.state.SetPOSSweepSkipActivationHeight(height)
 }
 
 // RemoveValidatorFromSet permanently removes addr from the active and

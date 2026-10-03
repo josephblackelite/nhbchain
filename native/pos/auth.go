@@ -93,6 +93,12 @@ type Lifecycle struct {
 	state   lifecycleState
 	emitter events.Emitter
 	nowFn   func() time.Time
+	// sweepSkipsUnreleasable makes SweepExpired carry on past an expired hold
+	// the payer's locked balance no longer covers instead of ending the sweep
+	// at it. It is off by default: whether the sweep stops or carries on
+	// changes the state a block leaves behind, so the state processor turns it
+	// on only from the block height the network has agreed on.
+	sweepSkipsUnreleasable bool
 }
 
 // NewLifecycle constructs a lifecycle engine bound to the provided state
@@ -130,6 +136,19 @@ func (l *Lifecycle) SetNowFunc(now func() time.Time) {
 	l.nowFn = now
 }
 
+// SetSweepSkipsUnreleasable chooses what SweepExpired does at an expired hold
+// the payer's locked balance no longer covers. With false (the default) the
+// sweep ends there with the locked-balance error, leaving every record queued
+// behind that hold untouched. With true it leaves that hold pending, carries on
+// with the records behind it, and reports the skipped holds through
+// ErrSweepSkipped. Every validator must use the same choice for the same block.
+func (l *Lifecycle) SetSweepSkipsUnreleasable(enabled bool) {
+	if l == nil {
+		return
+	}
+	l.sweepSkipsUnreleasable = enabled
+}
+
 var (
 	errLifecycleUninitialised    = errors.New("pos: lifecycle not initialised")
 	errAuthorizationNotFound     = errors.New("pos: authorization not found")
@@ -140,7 +159,18 @@ var (
 	errAuthorizationInvalidAmt   = errors.New("pos: amount must be positive")
 	errAuthorizationInsufficient = errors.New("pos: insufficient balance")
 	errAuthorizationUnauthorized = errors.New("pos: caller is not authorized for this authorization")
+	// errLockedBalanceInconsistent marks a release that would take more than the
+	// payer's locked balance. It is raised before anything is written, so the
+	// record and both accounts are exactly as they were.
+	errLockedBalanceInconsistent = errors.New("pos: locked balance inconsistent")
 )
+
+// ErrSweepSkipped is wrapped by the error SweepExpired returns next to a
+// usable result when, with SetSweepSkipsUnreleasable(true), it left one or more
+// expired authorizations pending because the payer's locked balance no longer
+// covers the hold. The returned slice still lists every authorization the sweep
+// did void.
+var ErrSweepSkipped = errors.New("pos: expiry sweep left authorizations pending")
 
 // Authorize locks the supplied ZapNHB amount on the payer account and records a
 // payment authorization that can later be captured or voided.
@@ -293,7 +323,7 @@ func (l *Lifecycle) Capture(id [32]byte, amount *big.Int, caller [20]byte) (*Aut
 		originalMerchant = originalPayer
 	}
 	if payerAcc.LockedZNHB.Cmp(auth.Amount) < 0 {
-		return nil, fmt.Errorf("pos: locked balance inconsistent")
+		return nil, errLockedBalanceInconsistent
 	}
 	refund := new(big.Int).Sub(auth.Amount, amount)
 	payerAcc.LockedZNHB = new(big.Int).Sub(payerAcc.LockedZNHB, auth.Amount)
@@ -391,7 +421,7 @@ func (l *Lifecycle) autoVoid(auth *Authorization, status AuthorizationStatus, re
 	payerAcc = cloneAccount(payerAcc)
 	originalPayer := cloneAccount(payerAcc)
 	if payerAcc.LockedZNHB.Cmp(auth.Amount) < 0 {
-		return nil, fmt.Errorf("pos: locked balance inconsistent")
+		return nil, errLockedBalanceInconsistent
 	}
 	payerAcc.LockedZNHB = new(big.Int).Sub(payerAcc.LockedZNHB, auth.Amount)
 	payerAcc.BalanceZNHB = new(big.Int).Add(payerAcc.BalanceZNHB, auth.Amount)
@@ -563,6 +593,15 @@ func (l *Lifecycle) removePendingAuthorization(id [32]byte) error {
 // SweepExpired scans the pending authorization index and voids any records past
 // their expiry timestamp. The returned slice contains the updated authorization
 // records for each auto-voided lock.
+//
+// An expired hold whose payer no longer has that much locked cannot be released
+// without inventing balance. By default the sweep ends at it with the
+// locked-balance error and no result, and the records queued behind it are left
+// as they were. When SetSweepSkipsUnreleasable(true) has been called the hold
+// is left pending instead and the sweep carries on with the records queued
+// behind it; if any were left, the voided records are returned together with an
+// error wrapping ErrSweepSkipped. Any other error still ends the sweep and no
+// result is returned.
 func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 	if l == nil || l.state == nil {
 		return nil, errLifecycleUninitialised
@@ -588,6 +627,7 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 	defer func() { l.nowFn = previousNow }()
 	cutoff := uint64(now.Unix())
 	expired := make([]*Authorization, 0)
+	skipped := 0
 	for _, entry := range ids {
 		if len(entry) != 32 {
 			continue
@@ -611,6 +651,10 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 		}
 		updated, err := l.autoVoid(auth, AuthorizationStatusExpired, "expired")
 		if err != nil {
+			if l.sweepSkipsUnreleasable && errors.Is(err, errLockedBalanceInconsistent) {
+				skipped++
+				continue
+			}
 			return nil, err
 		}
 		expired = append(expired, updated.Clone())
@@ -622,6 +666,9 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 			AuthorizationID: updated.ID,
 			Amount:          amount,
 		})
+	}
+	if skipped > 0 {
+		return expired, fmt.Errorf("%w: %d", ErrSweepSkipped, skipped)
 	}
 	return expired, nil
 }

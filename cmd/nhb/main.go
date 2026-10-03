@@ -166,6 +166,16 @@ func main() {
 		// A consensus value: identical on every validator, in force before the epoch it names.
 		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)
 	}
+	if cfg.POSSweepSkipActivationHeight > 0 {
+		// See config.Config.POSSweepSkipActivationHeight's doc comment --
+		// left unset (0) here means the POS expiry sweep behaves exactly like
+		// every prior release. This changes the state a block leaves behind,
+		// so it is a deliberate, coordinated, every-validator-at-once
+		// decision made in config.toml, never inferred.
+		node.SetPOSSweepSkipActivationHeight(cfg.POSSweepSkipActivationHeight)
+		logger.Info("POS expiry sweep skips holds the payer cannot cover from block height",
+			slog.Uint64("height", cfg.POSSweepSkipActivationHeight))
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {

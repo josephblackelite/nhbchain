@@ -83,14 +83,14 @@ var defaultAllowedGovernanceParams = []string{
 }
 
 type Config struct {
-	ListenAddress               string                       `toml:"ListenAddress"`
-	RPCAddress                  string                       `toml:"RPCAddress"`
-	RPCTrustedProxies           []string                     `toml:"RPCTrustedProxies"`
-	RPCTrustProxyHeaders        bool                         `toml:"RPCTrustProxyHeaders"`
-	RPCAllowlistCIDRs           []string                     `toml:"RPCAllowlistCIDRs"`
-	RPCWebSocketOrigins         []string                     `toml:"RPCWebSocketOrigins"`
-	RPCWebSocketMaxConnections  int                          `toml:"RPCWebSocketMaxConnections"`
-	RPCWebSocketMaxPerIP        int                          `toml:"RPCWebSocketMaxPerIP"`
+	ListenAddress              string   `toml:"ListenAddress"`
+	RPCAddress                 string   `toml:"RPCAddress"`
+	RPCTrustedProxies          []string `toml:"RPCTrustedProxies"`
+	RPCTrustProxyHeaders       bool     `toml:"RPCTrustProxyHeaders"`
+	RPCAllowlistCIDRs          []string `toml:"RPCAllowlistCIDRs"`
+	RPCWebSocketOrigins        []string `toml:"RPCWebSocketOrigins"`
+	RPCWebSocketMaxConnections int      `toml:"RPCWebSocketMaxConnections"`
+	RPCWebSocketMaxPerIP       int      `toml:"RPCWebSocketMaxPerIP"`
 	// The public read queries that are not cheap (transaction and address
 	// lookups the indexes cannot answer, explorer snapshots of a non-default
 	// window, transaction-window statistics, the lending and market reads that
@@ -162,35 +162,47 @@ type Config struct {
 	// own account. This is a consensus value: it must be the same on every validator, and on every node that replays blocks from a snapshot, and it must be
 	// in force on all of them before the epoch it names begins (see core.StateProcessor.SetRewardsByStakeFromEpoch). Change it only as one coordinated
 	// restart of every validator, with the epoch far enough ahead to finish it.
-	RewardsByStakeFromEpoch uint64 `toml:"RewardsByStakeFromEpoch"`
-	ValidatorKeystorePath       string                       `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI             string                       `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv             string                       `toml:"ValidatorKMSEnv"`
-	NetworkName                 string                       `toml:"NetworkName"`
-	Bootnodes                   []string                     `toml:"Bootnodes"`
-	PersistentPeers             []string                     `toml:"PersistentPeers"`
-	BootstrapPeers              []string                     `toml:"BootstrapPeers,omitempty"`
-	MaxPeers                    int                          `toml:"MaxPeers"`
-	MaxInbound                  int                          `toml:"MaxInbound"`
-	MaxOutbound                 int                          `toml:"MaxOutbound"`
-	MinPeers                    int                          `toml:"MinPeers"`
-	OutboundPeers               int                          `toml:"OutboundPeers"`
-	PeerBanSeconds              int                          `toml:"PeerBanSeconds"`
-	ReadTimeout                 int                          `toml:"ReadTimeout"`
-	WriteTimeout                int                          `toml:"WriteTimeout"`
-	MaxMsgBytes                 int                          `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond            float64                      `toml:"MaxMsgsPerSecond"`
-	ClientVersion               string                       `toml:"ClientVersion"`
-	P2P                         P2PSection                   `toml:"p2p"`
-	Potso                       PotsoConfig                  `toml:"potso"`
-	Governance                  GovConfig                    `toml:"governance"`
-	Swap                        swap.Config                  `toml:"swap"`
-	Lending                     lending.Config               `toml:"lending"`
-	Subscriptions               Subscriptions                `toml:"subscriptions"`
-	Mempool                     MempoolConfig                `toml:"mempool"`
-	Global                      Global                       `toml:"global"`
-	Consensus                   Consensus                    `toml:"consensus"`
-	NetworkSecurity             NetworkSecurity              `toml:"network_security"`
+	RewardsByStakeFromEpoch uint64          `toml:"RewardsByStakeFromEpoch"`
+	ValidatorKeystorePath   string          `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI         string          `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv         string          `toml:"ValidatorKMSEnv"`
+	NetworkName             string          `toml:"NetworkName"`
+	Bootnodes               []string        `toml:"Bootnodes"`
+	PersistentPeers         []string        `toml:"PersistentPeers"`
+	BootstrapPeers          []string        `toml:"BootstrapPeers,omitempty"`
+	MaxPeers                int             `toml:"MaxPeers"`
+	MaxInbound              int             `toml:"MaxInbound"`
+	MaxOutbound             int             `toml:"MaxOutbound"`
+	MinPeers                int             `toml:"MinPeers"`
+	OutboundPeers           int             `toml:"OutboundPeers"`
+	PeerBanSeconds          int             `toml:"PeerBanSeconds"`
+	ReadTimeout             int             `toml:"ReadTimeout"`
+	WriteTimeout            int             `toml:"WriteTimeout"`
+	MaxMsgBytes             int             `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond        float64         `toml:"MaxMsgsPerSecond"`
+	ClientVersion           string          `toml:"ClientVersion"`
+	P2P                     P2PSection      `toml:"p2p"`
+	Potso                   PotsoConfig     `toml:"potso"`
+	Governance              GovConfig       `toml:"governance"`
+	Swap                    swap.Config     `toml:"swap"`
+	Lending                 lending.Config  `toml:"lending"`
+	Subscriptions           Subscriptions   `toml:"subscriptions"`
+	Mempool                 MempoolConfig   `toml:"mempool"`
+	Global                  Global          `toml:"global"`
+	Consensus               Consensus       `toml:"consensus"`
+	NetworkSecurity         NetworkSecurity `toml:"network_security"`
+
+	// POSSweepSkipActivationHeight is the first block height at which the
+	// end-of-block sweep of expired POS authorizations carries on past an
+	// expired hold whose payer's locked balance no longer covers it, leaves
+	// that hold pending, and releases the holds queued behind it. Before this
+	// height (and at every height when the value is 0, the default) the sweep
+	// ends at that hold and the holds behind it stay pending. The two
+	// behaviours leave different state, so this is a consensus setting: it
+	// MUST be identical on every validator, and it must only be changed with
+	// every validator restarted together, with the height chosen above the
+	// chain tip at that moment. See docs/specs/pos-lifecycle.md.
+	POSSweepSkipActivationHeight uint64 `toml:"POSSweepSkipActivationHeight"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.

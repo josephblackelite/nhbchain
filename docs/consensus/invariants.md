@@ -186,3 +186,8 @@ off the treasury wallet than the Reward Pool holds is rejected with
   that replays blocks, and in force before the epoch it names begins: it decides
   who an epoch's reward is credited to, so another value is another state root
   (`config/config.go`, `core/rewards_logic.go` `distributeStakeWeighted`).
+- `POSSweepSkipActivationHeight` must be identical on every validator
+  (`config/config.go`, `POSSweepSkipActivationHeight`). Unlike the setting above
+  it changes the state a block leaves behind (the POS expiry sweep, see
+  `docs/specs/pos-lifecycle.md`), so it is changed only with all validators
+  restarted together, to a height above the chain tip.

@@ -78,6 +78,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: failed to open node: %v\n", err)
 		os.Exit(1)
 	}
+	// The recovery block below runs the same end-of-block work as any other
+	// block, including the POS expiry sweep, so it must use the setting the
+	// validators run with (see config.Config.POSSweepSkipActivationHeight).
+	if cfg.POSSweepSkipActivationHeight > 0 {
+		node.SetPOSSweepSkipActivationHeight(cfg.POSSweepSkipActivationHeight)
+	}
 
 	before := node.GetValidatorSet()
 	fmt.Printf("Current validator set (%d entries):\n", len(before))

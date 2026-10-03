@@ -67,6 +67,14 @@ QuorumCertActivationHeight = 1380200
 # value, in force before the epoch it names begins. Change it only as one coordinated restart of every validator, in the same release as the pin in
 # cmd/nhb-snapshot/pins.go and the tests.
 RewardsByStakeFromEpoch = 0
+# First block height at which the end-of-block sweep of expired POS holds goes
+# on past a hold whose payer's locked balance no longer covers it (see
+# config/config.go's POSSweepSkipActivationHeight doc comment and
+# docs/specs/pos-lifecycle.md). 0 keeps the earlier behaviour, which is what
+# both live validators run with. Unlike the setting above it changes the state a
+# block leaves behind: set it identically on every validator, to a height above
+# the chain tip, restarting all of them together.
+POSSweepSkipActivationHeight = 0
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

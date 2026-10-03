@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"sort"
@@ -237,6 +238,13 @@ type StateProcessor struct {
 	// across every validator on the same chain, so comparing against it
 	// here is fully deterministic.
 	swapVoucherChainID uint64
+	// posSweepSkipActivationHeight is the first block height at which the
+	// end-of-block POS expiry sweep carries on past an expired hold its payer
+	// cannot cover instead of ending at it. Zero (the default) leaves the
+	// earlier behaviour in place at every height. It changes the state a block
+	// leaves behind, so every validator must run with the same value; see
+	// config.Config.POSSweepSkipActivationHeight.
+	posSweepSkipActivationHeight uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -2019,8 +2027,41 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 	sp.blockCtx.PendingRewards.ClearPendingRewards()
 }
 
+// posSweepSkipLogInterval spaces the warning about expired holds the sweep had
+// to leave pending: a hold that stays unreleasable would otherwise be reported
+// again on every block.
+const posSweepSkipLogInterval = 100
+
+// SetPOSSweepSkipActivationHeight sets the first block height at which the
+// POS expiry sweep carries on past an expired hold the payer's locked balance
+// no longer covers (see SweepExpiredPOSAuthorizations). Zero, the default,
+// keeps the earlier behaviour at every height. The value changes the state a
+// block leaves behind, so it must be the same on every validator and must only
+// be changed with all of them restarted together.
+func (sp *StateProcessor) SetPOSSweepSkipActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.posSweepSkipActivationHeight = height
+}
+
+// posSweepSkipActive reports whether the block being applied is at or past the
+// activation height. Outside a block (no execution context, height 0) it is
+// never active.
+func (sp *StateProcessor) posSweepSkipActive() bool {
+	if sp == nil || sp.posSweepSkipActivationHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.posSweepSkipActivationHeight
+}
+
 // SweepExpiredPOSAuthorizations voids pending POS authorizations that have
 // crossed their expiry timestamp and returns the number of records affected.
+// Before the activation height (POSSweepSkipActivationHeight, off by default)
+// the sweep ends at the first expired hold the payer's locked balance no longer
+// covers, with an error, and the records queued behind it stay pending. From
+// the activation height that hold stays pending and is logged, and it does not
+// stop the holds queued behind it from being released.
 func (sp *StateProcessor) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
 	if sp == nil {
 		return 0, fmt.Errorf("state processor unavailable")
@@ -2035,9 +2076,18 @@ func (sp *StateProcessor) SweepExpiredPOSAuthorizations(now time.Time) (int, err
 	lifecycle := pos.NewLifecycle(manager)
 	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
 	lifecycle.SetNowFunc(func() time.Time { return now.UTC() })
+	lifecycle.SetSweepSkipsUnreleasable(sp.posSweepSkipActive())
 	expired, err := lifecycle.SweepExpired(now)
 	if err != nil {
-		return 0, err
+		if !errors.Is(err, pos.ErrSweepSkipped) {
+			return 0, err
+		}
+		if height := sp.blockHeight(); height%posSweepSkipLogInterval == 0 {
+			slog.Warn("pos: expired authorizations left pending because the payer's locked balance is below the hold",
+				slog.Uint64("height", height),
+				slog.String("detail", err.Error()),
+			)
+		}
 	}
 	count := len(expired)
 	if count == 0 {
@@ -2754,6 +2804,8 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		subscriptionsConfig:        sp.subscriptionsConfig,
 		hasSubscriptionsConfig:     sp.hasSubscriptionsConfig,
 		govPolicy:                  cloneGovernancePolicy(sp.govPolicy),
+
+		posSweepSkipActivationHeight: sp.posSweepSkipActivationHeight,
 	}, nil
 }
 

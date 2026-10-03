@@ -488,6 +488,32 @@ BlockTimestampToleranceSeconds = 12
 	}
 }
 
+func TestLoadPOSSweepSkipActivationHeight(t *testing.T) {
+	load := func(t *testing.T, extra string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		keystorePath := filepath.Join(dir, "validator.keystore")
+		contents := fmt.Sprintf("ListenAddress = \"0.0.0.0:6001\"\nValidatorKeystorePath = %s\n%s", tomlQuoted(keystorePath), extra)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	// Left out, the sweep keeps its earlier behaviour at every height.
+	if got := load(t, "").POSSweepSkipActivationHeight; got != 0 {
+		t.Fatalf("expected the activation height to default to 0 (off), got %d", got)
+	}
+	if got := load(t, "POSSweepSkipActivationHeight = 250000\n").POSSweepSkipActivationHeight; got != 250000 {
+		t.Fatalf("unexpected activation height: %d", got)
+	}
+}
+
 func TestGovPolicyParsing(t *testing.T) {
 	cfg := GovConfig{
 		MinDepositWei:                  "1.25e3",

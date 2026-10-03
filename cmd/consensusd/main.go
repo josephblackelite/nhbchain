@@ -199,6 +199,14 @@ func main() {
 	if cfg.RewardsByStakeFromEpoch > 0 {
 		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)
 	}
+	// Same setting and rule as in cmd/nhb/main.go: 0 (unset) keeps the
+	// earlier POS expiry sweep, and a value must be identical on every
+	// validator.
+	if cfg.POSSweepSkipActivationHeight > 0 {
+		node.SetPOSSweepSkipActivationHeight(cfg.POSSweepSkipActivationHeight)
+		slog.Info("POS expiry sweep skips holds the payer cannot cover from block height",
+			slog.Uint64("height", cfg.POSSweepSkipActivationHeight))
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
