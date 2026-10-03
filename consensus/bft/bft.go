@@ -192,12 +192,15 @@ type Engine struct {
 	// signed is the record of the last vote this validator signed, and
 	// signStatePath (WithSignStatePath) is where it is made durable. Together
 	// they are the double-sign guard: createVote signs nothing that conflicts
-	// with them (see sign_state.go). signMu guards both; createVote takes it
-	// while mu may already be held (broadcastPrevoteNilLocked), so the lock
-	// order is always mu, then signMu, never the reverse.
+	// with them (see sign_state.go). signBlocked, when set, makes createVote sign
+	// nothing: the record on disk was present at start but could not be read.
+	// signMu guards all three; createVote takes it while mu may already be held
+	// (broadcastPrevoteNilLocked), so the lock order is always mu, then signMu,
+	// never the reverse.
 	signMu        sync.Mutex
 	signed        signState
 	signStatePath string
+	signBlocked   error
 
 	// Round synchronisation (see round_sync.go). selfAddr is this validator's
 	// address. roundClaims is, for each other validator, the highest round it has

@@ -48,6 +48,23 @@ import (
 // the network. startNewRound moves a restarted engine past every round it has
 // signed in, so the restart does not have to walk dead rounds to get there.
 //
+// Three conditions would leave a validator with no memory of what it signed, and
+// the guard answers each the same way: the validator stays silent rather than
+// guess.
+//
+//   - A vote whose record cannot be written is not signed (errSignStateNotDurable).
+//     A signature that no record backs is exactly what a restart would forget.
+//   - A record for a height beyond the chain this process starts from is kept, not
+//     dropped. The chain database is not synced after every block, so after a host
+//     crash it can be behind a record that did reach the disk; that record covers
+//     heights the network may have finished, and the validator must not vote in
+//     them again. Rule 2 holds it back until block sync brings the chain up to the
+//     record. A chain that was relaunched under the same keys must start without
+//     the old record (docs/runbooks/migrations.md).
+//   - A record that is present but cannot be read or decoded stops the validator
+//     signing anything (errSignStateUnreadable) until the file is repaired, or moved
+//     aside on purpose, and the node is restarted.
+//
 // The state is a single small record (the last round signed in), not a history:
 // it is enough because rule 2 makes every earlier round unreachable.
 
@@ -56,6 +73,15 @@ import (
 // filled, or would sign for a round or height it has already moved past. The
 // engine never retries after it: the vote is not sent.
 var errConflictingVote = errors.New("refusing to sign a vote that conflicts with one this validator already signed")
+
+// errSignStateNotDurable is returned by createVote when the record of the vote
+// could not be written. Nothing is signed and nothing is remembered: callers treat
+// it as a failed attempt, so the vote is tried again once the disk works.
+var errSignStateNotDurable = errors.New("refusing to sign a vote whose record cannot be written")
+
+// errSignStateUnreadable is returned by createVote for as long as the engine runs
+// on a vote record that was present at start but could not be read.
+var errSignStateUnreadable = errors.New("refusing to sign a vote: the vote record could not be read at start")
 
 // signedValue is the block hash this validator signed for one vote type. An
 // empty hash is a vote for nil.
@@ -79,10 +105,10 @@ func (s *signState) empty() bool {
 
 // WithSignStatePath makes the double-sign record durable at path, so it survives
 // a restart (see the comment at the top of this file). NewEngine restores it when
-// it describes the height the engine is about to contest, and every vote this
-// validator signs is recorded there before it is signed. A blank path (the
-// default) keeps the record in memory only, which still protects a running
-// process but not a restart.
+// it describes the height the engine is about to contest or a later one, and
+// every vote this validator signs is recorded there before it is signed. A blank
+// path (the default) keeps the record in memory only, which still protects a
+// running process but not a restart.
 func WithSignStatePath(path string) Option {
 	return func(e *Engine) {
 		if e == nil {
@@ -94,7 +120,10 @@ func WithSignStatePath(path string) Option {
 
 // claimVote is the double-sign guard: createVote calls it before it signs. It
 // returns nil when the vote may be signed -- and records it, durably, before
-// returning -- and an error wrapping errConflictingVote when it may not.
+// returning -- and an error when it may not: one wrapping errConflictingVote for a
+// vote that conflicts with the record, errSignStateNotDurable when the record
+// cannot be written, errSignStateUnreadable when the record on disk could not be
+// read at start.
 //
 // It takes only signMu, never mu, because createVote is reached with mu held
 // (broadcastPrevoteNilLocked) and without it (prevote, precommit).
@@ -104,6 +133,10 @@ func (e *Engine) claimVote(t VoteType, blockHash []byte, round int, height uint6
 	}
 	e.signMu.Lock()
 	defer e.signMu.Unlock()
+
+	if e.signBlocked != nil {
+		return e.signBlocked
+	}
 
 	cur := e.signed
 	next := signState{Height: height, Round: round}
@@ -138,16 +171,18 @@ func (e *Engine) claimVote(t VoteType, blockHash []byte, round int, height uint6
 		next.Precommit = value
 	}
 
-	// Write-ahead: the record is durable before the signature exists. A failure to
-	// write it is logged, never fatal -- the in-memory record below still protects
-	// this process, the same policy as the lock snapshot -- but it is loud, because
-	// until the next successful write a restart is unprotected.
+	// Write-ahead: the record is durable before the signature exists. When it cannot
+	// be written nothing is signed and the in-memory record is left as it was, so
+	// the vote can be claimed again once the disk works. A vote that no durable
+	// record backs would be forgotten by a restart, and the restarted validator
+	// could then sign a different one in the same slot.
 	if err := writeSignState(e.signStatePath, next); err != nil {
-		slog.Error("SAFETY: could not persist the vote record; a restart before this height commits is not protected against signing a conflicting vote",
+		slog.Error("SAFETY: could not persist the vote record; the vote was not signed",
 			slog.String("event", "sign_state_write_failed"),
 			slog.Uint64("height", height),
 			slog.Int("round", round),
 			slog.String("error", boundedErrorText(err)))
+		return fmt.Errorf("%w: %s", errSignStateNotDurable, boundedErrorText(err))
 	}
 	e.signed = next
 	return nil
@@ -185,27 +220,40 @@ func (e *Engine) signedRoundFloor(height uint64) (int, bool) {
 	return e.signed.Round, true
 }
 
-// restoreSignState loads the durable record, if the engine has a path for one,
-// and keeps it only when it is for the height the engine is about to contest --
-// the same rule as the lock snapshot. A record for an earlier height describes a
-// height that has since committed and is stale. One for a later height cannot
-// come from this chain's own history; it is what a chain relaunched under the
-// same keys leaves behind, and trusting it would make the validator refuse every
-// vote until the new chain reached that height. Problems reading the record never
-// stop the engine: an unreadable record is reported loudly and treated as none.
+// restoreSignState loads the durable record, if the engine has a path for one, and
+// keeps it when it is for the height the engine is about to contest or a later
+// one. A record for an earlier height describes a height that has since committed
+// and is stale. One for a later height means the chain this process starts from is
+// behind what this validator already signed -- its database lost the newest blocks
+// -- so the record is what stops it voting again in heights the network may have
+// finished; the engine stays silent until block sync reaches the record's height.
+// (A chain relaunched under the same keys must not carry the old record over, see
+// docs/runbooks/migrations.md.) A record that is present but cannot be read does
+// not stop the engine from starting, but it stops it signing: see claimVote.
 func (e *Engine) restoreSignState() {
 	if e.signStatePath == "" {
 		return
 	}
 	st, err := readSignState(e.signStatePath)
 	if err != nil {
-		slog.Error("SAFETY: the vote record could not be read; this validator has no memory of what it signed before this start",
+		slog.Error("SAFETY: the vote record could not be read; this validator will not sign any vote until the file is repaired or moved aside and the node is restarted",
 			slog.String("event", "sign_state_read_failed"),
+			slog.String("path", e.signStatePath),
 			slog.String("error", boundedErrorText(err)))
+		e.signMu.Lock()
+		e.signBlocked = fmt.Errorf("%w (%s)", errSignStateUnreadable, e.signStatePath)
+		e.signMu.Unlock()
 		return
 	}
-	if st.empty() || st.Height != e.currentState.Height {
+	if st.empty() || st.Height < e.currentState.Height {
 		return
+	}
+	if st.Height > e.currentState.Height {
+		slog.Error("SAFETY: the vote record is for a height beyond the chain; this validator will not vote until its chain has reached that height",
+			slog.String("event", "sign_state_ahead_of_chain"),
+			slog.String("path", e.signStatePath),
+			slog.Uint64("record_height", st.Height),
+			slog.Uint64("chain_height", e.currentState.Height-1))
 	}
 	e.signMu.Lock()
 	e.signed = *st

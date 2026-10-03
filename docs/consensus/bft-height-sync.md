@@ -115,10 +115,15 @@ two files in the data directory (`bft.WithLockSnapshotPath`,
   already-committed height is never reapplied.
 - `<DataDir>/bft_sign_state.json`: the double-sign record, the last round this
   validator signed a vote in and the block hash it signed for each vote type
-  (`consensus/bft/sign_state.go`). It is written before a vote is signed. The
-  engine refuses to sign a different value for a vote type in a round it has
-  already voted in, and refuses to sign for an earlier round or height than the
-  last vote signed.
+  (`consensus/bft/sign_state.go`). It is written before a vote is signed, and a
+  vote whose record cannot be written is not signed. The engine refuses to sign a
+  different value for a vote type in a round it has already voted in, and refuses
+  to sign for an earlier round or height than the last vote signed. At
+  construction the record is restored when its height is the one the engine is
+  about to contest or a later one (a chain database that is behind the record
+  keeps the validator silent until block sync reaches it); only a record for a
+  height that has committed is dropped. A record that exists but cannot be read
+  stops the engine signing any vote until the file is repaired or moved aside.
 
 ## Tests
 

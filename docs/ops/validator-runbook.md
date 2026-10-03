@@ -189,6 +189,22 @@ flight. Nothing else is asked of the operator, but:
   guard doing its job. Note the height and round; a validator that logs it repeatedly is
   receiving conflicting proposals or is being run twice.
 - `SAFETY: could not persist the vote record` (event `sign_state_write_failed`) means the
-  disk refused the write. The validator keeps voting and is protected while it runs, but a
-  restart before the height commits is not: fix the disk first. A record that cannot be
-  read at start is logged as `sign_state_read_failed` and ignored.
+  disk refused the write. The vote that needed the record is not signed, so the validator
+  misses that vote; it tries again at its next vote and signs as soon as the disk accepts
+  the write. Fix the disk (space, permissions, mount) first.
+- `SAFETY: the vote record is for a height beyond the chain` (event
+  `sign_state_ahead_of_chain`) means the chain database is behind what this validator has
+  already signed, for example after a host crash that lost the newest blocks or after a
+  restore of an older snapshot. The validator signs nothing until block sync brings its
+  chain up to the height in the record, and then votes normally. Leave the file where it
+  is. If every validator is in this state at once, none of them has the missing blocks and
+  the chain waits until they come from a node that still has them. A chain that is
+  relaunched under the same keys must not keep the old record
+  ([migrations](../runbooks/migrations.md)): with it the validator would not vote until the
+  new chain passed the old height.
+- `SAFETY: the vote record could not be read` (event `sign_state_read_failed`) means the
+  file exists but is empty or damaged. The node starts and keeps syncing, but this validator
+  signs nothing, because the file is the only memory of what it voted. Restore the file
+  from a backup if there is one. Moving it aside and restarting makes the validator sign
+  again with no memory of its earlier votes, which is only safe once the network has
+  committed past every height this validator can have voted in.

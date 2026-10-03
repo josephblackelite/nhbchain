@@ -206,11 +206,10 @@ func TestSignStateRoundTripAndTolerance(t *testing.T) {
 	}
 }
 
-// The engine keeps the record of the height it is about to contest and drops any
-// other: an earlier height has committed, and a later one is what a relaunched
-// chain leaves behind (trusting it would make the validator refuse every vote
-// until the new chain reached that height). A record it cannot read never stops
-// it starting.
+// The engine keeps the record of the height it is about to contest, and of any
+// later one (the chain database is behind what the validator already signed), and
+// drops only a record for a height that has committed. A record it cannot read
+// never stops it starting, but it stops it signing.
 func TestNewEngineRestoresTheRecordOfTheHeightItContests(t *testing.T) {
 	tv := newTestValidators(t, 2)
 	newEngine := func(path string) *Engine {
@@ -226,8 +225,8 @@ func TestNewEngineRestoresTheRecordOfTheHeightItContests(t *testing.T) {
 		restored bool
 	}{
 		{"the height being contested", 6, true},
-		{"a later height (left behind by a relaunched chain)", 196000, false},
-		{"the next height", 7, false},
+		{"a much later height (the chain database is far behind the record)", 196000, true},
+		{"the next height", 7, true},
 		{"a height already passed", 5, false},
 		{"a much older height", 1, false},
 	} {
@@ -295,21 +294,198 @@ func TestStartNewRoundSkipsRoundsAlreadySignedIn(t *testing.T) {
 	}
 }
 
-// A record that cannot be written is reported loudly but never stops the vote:
-// the in-memory record still protects the running process.
-func TestAFailedRecordWriteStillGuardsTheProcess(t *testing.T) {
-	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+// A vote whose record cannot be written is not signed: a signature that no
+// durable record backs is what a restart would forget. Nothing is remembered in
+// memory either, so the vote can be claimed again when the disk works, and the
+// callers treat the failure as an attempt to retry rather than a conflict.
+func TestAVoteIsNotSignedWhenItsRecordCannotBeWritten(t *testing.T) {
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-directory")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	engine, _ := newGuardEngine(t, WithSignStatePath(filepath.Join(blocker, "bft_sign_state.json")))
+	path := filepath.Join(blocker, "bft_sign_state.json")
+	tv := newTestValidators(t, 2)
+	engine, _, br := newVoter(t, tv, WithSignStatePath(path))
 	hashA, hashB := sha256Sum([]byte("a")), sha256Sum([]byte("b"))
 
-	if err := engine.claimVote(Prevote, hashA, 1, 1); err != nil {
-		t.Fatalf("a record that cannot be written must not stop the vote: %v", err)
+	err := engine.claimVote(Prevote, hashA, 1, 1)
+	if !errors.Is(err, errSignStateNotDurable) || errors.Is(err, errConflictingVote) {
+		t.Fatalf("a vote whose record cannot be written must be refused as such, got %v", err)
 	}
-	if err := engine.claimVote(Prevote, hashB, 1, 1); !errors.Is(err, errConflictingVote) {
-		t.Fatalf("the process must still refuse a conflicting vote, got %v", err)
+	if !engine.signed.empty() {
+		t.Fatalf("a refused claim must leave no record in memory: %+v", engine.signed)
+	}
+	if vote, err := engine.createVote(Prevote, hashA, 1, 1); vote != nil || err == nil {
+		t.Fatalf("no vote may be signed without its record, got %+v, %v", vote, err)
+	}
+
+	// Through the engine: nothing reaches the wire, and the round may try again.
+	block := candidateBlock(1, 1, tv.addrs[1], 0x01)
+	engine.mu.Lock()
+	engine.currentState = State{Height: 1, Round: 1}
+	engine.mu.Unlock()
+	engine.acceptProposal(&SignedProposal{Proposal: &Proposal{Block: block, Round: 1, ValidRound: -1}, Proposer: tv.addrs[1]})
+	engine.prevote()
+	if votes := br.votes(tv.addrs[0]); len(votes) != 0 {
+		t.Fatalf("a vote was broadcast although its record could not be written: %s", describeVotes(votes))
+	}
+	engine.mu.RLock()
+	sent := engine.prevoteSent
+	engine.mu.RUnlock()
+	if sent {
+		t.Fatalf("a failed attempt must leave the prevote open to a retry")
+	}
+
+	// The disk recovers: the same slot can now be filled, with any value, because
+	// nothing was ever signed in it; and from then on the slot is held.
+	if err := os.Remove(blocker); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.claimVote(Prevote, hashB, 1, 1); err != nil {
+		t.Fatalf("once the record can be written the vote may be signed: %v", err)
+	}
+	if err := engine.claimVote(Prevote, hashA, 1, 1); !errors.Is(err, errConflictingVote) {
+		t.Fatalf("the slot must now be held, got %v", err)
+	}
+	if st, err := readSignState(path); err != nil || st == nil || st.Prevote == nil || !bytes.Equal(st.Prevote.BlockHash, hashB) {
+		t.Fatalf("the record must hold the vote that was signed: %+v, %v", st, err)
+	}
+}
+
+// The chain database is not synced after every block, so after a host crash it can
+// be behind a record that did reach the disk. The restarted validator must not
+// vote in the heights the record covers, and must not drop the record because the
+// chain is behind it: a different vote for a slot it already signed in is a
+// slashable pair, and those heights may have been finished by the network.
+func TestARecordAheadOfTheChainStillHoldsTheValidatorBack(t *testing.T) {
+	const (
+		recordHeight = 10
+		votedRound   = 1
+		missing      = 3 // blocks the chain database lost
+	)
+	path := filepath.Join(t.TempDir(), "bft_sign_state.json")
+	tv := newTestValidators(t, 2)
+	blockX := candidateBlock(recordHeight, votedRound, tv.addrs[1], 0x01)
+	blockY := candidateBlock(recordHeight, votedRound, tv.addrs[1], 0x02)
+	hashX, hashY := headerHash(t, blockX), headerHash(t, blockY)
+
+	// Before the crash: the chain is at height 9 and the validator prevotes X at
+	// height 10, round 1.
+	nodeBefore := &signGuardNode{validatorSet: tv.set, self: tv.addrs[0], height: recordHeight - 1}
+	before := NewEngine(nodeBefore, tv.keys[0], &captureBroadcaster{}, WithSignStatePath(path))
+	first, err := before.createVote(Prevote, hashX, votedRound, recordHeight)
+	if err != nil || first == nil {
+		t.Fatalf("the first vote: %v", err)
+	}
+
+	// After it: the record is on disk, the chain database is three blocks short.
+	nodeAfter := &signGuardNode{validatorSet: tv.set, self: tv.addrs[0], height: recordHeight - 1 - missing}
+	br := &captureBroadcaster{}
+	restarted := NewEngine(nodeAfter, tv.keys[0], br, WithSignStatePath(path))
+	if restarted.signed.empty() || restarted.signed.Height != recordHeight || restarted.signed.Round != votedRound {
+		t.Fatalf("the record ahead of the chain must be kept, the engine holds %+v", restarted.signed)
+	}
+
+	// While the chain is behind the record nothing is signed, at any round of the
+	// heights it has yet to reach.
+	for _, height := range []uint64{recordHeight - missing, recordHeight - 1} {
+		for _, round := range []int{0, 1, 5} {
+			if vote, err := restarted.createVote(Prevote, hashY, round, height); vote != nil || !errors.Is(err, errConflictingVote) {
+				t.Fatalf("a validator behind its own record signed for height %d round %d: %+v, %v", height, round, vote, err)
+			}
+		}
+	}
+
+	// The chain catches up (block sync) and the engine moves to the height of the
+	// record: the slot it already signed in is still held ...
+	nodeAfter.mu.Lock()
+	nodeAfter.height = recordHeight - 1
+	nodeAfter.mu.Unlock()
+	restarted.startNewRound()
+	restarted.mu.RLock()
+	height, round := restarted.currentState.Height, restarted.currentState.Round
+	restarted.mu.RUnlock()
+	if height != recordHeight {
+		t.Fatalf("the engine must be at height %d after the chain caught up, it is at %d", recordHeight, height)
+	}
+	if vote, err := restarted.createVote(Prevote, hashY, votedRound, recordHeight); vote != nil || !errors.Is(err, errConflictingVote) {
+		t.Fatalf("a different vote for the slot of the record was signed: %+v, %v", vote, err)
+	}
+	// ... the engine has gone straight to the first round after it ...
+	if round <= votedRound {
+		t.Fatalf("the engine must start a round after the one it signed in, it is in round %d", round)
+	}
+	// ... and there it votes normally: the record holds the validator back only
+	// until the chain reaches it.
+	later, err := restarted.createVote(Prevote, hashY, round, recordHeight)
+	if err != nil || later == nil {
+		t.Fatalf("once the chain has reached the record the validator must vote again: %v", err)
+	}
+	requireNoSlashableProof(t, []*SignedVote{first, later}, tv.addrs[0])
+	if votes := br.votes(tv.addrs[0]); len(votes) != 0 {
+		t.Fatalf("nothing was meant to be broadcast: %s", describeVotes(votes))
+	}
+}
+
+// A record that is present but cannot be read says nothing about what the
+// validator signed. It must not be taken for no record: the engine starts but
+// signs nothing, however the file came to be unreadable, until the operator
+// repairs it or moves it aside on purpose.
+func TestAnUnreadableRecordStopsTheValidatorSigning(t *testing.T) {
+	tv := newTestValidators(t, 2)
+	hash := sha256Sum([]byte("a"))
+	for _, tc := range []struct {
+		name    string
+		content []byte
+	}{
+		{"an empty file", []byte{}},
+		{"a truncated record", []byte(`{"height":1,"round":2,"prevote":{"blockHa`)},
+		{"garbage", []byte("garbage")},
+	} {
+		path := filepath.Join(t.TempDir(), "bft_sign_state.json")
+		if err := os.WriteFile(path, tc.content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		engine, _, br := newVoter(t, tv, WithSignStatePath(path))
+		if engine == nil {
+			t.Fatalf("%s: an unreadable record must not stop the engine from starting", tc.name)
+		}
+
+		if vote, err := engine.createVote(Prevote, hash, 1, 1); vote != nil || !errors.Is(err, errSignStateUnreadable) {
+			t.Fatalf("%s: nothing may be signed on an unreadable record, got %+v, %v", tc.name, vote, err)
+		}
+		if vote, err := engine.createVote(Precommit, nil, 3, 4); vote != nil || !errors.Is(err, errSignStateUnreadable) {
+			t.Fatalf("%s: nothing may be signed at any other slot either, got %+v, %v", tc.name, vote, err)
+		}
+		block := candidateBlock(1, 1, tv.addrs[1], 0x01)
+		engine.mu.Lock()
+		engine.currentState = State{Height: 1, Round: 1}
+		engine.mu.Unlock()
+		engine.acceptProposal(&SignedProposal{Proposal: &Proposal{Block: block, Round: 1, ValidRound: -1}, Proposer: tv.addrs[1]})
+		engine.prevote()
+		if votes := br.votes(tv.addrs[0]); len(votes) != 0 {
+			t.Fatalf("%s: a vote was broadcast on an unreadable record: %s", tc.name, describeVotes(votes))
+		}
+		// The file is left as it was, for the operator to look at.
+		if raw, err := os.ReadFile(path); err != nil || !bytes.Equal(raw, tc.content) {
+			t.Fatalf("%s: the unreadable record must not be overwritten: %q, %v", tc.name, raw, err)
+		}
+
+		// Moved aside on purpose, and the node restarted: the validator signs again.
+		if err := os.Rename(path, path+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		restarted, _, _ := newVoter(t, tv, WithSignStatePath(path))
+		if vote, err := restarted.createVote(Prevote, hash, 1, 1); err != nil || vote == nil {
+			t.Fatalf("%s: with the record moved aside the validator must sign again: %v", tc.name, err)
+		}
+	}
+
+	// No file at all is a validator that has not signed anything: it signs.
+	fresh, _, _ := newVoter(t, tv, WithSignStatePath(filepath.Join(t.TempDir(), "bft_sign_state.json")))
+	if vote, err := fresh.createVote(Prevote, hash, 1, 1); err != nil || vote == nil {
+		t.Fatalf("a missing record is no record, the validator must sign: %v", err)
 	}
 }
 

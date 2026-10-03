@@ -102,7 +102,8 @@ Enforced in `consensus/bft/bft.go` and `consensus/bft/round_sync.go`:
 6. **No conflicting vote.** The one function that signs a vote (`createVote`)
    refuses to sign a different value for a vote type in the (height, round) of the
    last vote it signed, and refuses an earlier round or height. The record is
-   written to `<DataDir>/bft_sign_state.json` before the vote is signed
+   written to `<DataDir>/bft_sign_state.json` before the vote is signed, and a
+   vote whose record cannot be written is not signed
    (`consensus/bft/sign_state.go`).
 
 ## Validator set
