@@ -26,7 +26,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-const rateLimitTestMethod = "nhb_testMethod"
+// rateLimitTestMethod is a method the server serves, because the limiter keeps
+// a bucket and a metric label of its own only for those (see limiterRouteFor).
+const rateLimitTestMethod = "nhb_getBalance"
 
 func injectClientIP(t *testing.T, srv *Server, req *http.Request) *http.Request {
 	t.Helper()

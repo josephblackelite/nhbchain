@@ -1650,7 +1650,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	moduleName, methodName := moduleAndMethod(req.Method)
+	moduleName, methodName := metricModuleAndMethod(req.Method)
 	recorder := &rpcResponseRecorder{ResponseWriter: w, status: http.StatusOK}
 	start := time.Now()
 	defer func() {
@@ -3052,8 +3052,15 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 	trimmedIdentity := strings.ToLower(strings.TrimSpace(identity))
 	trimmedChain := strings.TrimSpace(chainNonce)
 	trimmedMethod := strings.TrimSpace(method)
-	moduleName, _ := moduleAndMethod(trimmedMethod)
-	methodKey := strings.ReplaceAll(trimmedMethod, "|", "_")
+	// A name the server does not serve must not get a limiter entry or a metric
+	// label of its own (see limiterRouteFor).
+	route := s.limiterRouteFor(trimmedMethod)
+	moduleName, _ := moduleAndMethod(route)
+	routeLabel := route
+	if route == unknownLimiterRoute {
+		moduleName, routeLabel = unknownRPCLabel, unknownRPCLabel
+	}
+	methodKey := strings.ReplaceAll(route, "|", "_")
 	if methodKey == "" {
 		methodKey = limiterMethodWildcard
 	}
@@ -3127,7 +3134,7 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 			limiter.lastSeen = now
 			retryAfter := rateLimiterRetryAfter(limiter.limiter, now)
 			s.mu.Unlock()
-			observability.RPC().RecordLimiterHit(descriptor.scope, moduleName, trimmedMethod)
+			observability.RPC().RecordLimiterHit(descriptor.scope, moduleName, routeLabel)
 			return false, retryAfter
 		}
 		reservations[i] = reservation{limiter: limiter, limit: limit}
