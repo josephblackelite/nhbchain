@@ -205,6 +205,10 @@ cap is 30 minutes.
 `MaxPeers`, `MaxInbound`, `MaxOutbound` are also enforced when a peer registers.
 Values in the repo `config.toml` `[p2p]` section: `MaxPeers = 64`,
 `MaxInbound = 60`, `MaxOutbound = 30`, `MinPeers = 12`, `OutboundPeers = 16`.
+Some of each limit is kept back for the configured bootnodes and persistent
+peers, so that other peers cannot fill every slot: other peers are held to the
+limits less one slot per configured address, at most a quarter of the smallest
+limit (see [operations](../p2p/operations.md#bootnodes-and-persistent-peers)).
 When a value is unset, `MaxPeers` defaults to 64, `MaxInbound` and `MaxOutbound`
 to `MaxPeers`, `MinPeers` to half of `MaxPeers`, and `OutboundPeers` to
 `MaxOutbound` (`config/config.go` `Load`, `p2p/server.go` `NewServer`).

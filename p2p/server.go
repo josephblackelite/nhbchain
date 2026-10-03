@@ -51,7 +51,9 @@ const (
 // bound. They are node-local resource policies, not protocol rules. Inbound
 // connections from loopback, from a host that is not an IP address and from the
 // address of a configured persistent peer or bootnode are exempt from the
-// per-address ones.
+// per-address ones. A per-address limit counts an IPv4 address on its own and an
+// IPv6 address as the /64 network it belongs to (see addrGroup). Slots are also
+// kept back for the configured peers (see registerPeer).
 const (
 	// An address may open handshakeAttemptBurst inbound connections back to back
 	// and then one every 1/handshakeAttemptRate seconds; it may have
@@ -255,6 +257,10 @@ type Server struct {
 	maxInboundPerIP      int
 	maxPendingHandshakes int
 	trustedHosts         map[string]struct{}
+
+	// persistentReserve is the number of connection slots kept back for the
+	// configured bootnodes and persistent peers; see registerPeer.
+	persistentReserve int
 
 	// Budgets for the requests that make this node read and send chain data.
 	getBlocksLimiter *ipRateLimiter
@@ -702,6 +708,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 			server.trustedHosts[net.ParseIP(host).String()] = struct{}{}
 		}
 	}
+	server.persistentReserve = persistentReserveFor(cfg, len(server.persistent))
 	server.getBlocksLimiter = newIPRateLimiter(getBlocksRatePerIP, getBlocksBurstPerIP, WithIPRateLimiterMaxEntries(requestLimiterEntries))
 	server.getBlocksShared = newTokenBucket(getBlocksRateShared, getBlocksBurstShared)
 	server.getStatusLimiter = newIPRateLimiter(getStatusRatePerIP, getStatusBurstPerIP, WithIPRateLimiterMaxEntries(requestLimiterEntries))
@@ -764,7 +771,8 @@ func (s *Server) Start() error {
 		slog.Uint64("chain_id", s.cfg.ChainID),
 		slog.String("genesis", summarizeHash(s.genesis)),
 		logging.MaskField("node_id", s.nodeID),
-		slog.String("client_version", s.cfg.ClientVersion))
+		slog.String("client_version", s.cfg.ClientVersion),
+		slog.Int("reserved_peer_slots", s.persistentReserve))
 	s.addListenAddress(ln.Addr().String())
 
 	s.startConnManager()
@@ -862,6 +870,33 @@ func remoteHost(addr string) string {
 	return addr
 }
 
+// addrGroup is the key the per-address limits count by: an IPv4 address on its
+// own (an IPv4-mapped IPv6 address as the IPv4 address it stands for) and an
+// IPv6 address as its /64 network, because a single host or subscriber is
+// normally given a whole /64 and so has as many addresses to connect from as it
+// likes. A host that is not an IP address is its own group.
+func addrGroup(host string) string {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String()
+}
+
+// isTrustedHost reports whether host is, exactly, the IP address of a configured
+// persistent peer or bootnode.
+func (s *Server) isTrustedHost(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	_, trusted := s.trustedHosts[ip.String()]
+	return trusted
+}
+
 // exemptFromAddressLimits reports whether connections from this host are not
 // subject to the per-address inbound limits: loopback, hosts that are not IP
 // addresses, and the addresses of configured persistent peers and bootnodes.
@@ -901,7 +936,8 @@ func (s *Server) admitInbound(conn net.Conn) (func(), bool) {
 		host = remoteHost(addr.String())
 	}
 	limited := !s.exemptFromAddressLimits(host)
-	if limited && !s.handshakeLimiter.allow(host, s.currentTime()) {
+	group := addrGroup(host)
+	if limited && !s.handshakeLimiter.allow(group, s.currentTime()) {
 		return nil, false
 	}
 	s.inboundMu.Lock()
@@ -911,7 +947,7 @@ func (s *Server) admitInbound(conn net.Conn) (func(), bool) {
 	if limited && s.maxPendingHandshakes > 0 && s.pendingHandshakes >= s.maxPendingHandshakes {
 		return nil, false
 	}
-	if limited && s.maxPendingPerIP > 0 && s.pendingByIP[host] >= s.maxPendingPerIP {
+	if limited && s.maxPendingPerIP > 0 && s.pendingByIP[group] >= s.maxPendingPerIP {
 		return nil, false
 	}
 	s.pendingHandshakes++
@@ -919,17 +955,17 @@ func (s *Server) admitInbound(conn net.Conn) (func(), bool) {
 		if s.pendingByIP == nil {
 			s.pendingByIP = make(map[string]int)
 		}
-		s.pendingByIP[host]++
+		s.pendingByIP[group]++
 	}
 	return func() {
 		s.inboundMu.Lock()
 		defer s.inboundMu.Unlock()
 		s.pendingHandshakes--
 		if limited {
-			if s.pendingByIP[host] <= 1 {
-				delete(s.pendingByIP, host)
+			if s.pendingByIP[group] <= 1 {
+				delete(s.pendingByIP, group)
 			} else {
-				s.pendingByIP[host]--
+				s.pendingByIP[group]--
 			}
 		}
 	}, true
@@ -960,7 +996,7 @@ func (s *Server) admitRequest(peer *Peer, msg *Message) bool {
 		return true
 	}
 	now := time.Now()
-	if !perIP.allow(remoteHost(peer.remoteAddr), now) {
+	if !perIP.allow(addrGroup(remoteHost(peer.remoteAddr)), now) {
 		if s.allowLog("request_over_budget", inboundLogInterval) {
 			s.log().Warn("Dropping chain data requests from a peer over its budget",
 				logging.MaskField("peer_id", peer.id),
@@ -1179,6 +1215,37 @@ func (s *Server) updatePeerRecordScore(id string, score int) {
 	s.mu.Unlock()
 }
 
+// persistentReserveFor returns how many connection slots to keep back for the
+// configured bootnodes and persistent peers: one for each configured address,
+// and at most a quarter of the smallest of MaxPeers, MaxInbound and MaxOutbound,
+// so that the reserve leaves most of every limit to everybody else.
+func persistentReserveFor(cfg ServerConfig, configured int) int {
+	limit := cfg.MaxPeers
+	if cfg.MaxInbound < limit {
+		limit = cfg.MaxInbound
+	}
+	if cfg.MaxOutbound < limit {
+		limit = cfg.MaxOutbound
+	}
+	limit /= 4
+	if configured < limit {
+		return configured
+	}
+	return limit
+}
+
+// reserveEligible reports whether a peer may take one of the slots kept back for
+// configured peers: it is recognised as one by node ID, or the inbound
+// connection really comes from the address of a configured peer. The address is
+// that of the connection itself, not any address the peer reports for itself, so
+// a peer cannot claim eligibility by naming an address in its handshake. The
+// address matters because the node IDs of configured peers are learned only
+// after this node has connected to them, which a restarted node may not have
+// been able to do yet.
+func (s *Server) reserveEligible(peer *Peer) bool {
+	return peer.persistent || (peer.inbound && s.isTrustedHost(remoteHost(peer.remoteAddr)))
+}
+
 func (s *Server) registerPeer(peer *Peer) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1189,31 +1256,61 @@ func (s *Server) registerPeer(peer *Peer) error {
 	if banned, until := s.reputation.BanInfo(peer.id, s.now()); banned {
 		return fmt.Errorf("peer %s banned until %s", peer.id, until.Format(time.RFC3339))
 	}
-	if len(s.peers) >= s.cfg.MaxPeers {
-		return fmt.Errorf("maximum peers reached")
-	}
-	if peer.inbound {
-		if s.inboundCount >= s.cfg.MaxInbound {
-			return fmt.Errorf("maximum inbound peers reached")
-		}
-		if s.maxInboundPerIP > 0 && !peer.persistent {
-			if host := remoteHost(peer.remoteAddr); !s.exemptFromAddressLimits(host) {
-				sameHost := 0
-				for _, other := range s.peers {
-					if other.inbound && remoteHost(other.remoteAddr) == host {
-						sameHost++
-					}
-				}
-				if sameHost >= s.maxInboundPerIP {
-					return fmt.Errorf("maximum inbound peers per address reached")
-				}
+	// persistentReserve of the slots are kept back for the configured peers, so
+	// that hosts which hold the rest of them cannot keep those peers out. A peer
+	// takes a reserved slot when it is one of them, by node ID or, for an inbound
+	// connection, by the address the connection really comes from, and fewer than
+	// persistentReserve reserved slots are held. Reserved slots are not counted
+	// against MaxPeers, MaxInbound or MaxOutbound, and every other peer is held to
+	// those limits less the reserve, so that none of the limits is ever exceeded.
+	reserved := false
+	others, othersInbound, othersOutbound := len(s.peers), s.inboundCount, s.outboundCount
+	if s.persistentReserve > 0 {
+		held := 0
+		for _, other := range s.peers {
+			if !other.reserved {
+				continue
+			}
+			held++
+			others--
+			if other.inbound {
+				othersInbound--
+			} else {
+				othersOutbound--
 			}
 		}
-		s.inboundCount++
-	} else {
-		if s.outboundCount >= s.cfg.MaxOutbound {
+		reserved = held < s.persistentReserve && s.reserveEligible(peer)
+	}
+	if !reserved {
+		if others >= s.cfg.MaxPeers-s.persistentReserve {
+			return fmt.Errorf("maximum peers reached")
+		}
+		if peer.inbound {
+			if othersInbound >= s.cfg.MaxInbound-s.persistentReserve {
+				return fmt.Errorf("maximum inbound peers reached")
+			}
+			if s.maxInboundPerIP > 0 && !peer.persistent {
+				if host := remoteHost(peer.remoteAddr); !s.exemptFromAddressLimits(host) {
+					group := addrGroup(host)
+					sameGroup := 0
+					for _, other := range s.peers {
+						if other.inbound && addrGroup(remoteHost(other.remoteAddr)) == group {
+							sameGroup++
+						}
+					}
+					if sameGroup >= s.maxInboundPerIP {
+						return fmt.Errorf("maximum inbound peers per address reached")
+					}
+				}
+			}
+		} else if othersOutbound >= s.cfg.MaxOutbound-s.persistentReserve {
 			return fmt.Errorf("maximum outbound peers reached")
 		}
+	}
+	peer.reserved = reserved
+	if peer.inbound {
+		s.inboundCount++
+	} else {
 		s.outboundCount++
 	}
 	s.peers[peer.id] = peer
@@ -1384,7 +1481,7 @@ func (s *Server) allowIP(remote string, now time.Time) bool {
 	if h, _, err := net.SplitHostPort(remote); err == nil {
 		host = h
 	}
-	return s.ipLimiter == nil || s.ipLimiter.allow(host, now)
+	return s.ipLimiter == nil || s.ipLimiter.allow(addrGroup(host), now)
 }
 
 func (s *Server) updatePeerGreylist(id string, grey bool) {

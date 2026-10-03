@@ -31,6 +31,11 @@ type Peer struct {
 	persistent    bool
 	clientVersion string
 
+	// reserved is set by registerPeer, under the server lock and before the
+	// peer is visible to anything else, when the peer holds one of the slots kept
+	// back for configured peers. It is never changed afterwards.
+	reserved bool
+
 	limiter   *tokenBucket
 	baseRate  float64
 	baseBurst float64

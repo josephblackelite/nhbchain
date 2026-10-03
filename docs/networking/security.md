@@ -73,7 +73,9 @@ one every 6 seconds, at most 4 handshakes in flight and, at registration, at mos
 may be in flight. Connections from loopback, from a host that is not an IP
 address and from the address of a configured bootnode or persistent peer are
 exempt from the per-address limits, and are never refused a handshake slot on
-account of others. A refused connection is closed, and a warning
+account of others. The per-address limits (including the request and message
+budgets) count an IPv4 address on its own and an IPv6 address as its /64 network.
+A refused connection is closed, and a warning
 `Inbound connection refused: too many connections or handshakes` is logged at
 most once a second. Nothing is recorded about a peer before it has been
 registered.

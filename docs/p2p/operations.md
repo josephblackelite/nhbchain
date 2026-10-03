@@ -14,6 +14,16 @@ Day-to-day notes for running a P2P node. Settings are in the `[p2p]` section of
   the per-address inbound limits and the chain-data request budgets, and from
   connection-manager pruning, and not banned for score or on handshake evidence
   (an operator can still ban them with `net_ban`).
+- Connection slots are kept back for them: one slot for each configured address,
+  at most a quarter of the smallest of `MaxPeers`, `MaxInbound` and `MaxOutbound`.
+  Other peers are held to those limits less the reserve, so they cannot fill every
+  slot and keep a configured peer out; the limits themselves are never exceeded.
+  A peer takes a reserved slot when its node ID is recognised as a configured
+  peer's, or, for an inbound connection, when the address the connection really
+  comes from is the address of a configured peer (the addresses a peer reports in
+  its handshake do not count). With both lists empty nothing is reserved, so set
+  `PersistentPeers` on a validator to its fellow validators. The reserve is shown
+  as `reserved_peer_slots` in the `P2P server listening` log line.
 
 ## Firewalls and NAT
 

@@ -9,9 +9,10 @@ is decoded. Buckets refill continuously from the wall clock
 Checked in this order for each frame, one token per frame (Ping and Pong frames
 count):
 
-1. **Per-IP bucket.** One bucket per remote host (the IP part of the connection's
-   remote address), with the same rate and burst as the per-peer bucket. Buckets
-   idle for 15 minutes are evicted.
+1. **Per-IP bucket.** One bucket per remote IPv4 address or IPv6 /64 network (the
+   IP part of the connection's remote address, an IPv6 address cut to its first 64
+   bits), with the same rate and burst as the per-peer bucket. Buckets idle for 15
+   minutes are evicted.
 2. **Per-peer bucket.** Rate `RateMsgsPerSec` tokens per second, capacity
    `Burst` (raised to the rate if `Burst` is lower; every bucket's capacity is at
    least its rate). A greylisted peer's bucket is set to 25% of both rate and burst until
