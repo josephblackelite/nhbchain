@@ -19,7 +19,11 @@ ONBOARDING_EMAIL_ENDPOINT_DEFAULT='https://nhbcoin.com/api/v1/validators/onboard
 # as a real bug: "dial tcp: address enode://...: too many colons in
 # address" -- the node never dialed its bootnode at all.
 BOOTNODE_DEFAULT='52.1.96.250:6001'
-NETWORK_ID_DEFAULT='430060579445266314'
+NETWORK_ID_DEFAULT='18346390202490284624'
+# The live network's genesis file. Its hash is the chain id, so the copy this
+# script runs from must match byte for byte (the node then reports NETWORK_ID_DEFAULT).
+GENESIS_FILE_REL='config/genesis.relaunch.json'
+GENESIS_SHA256='10932798a0058ae35b135dae1a6ee1bdf6a8bc528a55c1eeb3e9eaab534f4b3b'
 LISTEN_ADDR_DEFAULT='0.0.0.0:6001'
 RPC_ADDR_DEFAULT='127.0.0.1:8545'
 
@@ -54,7 +58,9 @@ Options:
                            be sent).
   --bootnode <host:port>   Bootnode address to join (plain host:port, not
                            an enode:// URI). Default: NHBCoin mainnet bootnode.
-  --network-id <id>        P2P network ID. Default: 430060579445266314
+  --network-id <id>        P2P network ID. Default: 18346390202490284624 (the live
+                           network). The node must report this chain id once it
+                           starts, or this script stops with an error.
   --listen-addr <addr>     P2P listen address. Default: 0.0.0.0:6001
   --rpc-addr <addr>        Local RPC listen address. Default: 127.0.0.1:8545
   --external-address <ip>  This node's own publicly-dialable IP (the address
@@ -239,6 +245,15 @@ sudo chmod 700 "${CONFIG_DIR}"
 
 sudo rsync -a --delete "${REPO_ROOT}/" "${INSTALL_ROOT}/"
 
+# A node started from a modified or different genesis file writes it into its
+# database and can never peer with the live network, so stop before anything
+# starts if the file differs from the one the live network was started from.
+if ! echo "${GENESIS_SHA256}  ${INSTALL_ROOT}/${GENESIS_FILE_REL}" | sha256sum -c --status; then
+  echo "[ERROR] ${INSTALL_ROOT}/${GENESIS_FILE_REL} is not the live network's genesis file" >&2
+  echo "        (expected sha256 ${GENESIS_SHA256}). Restore it from the repository." >&2
+  exit 1
+fi
+
 echo "[INFO] building NHB validator binaries"
 cd "${INSTALL_ROOT}"
 # Go's module cache for this dependency tree (go-ethereum, protobuf, sqlite,
@@ -346,6 +361,7 @@ sudo cp "${REPO_ROOT}/config.toml" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ListenAddress = \".*\"#ListenAddress = \"${LISTEN_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^RPCAddress = \".*\"#RPCAddress = \"${RPC_ADDR}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^DataDir = \".*\"#DataDir = \"${STATE_DIR}/nhb-data\"#;" "${CONFIG_DIR}/config.toml"
+sudo perl -0pi -e "s#(?m)^GenesisFile = \".*\"#GenesisFile = \"${INSTALL_ROOT}/${GENESIS_FILE_REL}\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ValidatorKeystorePath = \".*\"#ValidatorKeystorePath = \"\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^ValidatorKMSEnv = \".*\"#ValidatorKMSEnv = \"NHB_VALIDATOR_RAW_KEY\"#;" "${CONFIG_DIR}/config.toml"
 sudo perl -0pi -e "s#(?m)^NetworkName = \".*\"#NetworkName = \"nhb-mainnet-validator\"#;" "${CONFIG_DIR}/config.toml"
@@ -500,12 +516,45 @@ submit_validator_steps() {
     return 1
   fi
 }
+# The chain id the running node announced when its P2P server started. The node logs it on every start, whether its state is fresh or not.
+node_chain_id() {
+  sudo journalctl -u nhb.service --no-pager -o cat --since "10 minutes ago" 2>/dev/null \
+    | grep 'P2P server listening' | tail -1 | grep -o '"chain_id":[0-9]*' | cut -d: -f2 || true
+}
+
+# Stops, with the reason, unless the node is on the live network's chain. The node may still be finishing its own startup, so look a few times.
+verify_chain_identity() {
+  local seen="" attempt
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    seen=$(node_chain_id)
+    if [[ -n "${seen}" ]]; then
+      break
+    fi
+    sleep "${CHAIN_ID_RETRY_DELAY:-2}"
+  done
+  if [[ "${seen}" != "${NETWORK_ID}" ]]; then
+    echo
+    echo "=================================================================="
+    echo "[ERROR] this node reports chain id '${seen:-unknown}', expected ${NETWORK_ID}."
+    echo "It was not started from the live network's genesis, so it cannot join that network."
+    echo "  Genesis file: ${INSTALL_ROOT}/${GENESIS_FILE_REL}"
+    echo "  If this host holds state from another chain, run this script again with --reset-state."
+    echo "=================================================================="
+    return 1
+  fi
+  echo "[INFO] node reports chain id ${seen}"
+}
 # --- end validator CLI helpers ---
 
 if ! RPC_TOKEN=$(mint_rpc_token); then
   echo "[ERROR] could not create an RPC token for the local node" >&2
   exit 1
 fi
+
+# A node started from any other genesis has a different chain id and can never peer with the live network, so confirm the identity the
+# running node announced before registering anything.
+verify_chain_identity || exit 1
+
 submit_validator_steps || exit 1
 
 if [[ -n "${OPERATOR_EMAIL}" ]]; then

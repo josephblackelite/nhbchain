@@ -126,7 +126,7 @@ You need a server that runs 24/7. Rent a basic VPS (Virtual Private Server).
 - **Recommended Size:** 2 vCPUs, 4GB RAM (e.g., AWS `t3.medium` or a $10 DigitalOcean droplet).
 - **Crucial Security Step:** In your server provider's firewall settings (AWS Security Groups), you must open the following ports to the public (`0.0.0.0/0`):
   - `22` (TCP) - For your SSH access
-  - `6001` (TCP/UDP) - For the blockchain P2P network
+  - `6001` (TCP) - For the blockchain P2P network (the node listens on TCP only; no UDP port is used)
   - `8545` (TCP) - (Optional) If you want to accept RPC requests like MetaMask
 
 ### Step 2: Connect to your Server
@@ -236,7 +236,7 @@ The entire NHBCoin blockchain engine is written in cross-platform Go. If you are
 If you are setting up a frontend application, a Web3 wallet (like MetaMask), or configuring your Node manually, here are the official Mainnet parameters:
 
 - **Network Name:** NHBCoin Mainnet
-- **Network ID:** `430060579445266314` *(P2P handshake identifier for the live mainnet deployment, effective from the Phase E genesis relaunch on 2026-08-06 -- genesis-hash-derived, not a chosen number. Nodes advertising a different value will not be able to peer with mainnet validators. Verify against the live node's `net_info`/`p2p_info` RPC result if this ever looks stale. The prior GTM 2026 genesis (10698789873712925303) was abandoned after a real consensus bug was found: no second validator could ever sync it -- see config/genesis.phase-e.json and core/mint.go's MintChainID comment for the full story. Account balances were snapshotted forward into the new genesis, nobody lost funds.)*
+- **Network ID:** `18346390202490284624` *(P2P handshake identifier of the live mainnet: the first 8 bytes of the genesis block hash that `config/genesis.relaunch.json` produces, not a chosen number. A node whose genesis derives a different value is refused at the handshake with "chain ID mismatch", so keep `GenesisFile` in `config.toml` pointing at that file. Earlier genesis ids are retired and cannot peer: Phase E `430060579445266314` (config/genesis.phase-e.json) and GTM 2026 `10698789873712925303`. Verify against the live node's `net_info`/`p2p_info` RPC result (operator credential) if this ever looks stale. See core/mint.go's MintChainID comment for the history of the earlier relaunches.)*
 - **Transaction Signing Chain ID:** `0x4e4842` *(ASCII `NHB`; this is the value wallet and SDK transaction payloads must sign against when using `nhb_sendTransaction`.)*
 - **Public RPC Endpoint:** `https://api.nhbcoin.com`
 - **Currency Symbol:** `NHB`

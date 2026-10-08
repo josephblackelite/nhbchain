@@ -24,31 +24,29 @@ Do these four things *before* you run anything:
    stuck on a small box.
 2. **Firewall / security group**, opened *before* you start:
    - `22/tcp` — SSH, your own access.
-   - `6001` **TCP and UDP** — P2P. Both protocols are required; UDP is the
-     one people forget.
+   - `6001` **TCP** — P2P. The node listens on TCP only, so no UDP rule is
+     needed (an extra UDP rule is harmless).
    - `8545/tcp` is **optional**. The bootstrap script binds RPC to
      `127.0.0.1` by default (not externally reachable). Only open this if
      you deliberately want direct external RPC/MetaMask access — leaving it
      internal-only is the safer default.
-3. **At least `10,000 ZNHB` ready to send to this validator's OWN node
-   address** once you know it (printed at the end of Step 1). Validator
-   eligibility is now based on this validator's own self-stake only --
-   ZNHB delegated in from a separate wallet does **not** count toward
-   eligibility at all (see "Staking" under Step 2 below). You'll send the
-   ZNHB to the server's own address and self-stake it directly on the
-   server; this is *not* a portal delegation.
+3. **At least `10,000 ZNHB` of total stake on this validator's node
+   address**, which you can add once you know the address (printed at the
+   end of Step 1). Either route counts, and they add together: delegate
+   from any wallet (the portal's Validator Hub -> Delegate tab), or send
+   ZNHB to the server's own address and self-stake it on the server (see
+   "Staking" under Step 2 below).
 4. **Understand gas vs. stake before you start** — this is the single most
    common point of confusion:
-   - **ZNHB for staking** needs to end up on *this server's own validator
-     key* (send it there once the key exists, then self-stake it) — a
-     separate wallet's stake never counts toward this validator's own
-     eligibility, no matter how much is delegated.
+   - **ZNHB for staking** counts toward this validator's eligibility
+     whether it is delegated to the validator's node address from any
+     wallet or self-staked from the validator's own key.
    - **NHB for gas** is *not* required to run this validator's heartbeat or
      to set its reward beneficiary — see "Getting paid" below for why.
 
    Don't send NHB to the server's validator key expecting it to be needed
-   for either of those operations; it currently isn't. ZNHB, unlike NHB, IS
-   needed there now — see item 3 above.
+   for either of those operations; it currently isn't. The ZNHB stake in
+   item 3 is the only funding step.
 
 ## Step 1 — Run the bootstrap script
 
@@ -79,7 +77,7 @@ Drop it on any later run.
 | `--email` | *(none)* | Best-effort onboarding notification; failure to send is a warning, not fatal. |
 | `--onboarding-email-endpoint` | `https://nhbcoin.com/api/v1/validators/onboarding-email` | Where the onboarding email is POSTed. |
 | `--bootnode` | `52.1.96.250:6001` | Must be plain `host:port` — see the enode warning below. |
-| `--network-id` | `430060579445266314` | Mainnet network ID. |
+| `--network-id` | `18346390202490284624` | Mainnet network ID (informational: the handshake uses the chain id derived from `config/genesis.relaunch.json`, which is this value). |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
 | `--rpc-addr` | `127.0.0.1:8545` | Not exposed externally by default. |
 | `--external-address` | *(auto-detected)* | Falls back to EC2 IMDSv2, then `https://ifconfig.me`, if omitted. |
@@ -132,10 +130,11 @@ fails with `dial tcp: address enode://...: too many colons in address`.
     node never comes up.
 12. Runs `nhb-cli set-reward-beneficiary <addr> <validator.key>` as the
     `nhb` user, using the `--beneficiary` address you passed (the script
-    already exited earlier if you didn't pass one — see Step 1). If this
-    step fails, the script only **warns** and prints the exact retry
-    command — it does not fail the script or block the validator from
-    starting.
+    already exited earlier if you didn't pass one — see Step 1), then
+    `nhb-cli register-validator 0 <validator.key>` to switch the
+    validator's on-chain registration flag on. If either step fails, the
+    script stops with an error and prints the exact retry commands (the
+    node itself keeps running).
 13. If `--email` was given, best-effort POSTs to the onboarding-email
     endpoint. Failure here is also just a warning, never fatal.
 
@@ -159,20 +158,21 @@ failure. Confirm the line is present before going live:
 
 There are two separate things, and they are not the same operation:
 
-### Staking (self-stake, on this server, not a portal delegation)
+### Staking (delegate, or self-stake on this server)
 
-Validator eligibility requires **>= 10,000 ZNHB of this validator's own
-self-stake** (`staking.minimumValidatorStake`, governance-adjustable,
-currently unchanged from its default). This is a real, load-bearing
-distinction from how staking used to work: ZNHB delegated in from a
-*separate* wallet through the portal's Validator Hub -> Delegate flow is
-tracked separately and does **not** count toward this validator's own
-eligibility at all, no matter the amount. Only stake sitting on the
-validator's own key, self-staked directly, counts (see
-`core/state_transition.go`'s `stakeRewardBasis` if you want the exact
-mechanics).
+Validator eligibility requires **>= 10,000 ZNHB of total stake on this
+validator's address** (`staking.minimumValidatorStake`,
+governance-adjustable, currently unchanged from its default). ZNHB
+delegated to the validator from any wallet, including the portal's
+Validator Hub -> Delegate tab, is added to that stake (the delegate
+transaction credits the validator account, see `core/state_transition.go`),
+and so is ZNHB the validator stakes itself. Use either route, or both.
 
-Two steps, both involving this server's own key:
+**Route A, delegate:** from any wallet, delegate at least 10,000 ZNHB to
+the validator's node address (the `nhb1...` address printed at the end of
+Step 1). Nothing more to do on the server.
+
+**Route B, self-stake**, two steps involving this server's own key:
 
 1. **Send >= 10,000 ZNHB directly to this validator's own node address**
    (the `nhb1...` address printed at the end of Step 1) from wherever you
