@@ -51,11 +51,15 @@ GenesisFile = "./config/genesis.relaunch.json"
 AllowAutogenesis = false
 # Quorum-certificate verification on the P2P block-sync path (see
 # config/config.go's QuorumCertActivationHeight doc comment and core/node.go's
-# commitBlock). 0 leaves it disabled, which is what both live validators run
-# with. It does not change state or any block's validity, but it must not be
-# changed on one validator alone: set it on every validator together, as one
-# coordinated change.
-QuorumCertActivationHeight = 0
+# commitBlock). A block that reaches a node through peer sync above this height
+# must carry a quorum certificate that verifies against the validator set at its
+# parent height, or it is refused; blocks at or below it, and every block the
+# node's own engine commits, are not checked. 1380200 is the value both live
+# validators run with. 0 would leave the check off. It does not change state or
+# any block's validity, but it must not be changed on one validator alone: set
+# it on every validator together, as one coordinated change, and in the same
+# release as the pin in cmd/nhb-snapshot/pins.go and the tests.
+QuorumCertActivationHeight = 1380200
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

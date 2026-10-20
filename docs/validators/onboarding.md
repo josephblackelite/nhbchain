@@ -218,11 +218,13 @@ many colons in address`. The script refuses it.
 `QuorumCertActivationHeight` in `config.toml` controls a block-level
 quorum-certificate check on the P2P sync path (NHB-TRIAGE-C1). It does not change
 state or any block's validity, and it must be the same on every validator. The
-shipped `config.toml` sets it to `0`, which is what both live validators run
-with: `cmd/nhb/main.go` only applies a value above zero, and the node's default
-is "never verify". (Earlier versions of this guide and of `config.toml` said
-`451949`; that is not what the live validators run.) Do not change it on one
-validator alone.
+shipped `config.toml` sets it to `1380200`, which is what both live validators run
+with: a block that reaches the node through peer sync above that height must
+carry a quorum certificate that verifies against the validator set at its parent
+height, or it is refused. `cmd/nhb/main.go` only applies a value above zero, and
+the node's default is "never verify", so a node left at `0` commits synced blocks
+without checking who signed them; `nhb-snapshot check-config` therefore refuses
+any other value than the live one. Do not change it on one validator alone.
 
 ## Step 2 — Getting paid
 

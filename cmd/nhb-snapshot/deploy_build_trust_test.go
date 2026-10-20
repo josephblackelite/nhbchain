@@ -128,7 +128,7 @@ func TestDeployRunsTheToolsRootBuiltAndNeverTheServiceUsersCopies(t *testing.T) 
 	t.Run("check-config decides whether a config is installed", func(t *testing.T) {
 		h, log := newHarness(t, "", "case \"$1\" in check-config) echo ok; exit 0 ;; esac\n")
 		// A template whose values are not the network's: the tool that is run says so.
-		drifted := strings.Replace(string(mustRead(t, filepath.Join(repoRoot(t), "config.toml"))), "QuorumCertActivationHeight = 0", "QuorumCertActivationHeight = 451949", 1)
+		drifted := strings.Replace(string(mustRead(t, filepath.Join(repoRoot(t), "config.toml"))), "QuorumCertActivationHeight = 1380200", "QuorumCertActivationHeight = 451949", 1)
 		if err := os.WriteFile(filepath.Join(h.install, "config.toml"), []byte(drifted), 0o644); err != nil {
 			t.Fatal(err)
 		}

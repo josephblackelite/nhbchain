@@ -339,8 +339,8 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 	expectAll("[subscriptions] Treasury", all(`(?m)^\s*Treasury\s*=\s*"([^"]*)"`), admin, 1)
 	expectAll("an NHB OwnerWallet", all(`(?m)^\s*OwnerWallet\s*=\s*"(nhb1[^"]*)"`), admin, 2)
 	expectAll("a ZNHB OwnerWallet", all(`(?m)^\s*OwnerWallet\s*=\s*"(znhb1[^"]*)"`), znhb, 1)
-	if got := all(`(?m)^QuorumCertActivationHeight\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
-		t.Errorf("config.toml: QuorumCertActivationHeight is %v, the live validators run with 0", got)
+	if got := all(`(?m)^QuorumCertActivationHeight\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "1380200" {
+		t.Errorf("config.toml: QuorumCertActivationHeight is %v, the live validators run with 1380200", got)
 	}
 	// No other treasury of an earlier network is left behind.
 	if bytes.Contains(cfg, []byte("10lephh6ffd79cc7lk6edc6rkxe9ha8xe")) {

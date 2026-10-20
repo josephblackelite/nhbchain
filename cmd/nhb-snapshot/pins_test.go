@@ -58,7 +58,13 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 	}{
 		"quorum certificate height": {
 			func(s string) string {
-				return strings.Replace(s, "QuorumCertActivationHeight = 0", "QuorumCertActivationHeight = 451949", 1)
+				return strings.Replace(s, "QuorumCertActivationHeight = 1380200", "QuorumCertActivationHeight = 451949", 1)
+			},
+			"QuorumCertActivationHeight",
+		},
+		"quorum certificate left off (zero)": {
+			func(s string) string {
+				return strings.Replace(s, "QuorumCertActivationHeight = 1380200", "QuorumCertActivationHeight = 0", 1)
 			},
 			"QuorumCertActivationHeight",
 		},
@@ -137,7 +143,7 @@ func TestCheckConfigCommand(t *testing.T) {
 		t.Fatalf("the shipped config: exit %d: %s %s", code, out.String(), errOut.String())
 	}
 	drifted := mutatedConfig(t, func(s string) string {
-		return strings.Replace(s, "QuorumCertActivationHeight = 0", "QuorumCertActivationHeight = 12", 1)
+		return strings.Replace(s, "QuorumCertActivationHeight = 1380200", "QuorumCertActivationHeight = 12", 1)
 	})
 	out.Reset()
 	errOut.Reset()

@@ -413,7 +413,7 @@ func TestDeployRenderConfigFailsLoudlyOnAStaleTemplateAndRefusesDrift(t *testing
 	}
 
 	// A template whose treasury drifted from the genesis is refused by the check.
-	drifted := strings.Replace(string(mustRead(t, filepath.Join(repoRoot(t), "config.toml"))), "QuorumCertActivationHeight = 0", "QuorumCertActivationHeight = 451949", 1)
+	drifted := strings.Replace(string(mustRead(t, filepath.Join(repoRoot(t), "config.toml"))), "QuorumCertActivationHeight = 1380200", "QuorumCertActivationHeight = 451949", 1)
 	if err := os.WriteFile(filepath.Join(h.install, "config.toml"), []byte(drifted), 0o644); err != nil {
 		t.Fatal(err)
 	}

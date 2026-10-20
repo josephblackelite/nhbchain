@@ -12,6 +12,11 @@ import (
 	"nhbchain/crypto"
 )
 
+// liveQuorumCertActivationHeight is the height above which both live validators require a quorum certificate on every block that reaches them through peer
+// sync (config QuorumCertActivationHeight). It is the same on every validator, so a node that follows the live network carries the same value: with 0 it would
+// commit synced blocks without ever checking who signed them. Change it here, in config.toml and in the tests together, in the release that changes the live value.
+const liveQuorumCertActivationHeight uint64 = 1380200
+
 // A node that starts from a snapshot executes every later block itself, so the
 // consensus-relevant values of its config must be the ones the live validators
 // run with. Most of them are addresses of the network's treasury, which the
@@ -92,8 +97,8 @@ func checkLiveConfig(configPath, genesisPath string) ([]string, error) {
 			bad = append(bad, fmt.Sprintf("%s is %q, the genesis treasury is %s", name, got, want))
 		}
 	}
-	if cfg.QuorumCertActivationHeight != 0 {
-		bad = append(bad, fmt.Sprintf("QuorumCertActivationHeight is %d, the live validators run with 0", cfg.QuorumCertActivationHeight))
+	if cfg.QuorumCertActivationHeight != liveQuorumCertActivationHeight {
+		bad = append(bad, fmt.Sprintf("QuorumCertActivationHeight is %d, the live validators run with %d", cfg.QuorumCertActivationHeight, liveQuorumCertActivationHeight))
 	}
 	expect("[global.Fees] OwnerWallet", cfg.Global.Fees.OwnerWallet, admin.String())
 	assets := map[string]string{}

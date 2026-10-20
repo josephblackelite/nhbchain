@@ -148,7 +148,7 @@ it):
 | `[global.Fees] OwnerWallet` and `[[global.Fees.Assets]]` NHB `OwnerWallet` | the genesis `adminWallet`, `nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj` |
 | `[[global.Fees.Assets]]` ZNHB `OwnerWallet` | `znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn` |
 | `[subscriptions] Treasury` | `nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj` |
-| `QuorumCertActivationHeight` | `0` |
+| `QuorumCertActivationHeight` | `1380200` |
 
 Until this change `config.toml` named the treasury of the network that came
 before this one in all of these places. A node started with it executes the
@@ -163,11 +163,13 @@ Also required, and checked by the script:
   (`core/node.go`, `NewNode`).
 - The node binary must be the one the snapshot was taken with: the same binary
   hash, or the same source commit.
-- `QuorumCertActivationHeight = 0` leaves quorum-certificate verification of
-  synced blocks off (`cmd/nhb/main.go` only sets it when it is above zero, and the
-  node's default is "never"), exactly as on the live validators. Your node still
-  executes every block and rejects one whose state root is not the one in the
-  header.
+- `QuorumCertActivationHeight = 1380200` turns quorum-certificate verification of
+  synced blocks on above that height (`cmd/nhb/main.go` only sets it when it is
+  above zero, and the node's default is "never"), exactly as on the live
+  validators: a block your node receives from a peer must carry a certificate
+  that verifies against the validator set at its parent height, or it is refused.
+  Your node also executes every block and rejects one whose state root is not
+  the one in the header.
 
 ## What the script does and checks
 
