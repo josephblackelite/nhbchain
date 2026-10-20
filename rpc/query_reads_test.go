@@ -186,9 +186,10 @@ func TestExplorerSnapshotIsComputedOncePerWindowAndHeight(t *testing.T) {
 func TestTxWindowStatsCacheIsBounded(t *testing.T) {
 	rc := buildRandomChain(t, 93, 100, false)
 	srv := newTestServer(t, rc.Node, nil, costServerConfig())
+	operatorToken := signEnvJWTWithRole(t, time.Now(), "operator")
 	const bound = 32
 	for lookback := 1; lookback <= 3*bound; lookback++ {
-		call := doRPC(t, srv, nil, "203.0.113.23:1", "nhb_txWindowStats", map[string]any{"lookbackSeconds": lookback})
+		call := doRPCWithToken(t, srv, nil, "203.0.113.23:1", operatorToken, "nhb_txWindowStats", map[string]any{"lookbackSeconds": lookback})
 		if call.Code != http.StatusOK || call.Resp.Error != nil {
 			t.Fatalf("lookback %d: HTTP %d %s", lookback, call.Code, call.Body)
 		}

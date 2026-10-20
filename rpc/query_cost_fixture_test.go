@@ -383,6 +383,14 @@ func (c rpcCall) errCode() int {
 // address), optionally under a request context.
 func doRPC(tb testing.TB, srv *Server, ctx context.Context, remote, method string, params ...any) rpcCall {
 	tb.Helper()
+	return doRPCWithToken(tb, srv, ctx, remote, "", method, params...)
+}
+
+// doRPCWithToken is doRPC with an optional bearer token, for the heavy query methods this fixture exercises that are also operator-only (for example
+// nhb_txWindowStats, see rpc/operator_methods.go): the operator gate runs before the query-gate logic this fixture tests, so such a call needs a real
+// operator-role credential (signEnvJWTWithRole in operator_auth_test.go) to reach that logic at all.
+func doRPCWithToken(tb testing.TB, srv *Server, ctx context.Context, remote, token, method string, params ...any) rpcCall {
+	tb.Helper()
 	if params == nil {
 		params = []any{}
 	}
@@ -392,6 +400,9 @@ func doRPC(tb testing.TB, srv *Server, ctx context.Context, remote, method strin
 		req = req.WithContext(ctx)
 	}
 	req.RemoteAddr = remote
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	rec := httptest.NewRecorder()
 	start := time.Now()
 	srv.ServeHTTP(rec, req)

@@ -124,6 +124,14 @@ func (n *errNetwork) Ban(context.Context, string, time.Duration) error { return 
 
 func TestNetErrorsMapToTheirTypedResponses(t *testing.T) {
 	env := newTestEnv(t)
+	// net_dial/net_ban are operator-only methods (see rpc/operator_methods.go);
+	// this test exercises their own error-mapping logic, not the operator
+	// gate in front of them, so it needs a credential that actually carries
+	// the operator role to reach that logic at all. Signed against env.now,
+	// not real wall-clock time: bearerOnlyServer below freezes the server's
+	// own JWT verifier clock to env.now, so a token timestamped against real
+	// time fails "not valid yet"/"expired" against that frozen clock.
+	operatorToken := signEnvJWTWithRole(t, env.now, "operator")
 	cases := []struct {
 		name       string
 		err        error
@@ -147,7 +155,7 @@ func TestNetErrorsMapToTheirTypedResponses(t *testing.T) {
 				{"net_dial", map[string]string{"target": "203.0.113.5:6001"}},
 				{"net_ban", map[string]any{"nodeId": "0xabc", "secs": 60}},
 			} {
-				rec, rpcErr := serveBearer(t, srv, env.token, call.method, call.params)
+				rec, rpcErr := serveBearer(t, srv, operatorToken, call.method, call.params)
 				if rec.Code != tc.wantStatus || rpcErr == nil || rpcErr.Code != tc.wantCode {
 					t.Fatalf("%s: HTTP %d, error %+v; want HTTP %d, code %d", call.method, rec.Code, rpcErr, tc.wantStatus, tc.wantCode)
 				}

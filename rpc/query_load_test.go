@@ -147,6 +147,12 @@ type loadRun struct {
 // heavy queries, and reports both.
 func measureLoad(t *testing.T, srv *Server, producer *blockProducer) *loadRun {
 	t.Helper()
+	// nhb_txWindowStats (case 4 below) is operator-only (see
+	// rpc/operator_methods.go); every other method this load mix calls is
+	// not, so only that one case needs a real operator-role credential to
+	// get past the gate and reach the query-cost/admission logic this test
+	// is actually measuring.
+	operatorToken := signEnvJWTWithRole(t, time.Now(), "operator")
 	// Idle: how long a block takes with nothing else going on.
 	idle := producer.produce(loadIdleBlocks, nil)
 	if len(idle) < loadIdleBlocks {
@@ -193,7 +199,7 @@ func measureLoad(t *testing.T, srv *Server, producer *blockProducer) *loadRun {
 					call = doRPC(t, srv, nil, remote, method)
 				case 4:
 					method = "nhb_txWindowStats"
-					call = doRPC(t, srv, nil, remote, method, map[string]any{"lookbackSeconds": 1_000_000 + c*1000 + i})
+					call = doRPCWithToken(t, srv, nil, remote, operatorToken, method, map[string]any{"lookbackSeconds": 1_000_000 + c*1000 + i})
 				default:
 					method = "nhb_getExplorerSnapshot"
 					call = doRPC(t, srv, nil, remote, method, 1+(c*7+i)%400)

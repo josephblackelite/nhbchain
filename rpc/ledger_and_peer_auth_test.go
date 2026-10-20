@@ -209,15 +209,26 @@ func TestPeerListNeedsTheBearerCredential(t *testing.T) {
 	env := newTestEnv(t)
 	net := &stubNetwork{peers: []p2p.PeerNetInfo{{NodeID: "peer-1", Address: "203.0.113.9:6001", State: "connected"}}}
 	srv := bearerOnlyServer(t, env, net, ServerConfig{})
+	// net_peers/p2p_peers/net_info are all operator-only methods (see
+	// rpc/operator_methods.go, ported 1:1 from the browser-facing gateway
+	// deny-list): env.token is a validly-authenticated but non-operator
+	// credential, which the operator gate correctly rejects with 403 for any
+	// of them, so exercising the actual handlers below needs a real
+	// operator-role credential, not just any bearer token. Signed against
+	// env.now, not real wall-clock time: bearerOnlyServer below freezes the
+	// server's own JWT verifier clock to env.now, so a token timestamped
+	// against real time fails "not valid yet"/"expired" against that frozen
+	// clock.
+	operatorToken := signEnvJWTWithRole(t, env.now, "operator")
 
 	for _, method := range []string{"net_peers", "p2p_peers"} {
 		rec, rpcErr := serveBearer(t, srv, "", method)
 		if rec.Code != http.StatusUnauthorized || rpcErr == nil || rpcErr.Code != codeUnauthorized {
 			t.Fatalf("%s without a credential: HTTP %d, error %+v; want 401 unauthorized (body %s)", method, rec.Code, rpcErr, rec.Body.String())
 		}
-		rec, rpcErr = serveBearer(t, srv, env.token, method)
+		rec, rpcErr = serveBearer(t, srv, operatorToken, method)
 		if rec.Code != http.StatusOK || rpcErr != nil {
-			t.Fatalf("%s with the bearer token: HTTP %d, error %+v", method, rec.Code, rpcErr)
+			t.Fatalf("%s with the operator bearer token: HTTP %d, error %+v", method, rec.Code, rpcErr)
 		}
 		result, _ := decodeRPCResponse(t, rec)
 		var peers []map[string]any
@@ -226,8 +237,13 @@ func TestPeerListNeedsTheBearerCredential(t *testing.T) {
 		}
 	}
 
-	// net_info stays what the operator dashboards read.
-	if rec, rpcErr := serveBearer(t, srv, "", "net_info"); rec.Code != http.StatusOK || rpcErr != nil {
-		t.Fatalf("net_info without a credential: HTTP %d, error %+v; it is public", rec.Code, rpcErr)
+	// net_info is operator-only too (see
+	// TestOperatorOnlyMethodRejectsMissingCredential/
+	// TestOperatorOnlyMethodRejectsNonOperatorCredential in
+	// operator_auth_test.go for the dedicated coverage of its auth gate) --
+	// this only re-confirms that an operator credential still reaches its
+	// handler successfully.
+	if rec, rpcErr := serveBearer(t, srv, operatorToken, "net_info"); rec.Code != http.StatusOK || rpcErr != nil {
+		t.Fatalf("net_info with the operator bearer token: HTTP %d, error %+v", rec.Code, rpcErr)
 	}
 }

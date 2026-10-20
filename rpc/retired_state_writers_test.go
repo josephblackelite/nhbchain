@@ -110,8 +110,11 @@ func TestStateWritingRPCsAreRetired(t *testing.T) {
 		t.Fatalf("sync_snapshot_export wrote %d files to the directory it was given", len(entries))
 	}
 
-	// The read-only neighbours are still served.
-	rec, rpcErr := serveBearer(t, env.server, env.token, "sync_status")
+	// The read-only neighbour is still served -- sync_status is operator-only
+	// (see rpc/operator_methods.go), unlike its retired sync_ siblings above,
+	// so this needs a real operator-role credential, not just env.token's
+	// validly-authenticated-but-non-operator one.
+	rec, rpcErr := serveBearer(t, env.server, signEnvJWTWithRole(t, env.now, "operator"), "sync_status")
 	if rec.Code != http.StatusOK || rpcErr != nil {
 		t.Fatalf("sync_status: HTTP %d, error %+v", rec.Code, rpcErr)
 	}
