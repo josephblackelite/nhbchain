@@ -1259,6 +1259,8 @@ print_next_steps() {
   echo
   echo "It joins the active validator set at the next epoch boundary once it has stake,"
   echo "is registered and keeps its heartbeat current. Until then do not expect rewards."
+  echo "Voting power and epoch rewards are proportional to stake, so a validator at the"
+  echo "minimum holds a small share of both. Once it votes, keep it running and reachable."
   echo
   echo "Check status with:"
   echo "  sudo systemctl status nhb.service"
