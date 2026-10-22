@@ -165,6 +165,11 @@ func newDeployHarness(t *testing.T) *deployHarness {
 	// the service user's, which it runs as that user.
 	copyTestFile(t, builtTool(t), filepath.Join(h.tools, filepath.Base(builtTool(t))))
 	copyTestFile(t, builtTool(t), filepath.Join(h.install, "bin", filepath.Base(builtTool(t))))
+	// Root's nhb-cli: the wait for the tip mints an operator token with it. This
+	// one only prints a token; a test that cares replaces it.
+	if err := os.WriteFile(filepath.Join(h.tools, "nhb-cli"), []byte("#!/usr/bin/env bash\ncase \"$1\" in rpc-token) echo \"token-for-$(cat)\" ;; esac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	return h
 }
 
@@ -190,6 +195,9 @@ func (h *deployHarness) run(snippet string, env ...string) (string, int) {
 		"FAKE_BIN="+slash(h.bin), "FAKE_LOG="+slash(h.log), "SCRIPT="+slash(h.script),
 		"NHB_INSTALL_ROOT="+slash(h.install), "NHB_CONFIG_DIR="+slash(h.config), "NHB_STATE_DIR="+slash(h.state), "NHB_BUILD_DIR="+slash(h.build),
 		"TMPDIR="+slash(h.tmp), "CLI_RETRY_DELAY=0", "NHB_MASTER_TREASURY=",
+		// The secret write_env keeps in node.env, which wait_until_synced signs its
+		// token with when a test calls it on its own.
+		"JWT_SECRET=test-secret",
 		// The lock of a run lives in the state directory of the user who runs the
 		// script: a temporary one here, never the tester's own.
 		"HOME="+slash(h.root), "XDG_STATE_HOME="+slash(filepath.Join(h.root, "xdgstate")),
