@@ -42,6 +42,11 @@ type fakeNode struct {
 	// noBlocks makes nhb_getLatestBlocks fail while net_info answers: a node whose
 	// RPC came up and then stopped answering what a follower asks.
 	noBlocks bool
+	// requireToken, when set, makes net_info answer 401 unless the request carries
+	// that bearer token (the operator-only net_info of a gated node).
+	requireToken string
+	// authSeen counts the requests that carried any Authorization header.
+	authSeen int32
 }
 
 // sameChainTime is the block time of a chain that every fakeNode shares.
@@ -55,8 +60,15 @@ func (n *fakeNode) handler() http.Handler {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
+		if r.Header.Get("Authorization") != "" {
+			atomic.AddInt32(&n.authSeen, 1)
+		}
 		switch req.Method {
 		case "net_info":
+			if n.requireToken != "" && r.Header.Get("Authorization") != "Bearer "+n.requireToken {
+				http.Error(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"missing Authorization header"}}`, http.StatusUnauthorized)
+				return
+			}
 			if atomic.AddInt32(&n.down, -1) >= 0 {
 				http.Error(w, "starting", http.StatusServiceUnavailable)
 				return
@@ -141,6 +153,58 @@ func TestWaitSyncedAgainstAReferenceNode(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "blocks behind") {
 		t.Fatalf("no progress was reported:\n%s", out.String())
+	}
+}
+
+func TestWaitSyncedPresentsTheOperatorTokenToTheNodeOnly(t *testing.T) {
+	const token = "operator-token-for-the-test"
+	local := &fakeNode{height: 100, step: 40, max: 1000, blockTime: sameChainTime, chainID: 7, genesis: "aa", requireToken: token}
+	ref := &fakeNode{height: 1000, max: 1000, blockTime: sameChainTime, chainID: 7, genesis: "aa"}
+	var out bytes.Buffer
+	opts := fastOptions(&out)
+	opts.RPC, opts.TipRPC, opts.RPCToken = local.serve(t), ref.serve(t), token
+	opts.MaxLagBlocks = 3
+
+	if _, err := waitSynced(context.Background(), opts); err != nil {
+		t.Fatalf("a node that asks for an operator token must be reachable with one: %v\n%s", err, out.String())
+	}
+	if atomic.LoadInt32(&local.authSeen) == 0 {
+		t.Fatalf("the token was never presented to the node")
+	}
+	if got := atomic.LoadInt32(&ref.authSeen); got != 0 {
+		t.Fatalf("the token was sent to the reference node (%d requests)", got)
+	}
+}
+
+func TestWaitSyncedWithoutTheTokenReportsThatTheNodeAnswers401(t *testing.T) {
+	local := &fakeNode{height: 10, max: 10, chainID: 7, genesis: "aa", requireToken: "needed", timestamp: func() int64 { return time.Now().Unix() }}
+	var out bytes.Buffer
+	opts := fastOptions(&out)
+	opts.RPC = local.serve(t)
+	opts.RPCTimeout = 200 * time.Millisecond
+	_, err := waitSynced(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("expected the failure to name the 401 answer, got %v", err)
+	}
+}
+
+func TestWaitSyncedNeverSendsAnOperatorTokenToAnotherHost(t *testing.T) {
+	var out bytes.Buffer
+	opts := fastOptions(&out)
+	opts.RPC, opts.RPCToken = "http://192.0.2.7:8545/", "secret-token"
+	_, err := waitSynced(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "refusing to send an RPC token") {
+		t.Fatalf("expected a refusal to send the token off this host, got %v", err)
+	}
+	for _, ok := range []string{"http://127.0.0.1:8545/", "http://localhost:8545", "http://[::1]:8545/"} {
+		if !isLoopbackURL(ok) {
+			t.Fatalf("%s is this host", ok)
+		}
+	}
+	for _, bad := range []string{"http://192.0.2.7:8545/", "https://example.com/", "http://127.0.0.1.evil.test/", ""} {
+		if isLoopbackURL(bad) {
+			t.Fatalf("%q is not this host", bad)
+		}
 	}
 }
 

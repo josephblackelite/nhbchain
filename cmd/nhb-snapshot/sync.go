@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -57,10 +59,29 @@ func (e *exitError) Unwrap() error { return e.err }
 type rpcClient struct {
 	url    string
 	client *http.Client
+	// token, when set, is sent as a bearer credential. The node's net_info is
+	// an operator-only method (since the operator gate), so a follower's own RPC
+	// has to be asked with an operator token; the reference node never gets one.
+	token string
 }
 
 func newRPCClient(url string) *rpcClient {
 	return &rpcClient{url: strings.TrimSpace(url), client: &http.Client{Timeout: 10 * time.Second}}
+}
+
+// isLoopbackURL reports whether the URL names this host (localhost, 127.0.0.0/8
+// or ::1): the only place a bearer token is ever sent.
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type rpcResponse struct {
@@ -81,6 +102,9 @@ func (c *rpcClient) call(ctx context.Context, method string, params []any, out a
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return err
@@ -173,7 +197,11 @@ type waitOptions struct {
 	// started from: the node counts as synced only once it has applied a block
 	// above it, which a snapshot that is not part of the network's chain can
 	// never do.
-	MinHeight     uint64
+	MinHeight uint64
+	// RPCToken is the operator bearer token for the node's own RPC (RPC), which
+	// answers net_info only to an operator. It is sent to RPC alone and only
+	// when RPC is on this host.
+	RPCToken      string
 	MaxLagBlocks  uint64
 	MaxLagSeconds int64
 	Interval      time.Duration
@@ -267,6 +295,12 @@ func waitSynced(ctx context.Context, o waitOptions) (*syncResult, error) {
 	defer cancel()
 
 	local := newRPCClient(o.RPC)
+	if tok := strings.TrimSpace(o.RPCToken); tok != "" {
+		if !isLoopbackURL(o.RPC) {
+			return nil, fmt.Errorf("refusing to send an RPC token to %s: it is not this host (use 127.0.0.1)", o.RPC)
+		}
+		local.token = tok
+	}
 	var ref *rpcClient
 	window := 1
 	if strings.TrimSpace(o.TipRPC) != "" {

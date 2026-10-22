@@ -37,6 +37,10 @@ import (
 const (
 	envChainID     = "NHB_SNAPSHOT_CHAIN_ID"
 	envGenesisHash = "NHB_SNAPSHOT_GENESIS_HASH"
+	// envRPCToken holds the operator bearer token wait-synced presents to the
+	// node's own RPC. It is an environment variable, never a flag: a command
+	// line shows in the process list.
+	envRPCToken = "NHB_RPC_TOKEN"
 )
 
 func main() {
@@ -481,7 +485,7 @@ func cmdCheckConfig(args []string, stdout, stderr io.Writer) error {
 
 func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("wait-synced", stderr)
-	rpc := fs.String("rpc", "", "the node's own RPC URL")
+	rpc := fs.String("rpc", "", "the node's own RPC URL (on this host; its operator token, when it needs one, is read from "+envRPCToken+")")
 	tipRPC := fs.String("tip-rpc", "", "RPC URL of a node you trust, measured against (optional)")
 	chain := fs.String("chain-id", "", "expected chain id (or "+envChainID+")")
 	genesis := fs.String("genesis-hash", "", "expected genesis hash (or "+envGenesisHash+")")
@@ -503,7 +507,7 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 		return usagef("--max-lag-blocks %d is more than the %d blocks that can be compared with the reference node's", *lagBlocks, maxReferenceLag)
 	}
 	opts := waitOptions{
-		RPC: *rpc, TipRPC: *tipRPC, MinHeight: *minHeight,
+		RPC: *rpc, RPCToken: os.Getenv(envRPCToken), TipRPC: *tipRPC, MinHeight: *minHeight,
 		MaxLagBlocks: *lagBlocks, MaxLagSeconds: *lagSecs,
 		Interval: *interval, Timeout: *timeout, RPCTimeout: *rpcTimeout, StallTimeout: *stall, Stable: *stable,
 		Out: stderr,

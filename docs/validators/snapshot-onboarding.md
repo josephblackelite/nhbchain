@@ -885,6 +885,10 @@ sudo install -m 0644 $SRC/deploy/systemd/nhb.service /etc/systemd/system/nhb.ser
 sudo systemctl daemon-reload
 sudo systemctl enable nhb.service
 sudo systemctl start nhb.service
+#    The node's net_info is an operator-only method, so wait-synced is given a token with
+#    the operator role in NHB_RPC_TOKEN (an environment variable, never a flag; it is sent
+#    only to a node on this host).
+NHB_RPC_TOKEN="$(sudo sed -n 's/^NHB_RPC_JWT_SECRET=//p' /etc/nhbchain/node.env | $B/bin/nhb-cli rpc-token --secret-stdin --role operator --ttl 3h)" \
 $B/bin/nhb-snapshot wait-synced --rpc http://127.0.0.1:8545 $PIN \
   --min-height "$(sudo -u nhb /opt/nhbchain/bin/nhb-snapshot manifest show --manifest $D/manifest.json --field height)" \
   --tip-rpc https://TRUSTED-RPC-HOST.example
@@ -1136,7 +1140,7 @@ nhb-snapshot verify       --manifest FILE --archive FILE --chain-id N --genesis-
 nhb-snapshot extract      --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX [--reject-validator ADDR] [--max-bytes N] [--tip-hash HEX] [--state-root HEX]
 nhb-snapshot manifest show --manifest FILE [--field NAME]
 nhb-snapshot check-config --config FILE --genesis FILE
-nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--rpc-timeout D] [--stall-timeout D]
+NHB_RPC_TOKEN=OPERATOR-TOKEN nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--rpc-timeout D] [--stall-timeout D]
 ```
 
 `refs` prints the files the MANIFEST of a database refers to (`manifest NAME`,

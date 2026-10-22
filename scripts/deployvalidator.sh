@@ -1099,11 +1099,21 @@ wait_until_synced() {
     --interval "${SYNC_INTERVAL}" --timeout "${SYNC_TIMEOUT_SECS}s" --rpc-timeout "${RPC_UP_TIMEOUT_SECS}s" --stall-timeout 15m --max-lag-blocks "${MAX_LAG_BLOCKS}")
   if [[ -n "${TIP_RPC}" ]]; then args+=(--tip-rpc "${TIP_RPC}"); fi
   if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then args+=(--min-height "${SNAPSHOT_HEIGHT}"); fi
+  # The node's net_info (which the wait reads the chain id and the peer count from) is
+  # an operator-only method, so the wait needs a token with the operator role. It is
+  # signed with this node's own secret by the tool root built, lasts as long as the
+  # wait may (the node's limit is 24 hours) and goes to the tool in its environment,
+  # never on a command line, and only to the node on this host.
+  local ttl_secs=$(( SYNC_TIMEOUT_SECS + 600 )) wait_token
+  if (( ttl_secs > 86400 )); then ttl_secs=86400; fi
+  wait_token=$(printf '%s' "${JWT_SECRET}" | "${TOOL_DIR}/nhb-cli" rpc-token --secret-stdin --role operator --ttl "${ttl_secs}s") \
+    || die "could not create an RPC token for the wait"
   log "waiting for the node to reach the network tip (this follows its progress; a few minutes to a few hours depending on the snapshot's age)"
   local rc=0
   # Its verdict is what lets the registration go ahead: the tool root built, not the
   # copy the service user (the node) could have replaced by one that always says yes.
-  "${TOOL_DIR}/nhb-snapshot" "${args[@]}" || rc=$?
+  NHB_RPC_TOKEN="${wait_token}" "${TOOL_DIR}/nhb-snapshot" "${args[@]}" || rc=$?
+  wait_token=''
   if [[ "${rc}" != "0" ]]; then
     echo
     echo "=================================================================="
