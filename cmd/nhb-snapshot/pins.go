@@ -17,6 +17,12 @@ import (
 // commit synced blocks without ever checking who signed them. Change it here, in config.toml and in the tests together, in the release that changes the live value.
 const liveQuorumCertActivationHeight uint64 = 1380200
 
+// liveRewardsByStakeFromEpoch is the first epoch whose emission the live validators pay by stake (config RewardsByStakeFromEpoch); 0 means they still pay the
+// earlier split. A node that starts from a snapshot executes every later block itself, so it must carry the same value: with another it would compute other
+// reward payouts at an epoch boundary, a different state root, and stop following the network. Change it here, in config.toml and in the tests together, in
+// the release that changes the live value.
+const liveRewardsByStakeFromEpoch uint64 = 0
+
 // A node that starts from a snapshot executes every later block itself, so the
 // consensus-relevant values of its config must be the ones the live validators
 // run with. Most of them are addresses of the network's treasury, which the
@@ -26,6 +32,7 @@ const liveQuorumCertActivationHeight uint64 = 1380200
 // liveConfigView is the part of config.toml the check reads.
 type liveConfigView struct {
 	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
+	RewardsByStakeFromEpoch    uint64 `toml:"RewardsByStakeFromEpoch"`
 	Potso                      struct {
 		Rewards struct {
 			TreasuryAddress string `toml:"TreasuryAddress"`
@@ -99,6 +106,9 @@ func checkLiveConfig(configPath, genesisPath string) ([]string, error) {
 	}
 	if cfg.QuorumCertActivationHeight != liveQuorumCertActivationHeight {
 		bad = append(bad, fmt.Sprintf("QuorumCertActivationHeight is %d, the live validators run with %d", cfg.QuorumCertActivationHeight, liveQuorumCertActivationHeight))
+	}
+	if cfg.RewardsByStakeFromEpoch != liveRewardsByStakeFromEpoch {
+		bad = append(bad, fmt.Sprintf("RewardsByStakeFromEpoch is %d, the live validators run with %d", cfg.RewardsByStakeFromEpoch, liveRewardsByStakeFromEpoch))
 	}
 	expect("[global.Fees] OwnerWallet", cfg.Global.Fees.OwnerWallet, admin.String())
 	assets := map[string]string{}

@@ -68,6 +68,12 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 			},
 			"QuorumCertActivationHeight",
 		},
+		"epoch rewards paid by stake from another epoch than the live validators": {
+			func(s string) string {
+				return strings.Replace(s, "RewardsByStakeFromEpoch = 0", "RewardsByStakeFromEpoch = 16700", 1)
+			},
+			"RewardsByStakeFromEpoch",
+		},
 		"potso treasury": {
 			func(s string) string {
 				return strings.Replace(s, "TreasuryAddress = \""+liveZNHB, "TreasuryAddress = \""+oldTreasury, 1)

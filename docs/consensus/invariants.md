@@ -182,3 +182,7 @@ off the treasury wallet than the Reward Pool holds is rejected with
   `bugcheck-race`.
 - `QuorumCertActivationHeight` must be identical on every validator
   (`config/config.go`, `QuorumCertActivationHeight`).
+- `RewardsByStakeFromEpoch` must be identical on every validator and on every node
+  that replays blocks, and in force before the epoch it names begins: it decides
+  who an epoch's reward is credited to, so another value is another state root
+  (`config/config.go`, `core/rewards_logic.go` `distributeStakeWeighted`).

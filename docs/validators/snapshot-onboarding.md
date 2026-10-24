@@ -149,6 +149,7 @@ it):
 | `[[global.Fees.Assets]]` ZNHB `OwnerWallet` | `znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn` |
 | `[subscriptions] Treasury` | `nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj` |
 | `QuorumCertActivationHeight` | `1380200` |
+| `RewardsByStakeFromEpoch` | `0` until the release that switches epoch rewards to stake-weighted payment names the epoch; then that epoch, on every validator |
 
 Until this change `config.toml` named the treasury of the network that came
 before this one in all of these places. A node started with it executes the

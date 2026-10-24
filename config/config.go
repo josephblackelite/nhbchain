@@ -156,6 +156,13 @@ type Config struct {
 	// a brand-new chain wanting the protection from genesis, not for
 	// upgrading an already-live one.
 	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
+	// RewardsByStakeFromEpoch is the first epoch whose emission is paid by stake: the validators' and the engagement pool follow each validator's stake,
+	// like the stakers' pool already does, and every pool is credited to the wallets that locked that stake instead of to the validator's own account (the
+	// key on its server). 0 (the default/unset value) keeps every earlier release's split: equal per validator and by engagement score, to the validator's
+	// own account. This is a consensus value: it must be the same on every validator, and on every node that replays blocks from a snapshot, and it must be
+	// in force on all of them before the epoch it names begins (see core.StateProcessor.SetRewardsByStakeFromEpoch). Change it only as one coordinated
+	// restart of every validator, with the epoch far enough ahead to finish it.
+	RewardsByStakeFromEpoch uint64 `toml:"RewardsByStakeFromEpoch"`
 	ValidatorKeystorePath       string                       `toml:"ValidatorKeystorePath"`
 	ValidatorKMSURI             string                       `toml:"ValidatorKMSURI"`
 	ValidatorKMSEnv             string                       `toml:"ValidatorKMSEnv"`

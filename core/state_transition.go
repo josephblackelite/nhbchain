@@ -194,6 +194,9 @@ type StateProcessor struct {
 	epochConfig                epoch.Config
 	epochHistory               []epoch.Snapshot
 	rewardConfig               rewards.Config
+	// rewardsByStakeFromEpoch is the first epoch whose emission is paid by stake (see settleEpochRewards and distributeStakeWeighted in
+	// rewards_logic.go). 0 means never: the default, byte-identical to every earlier release. It is a consensus value, identical on every validator.
+	rewardsByStakeFromEpoch    uint64
 	rewardAccrual              *rewards.Accumulator
 	rewardHistory              []rewards.EpochSettlement
 	stakeRewardEngine          *rewards.Engine
@@ -2134,6 +2137,21 @@ func (sp *StateProcessor) SetRewardConfig(cfg rewards.Config) error {
 	return sp.persistRewardHistory()
 }
 
+// SetRewardsByStakeFromEpoch sets the first epoch whose emission is paid by stake to the wallets that locked it, instead of equally per validator and by
+// engagement score to the validator's own account. 0 (the default) means never. Every validator must carry the same value before the epoch it names.
+func (sp *StateProcessor) SetRewardsByStakeFromEpoch(epoch uint64) {
+	sp.rewardsByStakeFromEpoch = epoch
+}
+
+// RewardsByStakeFromEpoch returns the epoch set by SetRewardsByStakeFromEpoch (0 = never).
+func (sp *StateProcessor) RewardsByStakeFromEpoch() uint64 {
+	return sp.rewardsByStakeFromEpoch
+}
+
+func (sp *StateProcessor) rewardsByStakeActive(epochNumber uint64) bool {
+	return sp.rewardsByStakeFromEpoch > 0 && epochNumber >= sp.rewardsByStakeFromEpoch
+}
+
 // PotsoRewardConfig returns the current POTSO reward configuration snapshot.
 func (sp *StateProcessor) PotsoRewardConfig() potso.RewardConfig {
 	return clonePotsoRewardConfig(sp.potsoRewardConfig)
@@ -2697,6 +2715,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		epochConfig:                sp.epochConfig,
 		epochHistory:               historyCopy,
 		rewardConfig:               sp.rewardConfig.Clone(),
+		rewardsByStakeFromEpoch:    sp.rewardsByStakeFromEpoch,
 		rewardAccrual:              cloneRewardAccumulator(sp.rewardAccrual),
 		rewardHistory:              rewardHistoryCopy,
 		stakeRewardEngine:          clonedEngine,

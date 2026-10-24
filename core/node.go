@@ -417,6 +417,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	if err := stateProcessor.SetRewardConfig(n.state.RewardConfig()); err != nil {
 		return err
 	}
+	stateProcessor.SetRewardsByStakeFromEpoch(n.state.RewardsByStakeFromEpoch())
 	if err := stateProcessor.SetPotsoRewardConfig(n.state.PotsoRewardConfig()); err != nil {
 		return err
 	}
@@ -4975,6 +4976,20 @@ func (n *Node) GlobalConfig() config.Global {
 		return config.Global{}
 	}
 	return n.globalConfigSnapshot()
+}
+
+// SetRewardsByStakeFromEpoch sets the first epoch whose emission is paid by stake (see StateProcessor.SetRewardsByStakeFromEpoch). 0 = never. A live chain
+// must give every validator the same value before that epoch begins, in the same coordinated restart, like SetQuorumCertActivationHeight.
+func (n *Node) SetRewardsByStakeFromEpoch(epoch uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return
+	}
+	n.state.SetRewardsByStakeFromEpoch(epoch)
 }
 
 func (n *Node) SetRewardConfig(cfg rewards.Config) error {

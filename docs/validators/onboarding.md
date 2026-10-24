@@ -126,6 +126,7 @@ validator; a snapshot that does not check out changes nothing.
 | `--beneficiary` | *(required)* | Wallet address to redirect the consensus reward to. The script exits with an error if this is omitted. |
 | `--snapshot-url` | *(required, or `NHB_SNAPSHOT_URL`)* | Directory URL that holds `manifest.json` and the archive it names. `https` only. |
 | `--bootnode` | *(required, or `NHB_BOOTNODE`)* | Plain `host:port`, never an `enode://` URI (see below). |
+| `--wallet-url` | *(none)* | The `https` address of the wallet's Validator Hub page. Only used to print, in the closing text, a link that opens it with this validator's address already filled in (`<url>?node=<address>`), so the delegation is one click. Never fetched. |
 | `--min-release-commit` | *(none, or `NHB_MIN_RELEASE_COMMIT`; advised)* | The full commit id of the oldest release you accept. The script refuses a manifest whose commit is neither that commit nor a descendant of it, so a snapshot host cannot steer you to old consensus code. Needs both commits in your checkout (`git fetch` first). |
 | `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust. Used to decide when the node has caught up, and to refuse a node whose newest blocks are not that node's. |
 | `--max-lag-blocks` | `3` | How far from that node (either side) still counts as caught up; at most 15. |
@@ -192,7 +193,7 @@ many colons in address`. The script refuses it.
    changing only `ListenAddress`, `RPCAddress`, `DataDir`, `GenesisFile`,
    `ValidatorKMSEnv=NHB_VALIDATOR_RAW_KEY`, `NetworkName`, `NetworkId`,
    `ExternalAddress`, and `Bootnodes`/`PersistentPeers`, and checks the values
-   consensus depends on (treasuries, `QuorumCertActivationHeight`) with
+   consensus depends on (treasuries, `QuorumCertActivationHeight`, `RewardsByStakeFromEpoch`) with
    `nhb-snapshot check-config`.
 10. Writes `/etc/nhbchain/node.env` (mode `600`, owned `root:root`; the RPC secret
     of an earlier run is kept), installs `deploy/systemd/nhb.service` from your
@@ -282,6 +283,32 @@ server.
    real stake is what actually brings its own stake up to the required
    minimum. It's safe to run again with a larger amount later if you want
    to add more self-stake; it isn't a one-time-only operation.
+
+### How the epoch reward is paid
+
+Every epoch (100 blocks) the chain pays out one emission (200 ZNHB for the first
+500,000 epochs, then halving each era), split 20 percent "validators", 50 percent
+"stakers" and 30 percent "engagement". The credit is a direct change of the
+recipient's balance, not a transaction, so it never shows in a transaction
+history; `nhb_getRewardHistory` lists it per address.
+
+- **Before `RewardsByStakeFromEpoch`** (the value in `config.toml`, `0` meaning
+  never): the 50 percent follows stake and reaches the wallets that hold it, the
+  20 percent is split equally per validator and the 30 percent by engagement
+  score, both to the validator's own account.
+- **From the epoch `RewardsByStakeFromEpoch` names on:** all three pools follow
+  stake, and each validator's share is passed on to the wallets that hold its
+  stake in proportion to the ZNHB they locked (the validator's own account only
+  for what it staked itself). A validator that is only delegated to keeps
+  nothing on its own account: the delegating wallet is paid, by itself, every
+  epoch, and there is nothing to collect from the server. Splitting a stake
+  across more validators earns nothing extra. The engagement pool still skips a
+  validator whose engagement score is 0.
+
+`RewardsByStakeFromEpoch` changes state, unlike `QuorumCertActivationHeight`: it
+must be the same on every validator and on every node that replays blocks, and in
+force before the epoch it names begins. `nhb-snapshot check-config` refuses any
+other value than the live one.
 
 ### Consensus reward beneficiary
 

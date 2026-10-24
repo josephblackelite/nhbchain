@@ -196,6 +196,9 @@ func main() {
 	if cfg.QuorumCertActivationHeight > 0 {
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
 	}
+	if cfg.RewardsByStakeFromEpoch > 0 {
+		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()

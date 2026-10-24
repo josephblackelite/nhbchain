@@ -60,6 +60,13 @@ AllowAutogenesis = false
 # it on every validator together, as one coordinated change, and in the same
 # release as the pin in cmd/nhb-snapshot/pins.go and the tests.
 QuorumCertActivationHeight = 1380200
+# The first epoch whose emission is paid by stake (see config/config.go's RewardsByStakeFromEpoch doc comment and core/rewards_logic.go's
+# distributeStakeWeighted). From that epoch on, all three reward pools follow stake and are credited to the wallets that locked it, so a validator that is
+# only delegated to receives nothing on its own account. 0 keeps the earlier split (equal per validator and by engagement score, to the validator's own
+# account). Unlike the setting above this one DOES change state: every validator, and every node that replays blocks from a snapshot, must carry the same
+# value, in force before the epoch it names begins. Change it only as one coordinated restart of every validator, in the same release as the pin in
+# cmd/nhb-snapshot/pins.go and the tests.
+RewardsByStakeFromEpoch = 0
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""

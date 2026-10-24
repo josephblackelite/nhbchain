@@ -161,6 +161,11 @@ func main() {
 		// made in config.toml, never inferred.
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
 	}
+	if cfg.RewardsByStakeFromEpoch > 0 {
+		// See config.Config.RewardsByStakeFromEpoch's doc comment -- left unset (0) the epoch rewards are split exactly as in every prior release.
+		// A consensus value: identical on every validator, in force before the epoch it names.
+		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)
+	}
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {

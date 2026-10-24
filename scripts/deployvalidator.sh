@@ -67,6 +67,9 @@ LISTEN_ADDR="${LISTEN_ADDR_DEFAULT}"
 RPC_ADDR="${RPC_ADDR_DEFAULT}"
 RESET_STATE=0
 BENEFICIARY=''
+# Where the wallet's Validator Hub page is (https only). Used for one thing: the closing text prints a link to it with this validator's address filled in.
+# Never fetched; the script names no host of its own, so the operator (or the website's command) says it.
+WALLET_URL=''
 EXTERNAL_ADDRESS=''
 EXTERNAL_ADDRESS_HOSTPORT=''
 ALLOW_INSECURE_HTTP=0
@@ -109,6 +112,9 @@ Required:
                            May be given as NHB_BOOTNODE instead.
 
 Options:
+  --wallet-url <url>       The https address of the wallet's Validator Hub page.
+                           Only used to print, at the end, a link that opens it
+                           with this validator's address already filled in.
   --min-release-commit <c> The full commit id (40 hex digits) of the oldest release
                            you accept. The snapshot's manifest is not signed and
                            names the commit the node is built from; with this the
@@ -220,6 +226,7 @@ parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --beneficiary) BENEFICIARY="${2:-}"; shift 2 ;;
+      --wallet-url) WALLET_URL="${2:-}"; shift 2 ;;
       --snapshot-url) SNAPSHOT_URL="${2:-}"; shift 2 ;;
       --bootnode) BOOTNODE="${2:-}"; shift 2 ;;
       --tip-rpc) TIP_RPC="${2:-}"; shift 2 ;;
@@ -263,6 +270,9 @@ validate_inputs() {
     exit 1
   fi
   [[ "${BENEFICIARY}" =~ ^nhb1[a-z0-9]{20,80}$ ]] || die "--beneficiary '${BENEFICIARY}' is not an nhb1... address"
+  if [[ -n "${WALLET_URL}" ]]; then
+    [[ "${WALLET_URL}" =~ ^https://[A-Za-z0-9._-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~%/-]*)?$ ]] || die "--wallet-url '${WALLET_URL}' is not an https URL (host and path only, no query)"
+  fi
 
   [[ -n "${SNAPSHOT_URL}" ]] || die "--snapshot-url (or NHB_SNAPSHOT_URL) is required: this script starts from a snapshot and has no default location for one"
   case "${SNAPSHOT_URL}" in
@@ -1259,6 +1269,11 @@ print_next_steps() {
   echo "so either route works:"
   echo "  A. Delegate: from any wallet, delegate at least 10,000 ZNHB to this"
   echo "     validator's node address (printed above)."
+  if [[ -n "${WALLET_URL}" ]]; then
+    echo "     One click in the wallet: open"
+    echo "       ${WALLET_URL}?node=${VALIDATOR_ADDRESS}"
+    echo "     and press Delegate (the address is already filled in)."
+  fi
   echo "  B. Self-stake: send at least 10,000 ZNHB to this validator's node"
   echo "     address, and once it has arrived, stake it from this server:"
   echo "     ${TOKEN_RECIPE}"
@@ -1271,6 +1286,11 @@ print_next_steps() {
   echo "is registered and keeps its heartbeat current. Until then do not expect rewards."
   echo "Voting power and epoch rewards are proportional to stake, so a validator at the"
   echo "minimum holds a small share of both. Once it votes, keep it running and reachable."
+  echo
+  echo "Getting paid: rewards are paid every epoch, by stake, to the wallet that holds the"
+  echo "stake. The ZNHB you delegate earns into your own wallet by itself, and nothing has"
+  echo "to be collected from this server. Anything paid to this node's own address goes to"
+  echo "the --beneficiary wallet you gave."
   echo
   echo "Check status with:"
   echo "  sudo systemctl status nhb.service"
