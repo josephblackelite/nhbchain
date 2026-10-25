@@ -342,20 +342,20 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 	if got := all(`(?m)^QuorumCertActivationHeight\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "1380200" {
 		t.Errorf("config.toml: QuorumCertActivationHeight is %v, the live validators run with 1380200", got)
 	}
-	if got := all(`(?m)^RewardsByStakeFromEpoch\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
-		t.Errorf("config.toml: RewardsByStakeFromEpoch is %v, the live validators pay the earlier split (0)", got)
+	if got := all(`(?m)^RewardsByStakeFromEpoch\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "17280" {
+		t.Errorf("config.toml: RewardsByStakeFromEpoch is %v, the live validators pay by stake from that epoch", got)
 	}
-	for _, key := range []string{
-		"POSSweepSkipActivationHeight",
-		"POSHoldUnstakeGuardActivationHeight",
-		"GovCreditPreservationActivationHeight",
-		"FeeRouteAliasActivationHeight",
-		"LendingFixedTermIDActivationHeight",
-		"PayoutReceiptActivationHeight",
-		"RejectAmbiguousParamKeysFromUnix",
+	for key, want := range map[string]string{
+		"POSSweepSkipActivationHeight":          "1718500",
+		"POSHoldUnstakeGuardActivationHeight":   "1718500",
+		"GovCreditPreservationActivationHeight": "1719700",
+		"FeeRouteAliasActivationHeight":         "1720900",
+		"LendingFixedTermIDActivationHeight":    "1723300",
+		"RejectAmbiguousParamKeysFromUnix":      "1792936800",
+		"PayoutReceiptActivationHeight":         "0",
 	} {
-		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
-			t.Errorf("config.toml: %s is %v, the live validators run with it off (0)", key, got)
+		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != want {
+			t.Errorf("config.toml: %s is %v, the live validators run with %s", key, got, want)
 		}
 	}
 	// No other treasury of an earlier network is left behind.

@@ -66,46 +66,46 @@ QuorumCertActivationHeight = 1380200
 # account). Unlike the setting above this one DOES change state: every validator, and every node that replays blocks from a snapshot, must carry the same
 # value, in force before the epoch it names begins. Change it only as one coordinated restart of every validator, in the same release as the pin in
 # cmd/nhb-snapshot/pins.go and the tests.
-RewardsByStakeFromEpoch = 0
+RewardsByStakeFromEpoch = 17280
 # First block height at which the end-of-block sweep of expired POS holds goes
 # on past a hold whose payer's locked balance no longer covers it (see
 # config/config.go's POSSweepSkipActivationHeight doc comment and
-# docs/specs/pos-lifecycle.md). 0 keeps the earlier behaviour, which is what
-# both live validators run with. Unlike the setting above it changes the state a
+# docs/specs/pos-lifecycle.md). 0 keeps the earlier behaviour; the live validators
+# switch it on at the height below. Unlike the setting above it changes the state a
 # block leaves behind: set it identically on every validator, to a height above
 # the chain tip, restarting all of them together.
-POSSweepSkipActivationHeight = 0
+POSSweepSkipActivationHeight = 1718500
 # First block height from which an unstake may not unbond ZNHB that backs a
 # pending POS hold (see config/config.go's POSHoldUnstakeGuardActivationHeight
-# doc comment and docs/staking/staking.md). 0 leaves the rule off, which is what
-# both live validators run with. It decides whether a transaction is valid, so
+# doc comment and docs/staking/staking.md). 0 leaves the rule off; the live
+# validators switch it on at the height below. It decides whether a transaction is valid, so
 # set it identically on every validator, to a height above the chain tip,
 # restarting all of them together.
-POSHoldUnstakeGuardActivationHeight = 0
+POSHoldUnstakeGuardActivationHeight = 1718500
 # First block height from which a governance finalize or execute transaction keeps
 # a credit the governance engine wrote to the sender's own account (a deposit
 # refund, a forfeited-deposit sweep) instead of overwriting it with the account as
 # it was before the call (see config/config.go's
-# GovCreditPreservationActivationHeight doc comment). 0 leaves it off, which is what
-# both live validators run with. It changes the state a block leaves behind: set it
+# GovCreditPreservationActivationHeight doc comment). 0 leaves it off; the live
+# validators switch it on at the height below. It changes the state a block leaves behind: set it
 # identically on every validator, to a height above the chain tip, restarting all of
 # them together.
-GovCreditPreservationActivationHeight = 0
+GovCreditPreservationActivationHeight = 1719700
 # First block height from which an NHB domain fee whose route wallet is the
 # transfer's own sender or recipient is credited to that account instead of to a
 # separate copy the transfer then overwrites (see config/config.go's
 # FeeRouteAliasActivationHeight doc comment; the same fix for ZNHB is always on).
-# 0 leaves the NHB half off, which is what both live validators run with. It
+# 0 leaves the NHB half off; the live validators switch it on at the height below. It
 # changes the state a block leaves behind: set it identically on every validator,
 # to a height above the chain tip, restarting all of them together.
-FeeRouteAliasActivationHeight = 0
+FeeRouteAliasActivationHeight = 1720900
 # First block height from which a fixed-term loan or deposit is stored under an ID
 # that includes its owner, and an origination whose ID already has a record is
 # refused (see config/config.go's LendingFixedTermIDActivationHeight doc comment).
-# 0 keeps the transaction hash as the ID, which is what both live validators run
-# with. It changes the key a record is written under: set it identically on every
+# 0 keeps the transaction hash as the ID; the live validators switch it on at the
+# height below. It changes the key a record is written under: set it identically on every
 # validator, to a height above the chain tip, restarting all of them together.
-LendingFixedTermIDActivationHeight = 0
+LendingFixedTermIDActivationHeight = 1723300
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
@@ -218,10 +218,10 @@ ClientVersion = ""
   # parameter under two keys differing only in surrounding whitespace, with
   # different values, is refused at submission and at execution (see
   # config/config.go's RejectAmbiguousParamKeysFromUnix doc comment). 0 keeps the
-  # earlier behaviour, which is what both live validators run with. It decides
+  # earlier behaviour; the live validators switch it on at the time below. It decides
   # whether a transaction is valid: set it identically on every validator, to a
   # time after the chain's current block time, restarting all of them together.
-  RejectAmbiguousParamKeysFromUnix = 0
+  RejectAmbiguousParamKeysFromUnix = 1792936800
 
 [swap]
   AllowedFiat = ["USD", "EUR", "GBP"]

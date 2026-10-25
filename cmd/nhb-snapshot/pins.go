@@ -17,11 +17,10 @@ import (
 // commit synced blocks without ever checking who signed them. Change it here, in config.toml and in the tests together, in the release that changes the live value.
 const liveQuorumCertActivationHeight uint64 = 1380200
 
-// liveRewardsByStakeFromEpoch is the first epoch whose emission the live validators pay by stake (config RewardsByStakeFromEpoch); 0 means they still pay the
-// earlier split. A node that starts from a snapshot executes every later block itself, so it must carry the same value: with another it would compute other
+// liveRewardsByStakeFromEpoch is the first epoch whose emission the live validators pay by stake (config RewardsByStakeFromEpoch); zero would mean the earlier split. A node that starts from a snapshot executes every later block itself, so it must carry the same value: with another it would compute other
 // reward payouts at an epoch boundary, a different state root, and stop following the network. Change it here, in config.toml and in the tests together, in
 // the release that changes the live value.
-const liveRewardsByStakeFromEpoch uint64 = 0
+const liveRewardsByStakeFromEpoch uint64 = 17280
 
 // liveChainRules are the other settings that decide what a block leaves behind or
 // whether a transaction is valid, each an activation height that is off (0) on the
@@ -35,13 +34,13 @@ var liveChainRules = []struct {
 	key   string
 	live  uint64
 }{
-	{"", "POSSweepSkipActivationHeight", 0},
-	{"", "POSHoldUnstakeGuardActivationHeight", 0},
-	{"", "GovCreditPreservationActivationHeight", 0},
-	{"", "FeeRouteAliasActivationHeight", 0},
-	{"", "LendingFixedTermIDActivationHeight", 0},
+	{"", "POSSweepSkipActivationHeight", 1718500},
+	{"", "POSHoldUnstakeGuardActivationHeight", 1718500},
+	{"", "GovCreditPreservationActivationHeight", 1719700},
+	{"", "FeeRouteAliasActivationHeight", 1720900},
+	{"", "LendingFixedTermIDActivationHeight", 1723300},
 	{"swap", "PayoutReceiptActivationHeight", 0},
-	{"governance", "RejectAmbiguousParamKeysFromUnix", 0},
+	{"governance", "RejectAmbiguousParamKeysFromUnix", 1792936800},
 }
 
 // A node that starts from a snapshot executes every later block itself, so the

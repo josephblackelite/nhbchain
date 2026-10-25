@@ -70,43 +70,43 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 		},
 		"epoch rewards paid by stake from another epoch than the live validators": {
 			func(s string) string {
-				return strings.Replace(s, "RewardsByStakeFromEpoch = 0", "RewardsByStakeFromEpoch = 16700", 1)
+				return strings.Replace(s, "RewardsByStakeFromEpoch = 17280", "RewardsByStakeFromEpoch = 16700", 1)
 			},
 			"RewardsByStakeFromEpoch",
 		},
 		"POS expiry sweep skip switched on": {
 			func(s string) string {
-				return strings.Replace(s, "POSSweepSkipActivationHeight = 0", "POSSweepSkipActivationHeight = 1800000", 1)
+				return strings.Replace(s, "POSSweepSkipActivationHeight = 1718500", "POSSweepSkipActivationHeight = 1800000", 1)
 			},
 			"POSSweepSkipActivationHeight",
 		},
 		"POS hold unstake guard switched on": {
 			func(s string) string {
-				return strings.Replace(s, "POSHoldUnstakeGuardActivationHeight = 0", "POSHoldUnstakeGuardActivationHeight = 1800000", 1)
+				return strings.Replace(s, "POSHoldUnstakeGuardActivationHeight = 1718500", "POSHoldUnstakeGuardActivationHeight = 1800000", 1)
 			},
 			"POSHoldUnstakeGuardActivationHeight",
 		},
 		"governance credit preservation switched on": {
 			func(s string) string {
-				return strings.Replace(s, "GovCreditPreservationActivationHeight = 0", "GovCreditPreservationActivationHeight = 1800000", 1)
+				return strings.Replace(s, "GovCreditPreservationActivationHeight = 1719700", "GovCreditPreservationActivationHeight = 1800000", 1)
 			},
 			"GovCreditPreservationActivationHeight",
 		},
 		"NHB fee route aliasing fix switched on": {
 			func(s string) string {
-				return strings.Replace(s, "FeeRouteAliasActivationHeight = 0", "FeeRouteAliasActivationHeight = 1800000", 1)
+				return strings.Replace(s, "FeeRouteAliasActivationHeight = 1720900", "FeeRouteAliasActivationHeight = 1800000", 1)
 			},
 			"FeeRouteAliasActivationHeight",
 		},
 		"owner-scoped fixed-term lending IDs switched on": {
 			func(s string) string {
-				return strings.Replace(s, "LendingFixedTermIDActivationHeight = 0", "LendingFixedTermIDActivationHeight = 1800000", 1)
+				return strings.Replace(s, "LendingFixedTermIDActivationHeight = 1723300", "LendingFixedTermIDActivationHeight = 1800000", 1)
 			},
 			"LendingFixedTermIDActivationHeight",
 		},
 		"duplicate parameter keys refused from a time": {
 			func(s string) string {
-				return strings.Replace(s, "RejectAmbiguousParamKeysFromUnix = 0", "RejectAmbiguousParamKeysFromUnix = 1900000000", 1)
+				return strings.Replace(s, "RejectAmbiguousParamKeysFromUnix = 1792936800", "RejectAmbiguousParamKeysFromUnix = 1900000000", 1)
 			},
 			"[governance] RejectAmbiguousParamKeysFromUnix",
 		},
