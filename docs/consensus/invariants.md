@@ -202,6 +202,13 @@ off the treasury wallet than the Reward Pool holds is rejected with
   the sender or recipient), so each is changed only with all validators restarted
   together, to a height above the chain tip. The state processor copies carry both
   (`StateProcessor.Copy`): a copy that dropped one would apply the fix from height 0.
+- `LendingFixedTermIDActivationHeight` must be identical on every validator
+  (`config/config.go`). It changes the key a fixed-term loan or deposit is written
+  under (`lendingFixedTermRecordID`, `core/lending_native.go`: the owner folded into
+  the transaction hash) and makes an origination onto an existing record fail, so it
+  is changed only with all validators restarted together, to a height above the
+  chain tip. Records written before the height keep their ID; every lookup goes
+  through an ID that was stored.
 - `POSHoldUnstakeGuardActivationHeight` must be identical on every validator
   (`config/config.go`, `POSHoldUnstakeGuardActivationHeight`): it decides whether an
   unstake that would take funds backing a pending POS hold is valid.

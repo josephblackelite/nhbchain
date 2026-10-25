@@ -277,6 +277,12 @@ type StateProcessor struct {
 	// (the default) leaves the guard off. See
 	// SetPOSHoldUnstakeGuardActivationHeight.
 	posHoldUnstakeGuardFromHeight uint64
+	// lendingFixedTermIDFromHeight is the first block height at which a
+	// fixed-term loan or deposit is stored under an ID that includes its owner,
+	// and an origination whose ID already has a record is refused. Zero (the
+	// default) keeps the transaction hash as the ID at every height. See
+	// SetLendingFixedTermIDActivationHeight.
+	lendingFixedTermIDFromHeight uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -2866,6 +2872,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 
 		posSweepSkipActivationHeight:  sp.posSweepSkipActivationHeight,
 		posHoldUnstakeGuardFromHeight: sp.posHoldUnstakeGuardFromHeight,
+		lendingFixedTermIDFromHeight:  sp.lendingFixedTermIDFromHeight,
 
 		// A field left out of this literal is zero on the copy, which for these
 		// two (the default is math.MaxUint64, off) would switch the fix on from
@@ -6186,6 +6193,43 @@ func (sp *StateProcessor) posHoldUnstakeGuardActive() bool {
 		return false
 	}
 	return sp.blockHeight() >= sp.posHoldUnstakeGuardFromHeight
+}
+
+// SetLendingFixedTermIDActivationHeight sets the first block height from which a
+// fixed-term loan or deposit is stored under lendingFixedTermRecordID (the
+// owner's address folded into the transaction hash) instead of under the
+// transaction hash alone, and from which an origination whose ID already has a
+// record is refused (ledger PL-R5T-02). Zero, the default, keeps the transaction
+// hash as the ID at every height.
+//
+// The transaction hash covers no sender, so two accounts that sign field-identical
+// transactions (same nonce, amount, tenure and gas fields) share one hash. Under
+// the hash-only ID the second origination overwrites the first record while both
+// moves of cash and both pool totals stand, so one borrower's obligation is
+// erased while they keep the principal, or a depositor's principal is taken with
+// no record to claim it.
+//
+// This is a chain rule: it changes the key a record is written under, so every
+// validator must run with the same value, chosen above the chain tip, with all of
+// them restarted together. The value comes from node configuration, not from
+// chain state. Records written before the height keep the ID they were written
+// under; every lookup is by an ID that was stored (the active-loan index, the due
+// buckets), never recomputed from a transaction hash.
+func (sp *StateProcessor) SetLendingFixedTermIDActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingFixedTermIDFromHeight = height
+}
+
+// lendingFixedTermIDActive reports whether the block being applied is at or past
+// the activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingFixedTermIDActive() bool {
+	if sp == nil || sp.lendingFixedTermIDFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingFixedTermIDFromHeight
 }
 
 func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*types.StakeUnbond, error) {

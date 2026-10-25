@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"strings"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -369,8 +371,10 @@ func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sen
 	if err != nil {
 		return fmt.Errorf("lending fixed-term borrow: compute tx hash: %w", err)
 	}
-	var loanID [32]byte
-	copy(loanID[:], txHash)
+	loanID, err := sp.lendingFixedTermRecordID("loan", sender, txHash)
+	if err != nil {
+		return fmt.Errorf("lending fixed-term borrow: %w", err)
+	}
 	loan, err := engine.BorrowFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), loanID, payload.TenureDays, tx.Value)
 	if err != nil {
 		return err
@@ -393,6 +397,49 @@ func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sen
 		}
 	}
 	return sp.incrementNativeAccountNonce(sender)
+}
+
+// lendingFixedTermRecordID returns the ID a fixed-term loan ("loan") or deposit
+// ("deposit") is stored under for the transaction with hash txHash sent by sender.
+//
+// Before SetLendingFixedTermIDActivationHeight (and always while that is zero) it
+// is the transaction hash itself, exactly as in every earlier release. From the
+// height it is the Keccak-256 of the kind, the sender and the transaction hash:
+// the hash covers no sender, so two accounts signing field-identical transactions
+// would otherwise share one ID and the second record would overwrite the first
+// (ledger PL-R5T-02). From the height an origination whose ID already has a record
+// is also refused, so a record can never be replaced by a later transaction.
+func (sp *StateProcessor) lendingFixedTermRecordID(kind string, sender, txHash []byte) ([32]byte, error) {
+	var id [32]byte
+	if !sp.lendingFixedTermIDActive() {
+		copy(id[:], txHash)
+		return id, nil
+	}
+	preimage := make([]byte, 0, len("nhb/lending/fixed-term/")+len(kind)+len(sender)+len(txHash))
+	preimage = append(preimage, "nhb/lending/fixed-term/"...)
+	preimage = append(preimage, kind...)
+	preimage = append(preimage, sender...)
+	preimage = append(preimage, txHash...)
+	copy(id[:], ethcrypto.Keccak256(preimage))
+
+	manager := nhbstate.NewManager(sp.Trie)
+	var exists bool
+	var err error
+	switch kind {
+	case "loan":
+		_, exists, err = manager.LendingGetFixedTermLoan(id)
+	case "deposit":
+		_, exists, err = manager.LendingGetFixedTermDeposit(id)
+	default:
+		return id, fmt.Errorf("unknown fixed-term record kind %q", kind)
+	}
+	if err != nil {
+		return id, fmt.Errorf("check %s %x: %w", kind, id[:8], err)
+	}
+	if exists {
+		return id, fmt.Errorf("%s %x already exists", kind, id[:8])
+	}
+	return id, nil
 }
 
 func (sp *StateProcessor) applyLendingRepayFixedTerm(tx *types.Transaction, sender []byte) error {
@@ -473,8 +520,10 @@ func (sp *StateProcessor) applyLendingSupplyFixedTerm(tx *types.Transaction, sen
 	if err != nil {
 		return fmt.Errorf("lending fixed-term supply: compute tx hash: %w", err)
 	}
-	var depositID [32]byte
-	copy(depositID[:], txHash)
+	depositID, err := sp.lendingFixedTermRecordID("deposit", sender, txHash)
+	if err != nil {
+		return fmt.Errorf("lending fixed-term supply: %w", err)
+	}
 	deposit, err := engine.SupplyFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), depositID, payload.TenureDays, tx.Value, lending.FixedTermDepositPayout(payload.Payout))
 	if err != nil {
 		return err

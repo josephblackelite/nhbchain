@@ -222,6 +222,9 @@ func main() {
 	if cfg.FeeRouteAliasActivationHeight > 0 {
 		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
 	}
+	// Same setting as cmd/nhb/main.go: zero (the default) keeps the transaction
+	// hash as the fixed-term loan and deposit ID.
+	node.SetLendingFixedTermIDActivationHeight(cfg.LendingFixedTermIDActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()

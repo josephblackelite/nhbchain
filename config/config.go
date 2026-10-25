@@ -242,6 +242,18 @@ type Config struct {
 	// routes such a fee. As a top-level key it goes before the first [table] of
 	// the file. See core.StateProcessor.SetFeeRouteAliasActivationHeight.
 	FeeRouteAliasActivationHeight uint64 `toml:"FeeRouteAliasActivationHeight"`
+	// LendingFixedTermIDActivationHeight is the first block height from which a
+	// fixed-term loan or deposit is stored under an ID that includes its owner,
+	// and an origination whose ID already has a record is refused (PL-R5T-02).
+	// Until then the ID is the transaction hash, which covers no sender, so two
+	// accounts signing field-identical transactions share one ID and the second
+	// record overwrites the first while both moves of cash and both pool totals
+	// stand. 0 (the default) keeps the transaction hash as the ID. A chain rule,
+	// not a node setting: set the same non-zero height on every validator, above
+	// the chain tip, with all of them restarted together. As a top-level key it
+	// goes before the first [table] of the file. See
+	// core.StateProcessor.SetLendingFixedTermIDActivationHeight.
+	LendingFixedTermIDActivationHeight uint64 `toml:"LendingFixedTermIDActivationHeight"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.

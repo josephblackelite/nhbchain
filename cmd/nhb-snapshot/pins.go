@@ -39,6 +39,7 @@ var liveChainRules = []struct {
 	{"", "POSHoldUnstakeGuardActivationHeight", 0},
 	{"", "GovCreditPreservationActivationHeight", 0},
 	{"", "FeeRouteAliasActivationHeight", 0},
+	{"", "LendingFixedTermIDActivationHeight", 0},
 	{"swap", "PayoutReceiptActivationHeight", 0},
 }
 

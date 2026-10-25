@@ -253,6 +253,12 @@ type Node struct {
 	// it off. Kept here as well as on the state processor so a rebuilt
 	// state processor carries it. Guarded by stateMu.
 	posHoldUnstakeGuardHeight uint64
+
+	// lendingFixedTermIDHeight is the activation height of the owner-scoped
+	// fixed-term loan and deposit IDs (see SetLendingFixedTermIDActivationHeight).
+	// Zero leaves them on the transaction hash. Kept here as well as on the state
+	// processor so a rebuilt state processor carries it. Guarded by stateMu.
+	lendingFixedTermIDHeight uint64
 }
 
 const (
@@ -442,6 +448,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetGovernancePolicy(n.governancePolicy())
 	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
 	stateProcessor.SetPOSHoldUnstakeGuardActivationHeight(n.posHoldUnstakeGuardHeight)
+	stateProcessor.SetLendingFixedTermIDActivationHeight(n.lendingFixedTermIDHeight)
 	stateProcessor.SetGovCreditPreservationActivationHeight(n.govCreditPreservationActivationHeight)
 	stateProcessor.SetFeeRouteAliasActivationHeight(n.feeRouteAliasActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
@@ -4655,6 +4662,23 @@ func (n *Node) SetPOSHoldUnstakeGuardActivationHeight(height uint64) {
 	n.posHoldUnstakeGuardHeight = height
 	if n.state != nil {
 		n.state.SetPOSHoldUnstakeGuardActivationHeight(height)
+	}
+}
+
+// SetLendingFixedTermIDActivationHeight sets the first block height from which
+// fixed-term loans and deposits are stored under an owner-scoped ID (see
+// StateProcessor.SetLendingFixedTermIDActivationHeight). Zero, the default, keeps
+// the transaction hash as the ID. It is a chain rule and must be the same on every
+// validator, set before the chain reaches the height.
+func (n *Node) SetLendingFixedTermIDActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingFixedTermIDHeight = height
+	if n.state != nil {
+		n.state.SetLendingFixedTermIDActivationHeight(height)
 	}
 }
 

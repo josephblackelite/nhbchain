@@ -196,6 +196,10 @@ func main() {
 		// never inferred.
 		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
 	}
+	// Zero (the default) keeps the transaction hash as the fixed-term loan and
+	// deposit ID; see config.Config.LendingFixedTermIDActivationHeight. A chain
+	// rule, so the value is set identically on every validator in config.toml.
+	node.SetLendingFixedTermIDActivationHeight(cfg.LendingFixedTermIDActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {

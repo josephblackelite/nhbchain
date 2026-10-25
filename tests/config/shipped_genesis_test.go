@@ -350,6 +350,7 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 		"POSHoldUnstakeGuardActivationHeight",
 		"GovCreditPreservationActivationHeight",
 		"FeeRouteAliasActivationHeight",
+		"LendingFixedTermIDActivationHeight",
 		"PayoutReceiptActivationHeight",
 	} {
 		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {

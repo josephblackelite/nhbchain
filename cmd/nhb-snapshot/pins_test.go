@@ -98,6 +98,12 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 			},
 			"FeeRouteAliasActivationHeight",
 		},
+		"owner-scoped fixed-term lending IDs switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LendingFixedTermIDActivationHeight = 0", "LendingFixedTermIDActivationHeight = 1800000", 1)
+			},
+			"LendingFixedTermIDActivationHeight",
+		},
 		"swap payout receipt rules switched on": {
 			func(s string) string {
 				return strings.Replace(s, "PayoutReceiptActivationHeight = 0", "PayoutReceiptActivationHeight = 1800000", 1)
