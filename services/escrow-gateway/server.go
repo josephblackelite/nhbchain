@@ -452,7 +452,25 @@ func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request) {
 	s.audit(r.Context(), principal, r, body, http.StatusAccepted, payload)
 }
 
+// authenticateRead requires the API key and HMAC signature on a read, as the
+// writes do. The three reads (an escrow, the open offers, a trade) used to
+// answer anyone who could reach the port, with the parties and amounts of every
+// escrow and trade the gateway had created. It reports whether the handler may
+// go on; when it may not, the response has been written.
+func (s *Server) authenticateRead(w http.ResponseWriter, r *http.Request) bool {
+	principal, err := s.authenticator.Authenticate(r, nil)
+	if err != nil {
+		s.writeAuthError(w, err)
+		s.audit(r.Context(), principal, r, nil, http.StatusUnauthorized, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleEscrowGet(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticateRead(w, r) {
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/escrow/")
 	if id == "" {
 		s.writeError(w, http.StatusBadRequest, errors.New("escrow id required"))
@@ -844,19 +862,15 @@ func (s *Server) enforceRealmConstraints(ctx context.Context, merchant *Merchant
 			return &realmValidationError{reason: fmt.Sprintf("realm scope %s does not match required scope %s", meta.Scope, expected)}
 		}
 	}
-	expectedType := strings.TrimSpace(settings.Type)
-	if expectedType == "" && settings.EnforceIdentityMatch {
-		expectedType = "private"
-	}
-	if expectedType != "" {
-		if strings.TrimSpace(meta.Type) == "" {
-			return &realmValidationError{reason: "realm type metadata unavailable"}
-		}
-		if !strings.EqualFold(meta.Type, expectedType) {
-			return &realmValidationError{reason: fmt.Sprintf("realm type %s does not match required type %s", meta.Type, expectedType)}
-		}
-	}
-	if settings.EnforceIdentityMatch {
+	// The node's realm result has no "type": a realm is on chain with a scope,
+	// a provider profile and a fee, and nothing marks it public or private, so
+	// there is no reported value to compare a configured type with. (This check
+	// used to demand one, which no node ever sent, so it failed for every realm
+	// of a merchant that configured a type or an identity match.) A private
+	// realm is the one named after the merchant, which is what the identity match
+	// verifies, so a merchant of type "private" gets that check; a merchant of
+	// type "public" accepts any realm that passes the scope check.
+	if settings.EnforceIdentityMatch || strings.EqualFold(strings.TrimSpace(settings.Type), "private") {
 		identity := strings.TrimSpace(merchant.Identity)
 		if identity == "" {
 			identity = strings.TrimSpace(principalKey)
@@ -972,6 +986,9 @@ func (s *Server) handleCreateOffer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListOffers(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticateRead(w, r) {
+		return
+	}
 	offers, err := s.store.ListOffers(r.Context())
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err)
@@ -1135,6 +1152,9 @@ func (s *Server) handleAcceptOffer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTrade(w http.ResponseWriter, r *http.Request) {
+	if !s.authenticateRead(w, r) {
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/p2p/trades/")
 	if strings.TrimSpace(id) == "" {
 		s.writeError(w, http.StatusBadRequest, errors.New("trade id required"))

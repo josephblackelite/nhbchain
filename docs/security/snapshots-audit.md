@@ -1,28 +1,31 @@
 # Snapshot audit checklist
 
-This guide covers the steps an auditor should follow before attesting to a published snapshot.
+This guide covers the checks an auditor can run on a snapshot before attesting to it. A snapshot is an archive of a node's chain database with a manifest, made by `scripts/make-snapshot.sh` with `cmd/nhb-snapshot` (`pack.go`, `manifest.go`) and checked by `nhb-snapshot verify` and `nhb-snapshot extract` (`extract.go`, `chaindb.go`). The procedure a new validator follows is in [../validators/snapshot-onboarding.md](../validators/snapshot-onboarding.md).
+
+The node's `sync_snapshot_export` and `sync_snapshot_import` RPC methods answer HTTP 410 (`rpc/sync_handlers.go`); they are not part of this procedure. The chunked snapshot export and import in `core/sync/` (`Manager.ExportSnapshot`, `Manager.ImportSnapshot`) are library code that no node command or RPC method calls any longer.
+
+## Trust model
+
+The manifest is a plain JSON file. Nothing in this repository signs it, and `nhb-snapshot` has no signature check. What makes a snapshot acceptable is what the operator pins before trusting it and what the tool re-derives from the database itself. The pins are the flags of `nhb-snapshot verify` and `extract` (`addExpectFlags` in `cmd/nhb-snapshot/main.go`): `--chain-id` and `--genesis-hash` are required (or the environment variables `NHB_SNAPSHOT_CHAIN_ID` and `NHB_SNAPSHOT_GENESIS_HASH`); `--min-height`, `--max-age`, `--tip-hash`, `--state-root` and `--reject-validator` are optional.
 
 ## Inputs
 
-* Snapshot manifest (`manifest.json`).
-* Chunk directory (`chunk-*.bin` files).
-* Validator set public keys / voting power at the advertised height.
-* Governance anchor key (if applicable).
+* The manifest, for example `manifest.json` or `nhb-snapshot-<first 4 bytes of the genesis hash, hex>-h<height, 10 digits>.manifest.json`.
+* The archive it names, `nhb-snapshot-<first 4 bytes of the genesis hash, hex>-h<height, 10 digits>.tar.gz` (`archiveNameFor` in `pack.go`).
+* The chain ID and genesis hash of the network, and, when you have a node you trust, its tip hash and state root at the snapshot height.
+
+## Manifest fields
+
+`manifestVersion` (`1`), `chainId` (decimal string), `genesisHash`, `height`, `tipHash`, `stateRoot`, `tipTimestamp` (Unix seconds of the newest block), `createdAt` (RFC 3339), `producer` (`binaryVersion`, `binaryCommit`, `binarySha256`, `snapshotTool`) and `archive` (`name`, `format` = `tar+gzip`, `size`, `sha256`, `uncompressedSize`, `files[]` of `name`, `size`, `sha256`). The three hashes are lower-case `0x` followed by 64 hex digits. Unknown fields, a second JSON value after the manifest, or a manifest larger than 4 MiB are rejected (`parseManifest`, `readManifestFile`). `nhb-snapshot manifest show --manifest FILE [--field NAME]` prints it.
 
 ## Procedure
 
-1. **Chain context** – Confirm the manifest `chainId`, `height`, and `stateRoot` match the expected network and checkpoint.
-2. **Digest verification** – Recompute the manifest digest (SHA-256 of the JSON with the `signatures` field removed).
-3. **Signature quorum** – Verify each validator signature recovers the advertised address and tally the voting power. Ensure at
-   least 2/3 of the total power signed the digest. If validator quorum is not met, verify the governance anchor signature and
-   payload.
-4. **Chunk integrity** – Hash every chunk file and compare against the manifest digest entries. Spot-check record decoding for
-   malformed key/value pairs.
-5. **State reconstruction** – Replay the snapshot into an isolated database and confirm the resulting state root matches the
-   manifest `stateRoot`.
-6. **Checkpoint header** – Hash the advertised checkpoint header (if supplied) and ensure it matches the manifest `checkpoint`
-   field. Optionally verify the header against canonical chain data.
-7. **Report** – Record the digest, quorum summary, and any anomalies. Only publish the snapshot once all checks succeed.
+1. **Well-formed manifest.** `manifest.validate` requires: version 1; `chainId` equal to the first 8 bytes of `genesisHash` read as a big-endian integer; a parseable `createdAt`; an archive name that is a plain `.tar.gz` file name; a positive archive size of at most 64 GiB; a valid `sha256`; a non-empty file list, sorted by name, without duplicates, made only of `CURRENT`, `MANIFEST-NNNNNN` and `NNNNNN.log`, `.ldb` or `.sst` names, and containing `CURRENT` and a `MANIFEST-` file; file sizes that add up to `uncompressedSize`; an unpacked size of at most 64 GiB; and an unpacked size of at most 64 times the archive size.
+2. **Pins.** `checkManifest` fails when the chain ID or genesis hash differs from the pinned one, when `height` is below `--min-height`, when `tipTimestamp` is more than 5 minutes ahead of the local clock, when `--max-age` is set and either `createdAt` or the newest block's date is older than it, and when `tipHash` or `stateRoot` differs from a pinned `--tip-hash` or `--state-root`. `createdAt` is free text that nobody signs, so the age limit also rests on the newest block's date.
+3. **Archive bytes.** The archive's size and SHA-256 must equal the manifest's (`verifyArchiveFile`). `walkArchive` then reads it as gzip and tar and allows only regular files, whose names are in the manifest, each exactly once, with exactly the listed size and SHA-256, no link targets, only zero padding after the tar trailer, and no more expansion than the manifest announced. `nhb-snapshot verify` stops here and writes nothing.
+4. **Database checks.** `nhb-snapshot extract` unpacks into a fresh directory next to the target, opens it read-only without repairing it (`openChainDB`), and checks: every table file the database's current version refers to exists with the recorded size; the genesis hash, height and tip are present and lengths are right; the tip equals the height-index entry for the height, the genesis hash equals the entry for height 0, and the index has no holes; the newest `--header-window` blocks (default 256, `0` for all) hash to the indexed hash and each links to its parent by `prevHash`; the state trie at the tip header's state root is present, and every node reachable from it hashes to its address (`verifyTrieNodes`). Then it compares the manifest with what the database says (chain ID, genesis hash, height, tip hash, state root, tip timestamp), checks the age again on the database's own tip timestamp, and refuses the snapshot when a `--reject-validator` address is in the validator set of the tip state. Only then does it move the directory into place.
+5. **What none of this proves.** No validator signed the snapshot, and the tool does not check that the state root is the one the validators committed to. That assurance comes from comparing `tipHash` and `stateRoot` with nodes you trust, using `--tip-hash` and `--state-root`, and from the genesis hash and chain ID pins. `nhb-snapshot info --data-dir DIR` prints the same identity for a database copy.
+6. **Producer.** `producer.binaryCommit` and `producer.binarySha256` name the node build that wrote the database. A new node executes every later block with its own build, so `scripts/deployvalidator.sh` accepts a snapshot only when its own build is that binary or that commit, and `--min-release-commit` refuses older commits (see the onboarding guide). Confirm the commit is a release you recognise.
+7. **Report.** Record the SHA-256 of the manifest file and of the archive, the pins you used, the tool output and any anomalies. Publish or attest to the snapshot only when every check passes.
 
-Auditors should retain their verification logs and the reconstructed state root so downstream operators can reproduce the audit
-trail.
+Keep the command output and the identity that `extract` prints so others can reproduce the result.

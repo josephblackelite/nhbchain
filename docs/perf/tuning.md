@@ -1,31 +1,75 @@
-# Performance Tuning Guide
+# Tuning levers
 
-This guide captures tuning levers that help operators meet or exceed the performance baselines for nhbchain services.
+Settings in this repository that bound node throughput and resource use. Values
+are defaults from `config/config.go`; the repository `config.toml` overrides some
+of them.
 
-## Consensus nodes
+## Mempool and blocks
 
-- **Database tuning.**
-  - Enable `GODEBUG=memprofilerate=0` when profiling to reduce allocation overhead during benchmarking.
-  - Configure RocksDB or the underlying KV store with high-compaction trigger thresholds to avoid background stalls.
-  - Place state and WAL directories on separate NVMe volumes where possible.
-- **Mempool sizing.** Set `global.mempool.MaxBytes` to at least 64 MB on high-throughput validators. Monitor eviction rates (`mempool_evicted_total`).
-- **P2P networking.** Increase the inbound/outbound peer limits in `config.toml` for data centers with sufficient bandwidth, but keep them symmetric to prevent gossip imbalances.
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `[mempool] MaxTransactions` | 4000 (`DefaultMempoolMaxTransactions`; `config.toml` sets 5000) | Maximum pending transactions; further admissions fail with `mempool full` (`-32030`). `AllowUnlimited = true` allows 0 (no limit). |
+| `[global.Mempool] MaxBytes` | 16 MiB (`16 << 20`) | Byte cap on pending transactions. |
+| `[global.Mempool] POSReservationBPS` | 1500 | Share of each block reserved for POS-tagged transfers ([QoS](../specs/pos-qos.md)). |
+| `[global.Blocks] MaxTxs` | 500 | Maximum transactions per block; enforced when proposing and when validating a block. |
 
-## Gateway services
+## Block production containment
 
-- **Connection pools.** Tune database and RPC client pools based on p95 latency. Start at 2× CPU cores and adjust after load testing.
-- **Caching.** Configure HTTP response caching for idempotent endpoints (account lookups, rate tables). Validate cache TTLs against compliance requirements.
-- **Async processing.** Offload blocking operations (file exports, invoicing) to background workers to keep API latency predictable.
+A proposer builds each block from a copy of committed state in waves
+(`core/proposal_containment.go`): every wave runs the candidate transactions,
+collects all failures, and the survivors run again from a fresh copy; a panic in
+one transaction is recovered; when the budget or the wave cap runs out, the clean
+prefix of the last wave is used, and failing that an empty block is built. This is
+local to the proposer (validators re-execute the block as before and reject it on
+any error) and nothing in it changes a consensus rule. Transactions that fail are
+recorded in a bounded strike book and evicted from the local mempool after repeated
+failures or a time limit. Defaults (`defaultBuildConfig`):
 
-## Observability-driven tuning
+| Knob | Default | Environment override |
+| --- | --- | --- |
+| Build budget for all waves of one block | the smaller of 1 s and half of `[consensus] ProposalTimeout` (`SetProposalBuildBudget`; 1 s at the default 2 s) | `NHB_PROPOSAL_BUILD_BUDGET_MS` (pins the value) |
+| Waves per build | 6 | `NHB_PROPOSAL_MAX_WAVES` |
+| Failures across builds before eviction | 3 | `NHB_POISON_STRIKES` |
+| Time a transaction that was only skipped stays before eviction | 2 h | `NHB_POISON_SKIP_TTL` (seconds) |
+| Time before any transaction with a failure record is evicted | 24 h | none |
+| Lease hiding a transaction offered in a proposal | 30 s | `NHB_INFLIGHT_LEASE_SECS` |
+| No-commit interval that counts as a stall | 60 s | `NHB_LIVENESS_STALL_SECS` |
 
-1. **Profile hotspots.** Use `pprof` or `go tool trace` during load tests to identify CPU or lock contention.
-2. **Adjust parameters.** Modify relevant configuration (mempool size, worker counts, queue depths) and document the change.
-3. **Measure impact.** Re-run the benchmark and compare to the baselines recorded in `docs/perf/baselines.md`.
-4. **Roll out carefully.** Apply changes to staging first, monitor for 24 hours, then promote to production with a rollback plan.
+`NHB_PROPOSER_EXCLUDE_TXTYPES` is an operator deny-list of transaction types this
+proposer will not include, and `NHB_ALLOW_CLOCK_DEPENDENT_TXS` disables the
+wall-clock read detector; both are read once when the node starts. A malformed
+value is ignored and reported as a start-up warning. The metrics and alerts for this
+are listed in [baselines](./baselines.md#prometheus-metrics).
 
-## Capacity planning
+## RPC
 
-- Run quarterly load tests using the `tests/load/` scenarios.
-- Capture TPS, latency, and resource usage across consensus, gateway, and database layers.
-- Update the operations runbooks with new resource requirements (CPU, RAM, storage) when sustained usage approaches 70% of capacity.
+`RPCMaxTxPerWindow` and the `RPCMaxTxPer*` limits (default 5 per
+`RPCRateLimitWindow` = 60 s), `RPCRouteRateLimits` per method, and the RPC
+timeouts (`RPCReadHeaderTimeout` 10 s, `RPCReadTimeout` 15 s, `RPCWriteTimeout`
+15 s, `RPCIdleTimeout` 120 s in the config file the node writes when none exists;
+0 means no timeout, which is what the repository `config.toml` sets) are described
+in [rpc.md](../api/rpc.md#rate-limits).
+
+The public reads that scan blocks or hold the state lock share a small admission
+pool, sized by `RPCQueryMaxConcurrent` (default half the CPUs, at least 1 and at most
+2), `RPCQueryMaxPerClient` (1), `RPCQueryQueueDepth` (8), `RPCQueryQueueWaitMS` (100)
+and `RPCQueryTimeoutSeconds` (10); `RPCDisableExplorerLoop` stops the per-block
+explorer snapshot rebuild on a node that serves no public RPC. The WebSocket streams
+are capped by `RPCWebSocketMaxConnections` (256) and `RPCWebSocketMaxPerIP` (8). See
+[RPC query limits](../ops/rpc-query-limits.md).
+
+## P2P
+
+`MaxPeers` (64), `MaxInbound`, `MaxOutbound`, `MinPeers`, `OutboundPeers`,
+`MaxMsgsPerSecond` (32, per peer), `[p2p] Burst` (200), `MaxMsgBytes` (1 MiB),
+`ReadTimeout` (90 s), `WriteTimeout` (5 s). See [P2P](../overview/p2p.md).
+
+## Storage
+
+Node state is stored in LevelDB (`storage/db.go` uses go-ethereum's
+`ethdb/leveldb`); the data directory is `DataDir` (default `./nhb-data`).
+
+## Measuring a change
+
+Use the benchmarks and metrics in [baselines](./baselines.md): run the benchmark
+or load generator before and after the change and compare the same metrics.

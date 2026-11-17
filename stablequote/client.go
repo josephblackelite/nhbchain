@@ -11,12 +11,11 @@ import (
 	"time"
 )
 
-// HTTPClient satisfies Engine by calling out to a stable-quote-service
-// process (see nhbchain-services' cmd/stable-quote-service) over HTTP,
-// instead of running the real engine in-process -- see this package's
-// header comment for why. Intended to run reachable only from localhost or
-// a private network path (the service itself enforces this; this client
-// has no special access of its own beyond a plain HTTP call).
+// HTTPClient satisfies Engine by calling out to a quote service over HTTP,
+// instead of running the engine in-process -- see this package's header
+// comment. Intended to run reachable only from localhost or a private
+// network path (the service itself enforces this; this client has no
+// special access of its own beyond a plain HTTP call).
 type HTTPClient struct {
 	baseURL string
 	http    *http.Client
@@ -32,7 +31,7 @@ func NewHTTPClient(baseURL string, timeout time.Duration) *HTTPClient {
 }
 
 // errorCodeSentinels maps the stable JSON error "code" field (set by the
-// service side, see nhbchain-services' http server) back to the exact
+// service side) back to the exact
 // sentinel error values in types.go, so errors.Is(...) keeps working for
 // callers on this side of the network boundary exactly as it did when the
 // engine was in-process.

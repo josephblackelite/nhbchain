@@ -283,7 +283,7 @@ func TestSwapVoucherMintExecutesInBlock(t *testing.T) {
 	}
 
 	foundMinted := false
-	for _, evt := range node.state.events {
+	for _, evt := range node.Events() {
 		if evt.Type == "swap.minted" {
 			foundMinted = true
 		}

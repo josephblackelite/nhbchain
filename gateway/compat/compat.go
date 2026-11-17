@@ -27,6 +27,57 @@ type Service struct {
 type Dispatcher struct {
 	services map[string]*Service
 	mappings map[string]Mapping
+	guard    ScopeGuard
+}
+
+// maxBatchRequests bounds how many calls one /rpc request may carry. The
+// gateway's rate limit counts requests, so an unbounded batch would be an
+// unbounded number of upstream calls for one token.
+const maxBatchRequests = 10
+
+// codeInsufficientScope is the JSON-RPC error for a call whose service needs a
+// scope that the caller's token does not hold.
+const codeInsufficientScope = -32004
+
+// ScopeGuard lets the dispatcher hold each call to the scopes the caller's
+// token needs for the service that would answer it: the same scopes the
+// service's own routes require, so /rpc is no way around them.
+type ScopeGuard struct {
+	// Required lists, by service name, the scopes a caller needs for that
+	// service's methods. A service that is not listed asks for none.
+	Required map[string][]string
+	// FromContext returns the scopes of the authenticated caller of the request
+	// and whether the request was authenticated at all. A request that was not
+	// (authentication is off, or the path is one the operator left open) is not
+	// held to scopes here: the authenticator in front of the dispatcher decided
+	// to let it in.
+	FromContext func(ctx context.Context) (scopes []string, authenticated bool)
+}
+
+// SetScopeGuard makes the dispatcher check scopes before it forwards a call.
+func (d *Dispatcher) SetScopeGuard(guard ScopeGuard) {
+	d.guard = guard
+}
+
+func (d *Dispatcher) scopesAllow(ctx context.Context, service string) bool {
+	required := d.guard.Required[service]
+	if len(required) == 0 || d.guard.FromContext == nil {
+		return true
+	}
+	held, authenticated := d.guard.FromContext(ctx)
+	if !authenticated {
+		return true
+	}
+	have := make(map[string]struct{}, len(held))
+	for _, scope := range held {
+		have[scope] = struct{}{}
+	}
+	for _, scope := range required {
+		if _, ok := have[scope]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func NewDispatcher(services []*Service, mappings map[string]Mapping) *Dispatcher {
@@ -53,15 +104,22 @@ func (d *Dispatcher) Handler() http.Handler {
 			writeError(w, nil, -32600, "empty request body")
 			return
 		}
+		// The caller's own credential goes upstream with each call, as the
+		// gateway's proxied routes do, so a service that checks it sees it.
+		authorization := r.Header.Get("Authorization")
 		if bytes.HasPrefix(bytes.TrimSpace(payload), []byte("[")) {
 			var requests []rpcRequest
 			if err := json.Unmarshal(payload, &requests); err != nil {
 				writeError(w, nil, -32700, fmt.Sprintf("decode batch: %v", err))
 				return
 			}
+			if len(requests) > maxBatchRequests {
+				writeError(w, nil, -32600, fmt.Sprintf("batch of %d calls exceeds the limit of %d", len(requests), maxBatchRequests))
+				return
+			}
 			responses := make([]rpcResponse, 0, len(requests))
 			for _, req := range requests {
-				responses = append(responses, d.handleSingle(r.Context(), req))
+				responses = append(responses, d.handleSingle(r.Context(), req, authorization))
 			}
 			writeJSON(w, responses)
 			return
@@ -71,7 +129,7 @@ func (d *Dispatcher) Handler() http.Handler {
 			writeError(w, nil, -32700, fmt.Sprintf("decode request: %v", err))
 			return
 		}
-		resp := d.handleSingle(r.Context(), request)
+		resp := d.handleSingle(r.Context(), request, authorization)
 		writeJSON(w, resp)
 	})
 }
@@ -96,7 +154,7 @@ type rpcError struct {
 	Data    any    `json:"data,omitempty"`
 }
 
-func (d *Dispatcher) handleSingle(ctx context.Context, req rpcRequest) rpcResponse {
+func (d *Dispatcher) handleSingle(ctx context.Context, req rpcRequest, authorization string) rpcResponse {
 	resp := rpcResponse{JSONRPC: "2.0", ID: req.ID}
 	mapping, ok := d.mappings[req.Method]
 	if !ok {
@@ -106,6 +164,10 @@ func (d *Dispatcher) handleSingle(ctx context.Context, req rpcRequest) rpcRespon
 	service, ok := d.services[mapping.Service]
 	if !ok {
 		resp.Error = &rpcError{Code: -32001, Message: "service unavailable"}
+		return resp
+	}
+	if !d.scopesAllow(ctx, mapping.Service) {
+		resp.Error = &rpcError{Code: codeInsufficientScope, Message: "insufficient scope"}
 		return resp
 	}
 	method := mapping.Method
@@ -130,6 +192,9 @@ func (d *Dispatcher) handleSingle(ctx context.Context, req rpcRequest) rpcRespon
 	}
 	if bodyReader != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
+	}
+	if authorization != "" {
+		httpReq.Header.Set("Authorization", authorization)
 	}
 	httpResp, err := service.Client.Do(httpReq)
 	if err != nil {

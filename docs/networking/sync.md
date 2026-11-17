@@ -1,33 +1,75 @@
-# Fast sync workflow
+# Fast sync components
 
-Fast sync brings a node from genesis to the current tip in two phases: snapshot import and range synchronization.
+`core/sync/` contains the pieces of a snapshot-plus-range fast sync. Which parts a
+running node actually uses is stated per component below; the snapshot format is
+in [snapshots.md](snapshots.md).
 
-## Phase 1 – snapshot import
+## Status: not used to start or recover a node
 
-1. Fetch the manifest over HTTPS with TLS fingerprint pinning (the node checks the provided SHA-256 fingerprint).
-2. Verify manifest signatures – at least 2/3 of the validator voting power must sign the digest. A governance anchor may be
-   provided as a fallback trust root.
-3. Download chunk files (resumable). Each file is hashed after download; corrupt files are retried.
-4. Apply the snapshot in a temporary database and atomically swap it in for the live DB. A `.bak` copy of the original database
-   is retained until the node finalizes the new state.
-5. Reset the state processor to the imported root and persist the snapshot height as the fast-sync checkpoint.
+The `core/sync` package implements the pieces described here (manifest
+verification, resumable chunk download, an atomic database swap that keeps a
+`.bak` copy, block-proof range sync), but the node does not use them to start or to
+recover. Nothing in the node signs a snapshot manifest, so there is nothing for the
+quorum check to verify; nothing calls the install helpers; and the governance
+verifier (`SetGovernanceVerifier`) is never set outside tests.
 
-## Phase 2 – range sync
+A new validator is brought up from a verified snapshot made and checked outside
+the node, with `scripts/make-snapshot.sh`, `cmd/nhb-snapshot` and
+`scripts/deployvalidator.sh`; see
+[Onboarding a validator from a snapshot](../validators/snapshot-onboarding.md).
+That tool has its own manifest and archive format, not the one in
+[snapshots.md](snapshots.md).
 
-Starting from the snapshot checkpoint the node requests block proofs from peers and verifies them before applying headers to the
-local chain. A simplified flow:
+## What is wired to the node
+
+- `Node` creates a `sync.Manager` at start (`core/node.go`) with the chain ID, the
+  current height and the trie database, and a validator set built from the active
+  validators' voting power. It updates the manager's height as blocks commit.
+- `sync_status` (`rpc/sync_handlers.go`) returns
+  `{"chainHeight": n, "snapshotHeight": n, "managerReady": bool}`;
+  `managerReady` says whether the manager exists.
+- The two RPC methods that reached into the package, `sync_snapshot_import` and
+  `sync_snapshot_export`, are retired: they answer HTTP 410 with JSON-RPC error
+  `-32060` (`codeMethodDisabled`) and do nothing. The import used to replace the
+  running node's state in place with no backup and no update of the chain head
+  (the node put the state back at its committed head at the next block or restart),
+  and the export wrote unsigned files to a directory the caller named.
+
+## Range verification (library code)
+
+`Manager.RangeSync` and `RangeSyncer` (`core/sync/blockproof.go`) verify a chain of
+block proofs starting from a checkpoint header:
 
 ```
-checkpoint -> request proof (height+1) -> verify header linkage -> verify validator quorum -> apply header -> repeat
+checkpoint -> fetch proof for height+1 -> check height and PrevHash linkage
+           -> check validator quorum over the proof digest -> apply header -> repeat
 ```
 
-The range syncer stops once the fetcher signals `EOF`. Verified headers are optionally persisted by the caller to close the gap
-between the snapshot height and the current tip.
+Details:
 
-## Operator checklist
+- A proof is a header plus validator signatures (`BlockProof`).
+- The signed digest is `sha256(chainID (8 bytes BE) || height (8 bytes BE) ||
+  header hash)`.
+- Quorum: the signatures' voting power must be a quorum of the manager's validator
+  set, strictly more than two thirds (`types.HasQuorum`, `floor(2 * total / 3) + 1`,
+  summed as big integers); unknown signers, wrong-length signatures and signatures
+  that do not recover to the signer's address fail the proof.
+- The syncer stops when the proof fetcher returns `io.EOF` and returns the last
+  verified header. Headers are handed to a `HeaderApplier` as they verify.
 
-* Validate the manifest digest and signature quorum before importing.
-* Confirm the `chainId`, `height`, and `stateRoot` match the intended network.
-* Ensure the snapshot directory has sufficient disk space (chunk size defaults to 16 MiB).
-* After import, monitor `sync_status` RPC until the node catches up to the network tip.
-* Retain the `.bak` database until the range sync has finalized and the node survives a restart.
+Nothing in the node, the CLI or the RPC layer calls `RangeSync`, `EnsureChunks`,
+`HTTPFetcher` or `InstallSnapshot`; only tests do. A running node catches up by
+ordinary block sync over P2P (the `GetStatus`/`GetBlocks` messages in
+[overview.md](overview.md#wire-format)), where blocks above
+`QuorumCertActivationHeight` must carry a verified quorum certificate. The node
+does not sync this chain from genesis; see
+[Onboarding a validator from a snapshot](../validators/snapshot-onboarding.md#why-block-sync-from-genesis-is-not-supported).
+
+## If you drive the package from a tool
+
+- Check the manifest's `chainId`, `height` and `stateRoot` against the network you
+  intend to join before importing.
+- Confirm the manifest carries validator signatures; an unsigned manifest is
+  rejected unless a governance verifier is set.
+- After a snapshot start, watch `sync_status` (or the block height) until the node
+  reaches the network tip.

@@ -56,6 +56,14 @@ var (
 	errInvalidRate           = errors.New("market engine: rate must be positive")
 )
 
+// ErrSelfFill rejects a fill whose buyer is the listing's own seller: the
+// trade would only move the seller's NHB to itself and its ZNHB out of and
+// back into escrow, minus the flat fee. Exported (unlike the sentinels above)
+// because core/node.go's classifyProposalError must recognize it: the buyer
+// is the transaction signer and the seller is fixed in the listing, so a
+// resubmission can never succeed.
+var ErrSelfFill = errors.New("market engine: buyer cannot fill its own listing")
+
 // Listing captures a single peer-to-peer offer to sell ZNHB for NHB. The
 // price is expressed as an exact rational -- RateNumerator ZNHB per
 // RateDenominator NHB -- and is never approximated with a float anywhere in

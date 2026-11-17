@@ -22,6 +22,20 @@ RPCMaxTxPerChain = 120
 RPCMaxTxPerIdentityChain = 120
 RPCRateLimitWindow = 60
 RPCCallerMetadataMaxTTL = 600
+# Public read queries that scan blocks or hold the state lock share a small pool
+# so they cannot take the CPU that block production needs (see
+# docs/ops/rpc-query-limits.md). The defaults need no configuration; these are
+# the knobs, each shown as zero, which selects the default in the comment.
+# A refused query gets HTTP 429, code -32020 and a Retry-After hint.
+# RPCQueryMaxConcurrent = 0   # half the CPUs, at least 1 and at most 2
+# RPCQueryMaxPerClient = 0    # 1
+# RPCQueryQueueDepth = 0      # 8
+# RPCQueryQueueWaitMS = 0     # 100
+# RPCQueryTimeoutSeconds = 0  # 10
+# Set on a node that serves no public RPC: stops the background rebuild of the
+# explorer snapshot after every block (and the streams and indexes that go with
+# it). Default false keeps today's behaviour.
+# RPCDisableExplorerLoop = false
 # Safe as-is: rpc/http.go refuses to bind plaintext on a non-loopback
 # address, and RPCAddress above stays 127.0.0.1 -- real TLS termination
 # happens at nginx, which proxies HTTPS down to this loopback-only listener.
@@ -30,29 +44,68 @@ RPCAllowInsecureUnspecified = false
 RPCTLSCertFile = ""
 RPCTLSKeyFile = ""
 RPCTLSClientCAFile = ""
-# Only consulted when RPCTLSClientCAFile above is set (mTLS is off here, so
-# this is a no-op today). See rpc.ServerConfig.OperatorClientCertOU: a
-# verified client cert whose Subject OU matches this value is treated as an
-# operator credential for operator-only RPC methods, same as a JWT's 'role'
-# claim.
-RPCOperatorClientCertOU = ""
 DataDir = "./nhb-data"
 # The live network's genesis file. The chain id (see [p2p] NetworkId) is the
 # first 8 bytes of its block hash, so this file must never be edited.
 GenesisFile = "./config/genesis.relaunch.json"
 AllowAutogenesis = false
-# Matches the coordinated activation height both live mainnet validators are
-# currently enforcing for NHB-TRIAGE-C1's quorum-certificate check on the
-# untrusted P2P block-sync path (see config/config.go's QuorumCertActivationHeight
-# doc comment and core/node.go's commitBlock). This value must stay identical
-# across every validator -- a new validator whose config leaves this at 0
-# (unset) will sync and commit every historical block above this height with
-# NO quorum-certificate verification at all: a silent security gap, not a
-# functional failure, since sync otherwise succeeds normally. Set 2026-09-02
-# to match the live validators' already-active height; if the network is
-# ever upgraded again with a new activation height, update this value (and
-# redeploy every validator) together, never independently.
-QuorumCertActivationHeight = 451949
+# Quorum-certificate verification on the P2P block-sync path (see
+# config/config.go's QuorumCertActivationHeight doc comment and core/node.go's
+# commitBlock). A block that reaches a node through peer sync above this height
+# must carry a quorum certificate that verifies against the validator set at its
+# parent height, or it is refused; blocks at or below it, and every block the
+# node's own engine commits, are not checked. 1380200 is the value both live
+# validators run with. 0 would leave the check off. It does not change state or
+# any block's validity, but it must not be changed on one validator alone: set
+# it on every validator together, as one coordinated change, and in the same
+# release as the pin in cmd/nhb-snapshot/pins.go and the tests.
+QuorumCertActivationHeight = 1380200
+# The first epoch whose emission is paid by stake (see config/config.go's RewardsByStakeFromEpoch doc comment and core/rewards_logic.go's
+# distributeStakeWeighted). From that epoch on, all three reward pools follow stake and are credited to the wallets that locked it, so a validator that is
+# only delegated to receives nothing on its own account. 0 keeps the earlier split (equal per validator and by engagement score, to the validator's own
+# account). Unlike the setting above this one DOES change state: every validator, and every node that replays blocks from a snapshot, must carry the same
+# value, in force before the epoch it names begins. Change it only as one coordinated restart of every validator, in the same release as the pin in
+# cmd/nhb-snapshot/pins.go and the tests.
+RewardsByStakeFromEpoch = 0
+# First block height at which the end-of-block sweep of expired POS holds goes
+# on past a hold whose payer's locked balance no longer covers it (see
+# config/config.go's POSSweepSkipActivationHeight doc comment and
+# docs/specs/pos-lifecycle.md). 0 keeps the earlier behaviour, which is what
+# both live validators run with. Unlike the setting above it changes the state a
+# block leaves behind: set it identically on every validator, to a height above
+# the chain tip, restarting all of them together.
+POSSweepSkipActivationHeight = 0
+# First block height from which an unstake may not unbond ZNHB that backs a
+# pending POS hold (see config/config.go's POSHoldUnstakeGuardActivationHeight
+# doc comment and docs/staking/staking.md). 0 leaves the rule off, which is what
+# both live validators run with. It decides whether a transaction is valid, so
+# set it identically on every validator, to a height above the chain tip,
+# restarting all of them together.
+POSHoldUnstakeGuardActivationHeight = 0
+# First block height from which a governance finalize or execute transaction keeps
+# a credit the governance engine wrote to the sender's own account (a deposit
+# refund, a forfeited-deposit sweep) instead of overwriting it with the account as
+# it was before the call (see config/config.go's
+# GovCreditPreservationActivationHeight doc comment). 0 leaves it off, which is what
+# both live validators run with. It changes the state a block leaves behind: set it
+# identically on every validator, to a height above the chain tip, restarting all of
+# them together.
+GovCreditPreservationActivationHeight = 0
+# First block height from which an NHB domain fee whose route wallet is the
+# transfer's own sender or recipient is credited to that account instead of to a
+# separate copy the transfer then overwrites (see config/config.go's
+# FeeRouteAliasActivationHeight doc comment; the same fix for ZNHB is always on).
+# 0 leaves the NHB half off, which is what both live validators run with. It
+# changes the state a block leaves behind: set it identically on every validator,
+# to a height above the chain tip, restarting all of them together.
+FeeRouteAliasActivationHeight = 0
+# First block height from which a fixed-term loan or deposit is stored under an ID
+# that includes its owner, and an origination whose ID already has a record is
+# refused (see config/config.go's LendingFixedTermIDActivationHeight doc comment).
+# 0 keeps the transaction hash as the ID, which is what both live validators run
+# with. It changes the key a record is written under: set it identically on every
+# validator, to a height above the chain tip, restarting all of them together.
+LendingFixedTermIDActivationHeight = 0
 ValidatorKeystorePath = "validator.keystore"
 ValidatorKMSURI = ""
 ValidatorKMSEnv = ""
@@ -119,7 +172,7 @@ ClientVersion = ""
     AlphaStakeBps = 7000
     MinPayoutWei = "1000000000000000"
     EmissionPerEpoch = "50000000000000000000" # 50 ZNHB reward per epoch (example)
-    TreasuryAddress = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+    TreasuryAddress = "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn"
     MaxWinnersPerEpoch = 5000
     CarryRemainder = true
     PayoutMode = "auto"
@@ -161,6 +214,14 @@ ClientVersion = ""
   AllowedRoles = ["MINTER_NHB", "ROLE_SWAP_PAYOUT_ATTESTOR", "ROLE_ESCROW_REALM_ADMIN", "ROLE_LOYALTY_ADMIN"]
   AllowedParams = ["fees.baseFee", "staking.minimumValidatorStake", "staking.aprBps", "staking.payoutPeriodDays", "staking.unbondingDays", "staking.minStakeWei", "staking.maxEmissionPerYearWei", "staking.rewardAsset", "staking.compoundDefault", "loyalty.dynamic.targetBps", "loyalty.dynamic.minBps", "loyalty.dynamic.maxBps", "loyalty.dynamic.smoothingStepBps", "loyalty.dynamic.coverageMax", "loyalty.dynamic.coverageLookbackDays", "loyalty.dynamic.dailyCapPctOf7dFees", "loyalty.dynamic.dailyCapUsd", "loyalty.dynamic.yearlyCapPctOfInitialSupply", "loyalty.dynamic.priceGuard.pricePair", "loyalty.dynamic.priceGuard.twapWindowSeconds", "loyalty.dynamic.priceGuard.priceMaxAgeSeconds", "loyalty.dynamic.priceGuard.maxDeviationBps", "loyalty.dynamic.priceGuard.enabled", "network.seeds", "potso.abuse.MaxUserShareBps", "potso.abuse.MinStakeToEarnWei", "potso.abuse.QuadraticTxDampenAfter", "potso.abuse.QuadraticTxDampenPower", "potso.rewards.EmissionPerEpochWei", "potso.weights.AlphaStakeBps", "market.flatFeeWei"]
   BlockTimestampToleranceSeconds = 5
+  # Block time (Unix seconds) from which a parameter-update payload that names one
+  # parameter under two keys differing only in surrounding whitespace, with
+  # different values, is refused at submission and at execution (see
+  # config/config.go's RejectAmbiguousParamKeysFromUnix doc comment). 0 keeps the
+  # earlier behaviour, which is what both live validators run with. It decides
+  # whether a transaction is valid: set it identically on every validator, to a
+  # time after the chain's current block time, restarting all of them together.
+  RejectAmbiguousParamKeysFromUnix = 0
 
 [swap]
   AllowedFiat = ["USD", "EUR", "GBP"]
@@ -171,6 +232,14 @@ ClientVersion = ""
   TwapSampleCap = 128
   PriceProofMaxDeviationBps = 0
   PayoutAuthorities = ["treasury"]
+  # First block height at which a swap payout receipt (transaction type 0x0F)
+  # takes its recorded times from the block timestamp and consumes the
+  # attestor's nonce. 0 keeps the earlier behaviour (host clock, nonce left
+  # alone), which is what both live validators run with. Changing it changes
+  # the state root of every block that carries a receipt, so set the same
+  # value on every validator, and restart them together, well before the chain
+  # reaches that height (see docs/swap/stable-ledger.md).
+  PayoutReceiptActivationHeight = 0
   # This section's numeric circuit-breaker caps (per-tx min/max, per-address
   # daily/monthly) are a static, config.toml-driven mint-side defense in
   # depth -- worst-case exposure is already bounded by the fixed,
@@ -243,11 +312,11 @@ ClientVersion = ""
   ManagementFeeCapBps = 500
   # Treasury receives every charge's management-fee share. Required once
   # ManagementFeeBps > 0 -- node startup panics otherwise. Set to the
-  # network's single treasury wallet (NHB_MASTER_TREASURY in node.env),
-  # which already receives every other fee app-wide -- confirmed
-  # 2026-08-13 after this placeholder caused both live validators to
-  # crash-loop on their first restart after this section was added.
-  Treasury = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+  # network's admin/treasury wallet (the genesis adminWallet), which already
+  # receives every other fee app-wide. Leave NHB_MASTER_TREASURY unset: the
+  # live validators run without it, and a node that points it at any other
+  # address computes different state (core/node.go, NewNode).
+  Treasury = "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
   # MaxRetries is how many consecutive failed charge attempts a
   # subscription tolerates (spaced RetryIntervalSeconds apart) before
   # being permanently suspended.
@@ -430,17 +499,17 @@ ClientVersion = ""
   [global.Fees]
     FreeTierTxPerMonth = 100
     MDRBasisPoints = 150
-    OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+    OwnerWallet = "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
 
     [[global.Fees.Assets]]
       Asset = "NHB"
       MDRBasisPoints = 150
-      OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
+      OwnerWallet = "nhb1spruw63528zhhys2zxfgu2yf5ulcrlcltg3zdj"
 
     [[global.Fees.Assets]]
       Asset = "ZNHB"
       MDRBasisPoints = 200
-      OwnerWallet = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
+      OwnerWallet = "znhb1spruw63528zhhys2zxfgu2yf5ulcrlclx6hfhn"
   [global.Loyalty]
     [global.Loyalty.Dynamic]
       TargetBPS = 50
@@ -474,10 +543,23 @@ ClientVersion = ""
         UseLastGoodPriceFallback = true
 
 [consensus]
-  ProposalTimeout = "0s"
-  PrevoteTimeout = "0s"
-  PrecommitTimeout = "0s"
-  CommitTimeout = "0s"
+  # The round timers, written out. A validator whose file says "0s" for a timer runs
+  # on the built-in default for it, which is these values (the live validators do), but
+  # consensusd refuses a timer that is not positive, so the shipped file carries the
+  # values themselves.
+  ProposalTimeout = "2s"
+  PrevoteTimeout = "2s"
+  PrecommitTimeout = "2s"
+  CommitTimeout = "4s"
+  # The least time a validator lets pass between seeing a block commit and starting
+  # the round of the next height: the pace of block production, at most one block per
+  # interval. Everything counted in blocks (epoch length, emission per epoch) follows it;
+  # lending interest reads the block timestamp and does not. Omitting the key keeps the default, one second; "0s" turns
+  # the wait off and blocks then come as fast as the validators can make them (tens a
+  # second while they are in step). The value is local to the validator, changes no
+  # message or state rule, and is limited to half the commit timeout (2s at the default
+  # 4s). See docs/consensus/block-cadence.md. Both live validators run with 2s.
+  MinBlockInterval = "2s"
 
 [network_security]
   ServerTLSCertFile = "/etc/nhb/tls/p2pd.crt"

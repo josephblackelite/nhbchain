@@ -6,6 +6,20 @@ import (
 	"strings"
 )
 
+var (
+	// ErrInvalidRequest is wrapped by every registry error that is decided by
+	// the request itself (a missing authority, merchant or device id, a zero
+	// nonce), so the same request can never succeed later.
+	ErrInvalidRequest = errors.New("pos: invalid registry request")
+	// ErrStaleNonce is returned when a request's nonce is not above the last
+	// one its authority used. The stored nonce only grows, so a stale request
+	// never becomes valid.
+	ErrStaleNonce = errors.New("pos: stale nonce")
+	// ErrDeviceNotRegistered is returned when a request names a device the
+	// registry does not hold. The device can still be registered later.
+	ErrDeviceNotRegistered = errors.New("pos: device not registered")
+)
+
 type registryState interface {
 	KVGet(key []byte, out interface{}) (bool, error)
 	KVPut(key []byte, value interface{}) error
@@ -87,10 +101,10 @@ func (r *Registry) ensureFreshNonce(authority string, nonce uint64) error {
 	}
 	normalized := normalizeAuthority(authority)
 	if normalized == "" {
-		return fmt.Errorf("pos: authority required")
+		return fmt.Errorf("%w: authority required", ErrInvalidRequest)
 	}
 	if nonce == 0 {
-		return fmt.Errorf("pos: nonce must be positive")
+		return fmt.Errorf("%w: nonce must be positive", ErrInvalidRequest)
 	}
 	key := signerNonceKey(normalized)
 	var stored signerNonce
@@ -99,7 +113,7 @@ func (r *Registry) ensureFreshNonce(authority string, nonce uint64) error {
 		return err
 	}
 	if ok && nonce <= stored.Nonce {
-		return fmt.Errorf("pos: stale nonce %d (last %d)", nonce, stored.Nonce)
+		return fmt.Errorf("%w %d (last %d)", ErrStaleNonce, nonce, stored.Nonce)
 	}
 	return r.state.KVPut(key, signerNonce{Nonce: nonce})
 }
@@ -133,7 +147,7 @@ func (r *Registry) UpsertMerchant(authority, addr string, nonce, expiresAt uint6
 	}
 	normalized := normalizeMerchant(addr)
 	if normalized == "" {
-		return nil, fmt.Errorf("pos: merchant address required")
+		return nil, fmt.Errorf("%w: merchant address required", ErrInvalidRequest)
 	}
 	if err := r.ensureFreshNonce(authority, nonce); err != nil {
 		return nil, err
@@ -222,11 +236,11 @@ func (r *Registry) RegisterDevice(authority, id, merchant string, nonce, expires
 	}
 	normalizedID := normalizeDevice(id)
 	if normalizedID == "" {
-		return nil, fmt.Errorf("pos: device id required")
+		return nil, fmt.Errorf("%w: device id required", ErrInvalidRequest)
 	}
 	normalizedMerchant := normalizeMerchant(merchant)
 	if normalizedMerchant == "" {
-		return nil, fmt.Errorf("pos: merchant address required")
+		return nil, fmt.Errorf("%w: merchant address required", ErrInvalidRequest)
 	}
 	if err := r.ensureFreshNonce(authority, nonce); err != nil {
 		return nil, err
@@ -262,7 +276,7 @@ func (r *Registry) RevokeDevice(authority, id string, nonce, expiresAt uint64, c
 		return nil, err
 	}
 	if record == nil {
-		return nil, fmt.Errorf("pos: device %s not registered", normalizeDevice(id))
+		return nil, fmt.Errorf("%w: %s", ErrDeviceNotRegistered, normalizeDevice(id))
 	}
 	record.Nonce = nonce
 	record.ExpiresAt = expiresAt
@@ -290,7 +304,7 @@ func (r *Registry) RestoreDevice(authority, id string, nonce, expiresAt uint64, 
 		return nil, err
 	}
 	if record == nil {
-		return nil, fmt.Errorf("pos: device %s not registered", normalizeDevice(id))
+		return nil, fmt.Errorf("%w: %s", ErrDeviceNotRegistered, normalizeDevice(id))
 	}
 	record.Nonce = nonce
 	record.ExpiresAt = expiresAt

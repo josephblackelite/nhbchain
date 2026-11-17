@@ -1,3 +1,9 @@
+# THESE ARE STAGING/DEV-NETWORK DEFAULTS (NetworkName "nhb-staging", NetworkId
+# 187001, AllowAutogenesis true, no GenesisFile). Installing this chart as-is
+# starts an ISOLATED private chain, not a connection to the live NHBCoin
+# network -- it will not fail or warn, it will just never see a live block.
+# To run a real validator, follow the join instructions on the validators
+# page (the release commit's own genesis and config, not this chart) instead.
 replicaCount: 1
 
 image:

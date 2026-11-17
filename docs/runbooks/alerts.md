@@ -1,51 +1,89 @@
 # Alert Runbook
 
-This runbook documents how to triage and resolve the primary SLO alerts emitted by the
-NHB observability stack.
+The repository ships two alert files:
 
-## ServiceErrorBudgetBurn
+* `ops/prometheus/rules/slo.rules.yml`: two service-level alerts computed from
+  OpenTelemetry span metrics (described first below).
+* `observability/alerts.yaml`: rules on the `nhb_*` metrics the `nhb` and `consensusd`
+  processes register, including the consensus liveness alerts (see
+  [Consensus liveness alerts](#consensus-liveness-alerts)).
 
-**Alert source**: `ops/prometheus/rules/slo.rules.yml`
+## Service SLO alerts
 
-**Trigger**: Five minute rolling error ratio for a service exceeds 2% for ten minutes.
+Both rules in `ops/prometheus/rules/slo.rules.yml` are computed from the OpenTelemetry span
+metrics that the collector in `ops/otel/collector.yaml` produces (`spanmetrics_calls_total`,
+`spanmetrics_error_count` and `spanmetrics_latency_bucket`), grouped by the `service_name`
+label.
 
-**Dashboards**:
-- Grafana &rarr; *NHB Services Overview* panel "5m Error Budget Consumption"
-- Tempo trace search filtered by `service.name`
+The Prometheus configuration in `ops/prometheus/prometheus.yml` scrapes the
+`nhb-services` job (path `/metrics`, port `9464`) for the targets listed there, and
+loads the rule file above. No Go code in this repository binds port `9464`; in
+`ops/otel/collector.yaml` that port is the collector's own Prometheus exporter. The
+Grafana dashboard `NHB Services Overview`
+(`ops/grafana/dashboards/services-overview.json`) has the panels named below.
+
+### ServiceErrorBudgetBurn
+
+**Rule**: `slo:service_error_ratio:5m > 0.02` for `10m`, severity label `page`.
+
+The recorded series `slo:service_error_ratio:5m` is
+`sum(rate(spanmetrics_error_count[5m])) / sum(rate(spanmetrics_calls_total[5m]))`,
+per `service_name`.
+
+**Dashboard**: `NHB Services Overview`, panel `5m Error Budget Consumption`.
 
 **Checks**:
-1. Confirm the alert is real by correlating with `spanmetrics_calls_total` and `spanmetrics_error_count` for the affected service.
-2. Inspect recent deployments or configuration changes for the service.
-3. Use the Gateway request logs in Loki filtered by `service` and `trace_id` to pinpoint failing requests.
+1. Query `spanmetrics_calls_total` and `spanmetrics_error_count` for the affected
+   `service_name` to confirm the ratio.
+2. Look at recent deployments or configuration changes for that service.
+3. Inspect the service's request logs. The collector's logs pipeline exports to Loki
+   (`ops/otel/collector.yaml`) and its traces pipeline exports to Tempo.
 
-**Mitigations**:
-- Roll back the most recent deployment if errors map to a release.
-- Increase rate limits via Gateway configuration if the service is overloaded.
-- If the upstream dependency is degraded, fail over to a healthy region and annotate the incident channel.
+### ServiceLatencyRegression
 
-## ServiceLatencyRegression
+**Rule**: `slo:service_latency_p95:5m > 0.75` (seconds) for `10m`, severity label `warn`.
 
-**Alert source**: `ops/prometheus/rules/slo.rules.yml`
+The recorded series `slo:service_latency_p95:5m` is
+`histogram_quantile(0.95, sum(rate(spanmetrics_latency_bucket[5m])) by (service_name, le))`.
 
-**Trigger**: p95 latency computed from the spanmetrics histogram stays above 750ms for ten minutes.
-
-**Dashboards**:
-- Grafana &rarr; *NHB Services Overview* panel "5m p95 Request Latency"
-- Grafana Explore &rarr; Tempo traces with the slowest spans
+**Dashboard**: `NHB Services Overview`, panel `5m p95 Request Latency`.
 
 **Checks**:
-1. Validate latency regression using Grafana by drilling into the service time series.
-2. Identify the span(s) contributing to the tail via Tempo exemplars.
-3. Review infrastructure dashboards (CPU, memory, disk) for resource saturation.
+1. Confirm the regression on the panel above for the affected `service_name`.
+2. Find the slow spans in Tempo for that service.
+3. Check host resources (CPU, memory, disk) for saturation.
 
-**Mitigations**:
-- Enable debug-level logging temporarily to capture additional context; remember to revert.
-- Scale out the service if CPU saturation is observed.
-- Engage dependent teams if external APIs are responsible for the slow spans.
+## Consensus liveness alerts
 
-## General Guidance
+The `consensus-liveness` group in `observability/alerts.yaml` reads metrics that the `nhb`
+and `consensusd` processes register (`observability/metrics.go`). Those metrics are served
+on `/metrics` only when the environment variable `NHB_METRICS_ADDR` is set to a listen
+address (`observability/metrics_server.go`); with it unset there is no listener. The
+listener is unauthenticated, so bind it to loopback or a private interface. `cmd/p2pd` does not
+start it.
 
-- Always acknowledge alerts in Alertmanager or PagerDuty to avoid duplicate pages.
-- Update the incident timeline in `#sre-alerts` with findings and actions taken.
-- After mitigation, verify that the error and latency SLO metrics trend back toward baseline.
-- File a post-incident review if the alert persisted for more than 30 minutes or recurred within a week.
+| Alert | Expression | For | Severity |
+| --- | --- | --- | --- |
+| `ConsensusNoCommit` | `nhb_consensus_seconds_since_last_commit > 60` | 1m | critical |
+| `ConsensusBuildFailing` | `nhb_consensus_build_failures_consecutive >= 2` | 30s | critical |
+| `ConsensusEmptyBlockFallbackRate` | `increase(nhb_consensus_empty_block_fallbacks_total[5m]) > 20` | 0m | warning |
+| `MempoolNondeterministicTransactions` | `increase(nhb_mempool_tx_failures_total{disposition="nondeterministic"}[10m]) > 0` | 0m | warning |
+| `ConsensusTxPanicRecovered` | `increase(nhb_consensus_tx_panics_recovered_total[10m]) > 0` | 0m | warning |
+
+When one fires, search the validator log for lines that start with `LIVENESS:`. The
+[validator runbook](../ops/validator-runbook.md#block-production-liveness) lists each line and its
+structured fields. The metric `nhb_consensus_block_interval_seconds` is the interval between
+the timestamps of consecutive committed blocks; how the pace of an idle chain is set is in
+[Block cadence](../consensus/block-cadence.md).
+
+The same file also defines the `module-runtime` group, which alerts on module error rate,
+module p95 latency, throttle counts, oracle update age, and the paymaster auto top-up
+counters (see
+[Paymaster automatic top-up](./paymaster-autotopup.md)).
+
+## Related signals
+
+The gateway also exposes request metrics (see `gateway/middleware/observability.go`) and
+the consensus node exposes the POS and paymaster metrics listed in
+[POS SLA and troubleshooting](./pos-slas.md) and
+[Paymaster budget](./paymaster-budgets.md).

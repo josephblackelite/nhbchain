@@ -1,45 +1,41 @@
 # Fuzzing Guide
 
-Fuzzing validates the resilience of consensus-critical, cryptographic, and financial components under unexpected input. Follow this guide to configure fuzzers, capture crashes, and interpret results.
+This page lists the Go fuzz targets that exist in the repository and how to run them. The module requires Go 1.24 (`go.mod`).
 
 ## Targets
 
-| Component | Location | Harness |
+| Fuzz function | File | What it checks |
 | --- | --- | --- |
-| Consensus state transitions | `consensus/` | `go test ./consensus/... -run TestStateTransitionFuzz -fuzz=.` |
-| Crypto primitives | `crypto/` | Go fuzz targets under `*_test.go` files (e.g., `TestSignatureFuzz`). |
-| SDK transaction builders | `sdk/` | `go test ./sdk/... -run TestTxBuilderFuzz -fuzz=.` |
+| `FuzzCanonicalizeNonce` | `p2p/nonce_fuzz_test.go` | Handshake nonce canonicalisation: canonical output is lowercase, even length, unprefixed valid hex, idempotent, and a nonce is rejected as a replay in both original and canonical form (see [handshake.md](../security/handshake.md)). |
+| `FuzzShareRedemptionProRata` | `tests/creator/shares_test.go` | Two fans stake on one creator; the first fan's unstake must not return more than that fan deposited. |
+| `FuzzCreatorURISanitization` | `tests/fuzz/creator_uri_fuzz_test.go` | `PublishContent` accepts only trimmed, non-empty URIs of at most 512 bytes with an `https`, `ipfs`, `ar` or `nhb` scheme. |
+| `FuzzGovernancePolicyDeltas` | `tests/fuzz/gov_policy_fuzz_test.go` | Randomised governance, slashing, mempool and block-limit policy deltas applied to a baseline through `govcfg` validation. |
+| `FuzzLendingSupplyWithdrawAmounts` | `tests/fuzz/lending_amounts_fuzz_test.go` | Lending supply then withdraw: shares minted are positive, share totals are tracked and restored, up to the half-up rounding of the share conversion; the module balance equals the market's supplied total; the user's shares are cleared; and a failed supply leaves liquidity unchanged. |
+| `FuzzPotsoEvidencePipeline` | `tests/fuzz/potso_evidence_fuzz_test.go` | POTSO evidence store, penalty engine and reward splitting: duplicate evidence is not re-accepted; a reward split never assigns more than the pool plus the rounding dust carried in; over all epochs the assigned amounts plus the rounding bucket equal the pools exactly; and no weight or amount goes negative. |
 
-## Setup
+These are the only `testing.F` fuzz targets in the repository. The files under `tests/fuzz/` are `_test.go` files, so the Go tool discovers them; `scripts/fuzz_all.sh` finds targets by searching `_test.go` files for `func Fuzz...`, and `tests/scripts/fuzz_audit_targets_test.go` checks that it does.
 
-1. Ensure Go 1.20+ is installed (`go env GOVERSION`).
-2. Set `GOFUZZNOCOMPRESS=1` and `GOMAXPROCS` to match available cores for deterministic reproduction.
-3. Configure timeouts using `-fuzztime=5m` (adjust per target) to balance coverage and runtime.
-4. Create a dedicated `artifacts/fuzz/` directory to store crash seeds and logs.
+## Running a fuzzer
 
-## Running fuzzers
+Go allows `-fuzz` to match exactly one fuzz function in exactly one package (`go test` rejects `-fuzz` across multiple packages with `cannot use -fuzz flag with multiple packages`). To run one target, name its package and function:
 
 ```bash
-GOFUZZNOCOMPRESS=1 go test ./consensus/... -run TestStateTransitionFuzz -fuzz=. -fuzztime=10m -fuzzminimize
+go test ./p2p -run '^$' -fuzz '^FuzzCanonicalizeNonce$' -fuzztime 5m
+go test ./tests/creator -run '^$' -fuzz '^FuzzShareRedemptionProRata$' -fuzztime 5m
 ```
 
-Repeat for each target, adjusting packages and time budgets. Monitor CPU and memory usage to prevent host instability.
+To run every target, `make bugcheck-fuzz` runs `scripts/fuzz_all.sh`, which lists the targets and runs them one at a time, each for `FUZZTIME` (default `60s`), and exits non-zero if any of them fails. `FUZZ_LIST_ONLY=1 bash scripts/fuzz_all.sh` prints the `<package> <function>` pairs and runs nothing.
+
+Seed inputs come from the `f.Add(...)` calls in each target. Go writes inputs that make a target fail to `testdata/fuzz/<FuzzName>/` next to the package (its cache of other interesting inputs lives in the Go build cache). No `testdata/fuzz` directories are checked in at present.
 
 ## Crash triage
 
-1. **Reproduce.** Run the reported seed with `go test -run TestStateTransitionFuzz -fuzz=. -fuzztime=1x -fuzzseed=<seed>`.
-2. **Classify impact.** Determine whether the failure affects consensus safety, liveness, or results in denial-of-service.
-3. **File an issue.** Include stack traces, minimized corpus inputs, and suspected root cause.
-4. **Verify fixes.** Add regression unit tests or invariants and re-run the fuzzer to ensure the seed no longer crashes.
-
-## Corpus management
-
-- Commit known-good seed corpora under `tests/fuzz/<target>/` for reproducibility.
-- Periodically prune redundant seeds to keep iterations fast.
-- Share crash artifacts via the audit folder with timestamps and reproduction commands.
+1. **Reproduce.** A failing input is written to `testdata/fuzz/<FuzzName>/<hash>`. Re-run it with `go test ./<pkg> -run 'FuzzName/<hash>'`.
+2. **Classify impact.** Decide whether the failure affects consensus safety, liveness, funds accounting or is a denial of service.
+3. **File an issue** with the stack trace, the minimised input and the suspected root cause.
+4. **Verify the fix.** Keep the reproducer file (or add a regression unit test) and re-run the fuzzer.
 
 ## Exit criteria
 
 - No unreproduced crashes remain.
-- High-impact bugs have validated fixes with associated regression tests.
-- Fuzzer coverage reports show steady state (no new edges found) for at least two runs of the configured duration.
+- Every fixed crash has a regression test or a committed reproducer.

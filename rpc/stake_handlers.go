@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -186,7 +187,8 @@ func (s *Server) guardStakeRequest(w http.ResponseWriter, r *http.Request, req *
 	}
 	source := s.clientSource(r)
 	identity, _ := r.Context().Value(clientIdentityContextKey).(string)
-	if !s.allowSource(source, identity, "", req.Method, now) {
+	if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, "", req.Method, now); !allowed {
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "staking rate limit exceeded", source)
 		return time.Time{}, false
 	}

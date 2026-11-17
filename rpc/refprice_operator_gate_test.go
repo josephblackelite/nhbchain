@@ -22,7 +22,7 @@ import (
 // claim: a credential that authenticates successfully but carries no
 // 'operator' role claim -- exactly the shape of every credential minted
 // today by generate_jwt.go, update_env.go and gov-keeper's mintJWT, which is
-// what a real, currently-deployed off-chain reference-price submission
+// what an off-chain reference-price submission
 // service holds -- must still be accepted here, exactly as it was before the
 // operator-role gate existed on this branch at all. Before this exemption,
 // the same request would have been rejected with codeOperatorOnly (403)

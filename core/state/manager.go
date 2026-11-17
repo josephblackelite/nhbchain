@@ -113,7 +113,6 @@ var (
 	potsoStakeLockIndexPrefix        = []byte("potso/stake/locks/index/")
 	potsoStakeQueuePrefix            = []byte("potso/stake/unbondq/")
 	potsoEvidenceRecordPrefix        = []byte("potso/evidence/record/")
-	potsoEvidencePendingIndexKey     = []byte("potso/evidence/pending")
 	potsoStakeModuleSeedPrefix       = "module/potso/stake/vault"
 	potsoStakeOwnerIndexKey          = []byte("potso/stake/owners")
 	potsoRewardLastProcessed         = []byte("potso/rewards/lastProcessed")
@@ -137,6 +136,7 @@ var (
 	lendingMarketPrefix              = []byte("lending/market/")
 	lendingFeeAccrualPrefix          = []byte("lending/fees/")
 	lendingUserPrefix                = []byte("lending/user/")
+	lendingLegacyReconciledPrefix    = []byte("lending/legacy-reconciled/")
 	lendingPoolIndexKey              = []byte("lending/pools/index")
 	// lendingFixedTermLoanPrefix/lendingFixedTermActiveLoanPrefix back the new
 	// fixed-term (locked-rate, 30/90-day) borrow product -- a separate record
@@ -1146,18 +1146,7 @@ func (m *Manager) MinimumValidatorStake() (*big.Int, error) {
 	if !ok {
 		return governance.DefaultMinimumValidatorStake(), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
-		return governance.DefaultMinimumValidatorStake(), nil
-	}
-	parsed, success := new(big.Int).SetString(trimmed, 10)
-	if !success {
-		return nil, fmt.Errorf("params: minimum validator stake must be a base-10 integer")
-	}
-	if parsed.Sign() <= 0 {
-		return nil, fmt.Errorf("params: minimum validator stake must be positive")
-	}
-	return parsed, nil
+	return governance.MinimumValidatorStakeFromParam(raw), nil
 }
 
 // SnapshotPotsoWeightsKey exposes the read-only snapshot handle for POTSO
@@ -1525,6 +1514,12 @@ type storedLendingMarket struct {
 	TotalFixedTermDepositInterestOwedWei    *big.Int `rlp:"optional"`
 	FixedTermDepositReserveWei              *big.Int `rlp:"optional"`
 	TotalFixedTermLoanInterestReceivableWei *big.Int `rlp:"optional"`
+	// LastUpdateTimestamp is the block time of the last index refresh (see
+	// lending.Market.LastUpdateTimestamp), appended last and optional like the
+	// fields above: a market that carries none encodes exactly as it did before
+	// the field existed, byte for byte, so state written by transactions that
+	// never set it keeps its root.
+	LastUpdateTimestamp uint64 `rlp:"optional"`
 }
 
 type storedLendingFees struct {
@@ -1541,6 +1536,8 @@ func newStoredLendingMarket(market *lending.Market) *storedLendingMarket {
 		LastUpdateBlock: market.LastUpdateBlock,
 		ReserveFactor:   market.ReserveFactor,
 		DeveloperFeeBps: market.DeveloperFeeBps,
+
+		LastUpdateTimestamp: market.LastUpdateTimestamp,
 	}
 	if market.DeveloperOwner.Bytes() != nil {
 		copy(stored.DeveloperOwner[:], market.DeveloperOwner.Bytes())
@@ -1598,6 +1595,8 @@ func (s *storedLendingMarket) toMarket() *lending.Market {
 		LastUpdateBlock: s.LastUpdateBlock,
 		ReserveFactor:   s.ReserveFactor,
 		DeveloperFeeBps: s.DeveloperFeeBps,
+
+		LastUpdateTimestamp: s.LastUpdateTimestamp,
 	}
 	var zeroAddr [20]byte
 	if !bytes.Equal(s.DeveloperOwner[:], zeroAddr[:]) {
@@ -1835,6 +1834,49 @@ func (m *Manager) LendingPutMarket(poolID string, market *lending.Market) error 
 		return err
 	}
 	return m.lendingEnsurePoolIndexed(normalized)
+}
+
+// LendingLegacyReconciled reports whether the one-time sweep that moves the
+// lending positions still recorded on plain accounts into the pool's own
+// records (core/lending_native.go's reconcileLegacyPoolState) has completed for
+// the pool. Only lending transactions and the lifecycle steps that run a
+// lending engine ever set it, so it stays unset, and unread, on a chain that
+// has executed none.
+func (m *Manager) LendingLegacyReconciled(poolID string) (bool, error) {
+	if m == nil {
+		return false, fmt.Errorf("state manager unavailable")
+	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return false, err
+	}
+	var done bool
+	ok, err := m.KVGet(lendingLegacyReconciledKey(normalized), &done)
+	if err != nil {
+		return false, err
+	}
+	return ok && done, nil
+}
+
+// LendingMarkLegacyReconciled records that the sweep has completed for the
+// pool, so the accounts are not listed again by every later lending call.
+func (m *Manager) LendingMarkLegacyReconciled(poolID string) error {
+	if m == nil {
+		return fmt.Errorf("state manager unavailable")
+	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	return m.KVPut(lendingLegacyReconciledKey(normalized), true)
+}
+
+func lendingLegacyReconciledKey(poolID string) []byte {
+	trimmed := strings.TrimSpace(poolID)
+	buf := make([]byte, len(lendingLegacyReconciledPrefix)+len(trimmed))
+	copy(buf, lendingLegacyReconciledPrefix)
+	copy(buf[len(lendingLegacyReconciledPrefix):], trimmed)
+	return buf
 }
 
 // LendingGetFeeAccrual loads the current lending fee accrual totals if present
@@ -3429,49 +3471,6 @@ func (m *Manager) PotsoEvidenceGetRecord(hash [32]byte) (*evidence.Record, bool,
 		return nil, false, nil
 	}
 	return &record, true, nil
-}
-
-// PotsoEvidencePutRecord persists a newly accepted misbehaviour report and
-// appends its hash to the pending index (see PotsoEvidencePendingHashes).
-// Callers must confirm via PotsoEvidenceGetRecord that the hash is not
-// already recorded before calling this -- it does not itself re-check, to
-// keep the already-exists/idempotent decision (and any accompanying event)
-// entirely in the caller's hands, matching every other apply*Transaction
-// idempotency pattern in this codebase.
-func (m *Manager) PotsoEvidencePutRecord(record *evidence.Record) error {
-	if record == nil {
-		return fmt.Errorf("potso: evidence record must not be nil")
-	}
-	if err := m.KVPut(potsoEvidenceRecordKey(record.Hash), record); err != nil {
-		return err
-	}
-	return m.KVAppend(potsoEvidencePendingIndexKey, record.Hash[:])
-}
-
-// PotsoEvidencePendingHashes returns every evidence hash ever recorded via a
-// TxTypeSubmitEvidence transaction, oldest-appended first. Entries are never
-// removed here even after core/node.go's processPendingEvidenceForState has
-// applied their penalty -- state/potso.Ledger's WasPenaltyApplied/
-// MarkPenaltyApplied pair is what makes re-processing an already-penalized
-// entry a safe no-op, exactly the idempotency guarantee this same index
-// relied on before this migration (consensus/potso/evidence.Store's own Put
-// was already a hash-keyed upsert that never needed a matching "delete once
-// processed" step).
-func (m *Manager) PotsoEvidencePendingHashes() ([][32]byte, error) {
-	var raw [][]byte
-	if err := m.KVGetList(potsoEvidencePendingIndexKey, &raw); err != nil {
-		return nil, err
-	}
-	hashes := make([][32]byte, 0, len(raw))
-	for _, entry := range raw {
-		if len(entry) != 32 {
-			continue
-		}
-		var hash [32]byte
-		copy(hash[:], entry)
-		hashes = append(hashes, hash)
-	}
-	return hashes, nil
 }
 
 func (m *Manager) appendStakeOwner(owner [20]byte) error {

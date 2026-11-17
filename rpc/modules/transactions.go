@@ -2,7 +2,6 @@ package modules
 
 import (
 	"encoding/json"
-	"errors"
 	"math/big"
 	"net/http"
 	"strings"
@@ -73,11 +72,6 @@ type SponsorshipConfigResult struct {
 	AdminRole string `json:"adminRole"`
 }
 
-type setSponsorshipParams struct {
-	Caller  string `json:"caller"`
-	Enabled bool   `json:"enabled"`
-}
-
 // sponsorshipCountersParams captures optional filter inputs for counter queries.
 type sponsorshipCountersParams struct {
 	Merchant string `json:"merchant,omitempty"`
@@ -143,34 +137,6 @@ func encodeThrottle(throttle *core.PaymasterThrottle) *SponsorshipThrottleInfo {
 		info.AttemptWei = new(big.Int).Set(throttle.AttemptBudgetWei).String()
 	}
 	return info
-}
-
-// SetSponsorshipEnabled updates the paymaster module status after verifying the caller is authorised.
-func (m *TransactionsModule) SetSponsorshipEnabled(raw json.RawMessage) (*SponsorshipConfigResult, *ModuleError) {
-	if m == nil || m.node == nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: "transactions module not initialised"}
-	}
-	var params setSponsorshipParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "invalid parameter object", Data: err.Error()}
-	}
-	caller := strings.TrimSpace(params.Caller)
-	if caller == "" {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "caller required"}
-	}
-	decoded, err := crypto.DecodeAddress(caller)
-	if err != nil {
-		return nil, &ModuleError{HTTPStatus: http.StatusBadRequest, Code: codeInvalidParams, Message: "invalid caller address", Data: err.Error()}
-	}
-	if err := m.node.SetPaymasterModuleEnabled(decoded.Bytes(), params.Enabled); err != nil {
-		switch {
-		case errors.Is(err, core.ErrPaymasterUnauthorized):
-			return nil, &ModuleError{HTTPStatus: http.StatusForbidden, Code: codeInvalidParams, Message: err.Error()}
-		default:
-			return nil, &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: err.Error()}
-		}
-	}
-	return &SponsorshipConfigResult{Enabled: m.node.PaymasterModuleEnabled(), AdminRole: "ROLE_PAYMASTER_ADMIN"}, nil
 }
 
 // SponsorshipConfig returns the current sponsorship configuration metadata.

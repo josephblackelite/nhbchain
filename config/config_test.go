@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"nhbchain/crypto"
+	"nhbchain/native/subscriptions"
 
 	"github.com/BurntSushi/toml"
 )
@@ -486,6 +488,121 @@ BlockTimestampToleranceSeconds = 12
 	}
 }
 
+func TestLoadPOSSweepSkipActivationHeight(t *testing.T) {
+	load := func(t *testing.T, extra string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		keystorePath := filepath.Join(dir, "validator.keystore")
+		contents := fmt.Sprintf("ListenAddress = \"0.0.0.0:6001\"\nValidatorKeystorePath = %s\n%s", tomlQuoted(keystorePath), extra)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	// Left out, the sweep keeps its earlier behaviour at every height.
+	if got := load(t, "").POSSweepSkipActivationHeight; got != 0 {
+		t.Fatalf("expected the activation height to default to 0 (off), got %d", got)
+	}
+	if got := load(t, "POSSweepSkipActivationHeight = 250000\n").POSSweepSkipActivationHeight; got != 250000 {
+		t.Fatalf("unexpected activation height: %d", got)
+	}
+}
+
+func TestLoadSwapPayoutReceiptActivation(t *testing.T) {
+	load := func(t *testing.T, swapSection string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		keystorePath := filepath.Join(dir, "validator.keystore")
+		contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+[swap]
+%s`, tomlQuoted(keystorePath), swapSection)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	// Left out, the block-time rules for payout receipts stay off.
+	cfg := load(t, "SlippageBps = 75\n")
+	if got := cfg.Swap.PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected the activation height to default to off, got %d", got)
+	}
+	if got := cfg.SwapSettings().PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected the swap settings to leave the rule off, got %d", got)
+	}
+	if got := (*Config)(nil).SwapSettings().PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected a missing config to leave the rule off, got %d", got)
+	}
+
+	cfg = load(t, "PayoutReceiptActivationHeight = 452000\n")
+	if got := cfg.Swap.PayoutReceiptActivationHeight; got != 452000 {
+		t.Fatalf("unexpected activation height: %d", got)
+	}
+	if got := cfg.SwapSettings().PayoutReceiptActivationHeight; got != 452000 {
+		t.Fatalf("swap settings dropped the activation height: %d", got)
+	}
+}
+
+func TestLoadGovernanceAmbiguousParamKeyActivation(t *testing.T) {
+	load := func(t *testing.T, governance string) *Config {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.toml")
+		keystorePath := filepath.Join(dir, "validator.keystore")
+		contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+[governance]
+%s`, tomlQuoted(keystorePath), governance)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("load config: %v", err)
+		}
+		return cfg
+	}
+
+	// Left out, the check stays off and the policy keeps today's behaviour.
+	cfg := load(t, "QuorumBps = 2500\n")
+	if cfg.Governance.RejectAmbiguousParamKeysFromUnix != 0 {
+		t.Fatalf("expected the check to default to off, got %d", cfg.Governance.RejectAmbiguousParamKeysFromUnix)
+	}
+	policy, err := cfg.Governance.Policy()
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	if policy.RejectAmbiguousParamKeysFromUnix != 0 {
+		t.Fatalf("expected the policy to leave the check off, got %d", policy.RejectAmbiguousParamKeysFromUnix)
+	}
+
+	cfg = load(t, "RejectAmbiguousParamKeysFromUnix = 1900000000\n")
+	if cfg.Governance.RejectAmbiguousParamKeysFromUnix != 1900000000 {
+		t.Fatalf("unexpected activation time: %d", cfg.Governance.RejectAmbiguousParamKeysFromUnix)
+	}
+	policy, err = cfg.Governance.Policy()
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	if policy.RejectAmbiguousParamKeysFromUnix != 1900000000 {
+		t.Fatalf("policy dropped the activation time: %d", policy.RejectAmbiguousParamKeysFromUnix)
+	}
+}
+
 func TestGovPolicyParsing(t *testing.T) {
 	cfg := GovConfig{
 		MinDepositWei:                  "1.25e3",
@@ -755,6 +872,53 @@ ValidatorKeystorePath = %s
 	}
 }
 
+// The minimum block interval is one block a second when the config leaves it out -- as
+// the config of a running node does, which has a [consensus] section with the four
+// timeouts and nothing else -- and is taken as written when it is there, "0s" included:
+// that is how the wait is turned off.
+func TestLoadKeepsTheDefaultMinBlockIntervalUnlessTheConfigSetsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		consensus string
+		want      time.Duration
+	}{
+		{"no consensus section", "", time.Second},
+		{"the four timeouts and nothing else", `[consensus]
+ProposalTimeout = "0s"
+PrevoteTimeout = "0s"
+PrecommitTimeout = "0s"
+CommitTimeout = "0s"
+`, time.Second},
+		{"set", `[consensus]
+MinBlockInterval = "1500ms"
+`, 1500 * time.Millisecond},
+		{"turned off", `[consensus]
+MinBlockInterval = "0s"
+`, 0},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			keystorePath := filepath.Join(dir, "validator.keystore")
+			contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+%s`, tomlQuoted(keystorePath), tc.consensus)
+			if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if got := cfg.Consensus.MinBlockInterval; got != tc.want {
+				t.Fatalf("MinBlockInterval %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadWithoutPassphraseFailsToCreateDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -787,5 +951,161 @@ func TestLoadCreatesKeystoreWithPassphrase(t *testing.T) {
 	}
 	if key == nil {
 		t.Fatalf("expected decrypted key")
+	}
+}
+
+func TestConfigDecodesWebSocketSettings(t *testing.T) {
+	var cfg Config
+	contents := `RPCWebSocketOrigins = ["app.example", "*.app.example"]
+RPCWebSocketMaxConnections = 128
+RPCWebSocketMaxPerIP = 4
+`
+	if _, err := toml.Decode(contents, &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := []string{"app.example", "*.app.example"}; !reflect.DeepEqual(cfg.RPCWebSocketOrigins, want) {
+		t.Fatalf("unexpected WebSocket origins: %v", cfg.RPCWebSocketOrigins)
+	}
+	if cfg.RPCWebSocketMaxConnections != 128 || cfg.RPCWebSocketMaxPerIP != 4 {
+		t.Fatalf("unexpected WebSocket limits: %d %d", cfg.RPCWebSocketMaxConnections, cfg.RPCWebSocketMaxPerIP)
+	}
+}
+
+// A config generated on first run must be exactly what the next start reads
+// back from the file just written. The generated literal used to skip the
+// defaults Load fills in (subscriptions, swap, POTSO weights, ...), so the
+// first run alone failed at startup.
+func TestLoadCreatesDefaultConfigEqualToTheNextLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	first, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	second, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("second load: %v", err)
+	}
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("the generated config differs from what the next start reads:\nfirst:  %+v\nsecond: %+v", first, second)
+	}
+}
+
+// cmd/nhb and cmd/consensusd refuse to start with a subscriptions config that
+// does not validate, and used to do exactly that on the first run.
+func TestLoadCreatesDefaultConfigTheSubscriptionsEngineAccepts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	engineCfg := subscriptions.Config{
+		ManagementFeeBps:     cfg.Subscriptions.ManagementFeeBps,
+		ManagementFeeCapBps:  cfg.Subscriptions.ManagementFeeCapBps,
+		MaxRetries:           cfg.Subscriptions.MaxRetries,
+		RetryIntervalSeconds: cfg.Subscriptions.RetryIntervalSeconds,
+	}
+	if err := engineCfg.Validate(); err != nil {
+		t.Fatalf("the generated subscriptions config is not accepted: %v (%+v)", err, cfg.Subscriptions)
+	}
+}
+
+// Loading a config that does not name a key path used to write the file back
+// from the half-filled in-memory struct, before the defaults were applied. That
+// stored every key the operator had left out as an explicit zero, and the next
+// Load took the zeros as the operator's choice. The file must stay exactly as
+// the operator wrote it, and each Load must give the same result as the one
+// before, whichever way the keystore at the default path comes to exist.
+func TestLoadWithoutAKeyPathLeavesTheConfigFileAlone(t *testing.T) {
+	const body = `ListenAddress = "0.0.0.0:6001"
+
+[consensus]
+ProposalTimeout = "0s"
+PrevoteTimeout = "0s"
+PrecommitTimeout = "0s"
+CommitTimeout = "0s"
+`
+	for _, tc := range []struct {
+		name string
+		// header is written before body in the config file.
+		header string
+		// existing creates the keystore at the default path before the first Load.
+		existing bool
+		// passphrase is handed to Load; empty loads the way the diagnostic tools do.
+		passphrase string
+	}{
+		{"keystore at the default path, no passphrase", "", true, ""},
+		{"keystore at the default path, with passphrase", "", true, testKeystorePassphrase},
+		{"keystore created by the first Load", "", false, testKeystorePassphrase},
+		{"explicitly empty key path", "ValidatorKeystorePath = \"\"\n", true, testKeystorePassphrase},
+		{"key path named in the file", "", true, testKeystorePassphrase},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			keystorePath := filepath.Join(dir, "validator.keystore")
+			if tc.existing {
+				key, err := crypto.GeneratePrivateKey()
+				if err != nil {
+					t.Fatalf("generate key: %v", err)
+				}
+				if err := crypto.SaveToKeystore(keystorePath, key, testKeystorePassphrase); err != nil {
+					t.Fatalf("save keystore: %v", err)
+				}
+			}
+			header := tc.header
+			if tc.name == "key path named in the file" {
+				header = "ValidatorKeystorePath = " + tomlQuoted(keystorePath) + "\n"
+			}
+			written := []byte(header + body)
+			if err := os.WriteFile(path, written, 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			var opts []LoadOption
+			if tc.passphrase != "" {
+				opts = append(opts, WithKeystorePassphrase(tc.passphrase))
+			}
+			first, err := Load(path, opts...)
+			if err != nil {
+				t.Fatalf("first load: %v", err)
+			}
+			afterFirst, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if string(afterFirst) != string(written) {
+				t.Fatalf("the first load rewrote the config file:\n%s", afterFirst)
+			}
+			second, err := Load(path, opts...)
+			if err != nil {
+				t.Fatalf("second load: %v", err)
+			}
+			afterSecond, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if string(afterSecond) != string(written) {
+				t.Fatalf("the second load rewrote the config file:\n%s", afterSecond)
+			}
+
+			if first.ValidatorKeystorePath != keystorePath {
+				t.Fatalf("keystore path %q, want %q", first.ValidatorKeystorePath, keystorePath)
+			}
+			if _, err := os.Stat(keystorePath); err != nil {
+				t.Fatalf("keystore missing at the default path: %v", err)
+			}
+			if !reflect.DeepEqual(first, second) {
+				t.Fatalf("a second load differs from the first:\nfirst:  %+v\nsecond: %+v", first, second)
+			}
+			if want := defaultGlobalConfig(); !reflect.DeepEqual(second.Global, want) {
+				t.Fatalf("the second load did not keep the global defaults: %+v", second.Global)
+			}
+			if got := second.Consensus.MinBlockInterval; got != defaultConsensusConfig().MinBlockInterval {
+				t.Fatalf("MinBlockInterval %v after the second load, want the default", got)
+			}
+		})
 	}
 }

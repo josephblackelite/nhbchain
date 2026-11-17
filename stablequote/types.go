@@ -1,21 +1,15 @@
 // Package stablequote defines the wire contract between the validator's RPC
 // surface (rpc/swap_stable_handlers.go) and a stable-quote engine that
-// implements it -- nothing more. 2026-09-17: split out of
-// services/swapd/stable so the public nhbchain repo (this one) can keep
-// exposing the *shape* of the stable-quote RPC methods (asset/quote/
-// reservation/cash-out request and response fields -- what any RPC client
-// already sees on the wire) without also exposing the engine's actual
-// reservation/ledger/cash-out IMPLEMENTATION, which now lives in the
-// private nhbchain-services repo alongside the rest of the off-chain money
-// orchestration. See Engine's doc comment for the exact boundary.
+// implements it -- nothing more. It exposes the *shape* of the stable-quote
+// RPC methods (asset/quote/reservation/cash-out request and response
+// fields -- what any RPC client already sees on the wire); the engine's
+// implementation is not part of this repository. See Engine's doc comment
+// for the exact boundary.
 //
 // This package contains ONLY data shapes, error sentinels, and the Engine
 // interface -- no business logic. Both sides implement/consume the same
-// types: the private repo's real stable.Engine (unchanged internal logic,
-// just wrapped by a small HTTP server -- see nhbchain-services'
-// cmd/stable-quote-service) and this repo's HTTPClient (client.go), which
-// cmd/nhb wires in wherever the real engine used to be constructed
-// in-process.
+// types: the engine, behind a small HTTP server, and this repo's
+// HTTPClient (client.go), which cmd/nhb wires in.
 package stablequote
 
 import (

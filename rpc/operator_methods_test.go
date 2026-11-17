@@ -17,7 +17,7 @@ func TestIsOperatorOnlyMethodKnownEntries(t *testing.T) {
 		"swap_setManualQuote",      // swap admin
 		"buyback_submitRefPrice",   // oracle ref price
 		"tx_setSponsorshipEnabled", // paymaster
-		"potso_reward_claim",       // POTSO treasury payout
+		"potso_reward_claim",       // retired reward claim
 		"nhb_getOwnerWalletStats",  // admin analytics
 		"escrow_milestoneCreate",   // escrow milestone writer
 		"stake_delegate",           // legacy direct-state mutator
@@ -90,8 +90,8 @@ func toFullwidth(s string) string {
 }
 
 // TestNormalizeRPCMethodNameAntiEvasion proves the ported normalization
-// catches the same decorated/evasive spellings the web wallet's
-// normalizeRpcMethodName (its own table) does: NFKC
+// catches the same decorated/evasive spellings the browser-facing gateway's
+// normalizeRpcMethodName does: NFKC
 // compatibility folding, stripped control/format/separator characters
 // (including the two characters outside Unicode's main whitespace blocks --
 // U+180E and the variation-selector range -- that it also strips explicitly),

@@ -17,7 +17,12 @@ const (
 	// TypeStakeRewardsClaimed is emitted when staking rewards are claimed and minted to an account.
 	TypeStakeRewardsClaimed = "stake.rewardsClaimed"
 	// TypeStakeRewardsClaimedLegacy aliases the rewards claim event for existing indexers.
+	// It is the only event named "stake.claimed": a matured unbonding entry
+	// that is claimed back is TypeStakeUnbondClaimed.
 	TypeStakeRewardsClaimedLegacy = "stake.claimed"
+	// TypeStakeUnbondClaimed is emitted when a matured unbonding entry is
+	// claimed back into the delegator's liquid balance.
+	TypeStakeUnbondClaimed = "stake.unbondClaimed"
 	// TypeStakeCapHit signals that the annual emission cap prevented a full payout.
 	TypeStakeCapHit = "stake.emissionCapHit"
 	// TypeStakeEmissionCapHit aliases the cap hit type for backwards compatibility.
@@ -113,6 +118,28 @@ func (e StakeUndelegated) Event() *types.Event {
 		attrs["unbondingId"] = strconv.FormatUint(e.UnbondingID, 10)
 	}
 	return &types.Event{Type: TypeStakeUndelegated, Attributes: attrs}
+}
+
+// StakeUnbondClaimed captures a matured unbonding entry returned to the
+// delegator's liquid balance.
+type StakeUnbondClaimed struct {
+	Delegator   [20]byte
+	Validator   [20]byte
+	Amount      *big.Int
+	UnbondingID uint64
+}
+
+// EventType satisfies the Event interface.
+func (StakeUnbondClaimed) EventType() string { return TypeStakeUnbondClaimed }
+
+// Event converts the structured payload into a broadcastable event.
+func (e StakeUnbondClaimed) Event() *types.Event {
+	return &types.Event{Type: TypeStakeUnbondClaimed, Attributes: map[string]string{
+		"delegator":   crypto.MustNewAddress(crypto.NHBPrefix, e.Delegator[:]).String(),
+		"validator":   crypto.MustNewAddress(crypto.NHBPrefix, e.Validator[:]).String(),
+		"amount":      formatAmount(e.Amount),
+		"unbondingId": strconv.FormatUint(e.UnbondingID, 10),
+	}}
 }
 
 // StakeRewardsClaimed captures the staking reward payout for an account.

@@ -1,77 +1,24 @@
 # Wallet Lite
 
-Wallet Lite is a client-side demo that exercises the NHB identity and creator flows:
+A Next.js app (identity, claimables, QR intents, creator panels). Most write flows now hit RPC methods the node has retired; see [`docs/examples/wallet-lite.md`](../../docs/examples/wallet-lite.md) for a panel-by-panel status table with source references.
 
-* Register a username against a bech32 address via `identity_setAlias`.
-* Create claimable escrows for usernames or emails with `identity_createClaimable`.
-* Claim escrowed funds using the alias preimage or a verified email hash.
-* Compose QR codes that encode `znhb://pay` intents.
-* Tip creators against published content via `creator_tip`.
-* Stake behind creators to simulate subscription-style memberships.
-* Browse creator profiles (avatar, addresses, recent drops) fetched from the public gateway.
+**Retired RPC methods.** `identity_setAlias`, `identity_setAvatar`, `identity_addAddress`, `identity_removeAddress`, `identity_setPrimary`, `identity_rename`, `identity_createClaimable`, `identity_claim`, `creator_tip`, `creator_stake` and `creator_unstake` return HTTP `410 Gone` from the node (`identityRPCDisabledMessage` in `rpc/identity_handlers.go`, `creatorRPCDisabledMessage` in `rpc/creator_handlers.go`). The register-username, tip, stake and unstake API routes in this app return `410` themselves; the claimable and claim routes still call the node and receive the `410`.
 
-The demo targets static hosting and only stores private keys in memory. It is suitable for
-walkthroughs and automated test accounts; do not connect production keys.
-
-**Retired RPC methods: most of the flows below are currently non-functional.** `identity_setAlias`,
-`identity_setAvatar`, `identity_addAddress`, `identity_removeAddress`, `identity_setPrimary`,
-`identity_rename`, `identity_createClaimable`, `identity_claim`, `creator_tip`, `creator_stake`, and
-`creator_unstake` all used to mutate validator-local state directly outside the block pipeline, which
-guarantees a consensus fork/halt on this chain's 2-validator zero-quorum-slack topology -- the node's
-RPC layer now returns `410 Gone` for every one of them unconditionally (see `rpc/identity_handlers.go`'s
-`identityRPCDisabledMessage` and `rpc/creator_handlers.go`'s `creatorRPCDisabledMessage`). There is no
-signed-transaction replacement for these yet. Only the read-only `identity_resolve`/`identity_reverse`
-lookups (used for the profile panel) and the client-side QR generation remain live.
+What works: the account snapshot (`nhb_getBalance`), alias lookup and creator profile (`identity_resolve`), the subscription schedule preview (computed locally), and the `znhb://pay` QR generator.
 
 ## Getting started
 
 ```bash
-# Install dependencies from the examples workspace root
 cd examples
 yarn install
-
-# Launch the Wallet Lite dev server
 cd wallet-lite
 yarn dev
 ```
 
-The server reads RPC settings from the repository root `.env` file:
+All of these must be set (the server throws `Wallet Lite configuration invalid` otherwise): `NHB_RPC_URL`, `NHB_RPC_TOKEN`, `NHB_CHAIN_ID`, `IDENTITY_EMAIL_SALT`, `IDENTITY_GATEWAY_URL`, `IDENTITY_GATEWAY_KEY`, `IDENTITY_GATEWAY_SECRET`. Optional: `APP_PUBLIC_BASE` (base for avatar and sample-content links), `NHB_WS_URL` (parsed, not used), `NHB_API_URL` (base for the creator content lookup; defaults to `https://gw.nhbcoin.net`).
 
-* `NHB_RPC_URL`
-* `NHB_RPC_TOKEN`
-* `NHB_CHAIN_ID`
-* `IDENTITY_EMAIL_SALT`
-* `IDENTITY_GATEWAY_URL`
-* `IDENTITY_GATEWAY_KEY`
-* `IDENTITY_GATEWAY_SECRET`
-* `APP_PUBLIC_BASE` (used for metadata URLs)
-* `NHB_WS_URL` (optional, reserved for future realtime updates)
-* `NHB_API_URL` (defaults to `https://gw.nhbcoin.net` for creator profile lookups)
+## Security notes
 
-For static deployments set `APP_PUBLIC_BASE=https://nhbcoin.com` so absolute links resolve correctly.
-
-## Flows
-
-1. Paste or generate a throwaway private key. Wallet Lite derives the NHB bech32 address locally.
-2. Register a username. The API route adds the bearer token and calls `identity_setAlias` on
-   `NHB_RPC_URL`.
-3. Create a claimable payment. Choose between alias, email, or raw preimage recipient types. The
-   API computes the salted email hash before invoking `identity_createClaimable` and exposes
-   `/api/identity/email/*` routes that proxy the identity gateway for registration, verification,
-   and alias binding.
-4. Claim the funds. Provide the claim ID and either an alias (auto-derived preimage) or an explicit
-   preimage returned by the identity gateway.
-5. Generate a `znhb://pay` QR code for sharing.
-6. Tip a creator and view the pending payout ledger returned by `creator_tip`.
-7. Stake (subscribe) or unstake behind a creator with `creator_stake` / `creator_unstake`.
-8. Inspect the profile panel to verify avatars, public addresses, and recent content sourced from [`https://gw.nhbcoin.net`](https://gw.nhbcoin.net).
-
-See [`docs/examples/wallet-lite.md`](../../docs/examples/wallet-lite.md) for a deeper dive into the RPC calls and gateway integration points surfaced by the new tipping and subscription panels.
-
-## Security considerations
-
-* Bearer tokens and salts are read only on the Next.js server runtime. They are never exposed to the
-  browser.
-* Private keys remain in React state—refreshing the page clears them. Do not store real credentials
-  in the demo UI.
-* Email addresses are hashed with the configured salt before they leave the server.
+- The token, email salt and gateway secret are read only by server-side code.
+- The private key is held in React state; the page uses no browser storage. Do not enter real keys into the demo.
+- Email addresses are hashed on the server (`0x` + hex `HMAC-SHA256(salt, normalised email)`) before they are used in a claimable request.

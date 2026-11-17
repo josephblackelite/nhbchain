@@ -38,6 +38,7 @@ var (
 	errOracleDeviation           = errors.New("lending engine: oracle deviation too large")
 	errMaxLTVExceeded            = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
 	errWithdrawSameBlockAsSupply = errors.New("lending engine: cannot withdraw in the same block as a supply")
+	errSelfLiquidation           = errors.New("lending engine: a borrower cannot liquidate their own position")
 
 	errFixedTermDepositTenureNotAllowed = errors.New("lending engine: tenure not in the fixed-term deposit rate schedule")
 	errFixedTermDepositInvalidPayout    = errors.New("lending engine: invalid fixed-term deposit payout preference")
@@ -73,6 +74,12 @@ var (
 	// proposal attempt, so a later attempt (different ordering, or a
 	// different transaction set) can genuinely change the outcome.
 	ErrWithdrawSameBlockAsSupply = errWithdrawSameBlockAsSupply
+	// ErrSelfLiquidation is an exported alias of errSelfLiquidation --
+	// core/node.go's classifyProposalError recognizes it as
+	// proposalDispositionPrune: the liquidator is the transaction signer and
+	// the borrower is named in its payload, so a resubmission can never
+	// succeed.
+	ErrSelfLiquidation = errSelfLiquidation
 	// ErrRepayPaused, ErrNoDebtToRepay, and ErrInsufficientBalance are
 	// exported aliases RepayFixedTerm can return for entirely ordinary,
 	// non-storage business/operational reasons (an operator pause, a loan
@@ -97,7 +104,16 @@ var (
 	ErrInsufficientLiquidity               = errInsufficientLiquidity
 )
 
-const blocksPerYear = 31_536_000
+// secondsPerYear is the length of a year the annual rates are quoted over
+// (365 days). Interest accrues by the block time that has passed, so a rate is
+// the same rate whether blocks come every second or every two.
+const secondsPerYear = 31_536_000
+
+// legacySecondsPerBlock is what a block was taken to be worth before interest
+// accrued by block time. A market that has never been stamped with a block time
+// accrues its first step that way, so its interest carries on from where it
+// was.
+const legacySecondsPerBlock = 1
 
 const moduleName = "lending"
 
@@ -710,7 +726,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		return nil, errMaxLTVExceeded
 	}
 
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	accounts := e.newAccountSet()
+	moduleAcc, err := accounts.load(e.moduleAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -718,13 +735,13 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		return nil, errInsufficientLiquidity
 	}
 
-	borrowerAcc, err := e.loadAccount(borrower)
+	borrowerAcc, err := accounts.load(borrower)
 	if err != nil {
 		return nil, err
 	}
 	var feeAcc *types.Account
 	if feeAmount.Sign() > 0 {
-		feeAcc, err = e.loadAccount(feeRecipient)
+		feeAcc, err = accounts.load(feeRecipient)
 		if err != nil {
 			return nil, err
 		}
@@ -736,16 +753,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 		feeAcc.BalanceNHB = new(big.Int).Add(feeAcc.BalanceNHB, feeAmount)
 	}
 
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return nil, err
-	}
-	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
-		return nil, err
-	}
-	if feeAcc != nil {
-		if err := e.persistAccount(feeRecipient, feeAcc); err != nil {
-			return nil, err
-		}
 	}
 
 	borrowerUser.DebtNHB = projectedDebt
@@ -880,6 +889,9 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	if e == nil || e.state == nil {
 		return nil, nil, errNilState
 	}
+	if string(liquidator.Bytes()) == string(borrower.Bytes()) {
+		return nil, nil, errSelfLiquidation
+	}
 
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
 		return nil, nil, err
@@ -918,7 +930,27 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 
 	repayAmount := new(big.Int).Set(borrowerUser.DebtNHB)
 
-	liquidatorAcc, err := e.loadAccount(liquidator)
+	// Each address is loaded exactly once and persisted once, so roles that
+	// resolve to the same address (liquidator, borrower, module, collateral
+	// vault, developer and protocol targets) share one account object and
+	// every delta lands on it.
+	accounts := make(map[string]*types.Account)
+	var loaded []crypto.Address
+	account := func(addr crypto.Address) (*types.Account, error) {
+		key := string(addr.Bytes())
+		if acc, ok := accounts[key]; ok {
+			return acc, nil
+		}
+		acc, err := e.loadAccount(addr)
+		if err != nil {
+			return nil, err
+		}
+		accounts[key] = acc
+		loaded = append(loaded, addr)
+		return acc, nil
+	}
+
+	liquidatorAcc, err := account(liquidator)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -926,11 +958,10 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errInsufficientBalance
 	}
 
-	borrowerAcc, err := e.loadAccount(borrower)
-	if err != nil {
+	if _, err := account(borrower); err != nil {
 		return nil, nil, err
 	}
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	moduleAcc, err := account(e.moduleAddress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -939,9 +970,10 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	liquidatorAcc.BalanceNHB = new(big.Int).Sub(liquidatorAcc.BalanceNHB, repayAmount)
 	moduleAcc.BalanceNHB = new(big.Int).Add(moduleAcc.BalanceNHB, repayAmount)
 
-	// Determine collateral seized with liquidation bonus.
-	seizeAmount := new(big.Int).Mul(repayAmount, big.NewInt(int64(10_000+e.params.LiquidationBonus)))
-	seizeAmount = seizeAmount.Quo(seizeAmount, basisPoints)
+	// Determine collateral seized with liquidation bonus. The repaid debt is
+	// NHB wei and the collateral is ZNHB wei, so the bonus-inclusive NHB value
+	// is converted at the same oracle price the eligibility check above used.
+	seizeAmount := CollateralForDebtValue(market, repayAmount, 10_000+e.params.LiquidationBonus)
 	if seizeAmount.Cmp(borrowerUser.CollateralZNHB) > 0 {
 		seizeAmount = new(big.Int).Set(borrowerUser.CollateralZNHB)
 	}
@@ -952,7 +984,7 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 		return nil, nil, errCollateralRoutingBps
 	}
 
-	collateralAcc, err := e.loadAccount(e.collateralAddress)
+	collateralAcc, err := account(e.collateralAddress)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1016,43 +1048,24 @@ func (e *Engine) Liquidate(liquidator, borrower crypto.Address) (*big.Int, *big.
 	collateralAcc.BalanceZNHB = new(big.Int).Sub(collateralAcc.BalanceZNHB, seizeAmount)
 	liquidatorAcc.BalanceZNHB = new(big.Int).Add(liquidatorAcc.BalanceZNHB, liquidatorShare)
 
-	var developerAcc *types.Account
 	if developerShare.Sign() > 0 {
-		developerAcc, err = e.loadAccount(routing.DeveloperTarget)
+		developerAcc, err := account(routing.DeveloperTarget)
 		if err != nil {
 			return nil, nil, err
 		}
 		developerAcc.BalanceZNHB = new(big.Int).Add(developerAcc.BalanceZNHB, developerShare)
 	}
 
-	var protocolAcc *types.Account
 	if protocolShare.Sign() > 0 {
-		protocolAcc, err = e.loadAccount(routing.ProtocolTarget)
+		protocolAcc, err := account(routing.ProtocolTarget)
 		if err != nil {
 			return nil, nil, err
 		}
 		protocolAcc.BalanceZNHB = new(big.Int).Add(protocolAcc.BalanceZNHB, protocolShare)
 	}
 
-	if err := e.persistAccount(liquidator, liquidatorAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(borrower, borrowerAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
-		return nil, nil, err
-	}
-	if err := e.persistAccount(e.collateralAddress, collateralAcc); err != nil {
-		return nil, nil, err
-	}
-	if developerAcc != nil {
-		if err := e.persistAccount(routing.DeveloperTarget, developerAcc); err != nil {
-			return nil, nil, err
-		}
-	}
-	if protocolAcc != nil {
-		if err := e.persistAccount(routing.ProtocolTarget, protocolAcc); err != nil {
+	for _, addr := range loaded {
+		if err := e.persistAccount(addr, accounts[string(addr.Bytes())]); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1262,6 +1275,28 @@ func OracleAdjustedCollateralValue(market *Market, collateralZNHBWei *big.Int) *
 	return value.Quo(value, weiPerToken)
 }
 
+// CollateralForDebtValue is the inverse of OracleAdjustedCollateralValue: it
+// converts an NHB-wei debt amount, scaled by factorBps (10_000 = 1.0, so a
+// liquidation bonus is 10_000 + bonusBps), into the raw ZNHB-wei collateral
+// amount worth that much at market.OracleMedianWei. The scaling and the price
+// division happen in one integer division, rounding down (borrower-favoring:
+// the liquidator never receives more than the bonus-inclusive value it repaid).
+// Falls back to strict 1:1 when no oracle price is set, exactly like
+// OracleAdjustedCollateralValue, so eligibility and seizure always use the
+// same valuation.
+func CollateralForDebtValue(market *Market, debtNHBWei *big.Int, factorBps uint64) *big.Int {
+	if debtNHBWei == nil || debtNHBWei.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	num := new(big.Int).Mul(debtNHBWei, new(big.Int).SetUint64(factorBps))
+	if market == nil || market.OracleMedianWei == nil || market.OracleMedianWei.Sign() <= 0 {
+		return num.Quo(num, basisPoints)
+	}
+	num.Mul(num, weiPerToken)
+	den := new(big.Int).Mul(market.OracleMedianWei, basisPoints)
+	return num.Quo(num, den)
+}
+
 // combinedDebtWei folds in a borrower's active fixed-term loan (if any),
 // alongside an already-computed flexible-side debt figure, into the single
 // exposure value a health/LTV check should be evaluated against. The two
@@ -1394,7 +1429,8 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 		return nil, errInsufficientLiquidity
 	}
 
-	moduleAcc, err := e.loadAccount(e.moduleAddress)
+	accounts := e.newAccountSet()
+	moduleAcc, err := accounts.load(e.moduleAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -1402,7 +1438,7 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 		return nil, errInsufficientLiquidity
 	}
 
-	recipientAcc, err := e.loadAccount(recipient)
+	recipientAcc, err := accounts.load(recipient)
 	if err != nil {
 		return nil, err
 	}
@@ -1410,10 +1446,7 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 	moduleAcc.BalanceNHB = new(big.Int).Sub(moduleAcc.BalanceNHB, amount)
 	recipientAcc.BalanceNHB = new(big.Int).Add(recipientAcc.BalanceNHB, amount)
 
-	if err := e.persistAccount(e.moduleAddress, moduleAcc); err != nil {
-		return nil, err
-	}
-	if err := e.persistAccount(recipient, recipientAcc); err != nil {
+	if err := accounts.persist(); err != nil {
 		return nil, err
 	}
 
@@ -1480,26 +1513,19 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 	}
 
 	if e.interestModel == nil {
-		if e.blockHeight > market.LastUpdateBlock {
-			market.LastUpdateBlock = e.blockHeight
-		}
+		e.markAccrued(market)
 		return fees, false, nil
 	}
 
-	var delta uint64
-	if e.blockHeight > market.LastUpdateBlock {
-		delta = e.blockHeight - market.LastUpdateBlock
-	}
-	if delta == 0 || market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Sign() == 0 {
-		if e.blockHeight > market.LastUpdateBlock {
-			market.LastUpdateBlock = e.blockHeight
-		}
+	elapsed := e.elapsedSeconds(market)
+	if elapsed == 0 || market.TotalNHBBorrowed == nil || market.TotalNHBBorrowed.Sign() == 0 {
+		e.markAccrued(market)
 		return fees, false, nil
 	}
 
 	borrowAPR := e.interestModel.BorrowAPR(market.TotalNHBBorrowed, market.TotalNHBSupplied)
 	if borrowAPR.Sign() == 0 {
-		market.LastUpdateBlock = e.blockHeight
+		e.markAccrued(market)
 		return fees, false, nil
 	}
 
@@ -1518,13 +1544,13 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 	supplyRate := new(big.Rat).Mul(borrowAPR, utilisation)
 	supplyRate.Mul(supplyRate, oneMinus)
 
-	borrowFactor := rateFactor(borrowAPR, delta)
-	supplyFactor := rateFactor(supplyRate, delta)
+	borrowFactor := rateFactor(borrowAPR, elapsed)
+	supplyFactor := rateFactor(supplyRate, elapsed)
 
 	market.BorrowIndex = rayMul(market.BorrowIndex, borrowFactor)
 	market.SupplyIndex = rayMul(market.SupplyIndex, supplyFactor)
 
-	interestAmount := computeInterest(market.TotalNHBBorrowed, borrowAPR, delta)
+	interestAmount := computeInterest(market.TotalNHBBorrowed, borrowAPR, elapsed)
 	interestApplied := interestAmount.Sign() > 0
 	if interestApplied {
 		reserveShare := new(big.Int).Mul(interestAmount, new(big.Int).SetUint64(reserveBps))
@@ -1541,8 +1567,41 @@ func (e *Engine) accrueInterest(market *Market) (*FeeAccrual, bool, error) {
 		market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, interestAmount)
 	}
 
-	market.LastUpdateBlock = e.blockHeight
+	e.markAccrued(market)
 	return fees, interestApplied, nil
+}
+
+// elapsedSeconds is the block time that has passed since the market's indexes
+// were last refreshed: this block's timestamp less the one recorded on the
+// market, and never negative, so a block that shares its predecessor's second
+// accrues nothing and the recorded time never moves back. A market with no
+// recorded time, or an engine that was given no block time, falls back to the
+// block count at legacySecondsPerBlock, so it neither loses nor invents a step.
+// Everything here comes from block data (the header timestamp the engine is
+// given), never from a clock.
+func (e *Engine) elapsedSeconds(market *Market) uint64 {
+	if e.blockTimestamp > 0 && market.LastUpdateTimestamp > 0 {
+		now := uint64(e.blockTimestamp)
+		if now <= market.LastUpdateTimestamp {
+			return 0
+		}
+		return now - market.LastUpdateTimestamp
+	}
+	if e.blockHeight > market.LastUpdateBlock {
+		return (e.blockHeight - market.LastUpdateBlock) * legacySecondsPerBlock
+	}
+	return 0
+}
+
+// markAccrued records the block the market was refreshed at, and its time when
+// the engine has one, without ever moving either back.
+func (e *Engine) markAccrued(market *Market) {
+	if e.blockHeight > market.LastUpdateBlock {
+		market.LastUpdateBlock = e.blockHeight
+	}
+	if e.blockTimestamp > 0 && uint64(e.blockTimestamp) > market.LastUpdateTimestamp {
+		market.LastUpdateTimestamp = uint64(e.blockTimestamp)
+	}
 }
 
 func (e *Engine) syncDebt(user *UserAccount, market *Market) {

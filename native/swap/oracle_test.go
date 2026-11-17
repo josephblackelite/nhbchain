@@ -216,3 +216,12 @@ func TestComputeMintAmount(t *testing.T) {
 		t.Fatalf("expected %s, got %s", expected, amount)
 	}
 }
+
+func TestConfigNormaliseKeepsPayoutReceiptActivationHeight(t *testing.T) {
+	if got := (Config{}).Normalise().PayoutReceiptActivationHeight; got != 0 {
+		t.Fatalf("expected the activation height to default to off, got %d", got)
+	}
+	if got := (Config{PayoutReceiptActivationHeight: 452000}).Normalise().PayoutReceiptActivationHeight; got != 452000 {
+		t.Fatalf("Normalise dropped the activation height: %d", got)
+	}
+}

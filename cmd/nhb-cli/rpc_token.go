@@ -24,7 +24,7 @@ const (
 
 func rpcTokenUsage() string {
 	return strings.TrimSpace(`Usage:
-  nhb-cli rpc-token [--secret-stdin] [--ttl <duration>] [--issuer <name>] [--audience <a,b>]
+  nhb-cli rpc-token [--secret-stdin] [--ttl <duration>] [--issuer <name>] [--audience <a,b>] [--role operator]
 
 Prints a short-lived bearer token for the node's privileged RPC methods,
 signed with the node's own JWT secret. Run it on the node host. The secret is
@@ -40,6 +40,8 @@ Flags:
   --ttl <duration>     Token lifetime (default 10m, at most 24h).
   --issuer <name>      Must match [RPCJWT] Issuer (default nhb-rpc).
   --audience <a,b>     Must include one of [RPCJWT] Audience (default wallets).
+  --role operator      Write the 'operator' role claim, which the node requires for
+                       net_info, sync_status and its other operator-only methods.
 `)
 }
 
@@ -47,6 +49,24 @@ Flags:
 // issuer and audience as configured, valid from now until now+ttl. The claims
 // are exactly the registered ones the verifier reads (rpc/http.go).
 func mintRPCToken(secret, issuer string, audience []string, ttl time.Duration, now time.Time) (string, error) {
+	return mintRPCTokenWithRole(secret, issuer, audience, "", ttl, now)
+}
+
+// rpcTokenClaims are the registered claims plus the optional 'role' claim the
+// node's operator-only methods look for (rpc/http.go rpcClaims.Role).
+type rpcTokenClaims struct {
+	jwt.RegisteredClaims
+	Role string `json:"role,omitempty"`
+}
+
+// mintRPCTokenWithRole is mintRPCToken with a 'role' claim. Only "operator" is
+// meaningful to the node (it opens net_info, sync_status and the other
+// operator-only methods); an empty role writes no claim.
+func mintRPCTokenWithRole(secret, issuer string, audience []string, role string, ttl time.Duration, now time.Time) (string, error) {
+	role = strings.TrimSpace(role)
+	if role != "" && role != "operator" {
+		return "", fmt.Errorf("role must be empty or \"operator\", got %q", role)
+	}
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		return "", fmt.Errorf("the node's RPC JWT secret is empty (set %s or use --secret-stdin)", rpcTokenSecretEnv)
@@ -60,12 +80,15 @@ func mintRPCToken(secret, issuer string, audience []string, ttl time.Duration, n
 	if ttl <= 0 || ttl > maxRPCTokenTTL {
 		return "", fmt.Errorf("ttl must be greater than zero and at most %s", maxRPCTokenTTL)
 	}
-	claims := jwt.RegisteredClaims{
-		Issuer:    issuer,
-		Audience:  jwt.ClaimStrings(audience),
-		IssuedAt:  jwt.NewNumericDate(now),
-		NotBefore: jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+	claims := rpcTokenClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    issuer,
+			Audience:  jwt.ClaimStrings(audience),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+		},
+		Role: role,
 	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
@@ -78,6 +101,7 @@ func runRPCTokenCommand(args []string, stdin io.Reader, stdout, stderr io.Writer
 	ttl := fs.Duration("ttl", defaultRPCTokenTTL, "token lifetime")
 	issuer := fs.String("issuer", defaultRPCTokenIssuer, "JWT issuer expected by the node")
 	audience := fs.String("audience", defaultRPCTokenAudience, "comma-separated JWT audience")
+	role := fs.String("role", "", "role claim to write; only \"operator\" is meaningful (it opens net_info, sync_status and the other operator-only methods)")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -107,7 +131,7 @@ func runRPCTokenCommand(args []string, stdin io.Reader, stdout, stderr io.Writer
 			audiences = append(audiences, trimmed)
 		}
 	}
-	token, err := mintRPCToken(secret, *issuer, audiences, *ttl, time.Now())
+	token, err := mintRPCTokenWithRole(secret, *issuer, audiences, *role, *ttl, time.Now())
 	if err != nil {
 		fmt.Fprintf(stderr, "Error: %v\n", err)
 		return 1

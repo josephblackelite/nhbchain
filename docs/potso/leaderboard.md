@@ -1,22 +1,16 @@
 # POTSO Leaderboard API
 
-The leaderboard surfaces the deterministic ordering produced by the POTSO
-composite weighting pipeline. Two public JSON-RPC methods expose this state.
+These methods expose the weight snapshot that `processPotsoRewardEpoch` stores for each processed reward epoch (see [weights.md](weights.md)). None of them require authentication. They return data only for epochs that have been processed; with rewards disabled ([config.md](config.md)) no snapshots exist.
 
-## Methods
+## `potso_leaderboard`
 
-### `potso_leaderboard`
+Returns the ranked entries of an epoch snapshot. Parameters are an optional single object:
 
-Returns the ordered winners for a specific epoch. Parameters are supplied as an
-object:
+- `epoch` (optional `uint64`): epoch to query. When omitted or `0`, the last processed epoch is used.
+- `offset` (optional `int`): zero-based offset. Negative values are treated as `0`.
+- `limit` (optional `int`): maximum entries. `0`, omitted or negative means no limit.
 
-- `epoch` (optional `uint64`): Epoch to query. When omitted or `0`, the handler
-  falls back to the latest processed epoch.
-- `offset` (optional `int`): Zero-based offset for pagination. Defaults to `0`.
-- `limit` (optional `int`): Maximum number of entries to return. `0` or omitted
-  means “no limit”.
-
-Example request:
+Request:
 
 ```json
 {
@@ -27,7 +21,7 @@ Example request:
 }
 ```
 
-Example response:
+Response:
 
 ```json
 {
@@ -42,57 +36,49 @@ Example response:
         "weightBps": 5123,
         "stakeShareBps": 6600,
         "engShareBps": 3567
-      },
-      {
-        "addr": "nhb1qqnw0pr5v92l8j2a2gyx9zgj9z87q5n8p5jd9s",
-        "weightBps": 4787,
-        "stakeShareBps": 3400,
-        "engShareBps": 6433
       }
     ]
   }
 }
 ```
 
-The `total` field always reflects the full number of stored winners prior to
-pagination. Ordering is guaranteed across nodes because the weighting pipeline
-applies deterministic tie-breakers (`addrLex` or `addrHash`).
+- `total` is the number of entries in the stored snapshot before pagination. That is the ranked candidate list after the `TopKWinners` cut. It is not the number of paid winners, which can be lower because of `MaxWinnersPerEpoch`, `MinPayoutWei` and the share cap. Use `potso_epoch_info` / `potso_epoch_payouts` for winners ([rewards-api.md](rewards-api.md)).
+- If no epoch has been processed, or the requested epoch has no snapshot, the result has `total: 0` and an empty `items` (with `epoch` `0` or the requested epoch respectively).
+- `weightBps`, `stakeShareBps` and `engShareBps` are `floor(share * 10000)`; they can sum to slightly under 10000.
+- Order is weight descending, with the tie break from `[potso.weights].TieBreak` in force when the snapshot was computed.
 
-### `potso_params`
+Source: `handlePotsoLeaderboard` in `rpc/potso_query_handlers.go`, `Node.PotsoLeaderboard` in `core/node.go`.
 
-Returns the currently active `[potso.weights]` configuration. Example request:
+## `potso_getWeight`
+
+Returns the voting power basis-points figure that governance vote casting would use.
+
+Params: `[{"epoch": 42, "address": "nhb1..."}]`. `address` is required; `epoch` is optional (`0`/omitted = last processed epoch).
+
+Result: `{"epoch": 42, "address": "nhb1...", "weightBps": 5123}`. An address with no entry, or an epoch with no snapshot, returns `weightBps: 0` rather than an error. It reads the `snapshots/potso/<epoch>/weights` snapshot (`Node.PotsoWeight`), the same one `CastVote` reads.
+
+## `potso_params`
+
+Returns the running `[potso.weights]` values. Params: `[]`.
 
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "potso_params",
-  "params": []
+  "alphaStakeBps": 7000,
+  "txWeightBps": 6000,
+  "escrowWeightBps": 3000,
+  "uptimeWeightBps": 1000,
+  "maxEngagementPerEpoch": 1000,
+  "minStakeToWinWei": "0",
+  "minEngagementToWin": 0,
+  "decayHalfLifeEpochs": 7,
+  "topKWinners": 5000,
+  "tieBreak": "addrHash"
 }
 ```
 
-Example response:
+The values shown are the defaults. The result contains only these ten fields (`potsoParamsResult`). `MinStakeToEarnWei`, the dampening parameters, `MaxUserShareBps` and the `[potso.rewards]` values are not included.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "result": {
-    "alphaStakeBps": 7000,
-    "txWeightBps": 6000,
-    "escrowWeightBps": 3000,
-    "uptimeWeightBps": 1000,
-    "maxEngagementPerEpoch": 1000,
-    "minStakeToWinWei": "0",
-    "minEngagementToWin": 0,
-    "decayHalfLifeEpochs": 7,
-    "topKWinners": 5000,
-    "tieBreak": "addrHash"
-  }
-}
-```
-
-## OpenAPI Fragment
+## OpenAPI fragment
 
 ```yaml
 paths:
@@ -154,14 +140,6 @@ components:
           maxItems: 0
 ```
 
-## Deterministic Tie Break
+## Tie break
 
-When participants share the same composite weight, the RPC reflects the
-underlying ordering produced by the weighting pipeline:
-
-- `addrLex` sorts by the 20-byte address (byte-wise ascending).
-- `addrHash` computes a SHA-256 digest of the address and sorts by the digest.
-
-Because every node uses identical data, pagination windows (`offset`, `limit`)
-are stable across runs and between replicas.
-
+Entries with equal weight are ordered by the tie-break key, ascending: `addrLex` is the 20-byte address, `addrHash` is the SHA-256 digest of the address. Because the order is stored in the snapshot, `offset` / `limit` windows are stable.

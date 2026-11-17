@@ -7,6 +7,8 @@ import (
 	"math/big"
 	"strings"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
@@ -146,6 +148,7 @@ func (sp *StateProcessor) ensureLendingMarket(adapter *lendingStateAdapter) (*le
 		DeveloperFeeBps:       sp.lendingDeveloperFeeBps,
 		ReserveFactor:         sp.lendingReserveFactorBps,
 		LastUpdateBlock:       sp.blockHeight(),
+		LastUpdateTimestamp:   sp.lendingBlockUnix(),
 		TotalNHBSupplied:      big.NewInt(0),
 		TotalSupplyShares:     big.NewInt(0),
 		TotalNHBBorrowed:      big.NewInt(0),
@@ -154,6 +157,15 @@ func (sp *StateProcessor) ensureLendingMarket(adapter *lendingStateAdapter) (*le
 		return nil, err
 	}
 	return market, nil
+}
+
+// lendingBlockUnix is the block time in Unix seconds, or zero when the block
+// carries none (a pre-epoch timestamp), which a market reads as "not stamped".
+func (sp *StateProcessor) lendingBlockUnix() uint64 {
+	if ts := sp.blockTimestamp().Unix(); ts > 0 {
+		return uint64(ts)
+	}
+	return 0
 }
 
 func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lending.Market, error) {
@@ -359,8 +371,10 @@ func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sen
 	if err != nil {
 		return fmt.Errorf("lending fixed-term borrow: compute tx hash: %w", err)
 	}
-	var loanID [32]byte
-	copy(loanID[:], txHash)
+	loanID, err := sp.lendingFixedTermRecordID("loan", sender, txHash)
+	if err != nil {
+		return fmt.Errorf("lending fixed-term borrow: %w", err)
+	}
 	loan, err := engine.BorrowFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), loanID, payload.TenureDays, tx.Value)
 	if err != nil {
 		return err
@@ -383,6 +397,49 @@ func (sp *StateProcessor) applyLendingBorrowFixedTerm(tx *types.Transaction, sen
 		}
 	}
 	return sp.incrementNativeAccountNonce(sender)
+}
+
+// lendingFixedTermRecordID returns the ID a fixed-term loan ("loan") or deposit
+// ("deposit") is stored under for the transaction with hash txHash sent by sender.
+//
+// Before SetLendingFixedTermIDActivationHeight (and always while that is zero) it
+// is the transaction hash itself, exactly as in every earlier release. From the
+// height it is the Keccak-256 of the kind, the sender and the transaction hash:
+// the hash covers no sender, so two accounts signing field-identical transactions
+// would otherwise share one ID and the second record would overwrite the first
+// (ledger PL-R5T-02). From the height an origination whose ID already has a record
+// is also refused, so a record can never be replaced by a later transaction.
+func (sp *StateProcessor) lendingFixedTermRecordID(kind string, sender, txHash []byte) ([32]byte, error) {
+	var id [32]byte
+	if !sp.lendingFixedTermIDActive() {
+		copy(id[:], txHash)
+		return id, nil
+	}
+	preimage := make([]byte, 0, len("nhb/lending/fixed-term/")+len(kind)+len(sender)+len(txHash))
+	preimage = append(preimage, "nhb/lending/fixed-term/"...)
+	preimage = append(preimage, kind...)
+	preimage = append(preimage, sender...)
+	preimage = append(preimage, txHash...)
+	copy(id[:], ethcrypto.Keccak256(preimage))
+
+	manager := nhbstate.NewManager(sp.Trie)
+	var exists bool
+	var err error
+	switch kind {
+	case "loan":
+		_, exists, err = manager.LendingGetFixedTermLoan(id)
+	case "deposit":
+		_, exists, err = manager.LendingGetFixedTermDeposit(id)
+	default:
+		return id, fmt.Errorf("unknown fixed-term record kind %q", kind)
+	}
+	if err != nil {
+		return id, fmt.Errorf("check %s %x: %w", kind, id[:8], err)
+	}
+	if exists {
+		return id, fmt.Errorf("%s %x already exists", kind, id[:8])
+	}
+	return id, nil
 }
 
 func (sp *StateProcessor) applyLendingRepayFixedTerm(tx *types.Transaction, sender []byte) error {
@@ -463,8 +520,10 @@ func (sp *StateProcessor) applyLendingSupplyFixedTerm(tx *types.Transaction, sen
 	if err != nil {
 		return fmt.Errorf("lending fixed-term supply: compute tx hash: %w", err)
 	}
-	var depositID [32]byte
-	copy(depositID[:], txHash)
+	depositID, err := sp.lendingFixedTermRecordID("deposit", sender, txHash)
+	if err != nil {
+		return fmt.Errorf("lending fixed-term supply: %w", err)
+	}
 	deposit, err := engine.SupplyFixedTerm(crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...)), depositID, payload.TenureDays, tx.Value, lending.FixedTermDepositPayout(payload.Payout))
 	if err != nil {
 		return err
@@ -530,7 +589,7 @@ func (sp *StateProcessor) applyLendingLiquidate(tx *types.Transaction, sender []
 		return fmt.Errorf("invalid borrower address: %w", err)
 	}
 	if bytes.Equal(borrowerAddr.Bytes(), sender) {
-		return fmt.Errorf("lending: a borrower cannot liquidate their own position; use repay instead")
+		return fmt.Errorf("%w; use repay instead", lending.ErrSelfLiquidation)
 	}
 	engine, _, err := sp.lendingEngine(payload.PoolID)
 	if err != nil {
@@ -561,9 +620,21 @@ type lendingStateAdapter struct {
 	processor *StateProcessor
 }
 
+// reconcileLegacyPoolState moves every lending position still recorded on a
+// plain account into the pool's own records. It reads every account, so it
+// runs once per pool: once a full pass has completed the pool is marked, and
+// later calls return at once. Nothing writes a lending position onto an account
+// any more, so an account created after the pass has none to move.
 func (a *lendingStateAdapter) reconcileLegacyPoolState() error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("lending: state manager unavailable")
+	}
+	done, err := a.manager.LendingLegacyReconciled(a.poolID)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
 	}
 	accounts, err := a.manager.AccountList()
 	if err != nil {
@@ -574,7 +645,7 @@ func (a *lendingStateAdapter) reconcileLegacyPoolState() error {
 			return err
 		}
 	}
-	return nil
+	return a.manager.LendingMarkLegacyReconciled(a.poolID)
 }
 
 func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*lending.UserAccount, error) {
@@ -628,6 +699,7 @@ func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*
 	market.TotalNHBBorrowed = sumBigIntLegacy(market.TotalNHBBorrowed, debtAmount)
 	if a.processor != nil {
 		market.LastUpdateBlock = a.processor.blockHeight()
+		market.LastUpdateTimestamp = a.processor.lendingBlockUnix()
 	}
 
 	if err := a.manager.LendingPutMarket(a.poolID, market); err != nil {
@@ -657,6 +729,7 @@ func (a *lendingStateAdapter) defaultMarket() *lending.Market {
 	}
 	if a.processor != nil {
 		market.LastUpdateBlock = a.processor.blockHeight()
+		market.LastUpdateTimestamp = a.processor.lendingBlockUnix()
 		market.ReserveFactor = a.processor.lendingReserveFactorBps
 		market.DeveloperFeeBps = a.processor.lendingDeveloperFeeBps
 		market.DeveloperOwner = cloneAddress(a.processor.lendingModuleAddr)
@@ -942,6 +1015,7 @@ func (sp *StateProcessor) applyLendingCreatePoolTransaction(tx *types.Transactio
 		DeveloperFeeCollector: sp.lendingDeveloperCollector,
 		ReserveFactor:         sp.lendingReserveFactorBps,
 		LastUpdateBlock:       sp.blockHeight(),
+		LastUpdateTimestamp:   sp.lendingBlockUnix(),
 		TotalNHBSupplied:      big.NewInt(0),
 		TotalSupplyShares:     big.NewInt(0),
 		TotalNHBBorrowed:      big.NewInt(0),

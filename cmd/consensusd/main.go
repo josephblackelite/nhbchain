@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/url"
@@ -35,6 +36,7 @@ import (
 	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
 	"nhbchain/network"
+	"nhbchain/observability"
 	"nhbchain/observability/logging"
 	telemetry "nhbchain/observability/otel"
 	consensusv1 "nhbchain/proto/consensus/v1"
@@ -193,7 +195,38 @@ func main() {
 	// inferred.
 	if cfg.QuorumCertActivationHeight > 0 {
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	} else {
+		slog.Warn("QuorumCertActivationHeight is not set: this node does not check quorum certificates on blocks it receives through peer sync, so a peer could make it accept a block the validators never agreed on; set it to the value the network you follow uses (docs/validators/onboarding.md)")
 	}
+	if cfg.RewardsByStakeFromEpoch > 0 {
+		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)
+	}
+	// Same setting and rule as in cmd/nhb/main.go: 0 (unset) keeps the
+	// earlier POS expiry sweep, and a value must be identical on every
+	// validator.
+	if cfg.POSSweepSkipActivationHeight > 0 {
+		node.SetPOSSweepSkipActivationHeight(cfg.POSSweepSkipActivationHeight)
+		slog.Info("POS expiry sweep skips holds the payer cannot cover from block height",
+			slog.Uint64("height", cfg.POSSweepSkipActivationHeight))
+	}
+	// Same setting as cmd/nhb/main.go: zero (the default) leaves the POS hold
+	// unstake guard off; see config.Config.POSHoldUnstakeGuardActivationHeight.
+	node.SetPOSHoldUnstakeGuardActivationHeight(cfg.POSHoldUnstakeGuardActivationHeight)
+	// See cmd/nhb/main.go's matching GovCreditPreservationActivationHeight
+	// guard and config.Config.GovCreditPreservationActivationHeight's doc
+	// comment. Left unset (0) here means PL-R1-GOVREFUND's fix stays
+	// disabled, exactly like every prior release.
+	if cfg.GovCreditPreservationActivationHeight > 0 {
+		node.SetGovCreditPreservationActivationHeight(cfg.GovCreditPreservationActivationHeight)
+	}
+	// Same setting and rule as in cmd/nhb/main.go: 0 (unset) keeps the NHB
+	// fee-route credit exactly as every prior release.
+	if cfg.FeeRouteAliasActivationHeight > 0 {
+		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
+	}
+	// Same setting as cmd/nhb/main.go: zero (the default) keeps the transaction
+	// hash as the fixed-term loan and deposit ID.
+	node.SetLendingFixedTermIDActivationHeight(cfg.LendingFixedTermIDActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
@@ -390,8 +423,18 @@ func main() {
 		Prevote:   cfg.Consensus.PrevoteTimeout,
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
-	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")))
+	}), bft.WithMinBlockInterval(cfg.Consensus.MinBlockInterval),
+		bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
+		// What this validator has voted, so a restart cannot make it sign a
+		// different vote for a round it already voted in (see cmd/nhb/main.go).
+		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")))
+	slog.Info("consensus: minimum block interval", slog.Duration("interval", bftEngine.MinBlockInterval()))
 	node.SetBftEngine(bftEngine)
+	// Bound one block build to half the proposal timeout (see cmd/nhb/main.go)
+	// and start the optional Prometheus listener (NHB_METRICS_ADDR); a failure
+	// to start it is logged and never stops the validator.
+	node.SetProposalBuildBudget(cfg.Consensus.ProposalTimeout / 2)
+	observability.StartMetricsServerFromEnv(slog.Default())
 
 	grpcListener, err := net.Listen("tcp", *grpcAddress)
 	if err != nil {

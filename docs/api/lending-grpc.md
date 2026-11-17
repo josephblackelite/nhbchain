@@ -1,292 +1,126 @@
 # Lending gRPC API
 
-The `lending.v1.LendingService` exposes the canonical lending functionality over gRPC.  This
-surface is consumed by the gateway and SDKs, and is the recommended integration point for
-back-end services that need real-time interactions with the lending protocol.
+`lending.v1.LendingService` is served by the lending daemon. It reads market and
+position data from a node's JSON-RPC and relays caller-signed lending
+transactions to the node; it holds no lending state itself. The protobuf
+definitions are in [`proto/lending/v1/lending.proto`](../../proto/lending/v1/lending.proto)
+(field names below are the proto snake_case names).
 
-> The protobuf definitions referenced throughout this document live in
-> [`proto/lending/v1/lending.proto`](../../proto/lending/v1/lending.proto).  Field names below use the
-> canonical snake_case protobuf casing while the generated clients expose idiomatic naming for each
-> language.
-
-## Connecting to the service
+## Connecting
 
 | Property | Value |
 | --- | --- |
-| Package | `lending.v1` |
-| Service | `LendingService` |
-| Default port (lendingd) | `9444` |
+| Package / service | `lending.v1` / `LendingService` |
+| Entrypoints | `services/lending/main.go` (configured by `LEND_*` environment variables and flags) and `services/lendingd/main.go` (configured by a YAML file, `-config`, default `services/lending/config.yaml`). Both register the same service. |
+| Default listen address | `0.0.0.0:9444` for `services/lending`; `:50053` for `services/lendingd` |
+| Node RPC it calls | `LEND_NODE_RPC_URL` / `node_rpc_url`, default `https://127.0.0.1:8081` |
 
-The service requires TLS in production deployments.  Development clusters may enable plaintext
-transport; when using `grpcurl` the `-plaintext` flag can be supplied to skip TLS.
+gRPC reflection is not registered.
 
-### Development quickstart
+### TLS and authentication
 
-The `lendingd` binary can run locally without TLS by opting into insecure mode
-and supplying an API token. The example below configures a plaintext listener
-bound to localhost and reuses the same shared secret for both the environment
-variable and command-line flag.
+* TLS is required unless insecure mode is enabled (`--allow-insecure` /
+  `LEND_ALLOW_INSECURE` / `tls.allow_insecure`). Insecure mode is accepted only on
+  a loopback listener or when `NHB_ENV=dev`.
+* The seven mutating methods (`SupplyAsset`, `WithdrawAsset`, `BorrowAsset`,
+  `RepayAsset`, `DepositCollateral`, `WithdrawCollateral`, `Liquidate`) require
+  authentication: an API token in the `authorization: Bearer <token>` or
+  `x-api-token` metadata, or a verified mTLS client certificate (optionally
+  restricted by allowed common names). Tokens come from the shared secret
+  (`LEND_SHARED_SECRET` / `--shared-secret`), `LEND_API_TOKEN`, or
+  `auth.api_tokens` in the YAML file. If `LEND_API_TOKEN` is set, only a token
+  matches. `services/lending` refuses to start without a token or mTLS
+  configuration.
+* `GetMarket`, `ListMarkets` and `GetPosition` do not go through the
+  authentication interceptor (`isMsgMethod` in `services/lending/server/auth.go`).
+* `services/lending` limits requests with `--rate-limit-per-min` /
+  `LEND_RATE_PER_MIN` (default 120).
+
+Local plaintext example (`services/lending`):
 
 ```bash
 export LEND_ALLOW_INSECURE=true
 export LEND_SHARED_SECRET=devtoken
-export LEND_NODE_RPC_URL=http://127.0.0.1:8081
+export LEND_NODE_RPC_URL=http://127.0.0.1:8545
 export LEND_LISTEN=127.0.0.1:9444
-
-go run ./services/lending \
-  --allow-insecure \
-  --shared-secret "$LEND_SHARED_SECRET" \
-  --listen "$LEND_LISTEN"
+go run ./services/lending
 ```
 
-With lendingd running locally, gRPC reflection remains disabled. Use the
-compiled protobufs when invoking `grpcurl` and include the API token metadata.
+Because reflection is off, pass the proto file to `grpcurl`:
 
 ```bash
-grpcurl -plaintext \
-  -import-path proto \
-  -proto lending/v1/lending.proto \
-  -H "x-api-token: $LEND_SHARED_SECRET" \
-  127.0.0.1:9444 list lending.v1.LendingService
+grpcurl -plaintext -import-path proto -proto lending/v1/lending.proto \
+  127.0.0.1:9444 lending.v1.LendingService/ListMarkets
 ```
 
-Every method follows the standard gRPC error model.  In addition to transport-level errors the
-service returns the following codes:
-
-- `INVALID_ARGUMENT` – malformed symbols, empty amounts, or failing validation.
-- `NOT_FOUND` – unknown market symbols or accounts with no position data.
-- `FAILED_PRECONDITION` – actions that would violate collateral requirements.
-- `UNAUTHENTICATED` / `PERMISSION_DENIED` – the caller lacks the required credentials.
-- `UNAVAILABLE` – the lending module is temporarily unable to service the request.
-
-## Shared message types
+## Messages
 
 ### `Market`
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `key.symbol` | `string` | Market identifier, e.g. `"nhb"`. |
-| `base_asset` | `string` | Denom that is supplied and borrowed. |
-| `collateral_factor` | `string` | Decimal fraction of supplied value that counts as collateral. |
-| `reserve_factor` | `string` | Portion of interest captured by protocol reserves. |
-| `liquidity_index` | `string` | Accumulated index for supplied balances. |
-| `borrow_index` | `string` | Accumulated index for borrowed balances. |
+| Field | Description |
+| --- | --- |
+| `key.symbol` | The lending pool id. |
+| `base_asset` | Always `"NHB"` in the current server. |
+| `collateral_factor` | The pool's `MaxLTV` risk parameter as an integer string (basis points). |
+| `reserve_factor` | The pool's reserve factor as an integer string. |
+| `liquidity_index` | The pool's supply index. |
+| `borrow_index` | The pool's borrow index. |
 
 ### `AccountPosition`
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `account` | `string` | Bech32 account address. |
-| `supplied` | `string` | Total supplied principal in base units. |
-| `borrowed` | `string` | Outstanding borrowed balance in base units. |
-| `collateral` | `string` | Value of collateral measured in base units. |
-| `health_factor` | `string` | Ratio of collateral value to borrowed value. |
+| Field | Description |
+| --- | --- |
+| `account` | Bech32 address. |
+| `supplied` | Sum of the account's supplied amounts across pools (wei). |
+| `borrowed` | Sum of the account's flexible-rate borrowed amounts across pools (wei). |
+| `collateral` | ZNHB collateral in wei. |
+| `health_factor` | Collateral value divided by borrowed value, as a decimal string; `"0"` when the account has no debt (`engine.ComputeHealthFactor`). |
 
-## RPC reference
+## Read methods
 
-### `ListMarkets`
-
-`rpc ListMarkets(ListMarketsRequest) returns (ListMarketsResponse);`
-
-**Request fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| _(none)_ | – | The request message has no fields. |
-
-**Response fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `markets[]` | `Market` | Configured markets that accept supply and borrow operations. |
-
-**Sample invocation**
+* `ListMarkets(ListMarketsRequest{}) -> markets[]`. Backed by the node's
+  `lend_getPools`.
+* `GetMarket({key: {symbol}}) -> market`. Backed by `lending_getMarket`.
+* `GetPosition({account}) -> position`. Backed by `lending_getUserAccount`; an
+  account with no position returns `NOT_FOUND` (`position not found`).
 
 ```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/ListMarkets <<'JSON'
-{}
-JSON
+grpcurl -plaintext -d '{"key": {"symbol": "<pool id>"}}' \
+  127.0.0.1:9444 lending.v1.LendingService/GetMarket
 ```
 
-### `GetMarket`
+## Mutating methods
 
-`rpc GetMarket(GetMarketRequest) returns (GetMarketResponse);`
+Every mutating method takes the caller's own fully signed transaction, encoded as
+JSON in `signed_tx_json`, in the shape accepted by `nhb_sendTransaction`
+([rpc.md](./rpc.md#transaction-encoding)). The daemon relays it unchanged; the
+node recovers the signer from the transaction signature. The other request
+fields are only checked for presence: `account`, `market.symbol`, `amount` and
+`signed_tx_json` are all required (`account required`, `market symbol required`,
+`amount required`, `signed transaction required`). `Liquidate` requires
+`liquidator`, `borrower` and `signed_tx_json` (`market` is passed through but not
+required); the liquidator's identity comes from the signature.
 
-**Request fields**
+The response of each is `{tx_hash}`: the mempool-accepted transaction hash. There
+is no updated position in the response; read it with `GetPosition` after the
+transaction is included in a block.
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `key.symbol` | `string` | Market symbol to fetch (case-sensitive). |
+| RPC | Request fields |
+| --- | --- |
+| `SupplyAsset`, `WithdrawAsset`, `BorrowAsset`, `RepayAsset`, `DepositCollateral`, `WithdrawCollateral` | `account`, `market`, `amount`, `signed_tx_json` |
+| `Liquidate` | `liquidator`, `market`, `borrower`, `signed_tx_json` |
 
-**Response fields**
+## Error codes
 
-| Field | Type | Description |
-| --- | --- | --- |
-| `market` | `Market` | Full market definition for the requested symbol. |
+From `services/lending/server` (`server.go`, `errors.go`, `auth.go`):
 
-**Sample invocation**
-
-```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/GetMarket <<'JSON'
-{
-  "key": {"symbol": "nhb"}
-}
-JSON
-```
-
-### `GetPosition`
-
-`rpc GetPosition(GetPositionRequest) returns (GetPositionResponse);`
-
-**Request fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `account` | `string` | Borrower account address. |
-
-**Response fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `position` | `AccountPosition` | Summary of the borrower's current state. |
-
-**Sample invocation**
-
-```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/GetPosition <<'JSON'
-{
-  "account": "nhb1exampleaccount"
-}
-JSON
-```
-
-### `SupplyAsset`
-
-`rpc SupplyAsset(SupplyAssetRequest) returns (SupplyAssetResponse);`
-
-**Request fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `account` | `string` | Address supplying liquidity. |
-| `market.symbol` | `string` | Target market symbol. |
-| `amount` | `string` | Amount to supply in base units. |
-
-**Response fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `position` | `AccountPosition` | Updated account position after the supply transaction. |
-
-**Sample invocation**
-
-```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/SupplyAsset <<'JSON'
-{
-  "account": "nhb1exampleaccount",
-  "market": {"symbol": "nhb"},
-  "amount": "500"
-}
-JSON
-```
-
-### `WithdrawAsset`
-
-`rpc WithdrawAsset(WithdrawAssetRequest) returns (WithdrawAssetResponse);`
-
-**Request fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `account` | `string` | Address withdrawing liquidity. |
-| `market.symbol` | `string` | Market symbol to withdraw from. |
-| `amount` | `string` | Amount to withdraw in base units. |
-
-**Response fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `position` | `AccountPosition` | Updated position reflecting the withdrawal. |
-
-**Sample invocation**
-
-```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/WithdrawAsset <<'JSON'
-{
-  "account": "nhb1exampleaccount",
-  "market": {"symbol": "nhb"},
-  "amount": "200"
-}
-JSON
-```
-
-### `BorrowAsset`
-
-`rpc BorrowAsset(BorrowAssetRequest) returns (BorrowAssetResponse);`
-
-**Request fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `account` | `string` | Borrower address. |
-| `market.symbol` | `string` | Market symbol to borrow from. |
-| `amount` | `string` | Amount to borrow in base units. |
-
-**Response fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `position` | `AccountPosition` | Updated position reflecting the borrowed balance. |
-
-**Sample invocation**
-
-```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/BorrowAsset <<'JSON'
-{
-  "account": "nhb1exampleaccount",
-  "market": {"symbol": "nhb"},
-  "amount": "100"
-}
-JSON
-```
-
-### `RepayAsset`
-
-`rpc RepayAsset(RepayAssetRequest) returns (RepayAssetResponse);`
-
-**Request fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `account` | `string` | Borrower address repaying the debt. |
-| `market.symbol` | `string` | Market symbol to repay. |
-| `amount` | `string` | Amount to repay in base units. |
-
-**Response fields**
-
-| Field | Type | Description |
-| --- | --- | --- |
-| `position` | `AccountPosition` | Updated position after the repayment. |
-
-**Sample invocation**
-
-```bash
-grpcurl -plaintext localhost:9444 lending.v1.LendingService/RepayAsset <<'JSON'
-{
-  "account": "nhb1exampleaccount",
-  "market": {"symbol": "nhb"},
-  "amount": "75"
-}
-JSON
-```
-
-## Error handling tips
-
-- For `INVALID_ARGUMENT` responses, re-check symbol casing and ensure numeric values are encoded as
-  strings containing base units (no decimals).
-- `FAILED_PRECONDITION` errors usually indicate that the requested borrow or withdrawal would push
-  the account below the allowed health factor.  Fetch the latest position using `GetPosition` to
-  calculate a safe amount.
-- When using mutual TLS or per-RPC credentials, ensure metadata headers are forwarded by your client
-  library—missing authentication details typically surface as `UNAUTHENTICATED`.
-
+| gRPC code | When |
+| --- | --- |
+| `INVALID_ARGUMENT` | Missing request fields; `invalid amount` (including a bad `signed_tx_json`). |
+| `NOT_FOUND` | Unknown resource; `GetPosition` for an account with no position. |
+| `UNAVAILABLE` | `operation paused`. |
+| `PERMISSION_DENIED` | Engine reported `unauthorized`. |
+| `RESOURCE_EXHAUSTED` | `insufficient collateral`. |
+| `UNAUTHENTICATED` | A mutating call without valid credentials (`authentication required`, `bearer token required`, `mtls client certificate required`). |
+| `FAILED_PRECONDITION` | The service has no engine configured (`lending engine unavailable`). |
+| `INTERNAL` | Any other engine error (`internal error`). |

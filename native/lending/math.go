@@ -55,25 +55,30 @@ func ratToRay(r *big.Rat) *big.Int {
 	return result
 }
 
-func rateFactor(rate *big.Rat, delta uint64) *big.Int {
-	if rate == nil || rate.Sign() == 0 || delta == 0 {
+// rateFactor is the growth factor of an annual rate over seconds seconds. All
+// of it is exact rational arithmetic on integers, rounded once when the factor
+// is turned into a ray.
+func rateFactor(rate *big.Rat, seconds uint64) *big.Int {
+	if rate == nil || rate.Sign() == 0 || seconds == 0 {
 		return new(big.Int).Set(ray)
 	}
-	perBlock := new(big.Rat).Set(rate)
-	perBlock.Quo(perBlock, new(big.Rat).SetUint64(blocksPerYear))
-	perBlock.Mul(perBlock, new(big.Rat).SetUint64(delta))
-	factor := new(big.Rat).Add(big.NewRat(1, 1), perBlock)
+	perPeriod := new(big.Rat).Set(rate)
+	perPeriod.Quo(perPeriod, new(big.Rat).SetUint64(secondsPerYear))
+	perPeriod.Mul(perPeriod, new(big.Rat).SetUint64(seconds))
+	factor := new(big.Rat).Add(big.NewRat(1, 1), perPeriod)
 	return ratToRay(factor)
 }
 
-func computeInterest(totalBorrowed *big.Int, rate *big.Rat, delta uint64) *big.Int {
-	if totalBorrowed == nil || totalBorrowed.Sign() == 0 || rate == nil || rate.Sign() == 0 || delta == 0 {
+// computeInterest is the interest an annual rate earns on totalBorrowed over
+// seconds seconds.
+func computeInterest(totalBorrowed *big.Int, rate *big.Rat, seconds uint64) *big.Int {
+	if totalBorrowed == nil || totalBorrowed.Sign() == 0 || rate == nil || rate.Sign() == 0 || seconds == 0 {
 		return big.NewInt(0)
 	}
-	perBlock := new(big.Rat).Set(rate)
-	perBlock.Quo(perBlock, new(big.Rat).SetUint64(blocksPerYear))
-	perBlock.Mul(perBlock, new(big.Rat).SetUint64(delta))
-	interest := new(big.Rat).Mul(perBlock, new(big.Rat).SetInt(totalBorrowed))
+	perPeriod := new(big.Rat).Set(rate)
+	perPeriod.Quo(perPeriod, new(big.Rat).SetUint64(secondsPerYear))
+	perPeriod.Mul(perPeriod, new(big.Rat).SetUint64(seconds))
+	interest := new(big.Rat).Mul(perPeriod, new(big.Rat).SetInt(totalBorrowed))
 	if interest.Sign() <= 0 {
 		return big.NewInt(0)
 	}

@@ -19,6 +19,7 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/governance"
 )
 
 // TestSubmitEvidenceTxTypeByteValue pins down the new TxType byte value so a
@@ -28,12 +29,12 @@ func TestSubmitEvidenceTxTypeByteValue(t *testing.T) {
 	if types.TxTypeSubmitEvidence != 0x4C {
 		t.Fatalf("expected TxTypeSubmitEvidence == 0x4C, got 0x%02X", byte(types.TxTypeSubmitEvidence))
 	}
-	// Senderless -- evidence.ValidateEvidence already recovers and verifies
-	// Evidence.ReporterSig against Evidence.Reporter (see the TxType's doc
-	// comment in core/types/transaction.go for why no separate envelope
-	// signature is required).
-	if types.RequiresSignature(types.TxTypeSubmitEvidence) {
-		t.Fatalf("expected TxTypeSubmitEvidence to be senderless (RequiresSignature=false)")
+	// An ordinary signed native transaction: the envelope signature is what
+	// identifies the reporter, and what gives the transaction a nonce and a
+	// sender for the mempool to limit (see the TxType's doc comment in
+	// core/types/transaction.go).
+	if !types.RequiresSignature(types.TxTypeSubmitEvidence) {
+		t.Fatalf("expected TxTypeSubmitEvidence to require a signature (RequiresSignature=true)")
 	}
 }
 
@@ -212,6 +213,46 @@ func seedEvidenceOffenderStake(t *testing.T, node *Node, offender [20]byte, amou
 	}
 }
 
+// seedEvidenceReporterBond gives reporter the minimum validator stake bonded
+// (LockedZNHB), which is what a reporter needs to submit evidence.
+func seedEvidenceReporterBond(t *testing.T, node *Node, reporter [20]byte) {
+	t.Helper()
+	node.stateMu.Lock()
+	defer node.stateMu.Unlock()
+	manager := nhbstate.NewManager(node.state.Trie)
+	account, err := manager.GetAccount(reporter[:])
+	if err != nil {
+		t.Fatalf("load reporter account: %v", err)
+	}
+	account.LockedZNHB = governance.DefaultMinimumValidatorStake()
+	if err := manager.PutAccount(reporter[:], account); err != nil {
+		t.Fatalf("seed reporter bond: %v", err)
+	}
+}
+
+// signedSubmitEvidenceTx wraps ev in a TxTypeSubmitEvidence transaction signed
+// by signer with the given account nonce. Evidence.Reporter must be signer's
+// own address for the transaction to be accepted.
+func signedSubmitEvidenceTx(t *testing.T, ev evidence.Evidence, signer *evidenceTestKey, nonce uint64) *types.Transaction {
+	t.Helper()
+	payload, err := encodeSubmitEvidenceTransaction(ev)
+	if err != nil {
+		t.Fatalf("encode evidence tx: %v", err)
+	}
+	tx := &types.Transaction{
+		ChainID:  types.NHBChainID(),
+		Type:     types.TxTypeSubmitEvidence,
+		Nonce:    nonce,
+		Data:     payload,
+		GasLimit: 21_000,
+		GasPrice: big.NewInt(1),
+	}
+	if err := tx.Sign(signer.priv); err != nil {
+		t.Fatalf("sign evidence tx: %v", err)
+	}
+	return tx
+}
+
 // TestSubmitEvidenceApply_IndependentStatesAgree is the direct regression
 // test for the consensus-safety property NHB-AUDIT-C10's follow-up
 // establishes: applying the identical TxTypeSubmitEvidence transaction
@@ -236,6 +277,8 @@ func TestSubmitEvidenceApply_IndependentStatesAgree(t *testing.T) {
 	stakeAmount := big.NewInt(1_000)
 	seedEvidenceOffenderStake(t, nodeA, offender, stakeAmount)
 	seedEvidenceOffenderStake(t, nodeB, offender, stakeAmount)
+	seedEvidenceReporterBond(t, nodeA, reporterKey.address())
+	seedEvidenceReporterBond(t, nodeB, reporterKey.address())
 
 	preRootA := nodeA.state.PendingRoot()
 	preRootB := nodeB.state.PendingRoot()
@@ -244,17 +287,7 @@ func TestSubmitEvidenceApply_IndependentStatesAgree(t *testing.T) {
 	}
 
 	ev, hash := buildGenuineEquivocationEvidence(t, offenderKey, reporterKey, evidenceHeight)
-	payload, err := encodeSubmitEvidenceTransaction(ev)
-	if err != nil {
-		t.Fatalf("encode evidence tx: %v", err)
-	}
-	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
-		Type:     types.TxTypeSubmitEvidence,
-		Data:     payload,
-		GasLimit: 0,
-		GasPrice: big.NewInt(0),
-	}
+	tx := signedSubmitEvidenceTx(t, ev, reporterKey, 0)
 
 	blockTime := time.Unix(1_700_000_000, 0).UTC()
 	for _, node := range []*Node{nodeA, nodeB} {
@@ -334,6 +367,12 @@ func TestSubmitEvidenceApply_IndependentStatesAgree(t *testing.T) {
 		if treasuryAcct.BalanceZNHB == nil || treasuryAcct.BalanceZNHB.Cmp(stakeAmount) != 0 {
 			t.Fatalf("expected treasury credited exactly %s ZNHB, got %v", stakeAmount, treasuryAcct.BalanceZNHB)
 		}
+		// No block lifecycle has run here, so the sale/reward pools do not
+		// exist yet: bootstrapping splits whatever the treasury holds, so a
+		// slash before it has no pool to mirror into.
+		if pool := nodeRewardPoolBalance(t, node); pool.Sign() != 0 {
+			t.Fatalf("expected the reward pool untouched before it is bootstrapped, got %s", pool)
+		}
 	}
 }
 
@@ -354,18 +393,10 @@ func TestSubmitEvidenceApply_RejectsForgedEvidence(t *testing.T) {
 	const evidenceHeight = 50
 	const applyHeight = 200
 
+	seedEvidenceReporterBond(t, node, reporterKey.address())
+
 	ev, hash := buildForgedEquivocationEvidence(t, offenderKey, reporterKey, evidenceHeight)
-	payload, err := encodeSubmitEvidenceTransaction(ev)
-	if err != nil {
-		t.Fatalf("encode evidence tx: %v", err)
-	}
-	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
-		Type:     types.TxTypeSubmitEvidence,
-		Data:     payload,
-		GasLimit: 0,
-		GasPrice: big.NewInt(0),
-	}
+	tx := signedSubmitEvidenceTx(t, ev, reporterKey, 0)
 
 	preRoot := node.state.PendingRoot()
 
@@ -395,14 +426,13 @@ func TestSubmitEvidenceApply_RejectsForgedEvidence(t *testing.T) {
 	}
 }
 
-// TestPotsoSubmitEvidenceGoesThroughTransactionPipeline proves the kept RPC
-// convenience path (Node.PotsoSubmitEvidence) no longer mutates state
-// directly: right after submission the evidence must NOT yet be visible via
-// PotsoEvidenceByHash (only mempool-admitted, exactly like
-// SwapReverseVoucher's identical "enqueue now, consensus mutates later"
-// contract) -- it only becomes visible once a block carrying that exact
-// transaction is actually committed.
-func TestPotsoSubmitEvidenceGoesThroughTransactionPipeline(t *testing.T) {
+// TestSubmitEvidenceGoesThroughTransactionPipeline proves a submitted report
+// does not mutate state directly: right after AddTransaction the evidence must
+// NOT yet be visible via PotsoEvidenceByHash (only mempool-admitted, exactly
+// like SwapReverseVoucher's "enqueue now, consensus mutates later" contract) --
+// it only becomes visible once a block carrying that exact transaction is
+// actually committed, and committing it consumes the reporter's nonce.
+func TestSubmitEvidenceGoesThroughTransactionPipeline(t *testing.T) {
 	// Uses writeSwapAdminGenesis (no declared AdminWallet), not
 	// writeEvidenceTestGenesis: this single-node test has no need for a
 	// shared treasury address across nodes, and declaring one triggers an
@@ -415,18 +445,12 @@ func TestPotsoSubmitEvidenceGoesThroughTransactionPipeline(t *testing.T) {
 	offenderKey := newEvidenceTestKey(t)
 	reporterKey := newEvidenceTestKey(t)
 	const evidenceHeight = 1
+	seedEvidenceReporterBond(t, node, reporterKey.address())
 
 	ev, hash := buildGenuineEquivocationEvidence(t, offenderKey, reporterKey, evidenceHeight)
-
-	receipt, err := node.PotsoSubmitEvidence(ev)
-	if err != nil {
+	tx := signedSubmitEvidenceTx(t, ev, reporterKey, 0)
+	if err := node.AddTransaction(tx); err != nil {
 		t.Fatalf("submit evidence: %v", err)
-	}
-	if receipt.Status != evidence.ReceiptStatusAccepted {
-		t.Fatalf("expected Accepted status, got %s", receipt.Status)
-	}
-	if receipt.Hash != hash {
-		t.Fatalf("receipt hash mismatch: got %x want %x", receipt.Hash, hash)
 	}
 
 	// Not yet applied for real -- only admitted to the mempool.
@@ -454,14 +478,20 @@ func TestPotsoSubmitEvidenceGoesThroughTransactionPipeline(t *testing.T) {
 	if record.Evidence.Offender != offenderKey.address() {
 		t.Fatalf("recorded offender mismatch after commit")
 	}
-
-	// Resubmitting the identical, already-recorded evidence must now be
-	// reported as idempotent, not accepted again.
-	idempotentReceipt, err := node.PotsoSubmitEvidence(ev)
+	reporterAddr := reporterKey.address()
+	reporterAcct, err := node.GetAccount(reporterAddr[:])
 	if err != nil {
-		t.Fatalf("resubmit evidence: %v", err)
+		t.Fatalf("load reporter account: %v", err)
 	}
-	if idempotentReceipt.Status != evidence.ReceiptStatusIdempotent {
-		t.Fatalf("expected Idempotent status on resubmission, got %s", idempotentReceipt.Status)
+	if reporterAcct.Nonce != 1 {
+		t.Fatalf("expected the reporter's nonce consumed by the committed evidence, got %d", reporterAcct.Nonce)
+	}
+
+	// Resubmitting the identical, already-recorded evidence (under the
+	// reporter's next nonce) is refused rather than accepted as an empty
+	// transaction that would still occupy block space and burn a nonce.
+	again := signedSubmitEvidenceTx(t, ev, reporterKey, 1)
+	if err := node.AddTransaction(again); err == nil {
+		t.Fatalf("expected resubmission of already-recorded evidence to be refused")
 	}
 }

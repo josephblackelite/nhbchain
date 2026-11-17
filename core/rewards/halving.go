@@ -92,10 +92,11 @@ func HalvingSchedule() []EmissionStep {
 // HalvingScheduleConfig builds a Config driven by the halving schedule
 // above. validatorSplitBps, stakerSplitBps, and engagementSplitBps must sum
 // to SplitDenominator (10,000), matching Config.Validate's existing rule.
-// This is a constructor, not an activation switch -- nothing calls it
-// automatically. A caller (test, ops tooling, or a future genesis/governance
-// path) still has to pass the result to StateProcessor.SetRewardConfig to
-// actually start validator/staking rewards flowing.
+// This is a constructor, not an activation switch: it only builds the Config.
+// core.NewNode calls it with the 20/50/30 split and passes the result to
+// StateProcessor.SetRewardConfig whenever the chain has an admin wallet; any
+// other caller (a test, ops tooling) has to do that second step itself for
+// rewards to flow.
 func HalvingScheduleConfig(validatorSplitBps, stakerSplitBps, engagementSplitBps uint32, historyLength uint64) Config {
 	return Config{
 		Schedule:        HalvingSchedule(),

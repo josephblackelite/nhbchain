@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -27,41 +28,53 @@ type BlockProof struct {
 	Signatures []BlockSignature   `json:"signatures"`
 }
 
-// Validator models the consensus voting power and public key metadata for a validator.
+// Validator models the consensus voting power and public key metadata for a
+// validator. Power is the full stake-scale voting power, not a clamped copy of
+// it: with stakes in the 10^25 range a 64-bit value saturates, and a saturated
+// power is blind to how much stake a validator really holds.
 type Validator struct {
 	Address []byte
-	Power   uint64
+	Power   *big.Int
 }
 
 // ValidatorSet verifies quorum signatures.
 type ValidatorSet struct {
 	validators map[string]Validator
-	totalPower uint64
+	totalPower *big.Int
 }
 
 // NewValidatorSet constructs a deterministic validator set keyed by normalized address bytes.
+// A missing or negative power counts as zero; the set keeps its own copies.
 func NewValidatorSet(list []Validator) *ValidatorSet {
-	set := &ValidatorSet{validators: make(map[string]Validator)}
+	set := &ValidatorSet{validators: make(map[string]Validator), totalPower: new(big.Int)}
 	for _, v := range list {
 		key := normalizeAddress(v.Address)
 		if key == "" {
 			continue
 		}
-		set.validators[key] = v
-		set.totalPower += v.Power
+		power := new(big.Int)
+		if v.Power != nil && v.Power.Sign() > 0 {
+			power.Set(v.Power)
+		}
+		set.validators[key] = Validator{Address: v.Address, Power: power}
+	}
+	for _, v := range set.validators {
+		set.totalPower.Add(set.totalPower, v.Power)
 	}
 	return set
 }
 
-// TotalPower returns the cumulative voting power of the set.
-func (s *ValidatorSet) TotalPower() uint64 {
-	if s == nil {
-		return 0
+// TotalPower returns the cumulative voting power of the set (a copy).
+func (s *ValidatorSet) TotalPower() *big.Int {
+	if s == nil || s.totalPower == nil {
+		return new(big.Int)
 	}
-	return s.totalPower
+	return new(big.Int).Set(s.totalPower)
 }
 
-// VerifyQuorum ensures the provided signatures collectively represent >= 2/3 of the voting power.
+// VerifyQuorum ensures the provided signatures collectively represent more
+// than 2/3 of the voting power (types.QuorumThreshold, the same bar the live
+// BFT round and QuorumCert.Verify apply).
 func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) error {
 	if s == nil {
 		return fmt.Errorf("validator set not configured")
@@ -70,7 +83,7 @@ func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) 
 		return fmt.Errorf("no signatures provided")
 	}
 	seen := make(map[string]struct{})
-	var signed uint64
+	signed := new(big.Int)
 	for _, sig := range signatures {
 		key := normalizeAddress(sig.Address)
 		if _, dup := seen[key]; dup {
@@ -91,15 +104,15 @@ func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) 
 		if !bytes.Equal(derived.Bytes(), validator.Address) {
 			return fmt.Errorf("signature address mismatch: expected %x got %x", validator.Address, derived.Bytes())
 		}
-		signed += validator.Power
+		signed.Add(signed, validator.Power)
 		seen[key] = struct{}{}
 	}
-	total := s.totalPower
-	if total == 0 {
+	total := s.TotalPower()
+	if total.Sign() == 0 {
 		return fmt.Errorf("validator set has zero total power")
 	}
-	if signed*3 < total*2 {
-		return fmt.Errorf("insufficient voting power: signed=%d total=%d", signed, total)
+	if !types.HasQuorum(signed, total) {
+		return fmt.Errorf("insufficient voting power: signed=%s total=%s", signed, total)
 	}
 	return nil
 }

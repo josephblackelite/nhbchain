@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,11 +84,45 @@ var defaultAllowedGovernanceParams = []string{
 }
 
 type Config struct {
-	ListenAddress               string                       `toml:"ListenAddress"`
-	RPCAddress                  string                       `toml:"RPCAddress"`
-	RPCTrustedProxies           []string                     `toml:"RPCTrustedProxies"`
-	RPCTrustProxyHeaders        bool                         `toml:"RPCTrustProxyHeaders"`
-	RPCAllowlistCIDRs           []string                     `toml:"RPCAllowlistCIDRs"`
+	// UndecodedKeys lists the keys in the config file that this build does not know (a misspelling, or a setting from another version); they are ignored.
+	// Filled by Load, never read from the file.
+	UndecodedKeys              []string `toml:"-"`
+	ListenAddress              string   `toml:"ListenAddress"`
+	RPCAddress                 string   `toml:"RPCAddress"`
+	RPCTrustedProxies          []string `toml:"RPCTrustedProxies"`
+	RPCTrustProxyHeaders       bool     `toml:"RPCTrustProxyHeaders"`
+	RPCAllowlistCIDRs          []string `toml:"RPCAllowlistCIDRs"`
+	RPCWebSocketOrigins        []string `toml:"RPCWebSocketOrigins"`
+	RPCWebSocketMaxConnections int      `toml:"RPCWebSocketMaxConnections"`
+	RPCWebSocketMaxPerIP       int      `toml:"RPCWebSocketMaxPerIP"`
+	// The public read queries that are not cheap (transaction and address
+	// lookups the indexes cannot answer, explorer snapshots of a non-default
+	// window, transaction-window statistics, the lending and market reads that
+	// hold the state lock) share a small pool so they cannot take the CPU that
+	// block production needs; see docs/ops/rpc-query-limits.md. Every field is
+	// optional and zero selects its default, which needs no configuration:
+	//   RPCQueryMaxConcurrent  queries running their heavy part at once
+	//                          (half the CPUs, at least 1 and at most 2)
+	//   RPCQueryMaxPerClient   in flight (running or waiting) per client (1)
+	//   RPCQueryQueueDepth     queries allowed to wait for a slot (8)
+	//   RPCQueryQueueWaitMS    how long one waits before it is refused (100)
+	//   RPCQueryTimeoutSeconds bound on one such query, start to answer (10)
+	// A query the pool refuses gets HTTP 429, code -32020 and a Retry-After
+	// hint; one that runs out of time gets HTTP 503 and code -32021.
+	//
+	// RPCDisableExplorerLoop stops the background work that keeps the explorer
+	// current -- the loop that rebuilds the default explorer snapshot after every
+	// block and streams it to /ws/explorer, the advance of the all-time payment
+	// index that goes with it, and the warm-up of the lending read index. Set it
+	// on a node that serves no public RPC. The default (false) keeps them
+	// running. With it set, a snapshot that is asked for is built on demand and
+	// cached per window and chain height, and /ws/explorer refuses connections.
+	RPCDisableExplorerLoop      bool                         `toml:"RPCDisableExplorerLoop"`
+	RPCQueryMaxConcurrent       int                          `toml:"RPCQueryMaxConcurrent"`
+	RPCQueryMaxPerClient        int                          `toml:"RPCQueryMaxPerClient"`
+	RPCQueryQueueDepth          int                          `toml:"RPCQueryQueueDepth"`
+	RPCQueryQueueWaitMS         int                          `toml:"RPCQueryQueueWaitMS"`
+	RPCQueryTimeoutSeconds      int                          `toml:"RPCQueryTimeoutSeconds"`
 	RPCProxyHeaders             RPCProxyHeaders              `toml:"RPCProxyHeaders"`
 	RPCJWT                      RPCJWT                       `toml:"RPCJWT"`
 	RPCSwapAuth                 RPCSwapAuth                  `toml:"RPCSwapAuth"`
@@ -108,15 +143,9 @@ type Config struct {
 	RPCTLSCertFile              string                       `toml:"RPCTLSCertFile"`
 	RPCTLSKeyFile               string                       `toml:"RPCTLSKeyFile"`
 	RPCTLSClientCAFile          string                       `toml:"RPCTLSClientCAFile"`
-	// RPCOperatorClientCertOU, when set, marks a verified mTLS client
-	// certificate as carrying the operator role if any of its Subject
-	// OrganizationalUnit values case-insensitively match it. Leave empty (the
-	// default) unless RPCTLSClientCAFile is also configured; see
-	// rpc.ServerConfig.OperatorClientCertOU.
-	RPCOperatorClientCertOU string `toml:"RPCOperatorClientCertOU"`
-	DataDir                 string `toml:"DataDir"`
-	GenesisFile             string `toml:"GenesisFile"`
-	AllowAutogenesis        bool   `toml:"AllowAutogenesis"`
+	DataDir                     string                       `toml:"DataDir"`
+	GenesisFile                 string                       `toml:"GenesisFile"`
+	AllowAutogenesis            bool                         `toml:"AllowAutogenesis"`
 	// QuorumCertActivationHeight enables NHB-TRIAGE-C1's quorum-certificate
 	// check on the untrusted P2P block-sync path once set: blocks at this
 	// height or below sync without one (grandfathering already-committed
@@ -129,36 +158,114 @@ type Config struct {
 	// 0 means "disabled" here, there is no way to express "enforce from
 	// height 1" via this config field specifically -- that only matters for
 	// a brand-new chain wanting the protection from genesis, not for
-	// upgrading an already-live one.
-	QuorumCertActivationHeight uint64          `toml:"QuorumCertActivationHeight"`
-	ValidatorKeystorePath      string          `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI            string          `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv            string          `toml:"ValidatorKMSEnv"`
-	NetworkName                string          `toml:"NetworkName"`
-	Bootnodes                  []string        `toml:"Bootnodes"`
-	PersistentPeers            []string        `toml:"PersistentPeers"`
-	BootstrapPeers             []string        `toml:"BootstrapPeers,omitempty"`
-	MaxPeers                   int             `toml:"MaxPeers"`
-	MaxInbound                 int             `toml:"MaxInbound"`
-	MaxOutbound                int             `toml:"MaxOutbound"`
-	MinPeers                   int             `toml:"MinPeers"`
-	OutboundPeers              int             `toml:"OutboundPeers"`
-	PeerBanSeconds             int             `toml:"PeerBanSeconds"`
-	ReadTimeout                int             `toml:"ReadTimeout"`
-	WriteTimeout               int             `toml:"WriteTimeout"`
-	MaxMsgBytes                int             `toml:"MaxMsgBytes"`
-	MaxMsgsPerSecond           float64         `toml:"MaxMsgsPerSecond"`
-	ClientVersion              string          `toml:"ClientVersion"`
-	P2P                        P2PSection      `toml:"p2p"`
-	Potso                      PotsoConfig     `toml:"potso"`
-	Governance                 GovConfig       `toml:"governance"`
-	Swap                       swap.Config     `toml:"swap"`
-	Lending                    lending.Config  `toml:"lending"`
-	Subscriptions              Subscriptions   `toml:"subscriptions"`
-	Mempool                    MempoolConfig   `toml:"mempool"`
-	Global                     Global          `toml:"global"`
-	Consensus                  Consensus       `toml:"consensus"`
-	NetworkSecurity            NetworkSecurity `toml:"network_security"`
+	// upgrading an already-live one. This field only gates the CERTIFICATE
+	// CHECK; it does not gate the quorum bar itself. The bar a certificate (or
+	// an ordinary vote tally) must clear -- strictly more than two thirds of
+	// voting power -- has no gate at all and has been unconditional since the
+	// DC-01 safety fix: any value set here, on a fresh replay or a live
+	// upgrade alike, must be at or above the first height actually committed
+	// under a binary that already enforces that strict bar, or a node
+	// replaying from genesis with an older, looser-quorum binary in its
+	// history could compute a different chain than one that never ran it.
+	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
+	// RewardsByStakeFromEpoch is the first epoch whose emission is paid by stake: the validators' and the engagement pool follow each validator's stake,
+	// like the stakers' pool already does, and every pool is credited to the wallets that locked that stake instead of to the validator's own account (the
+	// key on its server). 0 (the default/unset value) keeps every earlier release's split: equal per validator and by engagement score, to the validator's
+	// own account. This is a consensus value: it must be the same on every validator, and on every node that replays blocks from a snapshot, and it must be
+	// in force on all of them before the epoch it names begins (see core.StateProcessor.SetRewardsByStakeFromEpoch). Change it only as one coordinated
+	// restart of every validator, with the epoch far enough ahead to finish it.
+	RewardsByStakeFromEpoch uint64          `toml:"RewardsByStakeFromEpoch"`
+	ValidatorKeystorePath   string          `toml:"ValidatorKeystorePath"`
+	ValidatorKMSURI         string          `toml:"ValidatorKMSURI"`
+	ValidatorKMSEnv         string          `toml:"ValidatorKMSEnv"`
+	NetworkName             string          `toml:"NetworkName"`
+	Bootnodes               []string        `toml:"Bootnodes"`
+	PersistentPeers         []string        `toml:"PersistentPeers"`
+	BootstrapPeers          []string        `toml:"BootstrapPeers,omitempty"`
+	MaxPeers                int             `toml:"MaxPeers"`
+	MaxInbound              int             `toml:"MaxInbound"`
+	MaxOutbound             int             `toml:"MaxOutbound"`
+	MinPeers                int             `toml:"MinPeers"`
+	OutboundPeers           int             `toml:"OutboundPeers"`
+	PeerBanSeconds          int             `toml:"PeerBanSeconds"`
+	ReadTimeout             int             `toml:"ReadTimeout"`
+	WriteTimeout            int             `toml:"WriteTimeout"`
+	MaxMsgBytes             int             `toml:"MaxMsgBytes"`
+	MaxMsgsPerSecond        float64         `toml:"MaxMsgsPerSecond"`
+	ClientVersion           string          `toml:"ClientVersion"`
+	P2P                     P2PSection      `toml:"p2p"`
+	Potso                   PotsoConfig     `toml:"potso"`
+	Governance              GovConfig       `toml:"governance"`
+	Swap                    swap.Config     `toml:"swap"`
+	Lending                 lending.Config  `toml:"lending"`
+	Subscriptions           Subscriptions   `toml:"subscriptions"`
+	Mempool                 MempoolConfig   `toml:"mempool"`
+	Global                  Global          `toml:"global"`
+	Consensus               Consensus       `toml:"consensus"`
+	NetworkSecurity         NetworkSecurity `toml:"network_security"`
+
+	// POSSweepSkipActivationHeight is the first block height at which the
+	// end-of-block sweep of expired POS authorizations carries on past an
+	// expired hold whose payer's locked balance no longer covers it, leaves
+	// that hold pending, and releases the holds queued behind it. Before this
+	// height (and at every height when the value is 0, the default) the sweep
+	// ends at that hold and the holds behind it stay pending. The two
+	// behaviours leave different state, so this is a consensus setting: it
+	// MUST be identical on every validator, and it must only be changed with
+	// every validator restarted together, with the height chosen above the
+	// chain tip at that moment. See docs/specs/pos-lifecycle.md.
+	POSSweepSkipActivationHeight uint64 `toml:"POSSweepSkipActivationHeight"`
+	// POSHoldUnstakeGuardActivationHeight is the first block height from which
+	// an unstake may not unbond ZNHB that backs pending POS holds. A POS hold
+	// and a delegation both sit in the account's locked ZNHB, and without this
+	// rule an unstake can take more than was delegated, leaving a hold its
+	// payer cannot cover. 0 (the default) leaves the rule off. Unlike a node
+	// setting it is a chain rule: set the same non-zero height on every
+	// validator, above the chain tip and before the chain reaches it, or
+	// validators disagree on any block that carries an unstake the rule
+	// refuses. As a top-level key it goes before the first [table] of the
+	// file. See core.StateProcessor.SetPOSHoldUnstakeGuardActivationHeight.
+	POSHoldUnstakeGuardActivationHeight uint64 `toml:"POSHoldUnstakeGuardActivationHeight"`
+	// GovCreditPreservationActivationHeight enables PL-R1-GOVREFUND's fix
+	// once set: TxTypeGovFinalize/TxTypeGovExecute transactions below this
+	// height keep persisting the pre-engine-call sender snapshot
+	// after their nonce bump (grandfathering already-committed history that
+	// may rely on today's behavior); transactions at or above it reload the
+	// sender's account fresh first, so a same-address credit
+	// engine.Finalize/Execute just wrote (a deposit refund, a
+	// forfeited-deposit sweep, or a treasury-directive payout) survives
+	// instead of being silently clobbered. 0 (the default/unset value)
+	// leaves the fix fully disabled -- this field must be explicitly set to
+	// the chain's current tip height, identically on every validator, as
+	// one coordinated deploy (see core.Node.SetGovCreditPreservationActivationHeight's
+	// doc comment and core.StateProcessor.SetGovCreditPreservationActivationHeight's
+	// doc comment in core/governance_tx.go for the full rationale, including
+	// why this ships gated rather than unconditional).
+	GovCreditPreservationActivationHeight uint64 `toml:"GovCreditPreservationActivationHeight"`
+	// FeeRouteAliasActivationHeight is the first block height from which an NHB
+	// domain fee whose route wallet is the transfer's own sender or recipient is
+	// credited to that account as the transfer leaves it, instead of to a
+	// separately loaded copy the transfer's own later write overwrites, which
+	// destroys the fee (PL-R1-FEEROUTE). The same fix for ZNHB is already in
+	// force at every height. 0 (the default) leaves the NHB half off. A chain
+	// rule, not a node setting: it changes the state a block leaves behind, so
+	// set the same non-zero height on every validator, above the chain tip, with
+	// all of them restarted together, or they disagree on every block that
+	// routes such a fee. As a top-level key it goes before the first [table] of
+	// the file. See core.StateProcessor.SetFeeRouteAliasActivationHeight.
+	FeeRouteAliasActivationHeight uint64 `toml:"FeeRouteAliasActivationHeight"`
+	// LendingFixedTermIDActivationHeight is the first block height from which a
+	// fixed-term loan or deposit is stored under an ID that includes its owner,
+	// and an origination whose ID already has a record is refused (PL-R5T-02).
+	// Until then the ID is the transaction hash, which covers no sender, so two
+	// accounts signing field-identical transactions share one ID and the second
+	// record overwrites the first while both moves of cash and both pool totals
+	// stand. 0 (the default) keeps the transaction hash as the ID. A chain rule,
+	// not a node setting: set the same non-zero height on every validator, above
+	// the chain tip, with all of them restarted together. As a top-level key it
+	// goes before the first [table] of the file. See
+	// core.StateProcessor.SetLendingFixedTermIDActivationHeight.
+	LendingFixedTermIDActivationHeight uint64 `toml:"LendingFixedTermIDActivationHeight"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.
@@ -256,7 +363,7 @@ func defaultGlobalConfig() Global {
 			MerchantDailyCapWei: "0",
 			GlobalDailyCapWei:   "0",
 			AutoTopUp: PaymasterAutoTopUp{
-				Token:          "ZNHB",
+				Token:          "NHB",
 				MinBalanceWei:  "0",
 				TopUpAmountWei: "0",
 				DailyCapWei:    "0",
@@ -317,12 +424,19 @@ func defaultGlobalConfig() Global {
 	}
 }
 
+// defaultMinBlockInterval is one block a second: about the average an idle pair of
+// validators has kept, over hours, while it lost rounds to itself (0.6 to 1 blocks a
+// second). A config that leaves the key out keeps it; "0s"
+// turns the wait off, and the blocks then come as fast as the validators can make them.
+const defaultMinBlockInterval = time.Second
+
 func defaultConsensusConfig() Consensus {
 	return Consensus{
 		ProposalTimeout:  2 * time.Second,
 		PrevoteTimeout:   2 * time.Second,
 		PrecommitTimeout: 2 * time.Second,
 		CommitTimeout:    4 * time.Second,
+		MinBlockInterval: defaultMinBlockInterval,
 	}
 }
 
@@ -447,6 +561,12 @@ type GovConfig struct {
 	AllowedRoles                   []string `toml:"AllowedRoles"`
 	TreasuryAllowList              []string `toml:"TreasuryAllowList"`
 	BlockTimestampToleranceSeconds uint64   `toml:"BlockTimestampToleranceSeconds"`
+
+	// RejectAmbiguousParamKeysFromUnix is the block timestamp (Unix seconds)
+	// from which a parameter payload that repeats one parameter under keys
+	// differing only in surrounding whitespace, with different values, is
+	// rejected. Zero (the default) leaves the earlier behaviour in place.
+	RejectAmbiguousParamKeysFromUnix uint64 `toml:"RejectAmbiguousParamKeysFromUnix"`
 }
 
 type LoadOption func(*loadOptions)
@@ -538,7 +658,9 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		if len(undecoded) == 1 && undecoded[0] == "ValidatorKey" {
 			return nil, fmt.Errorf("config file %s uses deprecated ValidatorKey field; run nhbctl migrate-keystore", path)
 		}
+		cfg.UndecodedKeys = append(cfg.UndecodedKeys, strings.Join(undecoded, "."))
 	}
+	sort.Strings(cfg.UndecodedKeys)
 
 	if raw := strings.TrimSpace(cfg.P2P.NetworkIDRaw); raw != "" {
 		parsed, err := strconv.ParseUint(raw, 10, 64)
@@ -933,6 +1055,9 @@ func (cfg *Config) ensureConsensusDefaults(meta toml.MetaData) {
 	if !meta.IsDefined("consensus", "CommitTimeout") {
 		cfg.Consensus.CommitTimeout = defaults.CommitTimeout
 	}
+	if !meta.IsDefined("consensus", "MinBlockInterval") {
+		cfg.Consensus.MinBlockInterval = defaults.MinBlockInterval
+	}
 }
 
 // PotsoRewardConfig converts the loaded TOML representation into the runtime configuration structure.
@@ -1174,6 +1299,8 @@ func (cfg GovConfig) Policy() (governance.ProposalPolicy, error) {
 		PassThresholdBps:               cfg.PassThresholdBps,
 		AllowedRoles:                   append([]string{}, cfg.AllowedRoles...),
 		BlockTimestampToleranceSeconds: cfg.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: cfg.RejectAmbiguousParamKeysFromUnix,
 	}
 	amount, err := parseUintAmount(cfg.MinDepositWei)
 	if err != nil {
@@ -1310,10 +1437,12 @@ func ensureKeystore(configPath string, cfg *Config, resolvePassphrase func() (st
 		return err
 	}
 
-	if cfg.ValidatorKeystorePath != keystorePath {
-		cfg.ValidatorKeystorePath = keystorePath
-		return persist(configPath, cfg)
-	}
+	// Keep the resolved path in memory only. The default is derived from the
+	// config path on every Load, so there is nothing to record, and writing the
+	// struct back here would store every key the operator left out as an
+	// explicit zero before the defaults below have been applied: the next Load
+	// would then take those zeros as the operator's own values.
+	cfg.ValidatorKeystorePath = keystorePath
 
 	return nil
 }
@@ -1368,7 +1497,7 @@ func createDefault(path string, passphrase string) (*Config, error) {
 	cfg.NetworkSecurity.StreamQueueSize = defaultStreamQueueSize
 	cfg.NetworkSecurity.RelayDropLogRatio = defaultRelayDropLogRatio
 	cfg.P2P = P2PSection{
-		NetworkID:          430060579445266314,
+		NetworkIDRaw:       "18346390202490284624",
 		MaxPeers:           64,
 		MaxInbound:         60,
 		MaxOutbound:        30,

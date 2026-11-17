@@ -30,8 +30,8 @@ import (
 // fixed, pre-allocated genesis treasury Sale Pool rather than minting new
 // supply (see core/swap_voucher_tx.go's applySwapVoucherMintTransaction),
 // so they carry no external financial risk needing a
-// governance-adjustable circuit breaker -- only the NHB-custody-backed
-// redeem direction does. See ProposalKindSwapRiskParams's doc comment for
+// governance-adjustable circuit breaker -- only the redeem direction
+// does. See ProposalKindSwapRiskParams's doc comment for
 // the full rationale.
 
 // applySignedGovTx builds, signs, and applies a governance transaction

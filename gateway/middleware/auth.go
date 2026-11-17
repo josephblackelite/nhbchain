@@ -97,6 +97,17 @@ func (a *Authenticator) Middleware(requiredScopes ...string) func(http.Handler) 
 	}
 }
 
+// ScopesFromContext returns the scopes of the caller that Authenticator let
+// through on the strength of a token, and whether it did: a request that came
+// in with no token (authentication is off, or the path is an open one) has none.
+func ScopesFromContext(ctx context.Context) ([]string, bool) {
+	if ctx.Value(ContextKeyToken) == nil {
+		return nil, false
+	}
+	scopes, _ := ctx.Value(ContextKeyScopes).([]string)
+	return scopes, true
+}
+
 func (a *Authenticator) isOptional(path string) bool {
 	for _, prefix := range a.cfg.OptionalPaths {
 		if strings.HasPrefix(path, prefix) {

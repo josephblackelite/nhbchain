@@ -472,9 +472,9 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 
 	// The Genesis Treasury Distribution Curve (core/tokenomics/curve), not
 	// the price-proof rate above, is ZNHB's authoritative treasury price.
-	// The price-proof check just above still matters (it validates the
-	// OTC gateway's own submitted rate is internally consistent with what
-	// it requested), but the curve independently prices exactly how much
+	// The price-proof check just above still matters (it validates that
+	// the submitted rate is internally consistent with what the submitter
+	// requested), but the curve independently prices exactly how much
 	// this voucher's ZNHB amount actually costs against the treasury's
 	// own Sale Pool schedule, and the transfer below draws from that same
 	// pool -- mirroring applyBuyZNHB, never sp.MintToken.
@@ -512,6 +512,17 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 
 	if !sp.hasAdminWallet {
 		return fmt.Errorf("%w: no admin wallet configured for this network", ErrSwapInvalidSigner)
+	}
+	// The mint below debits the admin wallet and credits the recipient as two
+	// separately loaded accounts, so a recipient that IS the admin wallet
+	// would have its credit overwritten by the debit (the ZNHB vanishes while
+	// the Sale Pool still shrinks and its counters still advance). Selling the
+	// treasury's own inventory to the treasury is meaningless anyway --
+	// applyBuyZNHB rejects it the same way -- and the outcome is a pure
+	// function of the voucher's own payload, so it is permanently
+	// unsatisfiable (PRUNE).
+	if voucher.Recipient == sp.adminWallet {
+		return fmt.Errorf("%w: recipient must not be the treasury admin wallet", ErrSwapVoucherInvalidPayload)
 	}
 	salePoolBalance, err := curveManager.ZNHBSalePoolBalance()
 	if err != nil {

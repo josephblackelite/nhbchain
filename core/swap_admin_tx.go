@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -233,25 +234,68 @@ func (sp *StateProcessor) applySwapVoucherReverseTransaction(tx *types.Transacti
 	if record.MintAmountWei == nil || record.MintAmountWei.Sign() <= 0 {
 		return fmt.Errorf("%w: voucher amount invalid", ErrSwapAdminInvalidPayload)
 	}
-	balance, err := manager.Balance(record.Recipient[:], record.Token)
-	if err != nil {
-		return err
+	if strings.ToUpper(strings.TrimSpace(record.Token)) != "ZNHB" {
+		return ErrSwapInvalidToken
 	}
-	if balance.Cmp(record.MintAmountWei) < 0 {
+
+	// Vouchers are minted onto Account.BalanceZNHB and drawn from the admin
+	// wallet's Sale Pool (applySwapVoucherMintTransaction), so the reversal
+	// runs on those same account balances and pool counters rather than the
+	// separate per-token ledger. Each address is loaded once and persisted
+	// once, and a recipient that is also the sink is rejected because the
+	// reversal would move nothing.
+	sink := sp.swapRefundSink
+	if bytes.Equal(sink[:], record.Recipient[:]) {
+		return fmt.Errorf("%w: voucher recipient is the refund sink", ErrSwapAdminInvalidPayload)
+	}
+	recipientAccount, err := sp.getAccount(record.Recipient[:])
+	if err != nil {
+		return fmt.Errorf("swap: load recipient: %w", err)
+	}
+	if recipientAccount.BalanceZNHB == nil || recipientAccount.BalanceZNHB.Cmp(record.MintAmountWei) < 0 {
 		return ErrSwapReversalInsufficientBalance
 	}
-	updatedRecipient := new(big.Int).Sub(balance, record.MintAmountWei)
-	if err := manager.SetBalance(record.Recipient[:], record.Token, updatedRecipient); err != nil {
-		return err
-	}
-	sink := sp.swapRefundSink
-	sinkBalance, err := manager.Balance(sink[:], record.Token)
+	sinkAccount, err := sp.getAccount(sink[:])
 	if err != nil {
-		return err
+		return fmt.Errorf("swap: load refund sink: %w", err)
 	}
-	updatedSink := new(big.Int).Add(sinkBalance, record.MintAmountWei)
-	if err := manager.SetBalance(sink[:], record.Token, updatedSink); err != nil {
-		return err
+	if sinkAccount.BalanceZNHB == nil {
+		sinkAccount.BalanceZNHB = big.NewInt(0)
+	}
+	// Only a refund that lands back in the admin wallet rejoins the Sale Pool;
+	// the Sale Pool and Reward Pool sub-ledgers always sum to the admin
+	// wallet's own ZNHB (CheckZNHBSupplyInvariant), so a refund to any other
+	// address must leave them untouched.
+	restoresPool := sp.hasAdminWallet && bytes.Equal(sink[:], sp.adminWallet[:])
+	var salePoolBalance, cumulative *big.Int
+	if restoresPool {
+		if salePoolBalance, err = manager.ZNHBSalePoolBalance(); err != nil {
+			return fmt.Errorf("swap: load sale pool balance: %w", err)
+		}
+		if cumulative, err = manager.ZNHBCumulativeSaleDistributed(); err != nil {
+			return fmt.Errorf("swap: load cumulative sale distributed: %w", err)
+		}
+	}
+
+	recipientAccount.BalanceZNHB = new(big.Int).Sub(recipientAccount.BalanceZNHB, record.MintAmountWei)
+	sinkAccount.BalanceZNHB = new(big.Int).Add(sinkAccount.BalanceZNHB, record.MintAmountWei)
+	if err := sp.setAccount(record.Recipient[:], recipientAccount); err != nil {
+		return fmt.Errorf("swap: persist recipient: %w", err)
+	}
+	if err := sp.setAccount(sink[:], sinkAccount); err != nil {
+		return fmt.Errorf("swap: persist refund sink: %w", err)
+	}
+	if restoresPool {
+		if err := manager.ZNHBSetSalePoolBalance(new(big.Int).Add(salePoolBalance, record.MintAmountWei)); err != nil {
+			return fmt.Errorf("swap: update sale pool balance: %w", err)
+		}
+		newCumulative := new(big.Int).Sub(cumulative, record.MintAmountWei)
+		if newCumulative.Sign() < 0 {
+			newCumulative = big.NewInt(0)
+		}
+		if err := manager.ZNHBSetCumulativeSaleDistributed(newCumulative); err != nil {
+			return fmt.Errorf("swap: rewind cumulative sale distributed: %w", err)
+		}
 	}
 	if err := ledger.MarkReversed(providerTxID); err != nil {
 		return err

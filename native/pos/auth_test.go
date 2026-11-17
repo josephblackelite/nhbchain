@@ -175,3 +175,59 @@ func TestLifecycleAutoVoidOnExpiry(t *testing.T) {
 		t.Fatalf("payer balance after auto-void: got %s want 800", payerAcc.BalanceZNHB)
 	}
 }
+
+// With one account as both payer and merchant, Capture must apply the hold
+// release, the refund and the merchant credit to a single account object:
+// balance plus locked is unchanged by the capture and nothing stays locked.
+func TestLifecycleCaptureSamePayerAndMerchantConservesSupply(t *testing.T) {
+	for _, capture := range []int64{600, 250, 1} {
+		state := newMemoryLifecycleState()
+		var acct [20]byte
+		acct[5] = 0x66
+		state.accounts[string(acct[:])] = &types.Account{BalanceZNHB: big.NewInt(1_000), BalanceNHB: big.NewInt(0), LockedZNHB: big.NewInt(0)}
+		engine := NewLifecycle(state)
+		base := time.Unix(1_700_000_000, 0)
+		engine.SetNowFunc(func() time.Time { return base })
+
+		auth, err := engine.Authorize(acct, acct, big.NewInt(600), uint64(base.Add(time.Hour).Unix()), nil)
+		if err != nil {
+			t.Fatalf("authorize: %v", err)
+		}
+		if _, err := engine.Capture(auth.ID, big.NewInt(capture), acct); err != nil {
+			t.Fatalf("capture %d: %v", capture, err)
+		}
+		got, _ := state.GetAccount(acct[:])
+		if got.BalanceZNHB.Cmp(big.NewInt(1_000)) != 0 || got.LockedZNHB.Sign() != 0 {
+			t.Fatalf("capture %d: balance %s locked %s, want 1000 / 0", capture, got.BalanceZNHB, got.LockedZNHB)
+		}
+	}
+}
+
+// TestLifecycleCaptureWhenPayerIsMerchantConservesFunds: one account can be
+// both sides of an authorization. The capture releases the hold and credits
+// the merchant on that single account -- the funds neither grow nor stay
+// locked, for a full capture and for a partial one.
+func TestLifecycleCaptureWhenPayerIsMerchantConservesFunds(t *testing.T) {
+	for _, capture := range []int64{600, 250} {
+		state := newMemoryLifecycleState()
+		var account [20]byte
+		account[1] = 0x09
+		state.accounts[string(account[:])] = &types.Account{BalanceZNHB: big.NewInt(1_000), BalanceNHB: big.NewInt(0), LockedZNHB: big.NewInt(0)}
+
+		engine := NewLifecycle(state)
+		base := time.Unix(1_700_000_000, 0)
+		engine.SetNowFunc(func() time.Time { return base })
+		auth, err := engine.Authorize(account, account, big.NewInt(600), uint64(base.Add(time.Hour).Unix()), nil)
+		if err != nil {
+			t.Fatalf("authorize: %v", err)
+		}
+		engine.SetNowFunc(func() time.Time { return base.Add(time.Minute) })
+		if _, err := engine.Capture(auth.ID, big.NewInt(capture), account); err != nil {
+			t.Fatalf("capture %d: %v", capture, err)
+		}
+		got, _ := state.GetAccount(account[:])
+		if got.BalanceZNHB.Cmp(big.NewInt(1_000)) != 0 || got.LockedZNHB.Sign() != 0 {
+			t.Fatalf("capture %d: balance %s locked %s, want 1000 spendable and nothing locked", capture, got.BalanceZNHB, got.LockedZNHB)
+		}
+	}
+}

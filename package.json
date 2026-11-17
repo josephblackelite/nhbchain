@@ -14,7 +14,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "Apache-2.0",
+  "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "@noble/hashes": "^1.4.0",

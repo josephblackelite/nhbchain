@@ -2,6 +2,7 @@ package swap
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -377,5 +378,88 @@ func TestLedgerMarkReconciled(t *testing.T) {
 	}
 	if rec.Status != VoucherStatusReconciled {
 		t.Fatalf("expected reconciled status, got %s", rec.Status)
+	}
+}
+
+func putTestVoucher(t *testing.T, ledger *Ledger, id string) {
+	t.Helper()
+	if err := ledger.Put(&VoucherRecord{Provider: "p", ProviderTxID: id, FiatCurrency: "USD", FiatAmount: "1", Rate: "0.1", Token: "ZNHB", MintAmountWei: big.NewInt(1), QuoteTimestamp: time.Unix(1700000600, 0).Unix(), OracleSource: "manual", MinterSignature: "0xsig"}); err != nil {
+		t.Fatalf("put %s: %v", id, err)
+	}
+}
+
+func voucherStatus(t *testing.T, ledger *Ledger, id string) string {
+	t.Helper()
+	rec, ok, err := ledger.Get(id)
+	if err != nil || !ok {
+		t.Fatalf("get %s: %v ok=%v", id, err, ok)
+	}
+	return rec.Status
+}
+
+// A reversed voucher is final: reconciling it must be refused and must leave
+// the status as it is, where the ledger used to overwrite any status.
+func TestLedgerMarkReconciledRefusesAReversedVoucher(t *testing.T) {
+	ledger := NewLedger(newMockStorage())
+	ledger.SetClock(func() time.Time { return time.Unix(1700000600, 0) })
+	putTestVoucher(t, ledger, "reversed")
+	if err := ledger.MarkReversed("reversed"); err != nil {
+		t.Fatalf("mark reversed: %v", err)
+	}
+	err := ledger.MarkReconciled([]string{"reversed"})
+	if !errors.Is(err, ErrVoucherNotReconcilable) {
+		t.Fatalf("reconciling a reversed voucher: got %v, want ErrVoucherNotReconcilable", err)
+	}
+	if got := voucherStatus(t, ledger, "reversed"); got != VoucherStatusReversed {
+		t.Fatalf("reversed voucher ended up %q", got)
+	}
+}
+
+// An id the ledger has never seen is an error, not a silent skip.
+func TestLedgerMarkReconciledRefusesAnUnknownVoucher(t *testing.T) {
+	ledger := NewLedger(newMockStorage())
+	err := ledger.MarkReconciled([]string{"never-minted"})
+	if !errors.Is(err, ErrVoucherNotFound) {
+		t.Fatalf("reconciling an unknown voucher: got %v, want ErrVoucherNotFound", err)
+	}
+}
+
+// A batch is all or nothing: one id that cannot be reconciled leaves the
+// vouchers listed before it minted.
+func TestLedgerMarkReconciledWritesNothingWhenAnyIdIsRefused(t *testing.T) {
+	ledger := NewLedger(newMockStorage())
+	ledger.SetClock(func() time.Time { return time.Unix(1700000600, 0) })
+	putTestVoucher(t, ledger, "good")
+	putTestVoucher(t, ledger, "reversed")
+	if err := ledger.MarkReversed("reversed"); err != nil {
+		t.Fatalf("mark reversed: %v", err)
+	}
+	if err := ledger.MarkReconciled([]string{"good", "reversed"}); !errors.Is(err, ErrVoucherNotReconcilable) {
+		t.Fatalf("mixed batch: got %v, want ErrVoucherNotReconcilable", err)
+	}
+	if got := voucherStatus(t, ledger, "good"); got != VoucherStatusMinted {
+		t.Fatalf("voucher listed before the refused id is %q, want minted", got)
+	}
+	if err := ledger.MarkReconciled([]string{"good", "missing"}); !errors.Is(err, ErrVoucherNotFound) {
+		t.Fatalf("batch with an unknown id: got %v, want ErrVoucherNotFound", err)
+	}
+	if got := voucherStatus(t, ledger, "good"); got != VoucherStatusMinted {
+		t.Fatalf("voucher listed before the unknown id is %q, want minted", got)
+	}
+}
+
+// Reconciling twice is harmless: the second batch changes nothing and does not
+// fail, so a resubmitted signed batch is not an error.
+func TestLedgerMarkReconciledIsIdempotent(t *testing.T) {
+	ledger := NewLedger(newMockStorage())
+	ledger.SetClock(func() time.Time { return time.Unix(1700000600, 0) })
+	putTestVoucher(t, ledger, "id")
+	for i := 0; i < 2; i++ {
+		if err := ledger.MarkReconciled([]string{"id", "id"}); err != nil {
+			t.Fatalf("mark reconciled attempt %d: %v", i, err)
+		}
+		if got := voucherStatus(t, ledger, "id"); got != VoucherStatusReconciled {
+			t.Fatalf("attempt %d left status %q", i, got)
+		}
 	}
 }

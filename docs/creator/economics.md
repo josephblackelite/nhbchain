@@ -1,55 +1,33 @@
-# Creator Economy Share Accounting
+# Creator Share Accounting
 
-The creator engine mints proportional staking shares using an ERC4626-style
-index. The engine tracks three aggregate values per creator:
+The creator engine (`native/creator/math.go`, `engine.go`) accounts for fan stakes with shares. Per creator the ledger tracks:
 
-* **`totalAssets`** – the amount of NHB staked behind the creator.
-* **`totalShares`** – the outstanding fan shares, including any bootstrap
-  liquidity held by the protocol.
-* **`indexRay`** – a high-precision (1e27) price index equal to
-  `totalAssets * 1e27 / totalShares`.
+* `totalAssets`: NHB staked behind the creator (base units).
+* `totalShares`: outstanding shares, including the bootstrap share.
+* `indexRay`: `totalAssets * 1e27 / totalShares` (1e27 = `oneRay`); `1e27` when there are no shares, `0` when there are shares but no assets.
 
-## Minting
+## Minting (stake)
 
-When a fan stakes `deposit` NHB the engine calculates the number of shares to
-mint as:
+* First deposit (no shares or no assets yet): the deposit must be at least `minDeposit` = 1,000 base units (`creator engine: deposit below minimum` otherwise). The engine mints `deposit - minLiquidity` shares to the fan and adds `minLiquidity` = 1 share to the pool's `totalShares` as a bootstrap share (it is counted in the total but not assigned to any account).
+* Later deposits: `mintShares = floor(deposit * totalShares / totalAssets)`. If that is zero the call fails with `deposit below minimum` when `deposit < 1000`, otherwise `deposit too small for share precision`.
+* Afterwards `totalAssets += deposit`, `totalShares += mintShares (+ the bootstrap share on the first deposit)` and `indexRay` is recomputed.
 
-```
-mintShares = floor(deposit * totalShares / totalAssets)
-```
+## Redemption (unstake)
 
-If this is the first deposit (`totalShares == 0`) the engine performs a
-bootstrap by minting `MIN_LIQUIDITY` shares to the zero address and allocating
-`deposit - MIN_LIQUIDITY` shares to the fan. The current constants are
-`MIN_LIQUIDITY = 1` share and `MIN_DEPOSIT = 1_000` NHB. Deposits smaller than
-`MIN_DEPOSIT` are rejected, and any deposit that would round down to zero shares
-is rejected with `deposit too small for share precision`.
+The caller passes a number of shares (which must not exceed their stake's shares). `redeemAssets = floor(shares * totalAssets / totalShares)`; a result of zero fails with `creator engine: redeem value below precision`. If afterwards no more than the bootstrap share would remain (`remainingShares <= 1`) or no assets would remain, the residual assets are added to the payout, and the ledger's assets and shares reset to zero with `indexRay` set to `1e27`. The fan's stake record is deleted when its amount or shares reach zero.
 
-After minting, the ledger updates `totalAssets`, `totalShares`, and recomputes
-`indexRay`.
+## Yield and tips
 
-## Redemption
+* Tips add to the ledger's `PendingDistribution` one-for-one; they are not shares.
+* Each stake attempts to add a yield of 2.5% of the deposit (`stakingAccrualBps` = 250) to `PendingDistribution` and `TotalStakingYield`, funded from the rewards-treasury account only if it holds enough NHB (see [`overview.md`](./overview.md)).
 
-Unstaking burns a share amount and returns assets according to:
+## Limits
 
-```
-redeemAssets = floor(shares * totalAssets / totalShares)
-```
+* Content URI: at most 512 bytes, schemes `https`, `ipfs`, `ar`, `nhb`. Metadata: at most 4096 bytes, UTF-8; its BLAKE3-256 hash is stored on the content record.
+* Staking per fan: at most 1,000,000,000,000 base units (`fanStakeEpochCap`) per 3600-second window.
+* Tips: at most 5 per creator per rolling 1-second window (`tipRateBurst`, `tipRateWindowSeconds`).
+* Zero or negative stake and tip amounts are rejected.
 
-If the redemption would drain the pool the residual assets (including the
-bootstrap share) are returned to the redeemer and the ledger resets its
-aggregates to zero.
+## Note on balances
 
-The engine enforces that a fan cannot withdraw more than their pro-rata share of
-assets. Property tests cover dilution scenarios to ensure no actor can exit with
-more than their proportional stake.
-
-## Metadata and Anti-Grief Controls
-
-* Content URIs must use an allow-listed scheme (`https`, `ipfs`, `ar`, or `nhb`),
-  be UTF-8, and not exceed length limits. Metadata is trimmed, validated as
-  UTF-8, and hashed with BLAKE3 (stored on the content record).
-* Staking per fan is capped per epoch (`1h`) by `fanStakeEpochCap`.
-* Tips per creator are rate limited using a fixed 1-second window and
-  `tipRateBurst` allowance.
-* Zero-value stakes or tips are rejected early to prevent spam.
+In `StakeCreator` the fan's NHB balance is debited by the deposit and the amount is not credited to any account, and `UnstakeCreator` credits the fan's balance with the redeemed assets without debiting any account (`native/creator/engine.go`). The engine's stake path therefore does not conserve NHB supply. The module's write RPCs are disabled (see [`overview.md`](./overview.md)).

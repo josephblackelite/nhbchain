@@ -9,8 +9,8 @@ import (
 
 // Operator-only RPC method table.
 //
-// Until now, the ONLY place this deny-list existed was the web wallet's browser
-// gateway (its own table), which sits in front of
+// Until now, the ONLY place this deny-list existed was the browser-facing
+// gateway, which sits in front of
 // this node for browser traffic. Any caller that reaches this node directly
 // -- an off-chain daemon with its own node JWT, a misconfigured client, a
 // compromised credential -- was never subject to it: requireAuth only asked
@@ -20,14 +20,14 @@ import (
 // with nothing at the node to stop it.
 //
 // OPERATOR_ONLY_METHODS and OPERATOR_ONLY_METHOD_PREFIXES below are a
-// deliberate 1:1 port of the web wallet's table (down to the comments explaining
+// deliberate 1:1 port of the gateway's table (down to the comments explaining
 // why each entry is here), made authoritative at the node itself so
-// enforcement no longer depends on every caller routing through the web wallet
+// enforcement no longer depends on every caller routing through the gateway
 // gateway. The two lists are NOT wired together in code -- they live in
 // separate repos -- so they CAN drift apart silently. If a method is added
 // to either list, add it to the other in the same change:
 //   - node (authoritative for enforcement):   rpc/operator_methods.go (this file)
-//   - gateway (authoritative for the browser): the web wallet's gateway
+//   - gateway (authoritative for the browser): the browser-facing gateway's own list
 //
 // See requireOperatorInto/handle in rpc/http.go for how this table is
 // enforced: any request naming one of these methods must authenticate with
@@ -38,7 +38,7 @@ import (
 // One deliberate exception: handle() does not enforce this for a method
 // isPublicSwapMethod also claims (swap_submitVoucher, the swap_voucher_*
 // family, nhb_swapMint, nhb_swapBurn). Those are listed here because
-// the web wallet never wants a browser session calling them, not because this
+// the gateway never wants a browser session calling them, not because this
 // node treats them as an operator surface -- they already carry their own,
 // longer-standing per-partner HMAC API key authorization
 // (authenticateSwapRequest), which is a stronger, more specific control than
@@ -46,12 +46,12 @@ import (
 // rpc/http.go's handle for the full reasoning.
 //
 // A second, separately-checked exception (isSelfAuthenticatedMintMethod):
-// mint_with_sig. It is listed here because the web wallet never wants a browser
+// mint_with_sig. It is listed here because the gateway never wants a browser
 // session calling it either, not because this node treats it as an operator
 // surface -- it already carries its own on-chain secp256k1 voucher-signature
 // check plus a MINTER_NHB role requirement (core/state_transition.go's
-// applyMintTransaction), which the real, currently-deployed off-chain
-// fiat-settlement minting service relies on with no bearer credential at
+// applyMintTransaction), which an off-chain
+// submitter relies on with no bearer credential at
 // all. See isSelfAuthenticatedMintMethod's doc comment in rpc/http.go for
 // why this is a separate check rather than folded into isPublicSwapMethod.
 //
@@ -62,10 +62,17 @@ import (
 // layer is skipped. Their real, independent control is an on-chain M-of-N
 // signature-threshold check against a genesis-declared signer quorum
 // (core/buyback_tx.go's applyBuybackRefPrice, core/lending_tx.go's
-// applyLendingRefPriceTransaction), which the real, currently-deployed
-// off-chain reference-price submission service relies on without an
+// applyLendingRefPriceTransaction), which an
+// off-chain reference-price submitter relies on without an
 // operator-scoped credential. See isSignatureThresholdAuthorizedMethod's doc
 // comment in rpc/http.go for the full reasoning.
+//
+// A fourth, separately-checked exception (isRetiredMethod): the names in
+// retiredRPCMethods. Their handlers do nothing for any caller (HTTP 410 Gone,
+// or 404 for the one name with no dispatch case), so there is nothing for a
+// credential to unlock; the gate would only replace that answer with a 401/403
+// and make a method that is gone look like one the caller is not allowed to
+// use. They stay listed here so the table keeps matching the gateway's.
 var OperatorOnlyMethods = map[string]struct{}{
 	// --- p2p network control and node-internal sync (also covered by prefixes below)
 	"net_info":             {},
@@ -74,8 +81,8 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"net_ban":              {}, // bans a peer for N seconds; on a 2-validator chain this halts consensus
 	"p2p_info":             {}, // p2p network view (node id, listen addrs, peer counts)
 	"p2p_peers":            {},
-	"sync_snapshot_export": {}, // writes a snapshot to a caller-supplied filesystem path
-	"sync_snapshot_import": {}, // replaces state from a caller-supplied filesystem path
+	"sync_snapshot_export": {}, // writes a snapshot to a caller-supplied filesystem path -- retired, see isRetiredMethod
+	"sync_snapshot_import": {}, // replaces state from a caller-supplied filesystem path -- retired, see isRetiredMethod
 	"sync_status":          {},
 
 	// --- swap engine / voucher / redemption operations
@@ -85,7 +92,7 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"swap_limits":                 {},
 	"swap_provider_status":        {},
 	"swap_burn_list":              {},
-	"swap_listPendingRedemptions": {}, // every account's pending redemptions and payout addresses
+	"swap_listPendingRedemptions": {}, // pending swap requests and their destination addresses
 	"swap_submitVoucher":          {}, // mints against a partner voucher
 	"swap_voucher_get":            {},
 	"swap_voucher_list":           {},
@@ -99,24 +106,24 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"lending_submitRefPrice": {}, // M-of-N signed ref price; exempt from the gate below, see isSignatureThresholdAuthorizedMethod
 
 	// --- paymaster and POS operations
-	"tx_setSponsorshipEnabled": {},
-	"pos_sweepVoids":           {},
+	"tx_setSponsorshipEnabled": {}, // flips validator-local sponsorship state -- retired, see isRetiredMethod
+	"pos_sweepVoids":           {}, // retired, see isRetiredMethod
 
 	// --- POTSO / engagement / reputation writers and admin exports
-	"potso_submitEvidence":        {},
-	"potso_reward_claim":          {}, // pays out of the reward treasury
+	"potso_submitEvidence":        {}, // retired (no case in the dispatch switch at all, so it answers 404), see isRetiredMethod
+	"potso_reward_claim":          {}, // retired, see isRetiredMethod
 	"potso_heartbeat":             {},
-	"potso_export_epoch":          {}, // full epoch payout CSV
+	"potso_export_epoch":          {}, // full epoch reward CSV
 	"potso_rewards_outflow":       {},
 	"engagement_register_device":  {},
 	"engagement_submit_heartbeat": {},
-	"reputation_verifySkill":      {}, // takes a caller-supplied verifier address
+	"reputation_verifySkill":      {}, // takes a caller-supplied verifier address -- retired, see isRetiredMethod
 
-	// --- admin analytics (the web wallet's own admin pages read these server-side)
+	// --- admin analytics (an admin dashboard reads these server-side)
 	"nhb_getOwnerWalletStats": {},
 	"nhb_txWindowStats":       {},
 
-	// --- escrow milestone writers (not called by the web wallet)
+	// --- escrow milestone writers (not called by the gateway) -- retired, see isRetiredMethod
 	"escrow_milestoneCreate":             {},
 	"escrow_milestoneFund":               {},
 	"escrow_milestoneRelease":            {},
@@ -125,8 +132,12 @@ var OperatorOnlyMethods = map[string]struct{}{
 
 	// --- legacy direct-state mutators. The current node answers these with 410
 	// Gone (they wrote validator-local state outside the block pipeline); the
-	// the web wallet signs real transactions through nhb_sendTransaction instead. Denied
-	// here in case a stale node build still serves them.
+	// the gateway signs real transactions through nhb_sendTransaction instead. They
+	// stay listed so this table keeps matching the gateway's, but they do nothing,
+	// so handle() exempts them from the operator gate (see isRetiredMethod) and
+	// every caller gets that 410 rather than a 401/403. creator_payouts is the
+	// one entry here that is NOT retired: its read path is live, so it stays
+	// gated.
 	"lending_supplyNHB":        {},
 	"lending_withdrawNHB":      {},
 	"lending_depositZNHB":      {},
@@ -177,7 +188,7 @@ var OperatorOnlyMethods = map[string]struct{}{
 
 	// --- methods the node has already removed (governance, pool creation, POTSO
 	// staking now go through signed transactions). Denied so a stale node build
-	// cannot be driven with the web wallet's service JWT.
+	// cannot be driven with a service JWT.
 	"lend_createPool":      {},
 	"lending_createPool":   {},
 	"gov_propose":          {},
@@ -190,7 +201,7 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"potso_stake_withdraw": {},
 }
 
-// OperatorOnlyMethodPrefixes mirrors the web wallet's whole-namespace deny list.
+// OperatorOnlyMethodPrefixes mirrors the gateway's whole-namespace deny list.
 // net_ and sync_ are this node's live ones; the rest are conventional
 // operator namespaces the node does not serve today, listed so a future
 // node build cannot expose them through a wildcard allowlist or a stale
@@ -216,7 +227,7 @@ func buildNormalizedOperatorOnlyMethods() map[string]struct{} {
 }
 
 // NormalizeRPCMethodName puts a method name into the same strict, canonical
-// form the web wallet's gateway uses before consulting its deny-list: NFKC folds
+// form the browser-facing gateway uses before consulting its deny-list: NFKC folds
 // compatibility characters (fullwidth letters and the like), every
 // whitespace, control, format (zero-width, bidi, soft hyphen, BOM) and
 // variation-selector character is removed anywhere in the name (not just at
@@ -257,7 +268,7 @@ func isStrippedRPCMethodNameRune(r rune) bool {
 // or decoration a caller sent it -- names an operator-only RPC method or
 // falls under an operator-only namespace prefix. It is the node's own
 // authoritative check, independent of whether the request arrived through
-// the web wallet's gateway, another gateway, or directly from a daemon.
+// the browser-facing gateway, another gateway, or directly from a daemon.
 func IsOperatorOnlyMethod(method string) bool {
 	normalized := NormalizeRPCMethodName(method)
 	if normalized == "" {

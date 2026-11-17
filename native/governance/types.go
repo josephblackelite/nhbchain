@@ -1,11 +1,13 @@
 package governance
 
 import (
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
 
 	"nhbchain/crypto"
+	nativecommon "nhbchain/native/common"
 )
 
 // ProposalStatus enumerates the lifecycle phases a governance proposal
@@ -191,9 +193,9 @@ const (
 	// pre-allocated genesis treasury Sale Pool rather than minting new
 	// supply (see core/swap_voucher_tx.go's applySwapVoucherMintTransaction),
 	// so it carries no external financial risk needing a
-	// governance-adjustable circuit breaker -- only the NHB-custody-backed
-	// redeem direction (real money leaving the system via the NOWPayments
-	// custody wallet) does. These redeem caps used to live in every
+	// governance-adjustable circuit breaker -- only the redeem direction
+	// (real money leaving the system through an external settlement service)
+	// does. These redeem caps used to live in every
 	// validator's own local config.toml, individually operator-tuned and
 	// requiring a coordinated, lockstep restart of every validator to
 	// change; moving them here means a single passed proposal changes the
@@ -349,7 +351,8 @@ const (
 	// ProposalKindParamUpdate proposal -- no dedicated proposal kind needed
 	// (see core/market_native.go's readGovernedMarketFlatFeeWei).
 	ParamKeyMarketFlatFeeWei = "market.flatFeeWei"
-	// ParamKeyPaymasterTopUpFeeWei controls the flat ZNHB fee skimmed from
+	// ParamKeyPaymasterTopUpFeeWei controls the flat fee, in the top-up asset (NHB
+	// unless the policy names ZNHB), skimmed from
 	// the configured Paymaster.AutoTopUp.Governance.FundingAccount on every
 	// automatic paymaster top-up (core/sponsorship.go's
 	// maybeAutoTopUpPaymaster), on top of the TopUpAmountWei credited to the
@@ -414,6 +417,31 @@ func DefaultMinimumValidatorStake() *big.Int {
 		panic("governance: invalid defaultMinimumValidatorStakeWei constant")
 	}
 	return value
+}
+
+// MinimumValidatorStakeFromParam decodes the stored value of
+// staking.minimumValidatorStake. An empty value means the parameter is unset
+// and yields DefaultMinimumValidatorStake. A proposal is persisted exactly as
+// its author spelled it, so the number may be bare or a quoted decimal string
+// (both pass proposal validation); both decode to the same amount.
+//
+// Every account write and every epoch's validator selection consults this
+// threshold, so a stored value that is not a positive base-10 integer (which
+// proposal validation cannot produce) must not fail all of them: it degrades
+// to DefaultMinimumValidatorStake, deterministically from the stored bytes
+// alone, and is reported loudly.
+func MinimumValidatorStakeFromParam(raw []byte) *big.Int {
+	text := nativecommon.ParamDecimal(raw)
+	if text == "" {
+		return DefaultMinimumValidatorStake()
+	}
+	parsed, ok := new(big.Int).SetString(text, 10)
+	if !ok || parsed.Sign() <= 0 {
+		nativecommon.ReportMalformedParam(ParamKeyMinimumValidatorStake, raw,
+			fmt.Errorf("minimum validator stake must be a positive base-10 integer"), defaultMinimumValidatorStakeWei)
+		return DefaultMinimumValidatorStake()
+	}
+	return parsed
 }
 
 // AuditEvent identifies the lifecycle milestone captured by a governance audit

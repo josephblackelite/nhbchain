@@ -129,10 +129,8 @@ func (a *marketStateAdapter) ListFillsBySeller(addr crypto.Address) ([]*market.F
 // wiring this to wall-clock time would make that depend on the exact
 // instant each validator happens to execute the tx, guaranteeing a
 // state-root mismatch the first time more than one validator (or a
-// replaying/syncing node) processes the same market transaction. This
-// mirrors an existing bug in EscrowEngine/TradeEngine's own SetNowFunc
-// wiring (sp.now(), not sp.blockTimestamp()) -- not fixed here, out of
-// scope for this change, but the same fix should eventually apply there.
+// replaying/syncing node) processes the same market transaction.
+// EscrowEngine/TradeEngine (configureTradeEngine) are wired the same way.
 func (sp *StateProcessor) marketEngine() *market.Engine {
 	engine := market.NewEngine(cloneAddress(sp.marketEscrowAddr), cloneAddress(sp.marketFeeCollectorAddr))
 	engine.SetPauses(sp.pauses)
