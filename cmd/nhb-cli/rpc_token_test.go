@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"nhbchain/rpc"
 )
 
@@ -130,5 +132,35 @@ func TestRPCTokenLifetimeIsBounded(t *testing.T) {
 	}
 	if _, err := mintRPCToken(testRPCTokenSecret, "nhb-rpc", []string{"wallets"}, maxRPCTokenTTL, now); err != nil {
 		t.Fatalf("expected the maximum ttl to be allowed: %v", err)
+	}
+}
+
+func TestRPCTokenCommandWritesTheOperatorRoleClaimOnRequest(t *testing.T) {
+	srv := newTokenVerifyingServer(t, testRPCTokenSecret)
+	claimsOf := func(args ...string) jwt.MapClaims {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := runRPCTokenCommand(args, strings.NewReader(""), &stdout, &stderr); code != 0 {
+			t.Fatalf("rpc-token %v exited %d: %s", args, code, stderr.String())
+		}
+		token := strings.TrimSpace(stdout.String())
+		if err := authorize(srv, token); err != nil {
+			t.Fatalf("node rejected the minted token: %+v", err)
+		}
+		claims := jwt.MapClaims{}
+		if _, _, err := jwt.NewParser().ParseUnverified(token, claims); err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return claims
+	}
+	if _, has := claimsOf()["role"]; has {
+		t.Fatalf("a token minted without --role must carry no role claim")
+	}
+	if got := claimsOf("--role", "operator")["role"]; got != "operator" {
+		t.Fatalf("role claim = %v, want operator", got)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runRPCTokenCommand([]string{"--role", "admin"}, strings.NewReader(""), &stdout, &stderr); code == 0 {
+		t.Fatalf("expected a role other than operator to be refused")
 	}
 }

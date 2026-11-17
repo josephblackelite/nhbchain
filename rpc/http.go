@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,7 +54,9 @@ const (
 	defaultRateLimitWindow        = time.Minute
 	defaultMaxTxPerWindow         = 5
 	txSeenTTL                     = 15 * time.Minute
-	rateLimiterMaxEntries         = 512
+	rateLimiterMaxEntries         = 2048
+	rateLimiterEvictBatch         = rateLimiterMaxEntries / 16
+	rateLimiterFullSweepEvery     = time.Second
 	rateLimiterStaleMultiple      = 10
 	maxForwardedForAddrs          = 5
 	maxTrustedProxyEntries        = 32
@@ -166,10 +170,15 @@ type JWTConfig struct {
 
 // ServerConfig controls optional behaviours of the RPC server.
 type ServerConfig struct {
-	// TrustProxyHeaders, when set, will cause the server to honour proxy
-	// forwarding headers such as X-Forwarded-For regardless of the caller's
-	// remote address. Use with caution when the server is guaranteed to be
-	// behind a trusted reverse proxy.
+	// TrustProxyHeaders states that the server runs behind a reverse proxy. It
+	// does not widen who is trusted: proxy forwarding headers such as
+	// X-Forwarded-For are honoured only from a caller listed in TrustedProxies,
+	// never regardless of the caller's remote address -- the forwarded address
+	// becomes the client identity that rate limits and AllowlistCIDRs are
+	// applied to, so trusting every caller would let any client choose it.
+	// Setting it while TrustedProxies is empty therefore trusts nobody (the
+	// server says so at start-up); list the proxy's address (127.0.0.1 for a
+	// proxy on the same host) in TrustedProxies.
 	TrustProxyHeaders bool
 	// TrustedProxies enumerates remote addresses that are authorised to relay
 	// client requests. When a request originates from one of these proxies the
@@ -178,6 +187,16 @@ type ServerConfig struct {
 	// AllowlistCIDRs enumerates client IP ranges permitted to access the RPC
 	// server. When empty, all clients are allowed.
 	AllowlistCIDRs []string
+	// WebSocketOrigins lists the host patterns (matched case-insensitively with
+	// path.Match) of the browser origins that may open the WebSocket streams in
+	// addition to the request's own host. Like AllowlistCIDRs, an empty list
+	// allows any origin; clients that send no Origin header are not affected.
+	WebSocketOrigins []string
+	// WebSocketMaxConnections caps the WebSocket streams open at once and
+	// WebSocketMaxPerIP those open per client address. Zero selects the
+	// defaults (defaultWebSocketMaxConnections, defaultWebSocketMaxPerIP).
+	WebSocketMaxConnections int
+	WebSocketMaxPerIP       int
 	// ProxyHeaders configures handling of reverse proxy headers such as
 	// X-Forwarded-For and X-Real-IP.
 	ProxyHeaders ProxyHeadersConfig
@@ -242,6 +261,29 @@ type ServerConfig struct {
 	// JSON-RPC method names (e.g. "nhb_sendTransaction"). Values mirror the global
 	// MaxTxPer* knobs but apply only to the corresponding method.
 	RouteRateLimits map[string]RouteRateLimitConfig
+	// The public read queries that are not cheap (see isGatedQueryMethod and
+	// query_gate.go) share a small pool so they can never take the CPU that block
+	// production needs. QueryMaxConcurrent caps how many hold a slot at once (zero
+	// selects half the CPUs, at least 1 and at most 2), QueryMaxPerClient how many
+	// one client may have in flight (zero selects 1), QueryQueueDepth how many may
+	// wait for a slot (zero selects 8) and QueryQueueWait how long one waits before
+	// it is refused with the rate-limit error and a retry hint (zero selects
+	// 100ms). QueryTimeout bounds one such query from start to answer (zero selects
+	// 10s). The defaults need no configuration.
+	QueryMaxConcurrent int
+	QueryMaxPerClient  int
+	QueryQueueDepth    int
+	QueryQueueWait     time.Duration
+	QueryTimeout       time.Duration
+	// DisableExplorerLoop stops the background work that keeps the explorer
+	// current: the loop that rebuilds the default explorer snapshot after every
+	// block and streams it to /ws/explorer, the advance of the all-time payment
+	// index that goes with it, and the warm-up of the lending read index. It is
+	// for a node that serves no public RPC. Nothing else changes: a snapshot that
+	// is asked for is built on demand (and cached per window and chain height),
+	// advancing the payment index as it does, and /ws/explorer refuses
+	// connections. The zero value keeps the loop running.
+	DisableExplorerLoop bool
 }
 
 // NetworkService abstracts the network control plane used by RPC handlers to
@@ -266,7 +308,6 @@ type Server struct {
 	transactions             *modules.TransactionsModule
 	escrow                   *modules.EscrowModule
 	lending                  *modules.LendingModule
-	trustProxyHeaders        bool
 	trustedProxies           map[string]struct{}
 	readHeaderTimeout        time.Duration
 	readTimeout              time.Duration
@@ -319,11 +360,28 @@ type Server struct {
 	explorerHeight   uint64
 	explorerWindow   int
 
+	// WebSocket streams: allowed origins and how many are open, in total and
+	// per client address.
+	wsOrigins  []string
+	wsMu       sync.Mutex
+	wsOpen     int
+	wsOpenByIP map[string]int
+	wsMaxOpen  int
+	wsMaxPerIP int
+
 	activityMu     sync.RWMutex
 	activityTotals explorerActivityTotals
 
 	txWindowStatsMu    sync.Mutex
 	txWindowStatsCache map[int64]*txWindowStatsCacheEntry
+
+	// Heavy-read admission and the caches that keep most reads light.
+	queryGate       *queryGate
+	queryTimeout    time.Duration
+	explorerLoopOff bool
+	blockSummaries  blockSummaryCache
+	digests         blockDigestCache
+	snapshotCache   explorerSnapshotCache
 }
 
 type proxyPolicy struct {
@@ -362,6 +420,21 @@ const clientRoleContextKey contextKey = "rpc_client_role"
 // operator-scoped. See requireOperatorInto and OperatorOnlyMethods.
 const operatorRoleClaim = "operator"
 
+// limiterKeyContextKey carries the key that rate limits and the query pool
+// are applied to. It is the client address for a public caller (an IPv6
+// address stands for its /64, see limiterAddressKey) and, for a local service
+// that called through a trusted proxy address and proved who it is, that
+// service's own key (see limiterKeyFor).
+const limiterKeyContextKey contextKey = "rpc_limiter_key"
+
+// limiterSharedContextKey marks a limiter key that many callers share (see
+// limiterKeyFor), so the query pool does not treat it as one client.
+const limiterSharedContextKey contextKey = "rpc_limiter_shared"
+
+// limiterServicePrefix starts the limiter key of a credentialed local service.
+// No address contains a slash, so it cannot collide with one.
+const limiterServicePrefix = "svc/"
+
 func normalizeProxyMode(mode ProxyHeaderMode) ProxyHeaderMode {
 	switch strings.ToLower(string(mode)) {
 	case "", string(ProxyHeaderModeIgnore):
@@ -386,6 +459,9 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		}
 		trusted[trimmed] = struct{}{}
 		count++
+	}
+	if cfg.TrustProxyHeaders && len(trusted) == 0 {
+		slog.Warn("rpc: TrustProxyHeaders is set but TrustedProxies is empty; forwarded client addresses are honoured only from listed proxies, so none will be honoured until the proxy's address is listed")
 	}
 	policy := proxyPolicy{
 		xForwardedFor: normalizeProxyMode(cfg.ProxyHeaders.XForwardedFor),
@@ -584,7 +660,6 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		transactions:             modules.NewTransactionsModule(node),
 		escrow:                   modules.NewEscrowModule(node),
 		lending:                  modules.NewLendingModule(node),
-		trustProxyHeaders:        cfg.TrustProxyHeaders,
 		trustedProxies:           trusted,
 		readHeaderTimeout:        cfg.ReadHeaderTimeout,
 		readTimeout:              cfg.ReadTimeout,
@@ -612,6 +687,22 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		rateLimitWindow:          rateWindow,
 		rateLimiterStaleAfter:    staleAfter,
 		rateLimiterSweepBackoff:  rateWindow,
+		wsOrigins:                trimmedNonEmpty(cfg.WebSocketOrigins),
+		wsOpenByIP:               make(map[string]int),
+		wsMaxOpen:                cfg.WebSocketMaxConnections,
+		wsMaxPerIP:               cfg.WebSocketMaxPerIP,
+		queryGate:                newQueryGate(cfg.QueryMaxConcurrent, cfg.QueryMaxPerClient, cfg.QueryQueueDepth, cfg.QueryQueueWait),
+		queryTimeout:             cfg.QueryTimeout,
+		explorerLoopOff:          cfg.DisableExplorerLoop,
+	}
+	if srv.queryTimeout <= 0 {
+		srv.queryTimeout = defaultQueryTimeout
+	}
+	if srv.wsMaxOpen <= 0 {
+		srv.wsMaxOpen = defaultWebSocketMaxConnections
+	}
+	if srv.wsMaxPerIP <= 0 {
+		srv.wsMaxPerIP = defaultWebSocketMaxPerIP
 	}
 	srv.swapStable.assets = make(map[string]stablequote.Asset)
 	srv.swapStable.now = time.Now
@@ -620,7 +711,15 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		srv.explorerWindow = explorerDefaultRecentBlocks
 		srv.explorerRealtime = NewExplorerStream()
 		srv.loadExplorerActivityTotals()
-		srv.startExplorerSnapshotLoop()
+		if srv.explorerLoopOff {
+			slog.Info("rpc: the explorer snapshot loop is disabled by configuration; snapshots are built when asked for")
+		} else {
+			srv.startExplorerSnapshotLoop()
+			// The public lending reads need to know which blocks hold a lending
+			// transaction; find out in the background, gently, so that the first
+			// read after a restart does not have to (see lending_replay_index.go).
+			go srv.lending.WarmReplayIndex(context.Background())
+		}
 	}
 	return srv, nil
 }
@@ -770,10 +869,9 @@ func (v *jwtVerifier) Verify(token string) (*rpcClaims, error) {
 }
 
 // ConfigureStableEngine wires a stable-quote engine into the RPC surface --
-// either the real engine directly (if ever run in-process again) or, since
-// 2026-09-17, an stablequote.HTTPClient calling out to the standalone
-// stable-quote-service (see stablequote package doc comment for why the
-// real engine no longer runs inside this binary). engine must never be a
+// a stablequote.HTTPClient calling out to a standalone quote service, or any
+// other stablequote.Engine (see the stablequote package doc comment).
+// engine must never be a
 // typed nil (e.g. a nil *stablequote.HTTPClient) -- pass a genuinely
 // nil interface value (don't call this at all) if there's no engine to
 // wire up, or the nil checks in swap_stable_handlers.go will see a
@@ -844,7 +942,7 @@ func (s *Server) Serve(listener net.Listener) error {
 	// signer would make the validator itself the on-chain payer/merchant --
 	// moving the validator's own funds, not fixing the gap. There is no
 	// server-side change that makes this service produce a real
-	// authorization; the working pattern (used by the web wallet's own POS
+	// authorization; the working pattern (used by the gateway's own POS
 	// feature today) signs TxTypePOSAuthorize/Capture/Void client-side with
 	// the payer's own wallet key and submits via standard
 	// nhb_sendTransaction, exactly like any other wallet transaction. This
@@ -855,7 +953,7 @@ func (s *Server) Serve(listener net.Listener) error {
 	// future real client-signed-envelope submission path if one is ever
 	// built with an actual signature field on the wire messages.
 
-	baseHandler := grpcHandler(grpcServer, mux)
+	baseHandler := s.grpcHandler(grpcServer, mux)
 	srv := &http.Server{
 		Addr:              listener.Addr().String(),
 		Handler:           baseHandler,
@@ -950,11 +1048,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
-func grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
+// grpcHandler sends the gRPC POS services to grpcServer and everything else to
+// other. The finality stream is public like the WebSocket streams, so it is
+// admitted the same way: the client address must resolve, be on the allowlist
+// and fit under the stream caps, and it holds its slot until the stream ends.
+func (s *Server) grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor == 2 && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
 			// Only intercept registered POS services, forward others to the proxy
 			if strings.HasPrefix(r.URL.Path, "/pos.v1.") {
+				release, ok := s.admitGRPCStream(w, r)
+				if !ok {
+					return
+				}
+				defer release()
 				grpcServer.ServeHTTP(w, r)
 				return
 			}
@@ -1014,7 +1121,9 @@ type RPCRequest struct {
 	JSONRPC string            `json:"jsonrpc"`
 	Method  string            `json:"method"`
 	Params  []json.RawMessage `json:"params"`
-	ID      int               `json:"id"`
+	// ID is the request id as it came (an int, a string or a json.Number), and
+	// is echoed in the response; see RPCRequest.UnmarshalJSON.
+	ID interface{} `json:"id"`
 }
 
 type RPCResponse struct {
@@ -1033,6 +1142,9 @@ type rpcResultEnvelope struct {
 type rpcResponseRecorder struct {
 	http.ResponseWriter
 	status int
+	// throttle names why a 429 was written when it was not the rate limiter (see
+	// writeQueryFailure); empty means the rate limiter.
+	throttle string
 }
 
 func (r *rpcResponseRecorder) WriteHeader(code int) {
@@ -1120,9 +1232,9 @@ func isPublicSwapMethod(method string) bool {
 // MINTER_NHB (core/state_transition.go). Requiring an operator-role JWT on
 // top would not tighten anything -- a forged or stolen voucher signature
 // already fails independently of any JWT -- and would instead break every
-// legitimate caller of the real, currently-deployed off-chain
-// fiat-settlement minting service, which calls mint_with_sig with no
-// bearer credential at all (see docs/escrow/mint-settlement.md).
+// legitimate off-chain caller of mint_with_sig, which presents the
+// voucher signature itself and carries no
+// bearer credential.
 func isSelfAuthenticatedMintMethod(method string) bool {
 	switch strings.TrimSpace(method) {
 	case "mint_with_sig":
@@ -1152,7 +1264,7 @@ func isSelfAuthenticatedMintMethod(method string) bool {
 // unrelated to this branch). This handler layer does no cryptographic
 // verification itself; it only decodes the request and forwards it.
 //
-// A real, currently-deployed off-chain reference-price submission service
+// An off-chain reference-price submitter
 // authenticates to both endpoints today with a credential that does not, and
 // should not, carry the operator role: requiring one would not tighten
 // anything (a forged or below-threshold signature bundle already fails
@@ -1168,6 +1280,110 @@ func isSignatureThresholdAuthorizedMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+// retiredRPCMethods is every operator-only method whose dispatch case does no
+// work for any caller: its handler is a bare codeMethodDisabled reply (HTTP 410
+// Gone), or, for potso_submitEvidence, it has no dispatch case at all and
+// answers 404 (unknown method). See each handler's own doc comment
+// (posSweepRPCDisabledMessage, potsoRewardClaimRPCDisabledMessage,
+// reputationRPCDisabledMessage, syncSnapshotRPCDisabledMessage,
+// sponsorshipToggleRPCDisabledMessage, milestoneRPCDisabledMessage, and the
+// lending, stake, loyalty, creator, identity, claimable, escrow and p2p
+// equivalents) for why each one was retired instead of just gated.
+//
+// Only a name whose handler really does nothing may be listed: the operator
+// gate is skipped for these, so a handler that starts doing work again must be
+// taken off this list in the same change (rpc/retired_methods_gate_test.go
+// fails if one is left on it). creator_payouts, escrow_milestoneGet and
+// sync_status are NOT retired -- they still have a live read path.
+//
+// Names are matched exactly, as the dispatch switch matches them.
+var retiredRPCMethods = map[string]struct{}{
+	// Removed from the dispatch switch altogether.
+	"potso_submitEvidence": {},
+
+	// State-writing RPCs and snapshot methods answered with 410.
+	"pos_sweepVoids":           {},
+	"potso_reward_claim":       {},
+	"reputation_verifySkill":   {},
+	"sync_snapshot_export":     {},
+	"sync_snapshot_import":     {},
+	"tx_setSponsorshipEnabled": {},
+
+	// Milestone escrow writers.
+	"escrow_milestoneCreate":             {},
+	"escrow_milestoneFund":               {},
+	"escrow_milestoneRelease":            {},
+	"escrow_milestoneCancel":             {},
+	"escrow_milestoneSubscriptionUpdate": {},
+
+	// Legacy direct-state writers.
+	"lending_supplyNHB":        {},
+	"lending_withdrawNHB":      {},
+	"lending_depositZNHB":      {},
+	"lending_withdrawZNHB":     {},
+	"lending_borrowNHB":        {},
+	"lending_borrowNHBWithFee": {},
+	"lending_repayNHB":         {},
+	"lending_liquidate":        {},
+	"stake_delegate":           {},
+	"stake_undelegate":         {},
+	"stake_claim":              {},
+	"stake_claimRewards":       {},
+	"loyalty_createBusiness":   {},
+	"loyalty_setPaymaster":     {},
+	"loyalty_addMerchant":      {},
+	"loyalty_removeMerchant":   {},
+	"loyalty_createProgram":    {},
+	"loyalty_updateProgram":    {},
+	"loyalty_pauseProgram":     {},
+	"loyalty_resumeProgram":    {},
+	"creator_publish":          {},
+	"creator_tip":              {},
+	"creator_stake":            {},
+	"creator_unstake":          {},
+	"identity_setAlias":        {},
+	"identity_setAvatar":       {},
+	"identity_addAddress":      {},
+	"identity_removeAddress":   {},
+	"identity_setPrimary":      {},
+	"identity_rename":          {},
+	"identity_createClaimable": {},
+	"identity_claim":           {},
+	"claimable_create":         {},
+	"claimable_claim":          {},
+	"claimable_cancel":         {},
+	"escrow_create":            {},
+	"escrow_fund":              {},
+	"escrow_release":           {},
+	"escrow_refund":            {},
+	"escrow_dispute":           {},
+	"escrow_expire":            {},
+	"escrow_resolve":           {},
+	"p2p_createTrade":          {},
+	"p2p_settle":               {},
+	"p2p_dispute":              {},
+	"p2p_resolve":              {},
+}
+
+// isRetiredMethod reports whether method is in retiredRPCMethods, i.e. its
+// handler does no work for any caller (it answers 410 Gone via
+// codeMethodDisabled, or 404 when it has no dispatch case) rather than doing
+// anything a credential could unlock. All of these are listed in
+// OperatorOnlyMethods or covered by its "sync_" prefix for the reason explained
+// in rpc/operator_methods.go's comments -- this exemption is what keeps the
+// operator gate from intercepting them before they reach their own answer, the
+// same shape as isPublicSwapMethod/isSelfAuthenticatedMintMethod/
+// isSignatureThresholdAuthorizedMethod above, except these need no credential
+// at all rather than a different one.
+//
+// The match is exact (no trimming): the dispatch switch matches req.Method
+// exactly, so a padded or otherwise decorated spelling reaches no handler and
+// must stay behind the gate like any other caller of an operator-only name.
+func isRetiredMethod(method string) bool {
+	_, ok := retiredRPCMethods[method]
+	return ok
 }
 
 type BalanceResponse struct {
@@ -1192,10 +1408,6 @@ type StakeUnbondResponse struct {
 	Validator   string   `json:"validator"`
 	Amount      *big.Int `json:"amount"`
 	ReleaseTime uint64   `json:"releaseTime"`
-}
-
-type posSweepParams struct {
-	Timestamp *int64 `json:"timestamp,omitempty"`
 }
 
 // POSAuthorizationResult is the JSON shape returned by pos_getAuthorization
@@ -1403,16 +1615,20 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	clientIP, err := s.resolveClientIP(r)
+	client, err := s.resolveClient(r)
 	if err != nil {
 		writeError(w, http.StatusForbidden, nil, codeUnauthorized, "invalid client address", err.Error())
 		return
 	}
+	clientIP := client.ip
 	if !s.isClientAllowed(clientIP) {
 		writeError(w, http.StatusForbidden, nil, codeUnauthorized, "client address not allowed", nil)
 		return
 	}
 	ctx := context.WithValue(r.Context(), clientIPContextKey, clientIP)
+	limiterKey := s.limiterKeyFor(r, client)
+	ctx = context.WithValue(ctx, limiterKeyContextKey, limiterKey)
+	ctx = context.WithValue(ctx, limiterSharedContextKey, client.unattributed)
 	r = r.WithContext(ctx)
 
 	body, err := io.ReadAll(reader)
@@ -1446,7 +1662,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	moduleName, methodName := moduleAndMethod(req.Method)
+	moduleName, methodName := metricModuleAndMethod(req.Method)
 	recorder := &rpcResponseRecorder{ResponseWriter: w, status: http.StatusOK}
 	start := time.Now()
 	defer func() {
@@ -1456,7 +1672,11 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		metrics := observability.ModuleMetrics()
 		metrics.Observe(moduleName, methodName, recorder.status, time.Since(start))
 		if recorder.status == http.StatusTooManyRequests {
-			metrics.RecordThrottle(moduleName, "rate_limit")
+			reason := recorder.throttle
+			if reason == "" {
+				reason = "rate_limit"
+			}
+			metrics.RecordThrottle(moduleName, reason)
 		}
 	}()
 
@@ -1466,7 +1686,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			writeError(recorder, http.StatusUnauthorized, req.ID, codeUnauthorized, err.Error(), nil)
 			return
 		}
-		if !s.allowSwapPrincipal(principal.APIKey, s.swapNow()) {
+		if allowed, retryAfter := s.allowSwapPrincipalWithRetryAfter(principal.APIKey, s.swapNow()); !allowed {
+			recorder.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "swap partner rate limit exceeded", nil)
 			return
 		}
@@ -1488,7 +1709,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// requireAuthInto itself (several do, as defense-in-depth; several --
 	// e.g. net_info, sync_status, potso_submitEvidence -- previously had no
 	// auth check at all here). Without this, the deny-list enforced by
-	// the web wallet's browser gateway (its own table) was
+	// the browser-facing gateway was
 	// the ONLY thing stopping a caller with a valid-but-non-operator node
 	// credential -- e.g. a compromised or buggy off-chain daemon -- from
 	// calling any method below directly against this node, bypassing that
@@ -1496,7 +1717,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	//
 	// isPublicSwapMethod's methods are deliberately exempt even though
 	// several of them (swap_submitVoucher, swap_voucher_get/list/export,
-	// nhb_swapMint, nhb_swapBurn) are also in OperatorOnlyMethods: the web wallet
+	// nhb_swapMint, nhb_swapBurn) are also in OperatorOnlyMethods: the gateway
 	// lists them because a random BROWSER session should never reach them,
 	// not because this node treats them as an operator/admin surface. They
 	// already carry their own, longer-standing authorization model --
@@ -1506,17 +1727,17 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// operator-role JWT on top would not tighten anything (the HMAC check
 	// already rejects every caller without a provisioned partner key); it
 	// would only break every legitimate swap partner's traffic, including,
-	// per the recon this change is based on, an off-chain swap-settlement
-	// caller whose credential could not be confirmed from this repo. See
+	// an off-chain caller of the swap endpoints
+	// whose credential cannot be confirmed from this repo. See
 	// rpc/operator_methods.go's package comment for the full rationale.
 	//
 	// mint_with_sig is exempt for the same shape of reason, via the separate
 	// isSelfAuthenticatedMintMethod check (see its doc comment for why it is
 	// not simply folded into isPublicSwapMethod above): it already carries
 	// its own independent on-chain voucher-signature + MINTER_NHB-role check,
-	// and the real, currently-deployed off-chain fiat-settlement minting
-	// service calls it with no bearer credential at all, so gating it here
-	// too would halt production NHB minting rather than add any protection.
+	// and an off-chain submitter calls it with no bearer credential at
+	// all, so gating it here too would break that caller rather than
+	// add any protection.
 	//
 	// buyback_submitRefPrice and lending_submitRefPrice are exempt via the
 	// separate isSignatureThresholdAuthorizedMethod check, for a related but
@@ -1524,13 +1745,22 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// call requireAuthInto themselves, so a credential is still required --
 	// only the additional operator-role requirement is skipped here. Their
 	// real, independent control is an on-chain M-of-N signature-threshold
-	// check against a genesis-declared signer quorum, and the real,
-	// currently-deployed off-chain reference-price submission service
+	// check against a genesis-declared signer quorum, and an
+	// off-chain reference-price submitter
 	// authenticates to them today with a credential that does not carry the
 	// operator role, so adding that requirement here would only force
 	// issuing that narrow-purpose caller a blanket operator credential it
 	// doesn't need, without tightening any real control.
-	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) && !isSignatureThresholdAuthorizedMethod(req.Method) {
+	//
+	// The remaining exemption, isRetiredMethod, is unlike the three above:
+	// those methods still do real work for a caller with the right
+	// credential, while a retired method's handler does nothing for EVERY
+	// caller, credentialed or not (it answers 410 Gone, or 404 for the one
+	// name that has no dispatch case). Exempting it here is what lets that
+	// answer through instead of this gate's own 401/403 masking the method
+	// as merely access-denied rather than retired. See retiredRPCMethods for
+	// the full list and why each one was retired instead of just gated.
+	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) && !isSignatureThresholdAuthorizedMethod(req.Method) && !isRetiredMethod(req.Method) {
 		if authErr := s.requireOperatorInto(&r); authErr != nil {
 			status := http.StatusUnauthorized
 			if authErr.Code == codeOperatorOnly {
@@ -1539,6 +1769,28 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			writeError(recorder, status, req.ID, authErr.Code, authErr.Message, authErr.Data)
 			return
 		}
+	}
+
+	// A read that can run heavy work runs under a deadline, stops when its client
+	// goes away, and takes a slot in the query pool for the heavy part (see
+	// query_gate.go).
+	if isGatedQueryMethod(req.Method) && s.queryGate != nil {
+		shared, _ := r.Context().Value(limiterSharedContextKey).(bool)
+		timeout := s.queryTimeout
+		if timeout <= 0 {
+			timeout = defaultQueryTimeout
+		}
+		ticket := &queryTicket{gate: s.queryGate, client: s.clientSource(r), shared: shared}
+		ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), queryTicketKey{}, ticket), timeout)
+		// The response is held until the slot has been given back (the defers run
+		// in reverse), so a client that reads slowly holds its own connection and
+		// nothing of the pool.
+		held := &bufferedResponse{dst: recorder.ResponseWriter}
+		recorder.ResponseWriter = held
+		defer held.flush()
+		defer cancel()
+		defer ticket.finish()
+		r = r.WithContext(ctx)
 	}
 
 	switch req.Method {
@@ -1553,10 +1805,6 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "tx_getSponsorshipConfig":
 		s.handleTxGetSponsorshipConfig(recorder, r, req)
 	case "tx_setSponsorshipEnabled":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
 		s.handleTxSetSponsorshipEnabled(recorder, r, req)
 	case "nhb_getBalance":
 		s.handleGetBalance(recorder, r, req)
@@ -1597,10 +1845,19 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "swap_submitVoucher":
 		s.handleSwapSubmitVoucher(recorder, r, req)
 	case "swap_voucher_get":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherGet(recorder, r, req)
 	case "swap_voucher_list":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherList(recorder, r, req)
 	case "swap_voucher_export":
+		if !s.requireSwapLedgerAuth(recorder, &r, req) {
+			return
+		}
 		s.handleSwapVoucherExport(recorder, r, req)
 	case "nhb_requestSwapApproval", "nhb_getSwapQuote":
 		if authErr := s.requireAuthInto(&r); authErr != nil {
@@ -1731,10 +1988,6 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		s.handleSwapListPendingRedemptions(recorder, r, req)
 	case "pos_sweepVoids":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
 		s.handlePOSSweepVoids(recorder, r, req)
 	case "pos_getAuthorization":
 		s.handlePOSGetAuthorization(recorder, r, req)
@@ -1965,10 +2218,6 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	case "potso_epoch_payouts":
 		s.handlePotsoEpochPayouts(recorder, r, req)
 	case "potso_reward_claim":
-		if authErr := s.requireAuthInto(&r); authErr != nil {
-			writeError(recorder, http.StatusUnauthorized, req.ID, authErr.Code, authErr.Message, authErr.Data)
-			return
-		}
 		s.handlePotsoRewardClaim(recorder, r, req)
 	case "potso_rewards_history":
 		s.handlePotsoRewardsHistory(recorder, r, req)
@@ -1978,8 +2227,10 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleTxWindowStats(recorder, r, req)
 	case "potso_export_epoch":
 		s.handlePotsoExportEpoch(recorder, r, req)
-	case "potso_submitEvidence":
-		s.handlePotsoSubmitEvidence(recorder, r, req)
+	// potso_submitEvidence was removed -- evidence is reported with a signed
+	// TxTypeSubmitEvidence transaction sent through nhb_sendTransaction like
+	// every other signed native transaction (see
+	// rpc/modules/potso_evidence.go). Only the read-only queries remain.
 	case "potso_getEvidence":
 		s.handlePotsoGetEvidence(recorder, r, req)
 	case "potso_listEvidence":
@@ -2033,7 +2284,7 @@ func (s *Server) handleGetLatestBlocks(w http.ResponseWriter, _ *http.Request, r
 }
 
 // --- NEW HANDLER: Get Latest Transactions ---
-func (s *Server) handleGetLatestTransactions(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetLatestTransactions(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	count := 20
 	if len(req.Params) > 0 {
 		if err := json.Unmarshal(req.Params[0], &count); err != nil {
@@ -2053,6 +2304,23 @@ func (s *Server) handleGetLatestTransactions(w http.ResponseWriter, _ *http.Requ
 	// Iterate backwards from the latest block until we have enough transactions
 	for i := uint64(0); i <= latestHeight && len(txs) < count; i++ {
 		height := latestHeight - i
+		// The summary says whether the block holds any transaction, so an empty
+		// block (nearly all of them) is not read.
+		sum, err := s.summaryAt(r.Context(), s.node.Chain(), height)
+		if err != nil {
+			s.writeQueryFailure(w, req.ID, req.Method, err)
+			return
+		}
+		if !sum.loaded() {
+			break
+		}
+		if sum.txCount == 0 {
+			continue
+		}
+		if err := ticketFrom(r.Context()).chargeBlocks(r.Context(), 1); err != nil {
+			s.writeQueryFailure(w, req.ID, req.Method, err)
+			return
+		}
 		block, err := s.node.Chain().GetBlockByHeight(height)
 		if err != nil {
 			break
@@ -2067,7 +2335,7 @@ func (s *Server) handleGetLatestTransactions(w http.ResponseWriter, _ *http.Requ
 	writeResult(w, req.ID, txs)
 }
 
-func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetTransaction(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if s == nil || s.node == nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
 		return
@@ -2081,8 +2349,11 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, re
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction hash must be a string", err.Error())
 		return
 	}
-	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(hash)
+	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(r.Context(), hash)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		slog.Error("rpc: failed to resolve transaction",
 			slog.String("method", "nhb_getTransaction"),
 			slog.String("hash", hash),
@@ -2106,7 +2377,7 @@ func (s *Server) handleGetTransaction(w http.ResponseWriter, _ *http.Request, re
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if s == nil || s.node == nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "node unavailable", nil)
 		return
@@ -2120,8 +2391,11 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction hash must be a string", err.Error())
 		return
 	}
-	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(hash)
+	tx, canonicalHash, blockHash, blockNumber, err := s.findTransaction(r.Context(), hash)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		slog.Error("rpc: failed to resolve transaction",
 			slog.String("method", "nhb_getTransactionReceipt"),
 			slog.String("hash", hash),
@@ -2133,8 +2407,11 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 		writeResultAllowNil(w, req.ID, nil)
 		return
 	}
-	receipt, err := s.buildReceiptResult(tx, canonicalHash, blockHash, blockNumber)
+	receipt, err := s.buildReceiptResult(r.Context(), tx, canonicalHash, blockHash, blockNumber)
 	if err != nil {
+		if s.writeQueryFailure(w, req.ID, req.Method, err) {
+			return
+		}
 		slog.Error("rpc: failed to encode receipt",
 			slog.String("method", "nhb_getTransactionReceipt"),
 			slog.String("hash", canonicalHash),
@@ -2145,7 +2422,7 @@ func (s *Server) handleGetTransactionReceipt(w http.ResponseWriter, _ *http.Requ
 	writeResult(w, req.ID, receipt)
 }
 
-func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byte, uint64, error) {
+func (s *Server) findTransaction(ctx context.Context, hash string) (*types.Transaction, string, []byte, uint64, error) {
 	if s == nil || s.node == nil {
 		return nil, "", nil, 0, fmt.Errorf("node unavailable")
 	}
@@ -2158,15 +2435,26 @@ func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byt
 		return nil, "", nil, 0, fmt.Errorf("chain unavailable")
 	}
 	hashBytes, hashDecodeErr := hex.DecodeString(normalized)
-	if hashDecodeErr == nil {
-		if height, ok, indexErr := chain.FindTransactionHeight(hashBytes); indexErr == nil && ok {
-			if tx, canonicalHash, blockHash, found := findTransactionInBlock(chain, height, normalized); found {
-				return tx, canonicalHash, blockHash, height, nil
-			}
-			// Index pointed at a height that doesn't actually contain this
-			// hash (shouldn't happen, but the index is a convenience layer,
-			// never a source of truth) -- fall through to the scan below.
+	if hashDecodeErr != nil || len(hashBytes) != sha256.Size {
+		// A transaction hash is 32 bytes and a block's transactions are compared
+		// by their canonical hex form, so text that is not the hex of 32 bytes is
+		// the hash of nothing in the chain. The scan below could only have come
+		// back empty.
+		return nil, "", nil, 0, nil
+	}
+	if height, ok, indexErr := chain.FindTransactionHeight(hashBytes); indexErr == nil && ok {
+		if tx, canonicalHash, blockHash, found := findTransactionInBlock(chain, height, normalized); found {
+			return tx, canonicalHash, blockHash, height, nil
 		}
+		// Index pointed at a height that doesn't actually contain this
+		// hash (shouldn't happen, but the index is a convenience layer,
+		// never a source of truth) -- fall through to the scan below.
+	} else if indexErr == nil && chain.TransactionIndexComplete() {
+		// The index holds every transaction of every block on this node, so a
+		// hash it does not know is in none of them: nothing to scan. (Before this
+		// check every lookup of an unknown hash read the last 50,000 blocks, which
+		// is seconds of CPU on a small host and was open to anyone.)
+		return nil, "", nil, 0, nil
 	}
 	latest := chain.GetHeight()
 	// Scans backward from the chain tip, bounded by
@@ -2187,9 +2475,16 @@ func (s *Server) findTransaction(hash string) (*types.Transaction, string, []byt
 	// hash) beyond the bound now returns "not found" instead of hanging;
 	// a real persistent hash index is the proper fix for that case and is
 	// tracked separately, but "not found" is a strict improvement over an
-	// indefinite hang that ultimately lies about the outcome.
+	// indefinite hang that ultimately lies about the outcome. The scan is
+	// now only reached on a store whose index is incomplete or stale, and it
+	// is charged to the request (query_gate.go), so it stops when the client
+	// goes away, when the deadline passes, or when the pool is full.
+	ticket := ticketFrom(ctx)
 	scanned := 0
 	for height := latest; scanned < explorerHistoricalBackfillLimit; height-- {
+		if err := ticket.chargeBlocks(ctx, 1); err != nil {
+			return nil, "", nil, 0, err
+		}
 		scanned++
 		if tx, canonicalHash, blockHash, found := findTransactionInBlock(chain, height, normalized); found {
 			return tx, canonicalHash, blockHash, height, nil
@@ -2210,10 +2505,6 @@ func findTransactionInBlock(chain *core.Blockchain, height uint64, normalizedHas
 	if err != nil || block == nil || block.Header == nil {
 		return nil, "", nil, false
 	}
-	blockHash, hashErr := block.Header.Hash()
-	if hashErr != nil {
-		return nil, "", nil, false
-	}
 	for _, tx := range block.Transactions {
 		if tx == nil {
 			continue
@@ -2224,6 +2515,13 @@ func findTransactionInBlock(chain *core.Blockchain, height uint64, normalizedHas
 		}
 		canonical := hex.EncodeToString(txHashBytes)
 		if strings.EqualFold(canonical, normalizedHash) {
+			// The block hash is only needed for the block that matched (and is
+			// no answer at all when it cannot be computed), so it is not worked
+			// out for every block the scan passes.
+			blockHash, hashErr := block.Header.Hash()
+			if hashErr != nil {
+				return nil, "", nil, false
+			}
 			return tx, ensureHexPrefix(canonical), blockHash, true
 		}
 	}
@@ -2261,9 +2559,16 @@ func buildTransactionResult(tx *types.Transaction, txHash string, blockHash []by
 	return result, nil
 }
 
-func (s *Server) buildReceiptResult(tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64) (*ReceiptResult, error) {
+func (s *Server) buildReceiptResult(ctx context.Context, tx *types.Transaction, txHash string, blockHash []byte, blockNumber uint64) (*ReceiptResult, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("transaction nil")
+	}
+	// The simulation below holds the node's exclusive state lock while it runs,
+	// so it needs a slot in the query pool; a receipt that cannot get one is
+	// refused rather than answered from the fallback further down, which would
+	// be a different receipt.
+	if err := ticketFrom(ctx).require(ctx); err != nil {
+		return nil, err
 	}
 	receipt := &ReceiptResult{
 		TransactionHash: txHash,
@@ -2518,41 +2823,19 @@ func (s *Server) handleGetEpochSnapshot(w http.ResponseWriter, _ *http.Request, 
 	writeResult(w, req.ID, result)
 }
 
+// posSweepRPCDisabledMessage: pos_sweepVoids ran the expiry sweep on the one
+// validator that handled the call, at a caller-chosen time, through the live
+// state trie and outside block execution. The sweep changes authorization
+// records, so it made that validator's pending state differ from every other
+// validator's (which never saw the call) and left it to fork the next block
+// it proposed. Every block already voids the authorizations that have passed
+// their expiry as part of its own execution (StateProcessor.FinalizeBlock), so
+// nothing legitimate needs the RPC. pos_getAuthorization and
+// pos_getAuthorizationByIntentRef (read-only) are left live.
+const posSweepRPCDisabledMessage = "this method is disabled -- it changed validator-local state outside the block pipeline, so one validator could disagree with the others about the next block; expired authorizations are voided automatically by every block"
+
 func (s *Server) handlePOSSweepVoids(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if s.node == nil {
-		writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "node unavailable", nil)
-		return
-	}
-	if len(req.Params) > 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "at most one parameter object expected", nil)
-		return
-	}
-	var params posSweepParams
-	if len(req.Params) == 1 && len(req.Params[0]) > 0 {
-		if err := json.Unmarshal(req.Params[0], &params); err != nil {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameter object", err.Error())
-			return
-		}
-	}
-	now := time.Now().UTC()
-	if params.Timestamp != nil {
-		if *params.Timestamp < 0 {
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "timestamp must be non-negative", nil)
-			return
-		}
-		now = time.Unix(*params.Timestamp, 0).UTC()
-	}
-	count, err := s.node.SweepExpiredPOSAuthorizations(now)
-	if err != nil {
-		args := []any{slog.Time("timestamp", now), slog.Any("error", err)}
-		if params.Timestamp != nil {
-			args = append(args, slog.Int64("requestedTimestamp", *params.Timestamp))
-		}
-		slog.Error("rpc: sweep expired POS authorizations failed", args...)
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to sweep expired POS authorizations", nil)
-		return
-	}
-	writeResult(w, req.ID, map[string]int{"voided": count})
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, posSweepRPCDisabledMessage, nil)
 }
 
 func (s *Server) requireAuth(r *http.Request) (*http.Request, *RPCError) {
@@ -2709,16 +2992,25 @@ func (s *Server) authenticateSwapRequest(r *http.Request, body []byte) (*gateway
 }
 
 func (s *Server) allowSwapPrincipal(apiKey string, now time.Time) bool {
+	allowed, _ := s.allowSwapPrincipalWithRetryAfter(apiKey, now)
+	return allowed
+}
+
+// allowSwapPrincipalWithRetryAfter is the same fixed-window per-partner swap
+// quota allowSwapPrincipal exposes, extended to also report how long the
+// caller should wait before its window resets. The returned duration is only
+// meaningful when allowed is false.
+func (s *Server) allowSwapPrincipalWithRetryAfter(apiKey string, now time.Time) (bool, time.Duration) {
 	if len(s.swapPartnerLimits) == 0 {
-		return true
+		return true, 0
 	}
 	normalized := strings.TrimSpace(apiKey)
 	if normalized == "" {
-		return true
+		return true, 0
 	}
 	limit, ok := s.swapPartnerLimits[normalized]
 	if !ok || limit <= 0 {
-		return true
+		return true, 0
 	}
 	s.swapRateMu.Lock()
 	defer s.swapRateMu.Unlock()
@@ -2733,11 +3025,11 @@ func (s *Server) allowSwapPrincipal(apiKey string, now time.Time) bool {
 	}
 	if limiter.count >= limit {
 		limiter.lastSeen = now
-		return false
+		return false, limiter.windowStart.Add(s.swapRateWindow).Sub(now)
 	}
 	limiter.count++
 	limiter.lastSeen = now
-	return true
+	return true, 0
 }
 
 func (s *Server) swapNow() time.Time {
@@ -2782,8 +3074,15 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 	trimmedIdentity := strings.ToLower(strings.TrimSpace(identity))
 	trimmedChain := strings.TrimSpace(chainNonce)
 	trimmedMethod := strings.TrimSpace(method)
-	moduleName, _ := moduleAndMethod(trimmedMethod)
-	methodKey := strings.ReplaceAll(trimmedMethod, "|", "_")
+	// A name the server does not serve must not get a limiter entry or a metric
+	// label of its own (see limiterRouteFor).
+	route := s.limiterRouteFor(trimmedMethod)
+	moduleName, _ := moduleAndMethod(route)
+	routeLabel := route
+	if route == unknownLimiterRoute {
+		moduleName, routeLabel = unknownRPCLabel, unknownRPCLabel
+	}
+	methodKey := strings.ReplaceAll(route, "|", "_")
 	if methodKey == "" {
 		methodKey = limiterMethodWildcard
 	}
@@ -2842,7 +3141,7 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 		limiter, ok := s.rateLimiters[descriptor.key]
 		if !ok {
 			if len(s.rateLimiters) >= rateLimiterMaxEntries {
-				s.evictOldestLimiterLocked()
+				s.evictOldestLimiterLocked(now)
 			}
 			limiter = &rateLimiter{lastSeen: now}
 			if limit > 0 {
@@ -2857,7 +3156,7 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 			limiter.lastSeen = now
 			retryAfter := rateLimiterRetryAfter(limiter.limiter, now)
 			s.mu.Unlock()
-			observability.RPC().RecordLimiterHit(descriptor.scope, moduleName, trimmedMethod)
+			observability.RPC().RecordLimiterHit(descriptor.scope, moduleName, routeLabel)
 			return false, retryAfter
 		}
 		reservations[i] = reservation{limiter: limiter, limit: limit}
@@ -2923,8 +3222,14 @@ func (s *Server) evictRateLimitersLocked(now time.Time) {
 	if len(s.rateLimiters) == 0 {
 		return
 	}
-	if s.rateLimiterSweepBackoff > 0 && !s.rateLimiterSweep.IsZero() && now.Sub(s.rateLimiterSweep) < s.rateLimiterSweepBackoff && len(s.rateLimiters) < rateLimiterMaxEntries {
-		return
+	if s.rateLimiterSweepBackoff > 0 && !s.rateLimiterSweep.IsZero() {
+		sinceSweep := now.Sub(s.rateLimiterSweep)
+		// A full table may sweep again early, but at most once per
+		// rateLimiterFullSweepEvery: without that bound every request against a
+		// full table walked all of it.
+		if sinceSweep < s.rateLimiterSweepBackoff && (len(s.rateLimiters) < rateLimiterMaxEntries || sinceSweep < rateLimiterFullSweepEvery) {
+			return
+		}
 	}
 	for key, limiter := range s.rateLimiters {
 		if limiter.lastSeen.IsZero() {
@@ -2937,14 +3242,40 @@ func (s *Server) evictRateLimitersLocked(now time.Time) {
 	s.rateLimiterSweep = now
 }
 
-func (s *Server) evictOldestLimiterLocked() {
+// limiterIsIdle reports whether dropping l loses nothing: it has no bucket (no
+// limit is configured for its scope) or its bucket has refilled to its full
+// burst, which is exactly the state a new bucket starts in.
+func limiterIsIdle(l *rateLimiter, now time.Time) bool {
+	if l == nil || l.limiter == nil {
+		return true
+	}
+	return l.limiter.TokensAt(now) >= float64(l.limiter.Burst())
+}
+
+// evictOldestLimiterLocked makes room in a full limiter table. It drops idle
+// entries first, a batch at a time and least recently seen first, because an
+// idle entry carries no state: a caller whose bucket is still draining or empty
+// keeps it, so churning many distinct sources through the table does not hand a
+// throttled caller a fresh burst unless every entry in the table is in use at
+// the same moment. Only when no entry is idle does it fall back to dropping the
+// single least recently seen one.
+func (s *Server) evictOldestLimiterLocked(now time.Time) {
 	if len(s.rateLimiters) == 0 {
 		return
 	}
+	type idleEntry struct {
+		key      string
+		lastSeen time.Time
+	}
+	var idle []idleEntry
 	var oldestKey string
 	var oldestTime time.Time
 	hasOldest := false
 	for key, limiter := range s.rateLimiters {
+		if limiterIsIdle(limiter, now) {
+			idle = append(idle, idleEntry{key: key, lastSeen: limiter.lastSeen})
+			continue
+		}
 		switch {
 		case !hasOldest:
 			oldestKey = key
@@ -2957,6 +3288,17 @@ func (s *Server) evictOldestLimiterLocked() {
 			oldestKey = key
 			oldestTime = limiter.lastSeen
 		}
+	}
+	if len(idle) > 0 {
+		sort.Slice(idle, func(i, j int) bool { return idle[i].lastSeen.Before(idle[j].lastSeen) })
+		count := len(idle)
+		if count > rateLimiterEvictBatch {
+			count = rateLimiterEvictBatch
+		}
+		for _, entry := range idle[:count] {
+			delete(s.rateLimiters, entry.key)
+		}
+		return
 	}
 	if hasOldest {
 		delete(s.rateLimiters, oldestKey)
@@ -3008,7 +3350,7 @@ func (s *Server) transactionKnownForSender(hash string, sender []byte) bool {
 	if tx, ok := s.node.FindPendingTransactionByHash(hash); ok {
 		return transactionSenderMatches(tx, sender)
 	}
-	tx, _, _, _, err := s.findTransaction(hash)
+	tx, _, _, _, err := s.findTransaction(context.Background(), hash)
 	if err == nil && tx != nil {
 		return transactionSenderMatches(tx, sender)
 	}
@@ -3055,61 +3397,157 @@ func (s *Server) evictExpiredTxLocked(now time.Time) {
 	}
 }
 
+// resolvedClient is who a request is attributed to.
+type resolvedClient struct {
+	// ip is the address that rate limits and the allowlist apply to: the
+	// connecting peer, or the client a listed proxy relayed.
+	ip string
+	// unattributed is set when the request came from a listed proxy address and
+	// carried no client address. That is what a local service calling the node
+	// directly looks like, and also what a proxied request looks like when the
+	// proxy forwards no address, so on its own it says nothing about who the
+	// caller is (see limiterKeyFor).
+	unattributed bool
+}
+
 func (s *Server) resolveClientIP(r *http.Request) (string, error) {
+	client, err := s.resolveClient(r)
+	return client.ip, err
+}
+
+func (s *Server) resolveClient(r *http.Request) (resolvedClient, error) {
 	host := r.RemoteAddr
 	if splitHost, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		host = splitHost
 	}
 	host = canonicalHost(host)
 	if host == "" {
-		return "", errors.New("unable to determine remote address")
+		return resolvedClient{}, errors.New("unable to determine remote address")
 	}
 
-	trusted := s.trustProxyHeaders || s.isTrustedProxy(host)
+	// Only a listed proxy may relay a client address; TrustProxyHeaders alone
+	// (which used to trust every caller) never does.
+	trusted := s.isTrustedProxy(host)
 	forwardedValues := r.Header.Values("X-Forwarded-For")
 	if len(forwardedValues) > 0 {
 		if s.proxyPolicy.xForwardedFor == ProxyHeaderModeIgnore {
-			return "", errors.New("X-Forwarded-For header is not permitted")
+			return resolvedClient{}, errors.New("X-Forwarded-For header is not permitted")
 		}
 		if !trusted {
-			return "", fmt.Errorf("X-Forwarded-For header received from untrusted peer %s", host)
+			return resolvedClient{}, fmt.Errorf("X-Forwarded-For header received from untrusted peer %s", host)
 		}
 		parts := parseForwardedFor(forwardedValues)
 		if len(parts) == 0 {
-			return "", errors.New("X-Forwarded-For header did not contain any addresses")
+			return resolvedClient{}, errors.New("X-Forwarded-For header did not contain any addresses")
 		}
 		if s.proxyPolicy.xForwardedFor == ProxyHeaderModeSingle && len(parts) != 1 {
-			return "", errors.New("X-Forwarded-For must contain exactly one address")
+			return resolvedClient{}, errors.New("X-Forwarded-For must contain exactly one address")
 		}
 		if len(parts) > maxForwardedForAddrs {
-			return "", fmt.Errorf("X-Forwarded-For contains more than %d addresses", maxForwardedForAddrs)
+			return resolvedClient{}, fmt.Errorf("X-Forwarded-For contains more than %d addresses", maxForwardedForAddrs)
 		}
-		candidate := canonicalHost(parts[0])
+		candidate := parseClientAddr(parts[0])
 		if candidate == "" {
-			return "", errors.New("X-Forwarded-For contained an invalid address")
+			return resolvedClient{}, errors.New("X-Forwarded-For contained an invalid address")
 		}
-		return candidate, nil
+		return resolvedClient{ip: candidate}, nil
 	}
 
 	realIP := strings.TrimSpace(r.Header.Get("X-Real-IP"))
 	if realIP != "" {
 		if s.proxyPolicy.xRealIP == ProxyHeaderModeIgnore {
-			return "", errors.New("X-Real-IP header is not permitted")
+			return resolvedClient{}, errors.New("X-Real-IP header is not permitted")
 		}
 		if !trusted {
-			return "", fmt.Errorf("X-Real-IP header received from untrusted peer %s", host)
+			return resolvedClient{}, fmt.Errorf("X-Real-IP header received from untrusted peer %s", host)
 		}
 		if strings.Contains(realIP, ",") {
-			return "", errors.New("X-Real-IP header must not contain multiple addresses")
+			return resolvedClient{}, errors.New("X-Real-IP header must not contain multiple addresses")
 		}
-		candidate := canonicalHost(realIP)
+		candidate := parseClientAddr(realIP)
 		if candidate == "" {
-			return "", errors.New("X-Real-IP contained an invalid address")
+			return resolvedClient{}, errors.New("X-Real-IP contained an invalid address")
 		}
-		return candidate, nil
+		return resolvedClient{ip: candidate}, nil
 	}
 
-	return host, nil
+	return resolvedClient{ip: host, unattributed: trusted}, nil
+}
+
+// parseClientAddr returns the canonical form of an IP address that a proxy
+// relayed as the client, with or without a port, and "" for anything that is
+// not one. The address becomes the key that rate limits and the allowlist are
+// applied to, so text that is merely accepted as one (a name, garbage) would
+// give a client a fresh key of its own for every request it chose to send.
+func parseClientAddr(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		trimmed = host
+	}
+	trimmed = strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]")
+	ip := net.ParseIP(trimmed)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+// limiterAddressKey is the key a client address is limited under. An IPv4
+// address is its own key. Whoever holds an IPv6 network holds at least a /64 of
+// addresses and can send from a different one each time, so an IPv6 address
+// stands for its /64.
+func limiterAddressKey(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() != nil {
+		return ip
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// limiterKeyFor decides what a request is rate limited and admitted to the
+// query pool as. A public caller is its address. A request that came from a
+// listed proxy address with no client address is either a local service calling
+// the node directly or an anonymous request relayed by a proxy that forwards no
+// address, and the two cannot be told apart by address: left alone they share
+// the proxy's own address, so anonymous traffic can spend a local service's
+// quota. A local service that presents a valid bearer token is told apart by
+// it and limited under a key of its own (its token's subject), which anonymous
+// traffic cannot reach; everything else keeps the shared address key.
+func (s *Server) limiterKeyFor(r *http.Request, client resolvedClient) string {
+	if client.unattributed {
+		if identity := s.serviceIdentity(r); identity != "" {
+			return limiterServicePrefix + identity
+		}
+	}
+	return limiterAddressKey(client.ip)
+}
+
+// serviceIdentity returns the subject of the valid bearer token on the request,
+// or "" when there is none or it does not verify.
+func (s *Server) serviceIdentity(r *http.Request) string {
+	if s.jwtVerifier == nil || s.jwtVerifierErr != nil {
+		return ""
+	}
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return ""
+	}
+	token, err := extractBearerToken(header)
+	if err != nil {
+		return ""
+	}
+	claims, err := s.jwtVerifier.Verify(token)
+	if err != nil || claims == nil {
+		return ""
+	}
+	identity := strings.ToLower(strings.TrimSpace(claims.Subject))
+	if len(identity) > 128 {
+		identity = identity[:128]
+	}
+	return identity
 }
 
 func parseForwardedFor(values []string) []string {
@@ -3130,14 +3568,17 @@ func parseForwardedFor(values []string) []string {
 }
 
 func (s *Server) clientSource(r *http.Request) string {
-	if value, ok := r.Context().Value(clientIPContextKey).(string); ok && value != "" {
+	if value, ok := r.Context().Value(limiterKeyContextKey).(string); ok && value != "" {
 		return value
+	}
+	if value, ok := r.Context().Value(clientIPContextKey).(string); ok && value != "" {
+		return limiterAddressKey(value)
 	}
 	source, err := s.resolveClientIP(r)
 	if err != nil {
 		return ""
 	}
-	return source
+	return limiterAddressKey(source)
 }
 
 func (s *Server) isClientAllowed(ip string) bool {
@@ -3398,7 +3839,8 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	if chainKey != "" {
 		nonceKey = chainKey + ":" + nonceKey
 	}
-	if !s.allowSource(source, identity, nonceKey, req.Method, now) {
+	if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, nonceKey, req.Method, now); !allowed {
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "transaction rate limit exceeded", source)
 		return
 	}
@@ -3528,21 +3970,22 @@ func (s *Server) handleTxPreviewSponsorship(w http.ResponseWriter, _ *http.Reque
 	writeResult(w, req.ID, result)
 }
 
+// sponsorshipToggleRPCDisabledMessage: tx_setSponsorshipEnabled took a
+// "caller" address from the request body on trust -- nothing proved the
+// requester held that key, so anyone able to reach the method who knew a
+// ROLE_PAYMASTER_ADMIN holder's address (public chain state) could use it --
+// and flipped an in-memory flag on the one validator that handled the call.
+// That flag decides whether a sponsored transaction is valid at all (a
+// disabled module makes every sponsored transfer fail), so flipping it on one
+// validator changes which blocks that validator accepts, and it reset on
+// restart. Disabled, like the other RPC mutators that acted on an unsigned
+// caller (see escrowRPCDisabledMessage and stakeRPCDisabledMessage).
+// Sponsorship stays enabled on every node; tx_getSponsorshipConfig (read-only)
+// and tx_previewSponsorship are left live.
+const sponsorshipToggleRPCDisabledMessage = "this method is disabled -- it trusted an unsigned caller address and flipped a validator-local flag that decides whether sponsored transactions are valid, so validators could disagree on which blocks are acceptable; sponsorship stays enabled on every node"
+
 func (s *Server) handleTxSetSponsorshipEnabled(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
-		return
-	}
-	if s.transactions == nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "transactions module unavailable", nil)
-		return
-	}
-	result, modErr := s.transactions.SetSponsorshipEnabled(req.Params[0])
-	if modErr != nil {
-		writeModuleError(w, req.ID, modErr)
-		return
-	}
-	writeResult(w, req.ID, result)
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, sponsorshipToggleRPCDisabledMessage, nil)
 }
 
 func (s *Server) handleTxGetSponsorshipConfig(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

@@ -7,23 +7,6 @@ import (
 	"nhbchain/rpc/modules"
 )
 
-func (s *Server) handlePotsoSubmitEvidence(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)
-		return
-	}
-	if s.potsoEvidence == nil {
-		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "evidence module unavailable", nil)
-		return
-	}
-	result, modErr := s.potsoEvidence.Submit(req.Params[0])
-	if modErr != nil {
-		writeModuleError(w, req.ID, modErr)
-		return
-	}
-	writeResult(w, req.ID, result)
-}
-
 func (s *Server) handlePotsoGetEvidence(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "parameter object required", nil)

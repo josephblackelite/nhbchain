@@ -26,6 +26,7 @@ import (
 	"nhbchain/native/lending"
 	"nhbchain/native/subscriptions"
 	swap "nhbchain/native/swap"
+	"nhbchain/observability"
 	"nhbchain/observability/logging"
 	"nhbchain/p2p"
 	"nhbchain/p2p/seeds"
@@ -57,43 +58,6 @@ func convertModuleQuota(q config.Quota) nativecommon.Quota {
 	}
 }
 
-// lendingRiskParametersFromConfig converts the [lending] config/genesis
-// section into the lending.RiskParameters the lending engine actually reads
-// on every Supply/Borrow/Repay/Liquidate call (native/lending/engine.go).
-// Previously only MaxLTV/LiquidationThreshold/DeveloperFeeCapBps/Oracle were
-// wired here -- BorrowCaps, Pauses, CircuitBreakerActive, and
-// LiquidationBonus were silently dropped, so a configured borrow cap,
-// per-action pause, circuit breaker, or liquidation bonus never reached the
-// engine: it always saw the RiskParameters zero value for those four fields,
-// even though the engine already reads and enforces them (see e.g.
-// Engine.Borrow's BorrowCaps/CircuitBreakerActive checks and Engine.Liquidate's
-// LiquidationBonus-scaled seize amount). Extracted into its own function
-// (rather than inlined at the SetLendingRiskParameters call site) so a test
-// can prove every configured field survives this conversion and actually
-// changes engine behaviour, without needing to drive the whole node startup
-// path -- see lending_risk_params_test.go.
-//
-// This does NOT wire the module-wide lending pause (config/global.go's
-// Pauses.Lending, applied via node.SetPauses/engine.SetPauses) -- that is a
-// separate, already-correctly-wired mechanism that halts every lending flow
-// at once; cfg.Lending.Pauses here only gates individual flows
-// (RiskParameters.Pauses.Supply/Borrow/Repay/Liquidate).
-func lendingRiskParametersFromConfig(cfg lending.Config) lending.RiskParameters {
-	return lending.RiskParameters{
-		MaxLTV:               cfg.MaxLTVBps,
-		LiquidationThreshold: cfg.LiquidationThresholdBps,
-		LiquidationBonus:     cfg.LiquidationBonusBps,
-		CircuitBreakerActive: cfg.CircuitBreakerActive,
-		DeveloperFeeCapBps:   cfg.DeveloperFeeBps,
-		BorrowCaps:           cfg.BorrowCaps.Clone(),
-		Oracle: lending.OracleConfig{
-			MaxAgeBlocks:    cfg.OracleMaxAgeBlocks,
-			MaxDeviationBps: cfg.OracleMaxDeviationBps,
-		},
-		Pauses: cfg.Pauses,
-	}
-}
-
 func main() {
 	configFile := flag.String("config", "./config.toml", "Path to the configuration file")
 	genesisFlag := flag.String("genesis", "", "Path to a genesis block JSON file (overrides NHB_GENESIS and config GenesisFile)")
@@ -112,6 +76,8 @@ func main() {
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load config: %v", err))
 	}
+	// Every problem in the effective configuration is logged as a WARN; none stops the node.
+	checkConfiguration(logger, cfg)
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
 	if err != nil {
@@ -194,7 +160,48 @@ func main() {
 		// it is a deliberate, coordinated, every-validator-at-once decision
 		// made in config.toml, never inferred.
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	} else {
+		logger.Warn("QuorumCertActivationHeight is not set: this node does not check quorum certificates on blocks it receives through peer sync, so a peer could make it accept a block the validators never agreed on; set it to the value the network you follow uses (docs/validators/onboarding.md)")
 	}
+	if cfg.RewardsByStakeFromEpoch > 0 {
+		// See config.Config.RewardsByStakeFromEpoch's doc comment -- left unset (0) the epoch rewards are split exactly as in every prior release.
+		// A consensus value: identical on every validator, in force before the epoch it names.
+		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)
+	}
+	if cfg.POSSweepSkipActivationHeight > 0 {
+		// See config.Config.POSSweepSkipActivationHeight's doc comment --
+		// left unset (0) here means the POS expiry sweep behaves exactly like
+		// every prior release. This changes the state a block leaves behind,
+		// so it is a deliberate, coordinated, every-validator-at-once
+		// decision made in config.toml, never inferred.
+		node.SetPOSSweepSkipActivationHeight(cfg.POSSweepSkipActivationHeight)
+		logger.Info("POS expiry sweep skips holds the payer cannot cover from block height",
+			slog.Uint64("height", cfg.POSSweepSkipActivationHeight))
+	}
+	// Zero (the default) leaves the POS hold unstake guard off; see
+	// config.Config.POSHoldUnstakeGuardActivationHeight. A chain rule, so
+	// the value is set identically on every validator in config.toml.
+	node.SetPOSHoldUnstakeGuardActivationHeight(cfg.POSHoldUnstakeGuardActivationHeight)
+	if cfg.GovCreditPreservationActivationHeight > 0 {
+		// See config.Config.GovCreditPreservationActivationHeight's doc
+		// comment -- left unset (0) here means PL-R1-GOVREFUND's fix stays
+		// disabled, exactly like every prior release. Enabling it is a
+		// deliberate, coordinated, every-validator-at-once decision made in
+		// config.toml, never inferred.
+		node.SetGovCreditPreservationActivationHeight(cfg.GovCreditPreservationActivationHeight)
+	}
+	if cfg.FeeRouteAliasActivationHeight > 0 {
+		// See config.Config.FeeRouteAliasActivationHeight's doc comment -- left
+		// unset (0) here means the NHB half of PL-R1-FEEROUTE's fix stays off,
+		// exactly like every prior release. Enabling it is a deliberate,
+		// coordinated, every-validator-at-once decision made in config.toml,
+		// never inferred.
+		node.SetFeeRouteAliasActivationHeight(cfg.FeeRouteAliasActivationHeight)
+	}
+	// Zero (the default) keeps the transaction hash as the fixed-term loan and
+	// deposit ID; see config.Config.LendingFixedTermIDActivationHeight. A chain
+	// rule, so the value is set identically on every validator in config.toml.
+	node.SetLendingFixedTermIDActivationHeight(cfg.LendingFixedTermIDActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {
@@ -285,7 +292,15 @@ func main() {
 		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
 	}
 
-	node.SetLendingRiskParameters(lendingRiskParametersFromConfig(cfg.Lending))
+	node.SetLendingRiskParameters(lending.RiskParameters{
+		MaxLTV:               cfg.Lending.MaxLTVBps,
+		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
+		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
+		Oracle: lending.OracleConfig{
+			MaxAgeBlocks:    cfg.Lending.OracleMaxAgeBlocks,
+			MaxDeviationBps: cfg.Lending.OracleMaxDeviationBps,
+		},
+	})
 
 	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)
 
@@ -505,11 +520,31 @@ func main() {
 		Prevote:   cfg.Consensus.PrevoteTimeout,
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
-	}), bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")))
+	}), bft.WithMinBlockInterval(cfg.Consensus.MinBlockInterval),
+		bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
+		// What this validator has voted, so a restart cannot make it sign a
+		// different vote for a round it already voted in (a double-sign that
+		// anyone can turn into a slashing report).
+		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")))
+
+	// The pace of block production: the wait between seeing a block commit and starting
+	// the next round (config [consensus] MinBlockInterval), which every quantity counted
+	// in blocks follows.
+	logger.Info("consensus: minimum block interval", slog.Duration("interval", bftEngine.MinBlockInterval()))
 
 	// 4. Set the fully configured BFT engine on the node.
 	node.SetBftEngine(bftEngine)
 	node.SetExternalCommitNotifier(bftEngine.NotifyExternalCommit)
+	// Bound one block build to half the proposal timeout: the proposer's own
+	// validation, the broadcast and the peer's validation all follow it, and
+	// the peer's round timers are already running while this node builds.
+	node.SetProposalBuildBudget(cfg.Consensus.ProposalTimeout / 2)
+	// Keep the blocks this node proposes small enough for one p2p frame, whatever
+	// frame limit is configured.
+	node.SetProposalFrameLimit(cfg.MaxMsgBytes)
+	// Optional Prometheus listener (NHB_METRICS_ADDR); a failure to start it is
+	// logged and never stops the validator.
+	observability.StartMetricsServerFromEnv(logger)
 
 	// --- Server Startup ---
 	networkAdapter := &p2pNetworkAdapter{server: p2pServer}
@@ -583,6 +618,7 @@ func main() {
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
 		AllowlistCIDRs:    append([]string{}, cfg.RPCAllowlistCIDRs...),
+		WebSocketOrigins:  append([]string{}, cfg.RPCWebSocketOrigins...),
 		ProxyHeaders: rpc.ProxyHeadersConfig{
 			XForwardedFor: rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XForwardedFor)),
 			XRealIP:       rpc.ProxyHeaderMode(strings.TrimSpace(cfg.RPCProxyHeaders.XRealIP)),
@@ -611,9 +647,16 @@ func main() {
 		TLSCertFile:              cfg.RPCTLSCertFile,
 		TLSKeyFile:               cfg.RPCTLSKeyFile,
 		TLSClientCAFile:          cfg.RPCTLSClientCAFile,
-		OperatorClientCertOU:     cfg.RPCOperatorClientCertOU,
 		AllowInsecure:            cfg.RPCAllowInsecure,
 		AllowInsecureUnspecified: cfg.RPCAllowInsecureUnspecified,
+		WebSocketMaxConnections:  cfg.RPCWebSocketMaxConnections,
+		WebSocketMaxPerIP:        cfg.RPCWebSocketMaxPerIP,
+		QueryMaxConcurrent:       cfg.RPCQueryMaxConcurrent,
+		QueryMaxPerClient:        cfg.RPCQueryMaxPerClient,
+		QueryQueueDepth:          cfg.RPCQueryQueueDepth,
+		QueryQueueWait:           time.Duration(cfg.RPCQueryQueueWaitMS) * time.Millisecond,
+		QueryTimeout:             time.Duration(cfg.RPCQueryTimeoutSeconds) * time.Second,
+		DisableExplorerLoop:      cfg.RPCDisableExplorerLoop,
 		SwapAuth:                 swapAuthCfg,
 	})
 	if err != nil {
@@ -726,15 +769,11 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 
 // configureStableTradingEngine wires the RPC server's stable-quote surface
 // (rpc/swap_stable_handlers.go) to whatever implements stablequote.Engine
-// -- since 2026-09-17 that's an HTTP client talking to a separate
-// stable-quote-service process (see nhbchain-services' cmd/stable-quote-
-// service), not an in-process engine. The engine's actual reservation/
-// ledger/cash-out logic, and the price-refresh loop that used to run
-// right here, moved there along with the rest of this repo's off-chain
-// money-orchestration code -- see nhbchain/stablequote's package doc for
-// the full boundary this exists to enforce. This function now only
-// builds the wire-shape asset list and points the client at that
-// service; nothing here touches money-movement logic directly anymore.
+// -- an HTTP client talking to a separate quote service, not an
+// in-process engine (see nhbchain/stablequote's package doc for the
+// boundary). This function only builds the wire-shape asset list and
+// points the client at that service; nothing here touches
+// money-movement logic.
 func configureStableTradingEngine(rpcServer *rpc.Server, logger *slog.Logger) error {
 	if rpcServer == nil {
 		return nil
@@ -766,7 +805,7 @@ func configureStableTradingEngine(rpcServer *rpc.Server, logger *slog.Logger) er
 	client := stablequote.NewHTTPClient(baseURL, 10*time.Second)
 	rpcServer.ConfigureStableEngine(client, limits, assets, time.Now)
 	if logger != nil {
-		logger.Info("stable trading engine configured via stable-quote-service", slog.String("url", baseURL))
+		logger.Info("stable trading engine configured", slog.String("url", baseURL))
 	}
 	return nil
 }

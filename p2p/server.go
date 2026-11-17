@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -46,6 +47,46 @@ const (
 	invalidRateSampleSize    = 5
 )
 
+// Limits that keep remote peers from making this node hold or do without
+// bound. They are node-local resource policies, not protocol rules. Inbound
+// connections from loopback, from a host that is not an IP address and from the
+// address of a configured persistent peer or bootnode are exempt from the
+// per-address ones. A per-address limit counts an IPv4 address on its own and an
+// IPv6 address as the /64 network it belongs to (see addrGroup). Slots are also
+// kept back for the configured peers (see registerPeer).
+const (
+	// An address may open handshakeAttemptBurst inbound connections back to back
+	// and then one every 1/handshakeAttemptRate seconds; it may have
+	// defaultMaxPendingPerIP handshakes in flight and defaultMaxInboundPerIP
+	// established inbound connections; defaultMaxPendingHandshakes bounds the
+	// handshakes in flight across all addresses.
+	handshakeAttemptRate        = 1.0 / 6
+	handshakeAttemptBurst       = 10
+	defaultMaxPendingPerIP      = 4
+	defaultMaxInboundPerIP      = 8
+	defaultMaxPendingHandshakes = 64
+
+	// Requests that make this node read and send chain data get their own budget
+	// per remote address and one shared by all remote addresses.
+	getBlocksRatePerIP    = 4.0
+	getBlocksBurstPerIP   = 16.0
+	getBlocksRateShared   = 32.0
+	getBlocksBurstShared  = 64.0
+	getStatusRatePerIP    = 2.0
+	getStatusBurstPerIP   = 8.0
+	getStatusRateShared   = 64.0
+	getStatusBurstShared  = 128.0
+	requestLimiterEntries = 8192
+
+	// maxPeerRecords bounds the table of peers seen, and metricsSweepSize is the
+	// table size from which per-peer message statistics with an expired window
+	// are swept.
+	maxPeerRecords   = 4096
+	metricsSweepSize = 256
+
+	inboundLogInterval = time.Second
+)
+
 var (
 	ErrPeerUnknown     = errors.New("p2p: unknown peer")
 	ErrPeerBanned      = errors.New("p2p: peer is banned")
@@ -54,6 +95,11 @@ var (
 )
 
 var errQueueFull = errors.New("peer outbound queue full")
+
+// ErrMessageTooLarge is returned, wrapped, by Peer.Enqueue and Server.Broadcast
+// for a message whose frame is larger than MaxMessageBytes. Nothing is sent: a
+// frame that size is refused by the receiver as a protocol violation.
+var ErrMessageTooLarge = errors.New("p2p: message larger than the frame limit")
 
 // ServerConfig encapsulates runtime settings for the p2p server.
 type ServerConfig struct {
@@ -200,6 +246,30 @@ type Server struct {
 	nonceGuard       *nonceGuard
 
 	peerstore *Peerstore
+
+	// Inbound admission: connections that have not finished the handshake, per
+	// remote host and in total, and how often a host may open connections.
+	inboundMu            sync.Mutex
+	pendingHandshakes    int
+	pendingByIP          map[string]int
+	handshakeLimiter     *ipRateLimiter
+	maxPendingPerIP      int
+	maxInboundPerIP      int
+	maxPendingHandshakes int
+	trustedHosts         map[string]struct{}
+
+	// persistentReserve is the number of connection slots kept back for the
+	// configured bootnodes and persistent peers; see registerPeer.
+	persistentReserve int
+
+	// Budgets for the requests that make this node read and send chain data.
+	getBlocksLimiter *ipRateLimiter
+	getBlocksShared  *tokenBucket
+	getStatusLimiter *ipRateLimiter
+	getStatusShared  *tokenBucket
+
+	logMu   sync.Mutex
+	lastLog map[string]time.Time
 
 	dialMu      sync.Mutex
 	pendingDial map[string]struct{}
@@ -474,7 +544,13 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	if cfg.ListenAddress == "" {
 		cfg.ListenAddress = ":0"
 	}
-	if cfg.ClientVersion == "" {
+	// The version goes into every handshake this node sends, and peers refuse a
+	// handshake whose version is empty, too long or not printable. A value of
+	// this node's own that peers would refuse is replaced by the default, so
+	// that it does not cut the node off from all of them.
+	rejectedVersionLen := 0
+	if !validClientVersion(cfg.ClientVersion) {
+		rejectedVersionLen = len(cfg.ClientVersion)
 		cfg.ClientVersion = "nhbchain/node"
 	}
 	if cfg.MaxPeers <= 0 {
@@ -549,6 +625,12 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 	})
 
 	baseLogger := slog.Default().With(slog.String("component", "p2p_server"))
+	if rejectedVersionLen > 0 {
+		baseLogger.Warn("Configured client version cannot be sent in a handshake; using the default",
+			slog.Int("configured_length", rejectedVersionLen),
+			slog.Int("max_length", maxClientVersionLen),
+			slog.String("client_version", cfg.ClientVersion))
+	}
 
 	server := &Server{
 		cfg:               cfg,
@@ -613,7 +695,25 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		burst = cfg.RateMsgsPerSec
 	}
 	server.globalLimit = newTokenBucket(cfg.RateMsgsPerSec*float64(cfg.MaxPeers), burst)
-	server.ipLimiter = newIPRateLimiter(cfg.RateMsgsPerSec, cfg.RateBurst)
+	server.ipLimiter = newIPRateLimiter(cfg.RateMsgsPerSec, cfg.RateBurst, WithIPRateLimiterMaxEntries(requestLimiterEntries))
+
+	server.pendingByIP = make(map[string]int)
+	server.handshakeLimiter = newIPRateLimiter(handshakeAttemptRate, handshakeAttemptBurst, WithIPRateLimiterMaxEntries(requestLimiterEntries))
+	server.maxPendingPerIP = defaultMaxPendingPerIP
+	server.maxInboundPerIP = defaultMaxInboundPerIP
+	server.maxPendingHandshakes = defaultMaxPendingHandshakes
+	server.trustedHosts = make(map[string]struct{})
+	for _, addr := range append(append([]string{}, uniqBoot...), uniqPersist...) {
+		if host := remoteHost(strings.TrimSpace(addr)); net.ParseIP(host) != nil {
+			server.trustedHosts[net.ParseIP(host).String()] = struct{}{}
+		}
+	}
+	server.persistentReserve = persistentReserveFor(cfg, len(server.persistent))
+	server.getBlocksLimiter = newIPRateLimiter(getBlocksRatePerIP, getBlocksBurstPerIP, WithIPRateLimiterMaxEntries(requestLimiterEntries))
+	server.getBlocksShared = newTokenBucket(getBlocksRateShared, getBlocksBurstShared)
+	server.getStatusLimiter = newIPRateLimiter(getStatusRatePerIP, getStatusBurstPerIP, WithIPRateLimiterMaxEntries(requestLimiterEntries))
+	server.getStatusShared = newTokenBucket(getStatusRateShared, getStatusBurstShared)
+	server.lastLog = make(map[string]time.Time)
 
 	if cfg.EnablePEX {
 		server.pex = newPexManager(server)
@@ -671,20 +771,31 @@ func (s *Server) Start() error {
 		slog.Uint64("chain_id", s.cfg.ChainID),
 		slog.String("genesis", summarizeHash(s.genesis)),
 		logging.MaskField("node_id", s.nodeID),
-		slog.String("client_version", s.cfg.ClientVersion))
+		slog.String("client_version", s.cfg.ClientVersion),
+		slog.Int("reserved_peer_slots", s.persistentReserve))
 	s.addListenAddress(ln.Addr().String())
 
 	s.startConnManager()
 	go s.startDialers()
 
+	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				// Wait instead of spinning while accept keeps failing, for
+				// instance when the process is out of file descriptors.
+				if backoff == 0 {
+					backoff = 5 * time.Millisecond
+				} else if backoff *= 2; backoff > time.Second {
+					backoff = time.Second
+				}
+				time.Sleep(backoff)
 				continue
 			}
 			return err
 		}
+		backoff = 0
 		go s.handleInbound(conn)
 	}
 }
@@ -729,12 +840,193 @@ func (s *Server) Stop() error {
 }
 
 func (s *Server) handleInbound(conn net.Conn) {
-	if err := s.initPeer(conn, true, false, ""); err != nil {
-		s.log().Warn("Inbound connection rejected",
-			logging.MaskField("peer_address", conn.RemoteAddr().String()),
-			slog.Any("error", err))
+	release, ok := s.admitInbound(conn)
+	if !ok {
+		conn.Close()
+		if s.allowLog("inbound_refused", inboundLogInterval) {
+			s.log().Warn("Inbound connection refused: too many connections or handshakes",
+				logging.MaskField("peer_address", conn.RemoteAddr().String()))
+		}
+		return
+	}
+	err := s.initPeer(conn, true, false, "")
+	release()
+	if err != nil {
+		if s.allowLog("inbound_rejected", inboundLogInterval) {
+			s.log().Warn("Inbound connection rejected",
+				logging.MaskField("peer_address", conn.RemoteAddr().String()),
+				slog.Any("error", err))
+		}
 		conn.Close()
 	}
+}
+
+// remoteHost returns the host part of a network address. A value that is not
+// host:port is returned unchanged.
+func remoteHost(addr string) string {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return addr
+}
+
+// addrGroup is the key the per-address limits count by: an IPv4 address on its
+// own (an IPv4-mapped IPv6 address as the IPv4 address it stands for) and an
+// IPv6 address as its /64 network, because a single host or subscriber is
+// normally given a whole /64 and so has as many addresses to connect from as it
+// likes. A host that is not an IP address is its own group.
+func addrGroup(host string) string {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return host
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String()
+}
+
+// isTrustedHost reports whether host is, exactly, the IP address of a configured
+// persistent peer or bootnode.
+func (s *Server) isTrustedHost(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	_, trusted := s.trustedHosts[ip.String()]
+	return trusted
+}
+
+// exemptFromAddressLimits reports whether connections from this host are not
+// subject to the per-address inbound limits: loopback, hosts that are not IP
+// addresses, and the addresses of configured persistent peers and bootnodes.
+func (s *Server) exemptFromAddressLimits(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() {
+		return true
+	}
+	_, trusted := s.trustedHosts[ip.String()]
+	return trusted
+}
+
+// allowLog reports whether a log line of the given kind may be written now, so
+// that a flood of refused connections cannot flood the log as well.
+func (s *Server) allowLog(kind string, every time.Duration) bool {
+	now := s.currentTime()
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.lastLog == nil {
+		s.lastLog = make(map[string]time.Time)
+	}
+	if last, ok := s.lastLog[kind]; ok && now.Sub(last) < every {
+		return false
+	}
+	s.lastLog[kind] = now
+	return true
+}
+
+// admitInbound applies the per-address limits to a new inbound connection before
+// anything is read from it, and so before anything can be recorded about the
+// peer: how often an address may open connections, how many of its connections
+// may be mid-handshake, and how many handshakes may be in flight in total. The
+// function it returns ends the handshake slot.
+func (s *Server) admitInbound(conn net.Conn) (func(), bool) {
+	host := ""
+	if addr := conn.RemoteAddr(); addr != nil {
+		host = remoteHost(addr.String())
+	}
+	limited := !s.exemptFromAddressLimits(host)
+	group := addrGroup(host)
+	if limited && !s.handshakeLimiter.allow(group, s.currentTime()) {
+		return nil, false
+	}
+	s.inboundMu.Lock()
+	defer s.inboundMu.Unlock()
+	// Addresses that are exempt (configured peers included) are never refused a
+	// handshake slot, so that hosts elsewhere cannot crowd them out.
+	if limited && s.maxPendingHandshakes > 0 && s.pendingHandshakes >= s.maxPendingHandshakes {
+		return nil, false
+	}
+	if limited && s.maxPendingPerIP > 0 && s.pendingByIP[group] >= s.maxPendingPerIP {
+		return nil, false
+	}
+	s.pendingHandshakes++
+	if limited {
+		if s.pendingByIP == nil {
+			s.pendingByIP = make(map[string]int)
+		}
+		s.pendingByIP[group]++
+	}
+	return func() {
+		s.inboundMu.Lock()
+		defer s.inboundMu.Unlock()
+		s.pendingHandshakes--
+		if limited {
+			if s.pendingByIP[group] <= 1 {
+				delete(s.pendingByIP, group)
+			} else {
+				s.pendingByIP[group]--
+			}
+		}
+	}, true
+}
+
+// admitRequest applies the budgets for requests that make this node read and
+// send chain data: one per remote address and one shared by all addresses. A
+// request over either budget is dropped and the peer is not blamed for it. A
+// request costs its sender next to nothing and an honest node can be led into
+// sending many (a status report it has no way to check makes it ask for blocks,
+// and catching up on a long chain asks for a batch as fast as it can apply
+// one), so ending the connection over it would let anybody cost a node its
+// peers; a flood far above the message rate limit is ended by that limit.
+// Configured persistent peers are not limited. It reports whether the request
+// may be handled.
+func (s *Server) admitRequest(peer *Peer, msg *Message) bool {
+	var perIP *ipRateLimiter
+	var shared *tokenBucket
+	switch msg.Type {
+	case MsgTypeGetBlocks:
+		perIP, shared = s.getBlocksLimiter, s.getBlocksShared
+	case MsgTypeGetStatus:
+		perIP, shared = s.getStatusLimiter, s.getStatusShared
+	default:
+		return true
+	}
+	if peer.persistent {
+		return true
+	}
+	now := time.Now()
+	if !perIP.allow(addrGroup(remoteHost(peer.remoteAddr)), now) {
+		if s.allowLog("request_over_budget", inboundLogInterval) {
+			s.log().Warn("Dropping chain data requests from a peer over its budget",
+				logging.MaskField("peer_id", peer.id),
+				logging.MaskField("peer_address", peer.remoteAddr))
+		}
+		return false
+	}
+	return shared.allow(now)
+}
+
+// dispatch hands a message that the server does not handle itself to the
+// handler, together with the peer it came from when the handler wants that.
+func (s *Server) dispatch(peer *Peer, msg *Message) error {
+	if h, ok := s.handler.(PeerMessageHandler); ok {
+		return h.HandlePeerMessage(peer, msg)
+	}
+	return s.handler.HandleMessage(msg)
+}
+
+// noteOutgoingPexRequest records a peer exchange request this node is about to
+// send, so that only the reply to it is accepted.
+func (s *Server) noteOutgoingPexRequest(peerID string, msg *Message) {
+	if s == nil || s.pex == nil {
+		return
+	}
+	var payload PexRequestPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return
+	}
+	s.pex.noteRequestSent(peerID, payload.Token)
 }
 
 func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr string) (err error) {
@@ -767,42 +1059,25 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 		return fmt.Errorf("peer %s is currently banned", remote.nodeID)
 	}
 
-	s.recordPeerHandshake(remote)
-
 	trimmedDial := strings.TrimSpace(dialAddr)
-	addresses := append([]string{}, remote.addrs...)
+	// The addresses a peer advertises are its own claim and the handshake
+	// signature does not cover them. Only those at the host the connection came
+	// from are used to recognise, store or pass on the peer. When there are none,
+	// the address this node dialed stands in for a connection it opened; a peer
+	// that connected inbound and advertised only addresses elsewhere is not known
+	// by any address, and it stays connected all the same.
+	addresses := sourceBoundAddrs(remote.addrs, conn.RemoteAddr())
 	if len(addresses) == 0 && trimmedDial != "" {
 		addresses = append(addresses, trimmedDial)
 	}
-	if len(addresses) == 0 {
+	if len(addresses) == 0 && len(remote.addrs) == 0 {
 		addresses = append(addresses, conn.RemoteAddr().String())
 	}
 
 	now := s.now()
-	if s.pex != nil {
-		for _, addr := range addresses {
-			s.pex.recordPeer(remote.nodeID, addr, now)
-		}
-	}
-
 	primaryAddr := ""
 	if len(addresses) > 0 {
 		primaryAddr = strings.TrimSpace(addresses[0])
-	}
-
-	if s.peerstore != nil && primaryAddr != "" {
-		entry := PeerstoreEntry{Addr: primaryAddr, NodeID: remote.nodeID}
-		if err := s.peerstore.Put(entry); err != nil {
-			s.log().Warn("Failed to persist peer entry",
-				logging.MaskField("peer_id", remote.nodeID),
-				logging.MaskField("peer_address", entry.Addr),
-				slog.Any("error", err))
-		}
-		if _, err := s.peerstore.RecordSuccess(remote.nodeID, now); err != nil {
-			s.log().Warn("Failed to record peer success",
-				logging.MaskField("peer_id", remote.nodeID),
-				slog.Any("error", err))
-		}
 	}
 
 	if trimmedDial == "" {
@@ -813,6 +1088,40 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, trimmedDial)
 	if err := s.registerPeer(peer); err != nil {
 		return err
+	}
+
+	// Apart from a ban for a handshake that the node itself signed for another
+	// chain or genesis (markHandshakeViolation, recorded while the handshake is
+	// verified), nothing about the peer is recorded or persisted before
+	// registerPeer has accepted it: a handshake proves only that the remote holds
+	// some key, and a peer that never gets a slot must not leave state behind.
+	// Those bans are held within a bounded share of the peerstore and the
+	// reputation table.
+	s.recordPeerHandshake(remote)
+	if s.pex != nil {
+		for _, addr := range addresses {
+			s.pex.recordPeer(remote.nodeID, addr, now)
+		}
+	}
+	if s.peerstore != nil {
+		if primaryAddr != "" {
+			entry := PeerstoreEntry{Addr: primaryAddr, NodeID: remote.nodeID}
+			if err := s.peerstore.Put(entry); err != nil {
+				s.log().Warn("Failed to persist peer entry",
+					logging.MaskField("peer_id", remote.nodeID),
+					logging.MaskField("peer_address", entry.Addr),
+					slog.Any("error", err))
+			}
+		}
+		// A peer stored earlier is credited with the connection even when no
+		// address is stored for it now.
+		if _, stored := s.peerstore.ByNodeID(remote.nodeID); stored {
+			if _, err := s.peerstore.RecordSuccess(remote.nodeID, now); err != nil {
+				s.log().Warn("Failed to record peer success",
+					logging.MaskField("peer_id", remote.nodeID),
+					slog.Any("error", err))
+			}
+		}
 	}
 	if peer.persistent {
 		s.rememberPersistentPeerID(peer.id)
@@ -840,6 +1149,7 @@ func (s *Server) recordPeerHandshake(remote *handshakePacket) {
 
 	rec := s.records[remote.nodeID]
 	if rec == nil {
+		s.trimRecordsLocked()
 		rec = &PeerRecord{NodeID: remote.nodeID, FirstSeen: seen}
 		s.records[remote.nodeID] = rec
 	}
@@ -851,6 +1161,27 @@ func (s *Server) recordPeerHandshake(remote *handshakePacket) {
 	rec.Score = score
 	if s.metricsCollector != nil {
 		s.metricsCollector.observePeerStatus(remote.nodeID, ReputationStatus{Score: score})
+	}
+}
+
+// trimRecordsLocked makes room for one more peer record by dropping the least
+// recently seen records of peers that are not connected.
+func (s *Server) trimRecordsLocked() {
+	for len(s.records) >= maxPeerRecords {
+		victim := ""
+		var oldest time.Time
+		for id, rec := range s.records {
+			if _, connected := s.peers[id]; connected {
+				continue
+			}
+			if victim == "" || rec.LastSeen.Before(oldest) || (rec.LastSeen.Equal(oldest) && id < victim) {
+				victim, oldest = id, rec.LastSeen
+			}
+		}
+		if victim == "" {
+			return
+		}
+		delete(s.records, victim)
 	}
 }
 
@@ -900,6 +1231,37 @@ func (s *Server) updatePeerRecordScore(id string, score int) {
 	s.mu.Unlock()
 }
 
+// persistentReserveFor returns how many connection slots to keep back for the
+// configured bootnodes and persistent peers: one for each configured address,
+// and at most a quarter of the smallest of MaxPeers, MaxInbound and MaxOutbound,
+// so that the reserve leaves most of every limit to everybody else.
+func persistentReserveFor(cfg ServerConfig, configured int) int {
+	limit := cfg.MaxPeers
+	if cfg.MaxInbound < limit {
+		limit = cfg.MaxInbound
+	}
+	if cfg.MaxOutbound < limit {
+		limit = cfg.MaxOutbound
+	}
+	limit /= 4
+	if configured < limit {
+		return configured
+	}
+	return limit
+}
+
+// reserveEligible reports whether a peer may take one of the slots kept back for
+// configured peers: it is recognised as one by node ID, or the inbound
+// connection really comes from the address of a configured peer. The address is
+// that of the connection itself, not any address the peer reports for itself, so
+// a peer cannot claim eligibility by naming an address in its handshake. The
+// address matters because the node IDs of configured peers are learned only
+// after this node has connected to them, which a restarted node may not have
+// been able to do yet.
+func (s *Server) reserveEligible(peer *Peer) bool {
+	return peer.persistent || (peer.inbound && s.isTrustedHost(remoteHost(peer.remoteAddr)))
+}
+
 func (s *Server) registerPeer(peer *Peer) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -910,23 +1272,74 @@ func (s *Server) registerPeer(peer *Peer) error {
 	if banned, until := s.reputation.BanInfo(peer.id, s.now()); banned {
 		return fmt.Errorf("peer %s banned until %s", peer.id, until.Format(time.RFC3339))
 	}
-	if len(s.peers) >= s.cfg.MaxPeers {
-		return fmt.Errorf("maximum peers reached")
-	}
-	if peer.inbound {
-		if s.inboundCount >= s.cfg.MaxInbound {
-			return fmt.Errorf("maximum inbound peers reached")
+	// persistentReserve of the slots are kept back for the configured peers, so
+	// that hosts which hold the rest of them cannot keep those peers out. A peer
+	// takes a reserved slot when it is one of them, by node ID or, for an inbound
+	// connection, by the address the connection really comes from, and fewer than
+	// persistentReserve reserved slots are held. Reserved slots are not counted
+	// against MaxPeers, MaxInbound or MaxOutbound, and every other peer is held to
+	// those limits less the reserve, so that none of the limits is ever exceeded.
+	reserved := false
+	others, othersInbound, othersOutbound := len(s.peers), s.inboundCount, s.outboundCount
+	if s.persistentReserve > 0 {
+		held := 0
+		for _, other := range s.peers {
+			if !other.reserved {
+				continue
+			}
+			held++
+			others--
+			if other.inbound {
+				othersInbound--
+			} else {
+				othersOutbound--
+			}
 		}
-		s.inboundCount++
-	} else {
-		if s.outboundCount >= s.cfg.MaxOutbound {
+		reserved = held < s.persistentReserve && s.reserveEligible(peer)
+	}
+	if !reserved {
+		if others >= s.cfg.MaxPeers-s.persistentReserve {
+			return fmt.Errorf("maximum peers reached")
+		}
+		if peer.inbound {
+			if othersInbound >= s.cfg.MaxInbound-s.persistentReserve {
+				return fmt.Errorf("maximum inbound peers reached")
+			}
+			if s.maxInboundPerIP > 0 && !peer.persistent {
+				if host := remoteHost(peer.remoteAddr); !s.exemptFromAddressLimits(host) {
+					group := addrGroup(host)
+					sameGroup := 0
+					for _, other := range s.peers {
+						if other.inbound && addrGroup(remoteHost(other.remoteAddr)) == group {
+							sameGroup++
+						}
+					}
+					if sameGroup >= s.maxInboundPerIP {
+						return fmt.Errorf("maximum inbound peers per address reached")
+					}
+				}
+			}
+		} else if othersOutbound >= s.cfg.MaxOutbound-s.persistentReserve {
 			return fmt.Errorf("maximum outbound peers reached")
 		}
+	}
+	peer.reserved = reserved
+	if peer.inbound {
+		s.inboundCount++
+	} else {
 		s.outboundCount++
 	}
 	s.peers[peer.id] = peer
+	if s.peerstore != nil {
+		// A peer we are connected to must survive eviction from the peerstore.
+		s.peerstore.Protect(peer.id)
+	}
 	if peer.dialAddr != "" {
-		s.byAddr[peer.dialAddr] = peer.id
+		// An inbound peer's address is not one this node chose, so it never takes
+		// the place of an address that is already held by another peer.
+		if _, held := s.byAddr[peer.dialAddr]; !held || !peer.inbound {
+			s.byAddr[peer.dialAddr] = peer.id
+		}
 	}
 	if peer.persistent {
 		s.persistentIDs[peer.id] = struct{}{}
@@ -940,6 +1353,9 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 	s.mu.Lock()
 	if current, ok := s.peers[peer.id]; ok && current == peer {
 		delete(s.peers, peer.id)
+		if s.peerstore != nil {
+			s.peerstore.Unprotect(peer.id)
+		}
 		if peer.inbound {
 			if s.inboundCount > 0 {
 				s.inboundCount--
@@ -949,7 +1365,7 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 				s.outboundCount--
 			}
 		}
-		if peer.dialAddr != "" {
+		if peer.dialAddr != "" && s.byAddr[peer.dialAddr] == peer.id {
 			delete(s.byAddr, peer.dialAddr)
 		}
 		if peer.persistent {
@@ -1027,7 +1443,12 @@ func (s *Server) Connect(addr string) error {
 	return nil
 }
 
-// Broadcast sends a message to all connected peers with backpressure.
+// Broadcast sends a message to all connected peers with backpressure. A peer
+// whose queue has no room for it misses this one message and keeps its
+// connection: one slow peer must not be able to cost the node another peer, and
+// a peer that stops reading altogether is ended by its own write deadline. A
+// message whose frame is larger than MaxMessageBytes is sent to nobody, no peer
+// is disconnected over it, and the error returned wraps ErrMessageTooLarge.
 func (s *Server) Broadcast(msg *Message) error {
 	s.mu.RLock()
 	peers := make([]*Peer, 0, len(s.peers))
@@ -1037,14 +1458,34 @@ func (s *Server) Broadcast(msg *Message) error {
 	s.mu.RUnlock()
 
 	var errs []error
+	tooLarge := false
 	for _, peer := range peers {
 		if err := peer.Enqueue(msg); err != nil {
-			errs = append(errs, fmt.Errorf("peer %s: %w", peer.id, err))
-			if errors.Is(err, errQueueFull) {
-				s.log().Warn("Peer send queue full",
-					logging.MaskField("peer_id", peer.id))
-				peer.server.adjustScore(peer.id, -slowPenalty)
+			if errors.Is(err, ErrMessageTooLarge) {
+				// Every peer shares this node's limit, so report it once.
+				if !tooLarge {
+					tooLarge = true
+					msgType := -1
+					if msg != nil {
+						msgType = int(msg.Type)
+					}
+					s.log().Error("Message not sent: larger than the frame limit",
+						slog.Int("message_type", msgType),
+						slog.Int("frame_bytes", frameSize(msg)),
+						slog.Int("max_message_bytes", s.cfg.MaxMessageBytes))
+					errs = append(errs, err)
+				}
+				continue
 			}
+			if errors.Is(err, errQueueFull) {
+				if dropped, logNow := peer.noteDrop(); logNow {
+					s.log().Warn("Peer send queue full; dropping messages for this peer",
+						logging.MaskField("peer_id", peer.id),
+						slog.Uint64("dropped", dropped))
+				}
+				continue
+			}
+			errs = append(errs, fmt.Errorf("peer %s: %w", peer.id, err))
 			peer.terminate(false, err)
 		}
 	}
@@ -1060,7 +1501,7 @@ func (s *Server) allowIP(remote string, now time.Time) bool {
 	if h, _, err := net.SplitHostPort(remote); err == nil {
 		host = h
 	}
-	return s.ipLimiter == nil || s.ipLimiter.allow(host, now)
+	return s.ipLimiter == nil || s.ipLimiter.allow(addrGroup(host), now)
 }
 
 func (s *Server) updatePeerGreylist(id string, grey bool) {
@@ -1666,6 +2107,15 @@ func (s *Server) updatePeerMetrics(id string, valid bool) bool {
 	metrics := s.metrics[id]
 	now := s.now()
 	if metrics == nil {
+		if len(s.metrics) >= metricsSweepSize {
+			// A window that has run out counts for nothing: it is reset on next
+			// use anyway, so dropping it changes no decision.
+			for other, m := range s.metrics {
+				if now.Sub(m.windowStart) > invalidRateWindow {
+					delete(s.metrics, other)
+				}
+			}
+		}
 		metrics = &peerMetrics{windowStart: now}
 		s.metrics[id] = metrics
 	}

@@ -301,8 +301,9 @@ func ParseDecisionOutcome(outcome string) (DecisionOutcome, error) {
 
 // Escrow captures the immutable metadata and runtime status of a single escrow
 // agreement managed by the native engine. The identifier is the keccak256 hash
-// of the payer, payee and a caller-supplied nonce, ensuring deterministic IDs
-// without storing the nonce on-chain.
+// of the payer, payee, the agreement's metadata hash and a caller-supplied
+// nonce (Engine.Create), so it is deterministic from its inputs and the same
+// parties can hold many escrows. The nonce is kept in the record as well.
 type Escrow struct {
 	ID             [32]byte
 	Payer          [20]byte

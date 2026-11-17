@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -133,7 +134,7 @@ func TestBuildExplorerSnapshotFindsMultipleAddressesViaBackfill(t *testing.T) {
 
 	server := newTestServer(t, node, nil, ServerConfig{})
 	// A small recentBlocks window forces the backfill path to do real work.
-	snapshot, err := server.buildExplorerSnapshot(2)
+	snapshot, err := server.buildExplorerSnapshot(context.Background(), 2)
 	if err != nil {
 		t.Fatalf("build explorer snapshot: %v", err)
 	}

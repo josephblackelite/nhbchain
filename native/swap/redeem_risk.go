@@ -9,7 +9,7 @@ import (
 )
 
 // Conservative defaults for the redeem-side (swap-out: burn NHB on-chain,
-// pay USDT off-chain via NOWPayments) circuit breaker, applied by
+// settle off-chain through an external service) circuit breaker, applied by
 // core/swap_risk_params.go's effectiveRedeemRiskParameters whenever no
 // policy.swapRiskParams governance proposal has ever executed. Swap-out is a
 // brand-new, unproven money-moving pathway -- unlike the mint-side

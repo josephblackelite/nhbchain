@@ -1,87 +1,60 @@
-# Refund linkage and safeguards
+# Refund linkage
 
-The POS refund programme now enforces a strict linkage between refund
-transactions and the original payment that funded them. This document captures
-the on-chain mechanics, ledger semantics, and the API surfaces exposed to
-clients.
+NHB transfers can be linked to an earlier transfer so the total refunded never
+exceeds what the original transfer moved. Code: `core/state_transition.go`
+(`applyEvmTransaction`), `native/bank/transfer.go`, `core/state/refund_ledger.go`.
 
-## Transaction metadata
+## Transaction field
 
-* All transactions now expose an optional `refundOf` metadata field. The field
-  accepts the 32 byte transaction hash of the originating payment (hex encoded
-  with or without the `0x` prefix).
-* When `refundOf` is omitted the transaction is treated as the origin payment
-  and its value is recorded as the maximum refundable amount.
-* When `refundOf` is present the state processor resolves the ledger entry for
-  the provided hash and rejects the transaction when the new refund would exceed
-  the recorded origin amount.
+`refundOf` (string) is a field of every `types.Transaction` (`refund_of` in the
+gRPC `TxEnvelope`), covered by the signed hash. It holds a 32-byte transaction
+hash, hex-encoded with or without `0x`, exactly 64 hex characters
+(`bank.ParseTxHash`). It is only acted on for `TxTypeTransfer` (NHB transfers).
+ZNHB transfers and other types ignore it and record nothing in the ledger.
 
-## Refund ledger
+## Ledger behaviour
 
-Origin transactions and all linked refunds are recorded in the new
-`RefundLedger` stored under `refund/thread/<origin-hash>`:
+For an NHB transfer (`TxTypeTransfer`), the state processor uses the
+transaction's hash (`Transaction.Hash`):
 
-| Field | Description |
+* `refundOf` empty: the transfer is an origin. `RecordOrigin` stores its `value`
+  as `originAmount` with the block timestamp. Origin amounts must be positive; a
+  zero-value origin is not recorded. Recording the same hash again with a
+  different amount is an error.
+* `refundOf` set: before moving funds, `ValidateRefund` looks up the origin. It
+  fails when the origin is not in the ledger (`refund: origin <hash> not found`),
+  when the refund amount is not positive, or when `cumulativeRefunded + value >
+  originAmount` (`refund: cumulative refunds X exceed origin amount Y`). On
+  success `ApplyRefund` appends `{refundTx, amount, timestamp}` and increases
+  `cumulativeRefunded`. A refund transaction is not itself recorded as an origin.
+
+Failing the check rejects the transaction; no state is committed for it. The
+ledger is stored under the key prefix `refund/thread/<origin hash>`:
+
+| Field | Meaning |
 | --- | --- |
-| `originAmount` | Value transferred by the origin transaction. |
-| `originTimestamp` | Block timestamp (UTC seconds) of the origin transaction. |
-| `cumulativeRefunded` | Sum of all recorded refund amounts. |
-| `refunds[]` | Chronological entries containing `refundTx`, `amount` and `timestamp`. |
+| `originAmount` | `value` of the origin transfer. |
+| `originTimestamp` | Block timestamp of the origin transfer (unix seconds). |
+| `cumulativeRefunded` | Sum of recorded refunds. |
+| `refunds[]` | `refundTx`, `amount`, `timestamp` in order applied. |
 
-Ledger guarantees:
+The refund transfer itself is an ordinary transfer from whoever signs it to the
+recipient it names; the ledger only limits the running total.
 
-1. Origin amounts must be greater than zero.
-2. Refund entries must reference an existing origin hash.
-3. Each refund must keep `cumulativeRefunded <= originAmount`.
+## Reading the ledger
 
-Attempts to exceed the origin amount abort the transaction before state is
-committed, ensuring double-refunds cannot occur.
+`proto/tx/tx.proto` defines `tx.v1.Query/RefundThread` (request `origin_tx`;
+response `origin_tx`, `origin_amount`, `cumulative_refunded`, `origin_timestamp`,
+`refunds[]` with `refund_tx`, `amount`, `timestamp`). No server in this repository
+registers that service, so the RPC is not reachable; there is no JSON-RPC method
+that returns the ledger.
 
-## Query service
+## Example
 
-`proto/tx/tx.proto` introduces a read-only `Query` service. The
-`RefundThread(origin_tx)` RPC returns the ledger view needed to surface refund
-threads in wallets and dashboards.
+1. Origin: `refundOf` omitted, `value` 1000. Ledger: `originAmount` 1000.
+2. Refund A: `refundOf = <origin hash>`, `value` 400. `cumulativeRefunded` 400.
+3. Refund B: `value` 600. `cumulativeRefunded` 1000.
+4. Refund C with any positive `value` is rejected.
 
-The proto messages, service definition, and generated stubs exist, and the
-backing data (`RefundLedger.Thread`) is real and wired into transaction
-execution. However, no concrete server implementation for this `Query`
-service is registered on any running gRPC server (compare with
-`services/governd/main.go`, which does register the analogous governance
-`Query` service). The generated code currently just returns `Unimplemented` —
-this RPC is not reachable today.
-
-**Response fields:**
-
-* `origin_tx` – the referenced transaction hash.
-* `origin_amount` – the amount locked by the origin payment.
-* `cumulative_refunded` – total refunds applied so far.
-* `refunds[]` – each linked refund with `refund_tx`, `amount`, and `timestamp`.
-
-Amounts are string encoded in both protobuf and the TypeScript client bindings
-to avoid JSON precision loss.
-
-## UX guidance
-
-* Wallets should prompt the operator for the original payment hash when
-  initiating a refund.
-* The refund summary page should fetch the thread and surface both the remaining
-  refundable balance and the list of processed refunds.
-* Attempts to exceed the refundable balance should be blocked client-side but
-  the node will enforce the invariant even if a malicious client attempts to
-  bypass the warning.
-
-## Example flow
-
-1. Origin payment: `refundOf` omitted. Ledger records a refundable balance of
-   `1000` units.
-2. Refund transaction A: `refundOf = <origin-hash>`, amount `400`. Ledger links
-   the refund and sets the cumulative tally to `400`.
-3. Refund transaction B: `refundOf = <origin-hash>`, amount `600`. Ledger links
-   the refund, cumulative tally becomes `1000`.
-4. Refund transaction C: any amount > `0` would be rejected because the origin
-   has already been fully refunded.
-
-This behaviour is captured by the unit test suite
-(`TestRefundLedgerRecordAndThread` and `TestRefundLedgerOverRefund` in
-`core/state/refund_ledger_test.go`).
+Covered by `TestRefundLedgerRecordAndThread` and `TestRefundLedgerOverRefund` in
+`core/state/refund_ledger_test.go`.

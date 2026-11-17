@@ -52,12 +52,15 @@ func (g Global) PaymasterLimits() (PaymasterLimits, error) {
 // PaymasterAutoTopUpConfig parses the automatic top-up policy into runtime values.
 func (g Global) PaymasterAutoTopUpConfig() (PaymasterAutoTopUpConfig, error) {
 	cfg := PaymasterAutoTopUpConfig{Enabled: g.Paymaster.AutoTopUp.Enabled}
+	// The asset the top-up watches, debits and credits. Sponsored gas is paid
+	// in NHB, so NHB is the default; ZNHB is accepted for an operator that
+	// wants the top-up to keep a ZNHB balance instead.
 	token := strings.ToUpper(strings.TrimSpace(g.Paymaster.AutoTopUp.Token))
 	if token == "" {
-		token = "ZNHB"
+		token = "NHB"
 	}
-	if token != "ZNHB" {
-		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.Token: must be ZNHB, got %q", g.Paymaster.AutoTopUp.Token)
+	if token != "NHB" && token != "ZNHB" {
+		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.Token: must be NHB or ZNHB, got %q", g.Paymaster.AutoTopUp.Token)
 	}
 	cfg.Token = token
 

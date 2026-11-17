@@ -323,22 +323,13 @@ func TestHandleFutureProposalRequestsCatchUp(t *testing.T) {
 }
 
 func TestHandleProposalBuffersFutureRoundAndAdvancesRound(t *testing.T) {
-	validatorKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate validator key: %v", err)
-	}
-	validatorAddr := validatorKey.PubKey().Address().Bytes()
-	otherKey, err := crypto.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("generate second validator key: %v", err)
-	}
-	otherAddr := otherKey.PubKey().Address().Bytes()
-	node := &trackingNode{
-		validatorSet: map[string]*big.Int{
-			string(validatorAddr): big.NewInt(1),
-			string(otherAddr):     big.NewInt(1),
-		},
-	}
+	// Only the round's proposer's proposal is kept for a round that has not been
+	// reached (and replayed when it is), so the other validator is made the
+	// proposer of round 2.
+	tv := validatorsWithProposer(t, 2, 2, 1)
+	validatorKey, otherKey := tv.keys[0], tv.keys[1]
+	otherAddr := tv.addrs[1]
+	node := &trackingNode{validatorSet: tv.set}
 	engine := NewEngine(node, validatorKey, &recordingBroadcaster{})
 	engine.mu.Lock()
 	engine.currentState = State{Height: 1, Round: 0}
@@ -829,8 +820,8 @@ func TestEngineFastForwardsHeightOnRestart(t *testing.T) {
 	if syncedHeight != expectedHeight {
 		t.Fatalf("expected engine height %d after sync, got %d", expectedHeight, syncedHeight)
 	}
-	if syncedRound != 0 {
-		t.Fatalf("expected engine round 0 after height sync, got %d", syncedRound)
+	if syncedRound != 1 {
+		t.Fatalf("expected engine round 1 (the round every height starts in) after height sync, got %d", syncedRound)
 	}
 	if stalePresent {
 		t.Fatalf("expected committedBlocks to be pruned for stale heights")
@@ -874,9 +865,16 @@ func TestHasTwoThirdsPowerLockedThresholds(t *testing.T) {
 		expectMet bool
 	}{
 		{
+			// Exactly 2/3 is not a quorum: it takes strictly more.
 			name:      "exactTwoThirds",
 			total:     6,
 			power:     4,
+			expectMet: false,
+		},
+		{
+			name:      "aboveTwoThirds",
+			total:     6,
+			power:     5,
 			expectMet: true,
 		},
 		{

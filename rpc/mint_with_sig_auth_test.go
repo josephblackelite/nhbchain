@@ -58,8 +58,8 @@ func assignMinterRole(t *testing.T, env *testEnv, role string, key *crypto.Priva
 // requireAuthInto/requireOperatorInto itself; its only authorization was
 // always the on-chain voucher signature + minter-role check inside
 // core.Node.MintWithSignature / applyMintTransaction. The real, currently-
-// deployed off-chain fiat-settlement minting service calls mint_with_sig
-// with no bearer credential at all (docs/escrow/mint-settlement.md); if
+// off-chain submitter calls mint_with_sig
+// with no bearer credential at all; if
 // this regressed, every one of its calls would start failing with -32002
 // (operator role required).
 func TestMintWithSigExemptFromOperatorGateAllowsNoCredential(t *testing.T) {

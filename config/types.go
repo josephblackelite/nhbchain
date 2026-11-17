@@ -21,11 +21,6 @@ type RPCProxyHeaders struct {
 }
 
 // RPCJWT captures JWT validation settings enforced by the RPC server.
-//
-// Operator-only RPC methods (see rpc/operator_methods.go) additionally
-// require the bearer JWT's 'role' claim to equal "operator" -- there is no
-// config knob for that; it is a property of the token itself, minted with
-// e.g. generate_operator_jwt.go.
 type RPCJWT struct {
 	Enable           bool     `toml:"Enable"`
 	Alg              string   `toml:"Alg"`
@@ -162,12 +157,21 @@ func (f Fees) RouteWalletByAsset() map[string]string {
 	return wallets
 }
 
-// Consensus controls the BFT round timeouts.
+// Consensus controls the BFT round timeouts and the pace of block production.
+//
+// MinBlockInterval is the least time a validator lets pass between seeing a block
+// commit and starting the round of the next height (a validator-local wait, not a
+// rule blocks are checked against; see bft.WithMinBlockInterval). It is what sets
+// the pace of an idle chain, and with it every quantity counted in blocks: epoch
+// length, emission per epoch, interest per block. Zero starts the next round at once,
+// which is as fast as the validators can make blocks (tens a second while they are in
+// step). A value above half the commit timeout is lowered to it by the engine.
 type Consensus struct {
 	ProposalTimeout  time.Duration `toml:"ProposalTimeout"`
 	PrevoteTimeout   time.Duration `toml:"PrevoteTimeout"`
 	PrecommitTimeout time.Duration `toml:"PrecommitTimeout"`
 	CommitTimeout    time.Duration `toml:"CommitTimeout"`
+	MinBlockInterval time.Duration `toml:"MinBlockInterval"`
 }
 
 // Staking captures the runtime configuration for validator and delegator rewards.

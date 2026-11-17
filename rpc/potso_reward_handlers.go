@@ -1,11 +1,8 @@
 package rpc
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -14,8 +11,6 @@ import (
 
 	"nhbchain/crypto"
 	"nhbchain/native/potso"
-
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
 type potsoEpochInfoParams struct {
@@ -51,17 +46,6 @@ type potsoEpochPayoutsResult struct {
 	Payouts []potsoEpochPayoutEntry `json:"payouts"`
 }
 
-type potsoRewardClaimParams struct {
-	Epoch     uint64 `json:"epoch"`
-	Address   string `json:"address"`
-	Signature string `json:"signature"`
-}
-
-type potsoRewardClaimResult struct {
-	Paid   bool   `json:"paid"`
-	Amount string `json:"amount"`
-}
-
 type potsoRewardHistoryParams struct {
 	Address string `json:"address"`
 	Cursor  string `json:"cursor,omitempty"`
@@ -89,13 +73,6 @@ type potsoRewardExportResult struct {
 	CSVBase64 string `json:"csvBase64"`
 	TotalPaid string `json:"totalPaid"`
 	Winners   int    `json:"winners"`
-}
-
-func rewardClaimDigest(epoch uint64, addr string) []byte {
-	normalized := strings.ToLower(strings.TrimSpace(addr))
-	payload := fmt.Sprintf("potso_reward_claim|%d|%s", epoch, normalized)
-	digest := sha256.Sum256([]byte(payload))
-	return digest[:]
 }
 
 func (s *Server) handlePotsoEpochInfo(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
@@ -191,62 +168,19 @@ func (s *Server) handlePotsoEpochPayouts(w http.ResponseWriter, _ *http.Request,
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handlePotsoRewardClaim(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
-	if len(req.Params) != 1 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "claim requires parameter object", nil)
-		return
-	}
-	var params potsoRewardClaimParams
-	if err := json.Unmarshal(req.Params[0], &params); err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid parameters", err.Error())
-		return
-	}
-	if params.Address == "" || params.Signature == "" {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "address and signature are required", nil)
-		return
-	}
-	addr, err := decodeBech32(params.Address)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address", err.Error())
-		return
-	}
-	sig, err := decodeHexBytes(params.Signature)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid signature", err.Error())
-		return
-	}
-	if len(sig) != 65 {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "signature must be 65 bytes", nil)
-		return
-	}
-	digest := rewardClaimDigest(params.Epoch, params.Address)
-	pubKey, err := ethcrypto.SigToPub(digest, sig)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid signature", err.Error())
-		return
-	}
-	recovered := ethcrypto.PubkeyToAddress(*pubKey)
-	if !strings.EqualFold(recovered.Hex()[2:], hex.EncodeToString(addr[:])) {
-		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "signature does not match address", nil)
-		return
-	}
+// potsoRewardClaimRPCDisabledMessage: potso_reward_claim paid a claim-mode
+// reward by debiting the treasury and crediting the claimant on the live state
+// trie of the one validator that handled the call, outside block execution and
+// stamped with that validator's own clock. No other validator saw the payment,
+// so it made that validator's pending state differ from theirs and left it to
+// fork the next block it proposed. The shipped configuration pays rewards
+// automatically at epoch end (PayoutMode "auto"), which needs no claim, and the
+// read-only queries (potso_rewards_history, potso_epoch_info,
+// potso_epoch_payouts, potso_export_epoch) are left live.
+const potsoRewardClaimRPCDisabledMessage = "this method is disabled -- it moved funds on validator-local state outside the block pipeline, so one validator could disagree with the others about the next block; rewards are paid automatically at epoch end, and claim-mode payouts will need a signed transaction"
 
-	paid, amount, claimErr := s.node.PotsoRewardClaim(params.Epoch, addr)
-	if claimErr != nil {
-		switch {
-		case errors.Is(claimErr, potso.ErrRewardNotFound):
-			writeError(w, http.StatusNotFound, req.ID, codeServerError, "reward not found", nil)
-		case errors.Is(claimErr, potso.ErrClaimingDisabled):
-			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "claiming disabled", nil)
-		case errors.Is(claimErr, potso.ErrInsufficientTreasury):
-			writeError(w, http.StatusConflict, req.ID, codeServerError, "INSUFFICIENT_TREASURY", nil)
-		default:
-			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to claim reward", claimErr.Error())
-		}
-		return
-	}
-	result := potsoRewardClaimResult{Paid: paid, Amount: bigIntString(amount)}
-	writeResult(w, req.ID, result)
+func (s *Server) handlePotsoRewardClaim(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	writeError(w, http.StatusGone, req.ID, codeMethodDisabled, potsoRewardClaimRPCDisabledMessage, nil)
 }
 
 func (s *Server) handlePotsoRewardsHistory(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {

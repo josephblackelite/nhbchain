@@ -100,8 +100,8 @@ func (c Config) Clone() Config {
 const ReferencePriceDomainV1 = "NHB_BUYBACK_REFPRICE_V1"
 
 // ReferencePrice is the independently-signed market price for ZNHB, in NHB
-// terms (matching the curve's own USD-denominated pricing, since NHB is
-// backed 1:1), that a given epoch's settlement checks its clearing price
+// terms (matching the curve's own USD-denominated pricing), that a given
+// epoch's settlement checks its clearing price
 // against. Scoped to a specific epoch so a stale signature bundle from an
 // earlier epoch can never be replayed into a later one.
 type ReferencePrice struct {

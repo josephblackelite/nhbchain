@@ -1,135 +1,48 @@
 # Network Hardening Playbook
 
-This document consolidates the controls and monitoring that keep NHBChain nodes
-resilient against modern attacks. It augments the validator hardening steps in
-[`release-process.md`](./release-process.md) and focuses specifically on network
-boundaries, RPC services, and abuse handling.
+This page lists the network-facing controls the node implements, with the configuration keys that drive them, followed by deployment guidance and a checklist. Transport (TLS/mTLS) settings are in [transport.md](./transport.md); HMAC request signing is in [api-auth.md](./api-auth.md); the peer handshake is in [handshake.md](./handshake.md).
 
-## Threat Model
+## JSON-RPC server controls (`rpc/http.go`)
 
-- **JSON-RPC & REST abuse** – Attackers attempt to bypass authentication,
-  replay signed requests, or exhaust rate limits.
-- **Distributed denial of service (DDoS)** – Floods directed at public RPC,
-  WebSocket, or peer-to-peer listeners to degrade availability.
-- **Credential stuffing & API key theft** – Compromise of merchant or partner
-  credentials that grant transactional authority.
-- **State divergence** – Malicious peers replay old handshakes or inject
-  conflicting genesis data to isolate nodes.
+1. **Transport.** The server refuses to start without a TLS certificate and key unless `RPCAllowInsecure = true`, and even then it only serves plaintext on a loopback listener (see [transport.md](./transport.md)).
+2. **Client allowlist.** `RPCAllowlistCIDRs` (CIDRs or single IPs) restricts which client addresses the JSON-RPC handler, the `/ws/pos/finality` and `/ws/explorer` WebSocket endpoints and the gRPC `pos.v1.Realtime` service accept. Others get HTTP 403 (`client address not allowed`); a gRPC client gets the status `PermissionDenied` with the same message (`grpcHandler` in `rpc/http.go`). The list is empty by default, which allows everyone. Entries that do not parse as a CIDR or an IP address are skipped when the list is built (`NewServer`), so a list made only of unparseable entries is empty and allows everyone.
+3. **Authentication.** Some methods require either a verified TLS client certificate or a bearer JWT (`Authorization: Bearer <token>`); others are open reads. Methods that require it include `nhb_sendTransaction`, `net_dial`, `net_ban`, `net_peers`, `p2p_peers`, `swap_limits`, `swap_provider_status`, `swap_burn_list`, `swap_voucher_reverse`, `swap_markReconciled`, `swap_setManualQuote`, `swap_listPendingRedemptions`, `buyback_submitRefPrice`, `lending_submitRefPrice`, `engagement_register_device`, `engagement_submit_heartbeat` and `potso_stake_info` (each calls `requireAuthInto`; `swap_voucher_get`, `swap_voucher_list` and `swap_voucher_export` do too, unless `[RPCSwapAuth].Secrets` is set, in which case the HMAC check is their credential). Retired methods answer HTTP 410 with code `-32060` whatever the credential: `sync_snapshot_export`, `sync_snapshot_import`, `potso_reward_claim`, `tx_setSponsorshipEnabled`, `pos_sweepVoids` and `reputation_verifySkill` (`handleTxSetSponsorshipEnabled` in `rpc/http.go`, `rpc/sync_handlers.go`, `rpc/potso_reward_handlers.go`, `handlePOSSweepVoids` in `rpc/http.go`, `rpc/reputation_handlers.go`). The server will not start unless JWT is enabled (`[RPCJWT] Enable = true`) or a client CA is configured (`RPCTLSClientCAFile`). JWT validation: HS256 (secret read from the environment variable named by `HSSecretEnv`) or RS256 (`RSAPublicKeyFile`); issuer must match `Issuer`; the token's audience must match one of `Audience`; expiry and not-before are checked with a leeway of `MaxSkewSeconds` (30 s if unset). Failures return HTTP 401.
+4. **Swap HMAC.** When `[RPCSwapAuth].Secrets` is set, the swap methods in `isPublicSwapMethod` also require an API key and HMAC signature; per-key quotas come from `PartnerRateLimits`.
+5. **Client IP handling.** `X-Forwarded-For` and `X-Real-IP` are rejected by default (`[RPCProxyHeaders]` mode `ignore`). Mode `single` accepts exactly one address, and only from a peer listed in `RPCTrustedProxies`: a forwarded header from any other peer is refused. `RPCTrustProxyHeaders = true` does not widen who is trusted; with `RPCTrustedProxies` empty it trusts nobody, and the node logs a warning at start-up saying so (`resolveClient`, `NewServer` in `rpc/http.go`). At most 32 `RPCTrustedProxies` entries are used. The forwarded value must be an IP address (with or without a port); anything else is refused. An IPv6 client is limited as its /64.
+6. **Request size.** Bodies over 1 MiB are rejected with HTTP 413.
+7. **Rate limiting.** A fixed-window counter is kept per client IP, per authenticated identity, per chain nonce and per identity+chain nonce, separately for each method. Limits come from `RPCMaxTxPerWindow`, `RPCMaxTxPerIP`, `RPCMaxTxPerIdentity`, `RPCMaxTxPerChain`, `RPCMaxTxPerIdentityChain`, per-method overrides in `RPCRouteRateLimits`, and the window `RPCRateLimitWindow` (seconds). If unset in the configuration, `config.Load` sets `RPCMaxTxPerWindow = 5` and the window to 60 seconds, and the other limits default from `RPCMaxTxPerWindow`; the repository's `config.toml` sets all five limits to 120 per 60 seconds. Exceeding a limit returns HTTP 429.
+8. **Query admission pool.** Public read methods that scan blocks or hold the state lock share a small pool: a global slot count, a per-client limit, a bounded queue and a deadline. A refused query returns HTTP 429 with code `-32020` and a `Retry-After` header; a query that runs out of time returns HTTP 503 with code `-32021`. Configuration: `RPCQueryMaxConcurrent`, `RPCQueryMaxPerClient`, `RPCQueryQueueDepth`, `RPCQueryQueueWaitMS`, `RPCQueryTimeoutSeconds` (zero selects the default), and `RPCDisableExplorerLoop`. Defaults and the list of gated methods are in [../ops/rpc-query-limits.md](../ops/rpc-query-limits.md) (`rpc/query_gate.go`, `config/config.go`).
+9. **WebSocket and gRPC streams.** `/ws/pos/finality`, `/ws/explorer` and the gRPC `pos.v1.Realtime` stream accept at most `RPCWebSocketMaxConnections` streams in total (default 256) and `RPCWebSocketMaxPerIP` per client address (default 8), counted across the three together; an IPv6 client counts as its /64. A further WebSocket connection gets HTTP 429; a further gRPC stream gets the status `ResourceExhausted` (`acquireStream` in `rpc/ws.go`). The total can still be filled by many different addresses, which a per-address cap does not prevent. `RPCWebSocketOrigins` lists the browser origins (host patterns) allowed in addition to the request's own host; empty allows any origin.
 
-Every mitigation below maps to at least one of these scenarios.
+## Peer-to-peer controls (`p2p/`)
 
-## RPC & Gateway Protection
+1. **Signed handshake.** Every connection must complete the handshake in [handshake.md](./handshake.md): chain ID, genesis hash, signature and nonce replay are checked. A chain ID or genesis hash mismatch in a packet signed by the node it names bans that node ID; signature failures and replays are refused without a ban (see [handshake.md](./handshake.md#violations-and-bans)).
+2. **Nonce replay guard.** 10 minute window, 100,000 entries.
+3. **Reputation.** Peers are scored (`ReputationManager` in `p2p/reputation.go`): invalid block −20, spam −10, malformed message −5, heartbeat +1, uptime +2 per day, with a 10 minute decay half-life. A score at or below `-BanScore` bans the peer for the ban duration; at or below `-GreyScore` greylists it for one minute (`NewServer` in `p2p/server.go` passes `GreylistDuration: time.Minute`; the reputation manager's own default of two minutes is not used). Defaults from `config/config.go` are `BanScore = 100` and `GreyScore = 50`. Persistent peers are never banned. The reputation table holds at most 4096 peers; the least recently updated one without an active ban is dropped first (`defaultReputationMaxRecords`).
+4. **Limits.** `MaxPeers` defaults to 64, `MaxInbound`/`MaxOutbound` default to `MaxPeers` and are capped at it, `MaxMsgBytes` to 1 MiB, and `MaxMsgsPerSecond` to 32 messages per second per peer. The shipped `config.toml` `[p2p]` section sets `RateMsgsPerSec = 50.0`, `Burst = 200.0`, `MaxPeers = 64`, `MaxInbound = 60` and `MaxOutbound = 30`.
+5. **Inbound connection limits.** These are fixed in `p2p/server.go`, not configurable: per remote address, a burst of 10 inbound connection attempts and then one every 6 seconds, 4 handshakes in flight and 8 established inbound connections; 64 handshakes in flight across all addresses. Loopback, non-IP hosts and the addresses of configured persistent peers and bootnodes are exempt from the per-address limits. Chain-data requests (`MsgTypeGetBlocks`: 4 per second, burst 16 per address, 32 and 64 shared; `MsgTypeGetStatus`: 2 per second, burst 8 per address, 64 and 128 shared) have a per-address and a shared budget.
+6. **Address exchange.** The address book holds at most 1024 entries; a reply carrying addresses is accepted only for a request this node sent (open for 5 minutes, at most 4 per peer); a peer may ask for addresses at most 3 times back to back and then once every 5 seconds; at most 4 candidate addresses are dialed at once (`p2p/pex.go`). The peer store holds at most 2048 entries and the peer-record table 4096 (`defaultPeerstoreMaxEntries`, `maxPeerRecords`).
+7. **Manual ban.** The authenticated `net_ban` RPC takes `{"nodeId": "<id>", "secs": <n>}` (`secs` must not be negative) and bans a peer.
 
-1. **Mandatory authentication** – JSON-RPC methods that mutate chain state must
-   sit behind bearer-token authentication (`Authorization: Bearer <RPCJWT>`).
-   Do not expose unauthenticated endpoints on public interfaces. The
-   configuration examples in
-   [`docs/networking/net-rpc.md`](../networking/net-rpc.md) show the required
-   header and expected error codes.
-2. **Mutual TLS or private networking** – Validators should restrict RPC access
-   to an API gateway that validates client certificates. Partners connecting
-   over the internet must use mutual TLS; browser clients should go through a
-   gateway that proxies requests on their behalf.
-3. **Request validation** – Reject mismatched `chainId`, stale timestamps
-   (±120 seconds), and nonce replays. The stock handlers already enforce these
-   checks; ensure any custom middleware preserves them.
-4. **Rate limiting** – Keep the defaults from `config.toml` (`RPCMaxTxPerWindow`,
-   `RPCRateLimitWindow`) for operator RPC. API gateways should additionally
-   enforce per IP and per key quotas that align with commercial agreements.
-5. **Audit logging** – Ship RPC access logs to your SIEM. Alert on spikes in
-   401/403 responses, large payloads, or methods invoked outside policy.
+## Deployment guidance
 
-## Application-Layer Safeguards
+These are suggestions for operators, not behavior the node enforces:
 
-Add controls that make it impractical for attackers to tamper with request and
-response payloads even if they can reach the gateway perimeter:
+- Expose the RPC port only through a TLS-terminating proxy or with the node's own TLS, and restrict it with `RPCAllowlistCIDRs` or network rules. If a proxy in front of the node passes client addresses, list its address in `RPCTrustedProxies` (setting `RPCTrustProxyHeaders` alone trusts nobody) and set `[RPCProxyHeaders]` accordingly. The repository's `config.toml` does this for a proxy on the same host: `RPCTrustProxyHeaders = true`, `RPCTrustedProxies = ["127.0.0.1"]` and both `[RPCProxyHeaders]` modes `single`.
+- Allow the P2P port only from the peers you expect, and keep the RPC port off the public interface unless it needs to be reachable.
+- Keep JWT signing secrets and API-key secrets in the environment or a secret manager rather than in the configuration file. `[RPCJWT].HSSecretEnv` names the environment variable to read.
+- Ship RPC access logs to your log system and alert on spikes of HTTP 401, 403 and 429.
+- Track `nhb_security_insecure_binds_total` to see whether a plaintext listener was ever started.
+- The node checks its effective configuration at start-up (`checkConfiguration` in `cmd/nhb/config_check.go`) and logs each problem it finds as a `WARN`; none of these warnings stops the node, so read the start-up log.
+- The optional Prometheus listener (`NHB_METRICS_ADDR` in the node's environment; unset means no listener) serves `/metrics` without authentication and logs a warning when bound to a non-loopback address (`observability/metrics_server.go`). Bind it to loopback or a private interface.
 
-1. **Method allowlists** – Expose only the JSON-RPC and REST routes that your
-   application requires. Deny-listing is insufficient; configure the gateway to
-   reject any method not explicitly registered so fuzzing cannot surface
-   development or admin handlers.
-2. **Canonical signing** – Normalize headers (case, spacing) and payloads before
-   computing HMAC signatures. This prevents smuggling attempts where attackers
-   replay a signed payload with modified framing.
-3. **Idempotency enforcement** – Require `Idempotency-Key` headers on every
-   state-changing REST call. Persist recently used keys for at least 24 hours so
-   replayed requests are dropped before hitting business logic.
-4. **Deterministic error budgets** – Return opaque error codes to clients and
-   avoid echoing raw stack traces. Detailed diagnostics belong in structured
-   logs that never traverse the public network.
-5. **Schema validation** – Validate JSON bodies against OpenAPI/JSON Schema
-   definitions. Reject additional properties, enforce type constraints, and
-   clamp numeric ranges to stop injection attempts.
+## Verification checklist
 
-## Peer-to-Peer Controls
-
-1. **Signed handshakes** – NET-2A challenge/response prevents spoofing. Monitor
-   for repeated `Record handshake violation` messages and ban offending peers.
-2. **Nonce replay guard** – The in-memory nonce cache rejects replays within the
-   10-minute window. Do not disable this guard; adjust the window only if
-   memory pressure is measurable.
-3. **Ban scoring** – Keep `BanScore=100` and `GreyScore=50` unless running in a
-   permissioned lab. The defaults balance false positives against swift removal
-   of abusive peers.
-4. **Global throttles** – `MaxPeers=64` and `RateMsgsPerSec=50` keep aggregate
-   bandwidth bounded. If you must raise these values, scale hardware and update
-   DDoS protection policies accordingly.
-5. **Ingress filtering** – Front validators with firewalls that allow P2P
-   traffic from known peer ranges. Cloud deployments should leverage provider
-   load balancers with connection limits to absorb SYN floods before they reach
-   the node process.
-
-## DDoS Resilience
-
-- **Layer 3/4** – Use cloud provider DDoS protection (AWS Shield Advanced,
-  Cloud Armor, etc.) or on-prem appliances. Always enable connection tracking
-  and SYN cookies. Autoscale or rate limit at the edge rather than inside the
-  node binary.
-- **Layer 7** – Deploy a WAF in front of RPC/REST endpoints with rules that
-  block malformed JSON, oversized payloads, and high request rates. Tie WAF
-  alerts into the same incident response channel as validator telemetry.
-- **Graceful degradation** – Configure gateways to shed non-critical traffic
-  (public explorers, historical queries) before validator-to-validator calls.
-  During sustained attacks, operators may temporarily restrict RPC to allowlisted
-  partner IPs.
-
-## Credential Hygiene
-
-- Rotate API keys quarterly and immediately on any sign of compromise.
-- Store secrets in a hardware security module (HSM), HashiCorp Vault, or
-  another dedicated secret manager; never bake credentials into container
-  images.
-- Enable anomaly detection on authentication events—multiple failures from a
-  single IP or key should trigger automated bans via `net_ban`.
-
-## Future-Facing Improvements
-
-- **Adaptive rate limiting** – Integrate risk scoring that raises or lowers
-  per-key throughput based on behavioural history.
-- **QUIC transport** – Evaluate QUIC for RPC to add native congestion control
-  and mitigate head-of-line blocking during bursts.
-- **Hardware attestation** – Tie validator admission to TPM-backed attestation
-  (e.g., Intel SGX/DCAP, AWS Nitro) to harden against key exfiltration.
-- **Centralised revocation registry** – Publish compromised peer IDs and API
-  keys via on-chain governance so all operators can revoke access rapidly.
-
-Track these items in the security backlog and revisit after each major release.
-
-## Verification Checklist
-
-Use this list before promoting infrastructure to production or public testnet:
-
-- [ ] RPC endpoints enforce Bearer/RPCJWT auth or mutual TLS and reject
-      unauthenticated calls.
-- [ ] Rate limiting is active at the node and edge layers.
-- [ ] Gateways enforce allowlists for RPC/REST methods and reject unknown routes.
-- [ ] REST write paths require idempotency keys and drop replays for 24 hours.
-- [ ] JSON schemas validate inbound payloads and strip unexpected fields.
-- [ ] P2P logs show successful NET-2A challenges with no unresolved violations.
-- [ ] SIEM receives logs from RPC gateways, WAF, and node processes.
-- [ ] DDoS mitigation plan tested within the last quarter.
-- [ ] Emergency ban (`net_ban`) tested against a disposable peer and recovered
-      automatically.
-
-Maintain signed runbooks proving the checklist was executed; auditors and
-governance committees may request evidence during incident reviews.
+- [ ] The RPC listener has a certificate and key configured, or is loopback-only behind a TLS proxy.
+- [ ] Either `[RPCJWT] Enable = true` with a non-empty secret, or `RPCTLSClientCAFile` is set.
+- [ ] `RPCAllowInsecureUnspecified` is `false`.
+- [ ] `RPCTrustProxyHeaders`, `RPCTrustedProxies` and `[RPCProxyHeaders]` match the actual proxy in front of the node.
+- [ ] `[RPCSwapAuth].Secrets` and a persistence backend are set where the swap methods are exposed (required for `NetworkName = "mainnet"`).
+- [ ] Rate-limit values are set explicitly rather than left at defaults.
+- [ ] `[p2p]` `BanScore`, `GreyScore`, `MaxPeers` and message-rate values are the intended ones.
+- [ ] `net_ban` works against a disposable peer with a valid token.

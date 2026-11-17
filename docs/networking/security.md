@@ -1,122 +1,169 @@
 # Networking Security Notes
 
-The NET-2A handshake introduces a signed challenge to prevent spoofing and
-replay attacks while keeping the exchange lightweight.
+What the P2P layer checks, bans and logs, taken from `p2p/`. For the handshake
+frame itself see the [overview](overview.md). Broader deployment guidance is in
+[Network security playbook](../security/networking.md) and
+[Network hardening playbook](../security/network-hardening.md).
 
 ## Signed challenge
 
-For each handshake a node signs the digest:
+Each side signs
 
 ```
-digest = keccak256(
-    bigEndian(chainID) || genesisHash || nonce || remoteNodeID,
-)
+digest = keccak256( "nhb-handshake-v1"
+                    || chainID (8 bytes, big-endian)
+                    || genesisHash (raw bytes)
+                    || nonce (12 raw bytes)
+                    || ASCII bytes of the sender's canonical "0x..." nodeId )
 ```
 
-* `chainID` is encoded as an 8-byte big-endian integer.
-* `genesisHash` is the raw 32-byte hash of the canonical genesis block.
-* `nonce` is a freshly generated 32-byte random value unique to this handshake.
-* `remoteNodeID` is the sender's advertised NodeID (from the perspective of the
-  verifying peer).
+(`handshakeDigest`, `p2p/handshake.go`). The `nodeId` in the digest is the
+sender's own node ID. The signature is a 65-byte secp256k1 signature; the
+verifier recovers the public key, derives the node ID from it and compares it to
+the claimed `nodeId`. The digest does not include a timestamp or the remote
+peer's identity.
 
-Including the remote NodeID binds the signature to the identity being claimed,
-so any tampering with `nodeId` or swapping in a different identity invalidates
-`SigToPub` recovery. The random nonce ensures the signed material is unique per
-handshake, preventing replay even if the other fields remain constant.
+## Replay guard
 
-A direct translation of the digest computation is shown below:
+`nonceGuard` (`nonce_guard.go`) remembers `sha256(nodeID + ":" + canonicalNonce)`
+for every handshake nonce the server generates or receives. A nonce seen again
+within the window is rejected as a replay. The node the packet names is not
+banned for it: a handshake is not a challenge, so whoever has seen one can send
+it again, and a ban would let anybody lock that node out of its peers.
 
-```go
-func handshakeDigest(chainID uint64, genesis, nonce []byte, nodeID string) ([]byte, error) {
-        var buf [8]byte
-        binary.BigEndian.PutUint64(buf[:], chainID)
-        idBytes, err := hex.DecodeString(strings.TrimPrefix(nodeID, "0x"))
-        if err != nil {
-                return nil, err
-        }
-        payload := bytes.Join([][]byte{buf[:], genesis, nonce, idBytes}, nil)
-        return ethcrypto.Keccak256(payload), nil
-}
-```
+- Window: `handshakeReplayWindow` = 10 minutes (`p2p/handshake.go`), applied
+  as the entry lifetime; a sweep runs every minute.
+- Capacity: 100,000 entries; the oldest are evicted when full.
+- Nonces are canonicalized (Unicode NFKC, invisible format characters removed,
+  lower-cased, optional `0x` stripped, hex-decoded) before fingerprinting, so
+  differently spelled encodings of one nonce collide.
+- The guard is in memory and per process. After an entry expires or the process
+  restarts, the same signed frame is accepted again, because nothing else in the
+  digest binds it to a time or to the receiving node.
+- Metrics: `nhb_p2p_nonce_guard_size`, `nhb_p2p_nonce_guard_evicted_total`.
 
-## Replay window
+## Ban reasons and default actions
 
-`Server` maintains an in-memory nonce guard that rejects any nonce observed in
-the last ten minutes (`handshakeReplayWindow`). This guard applies to both
-locally generated and remote nonces, providing a coarse replay window until the
-full anti-replay design (NET-2G) lands. In addition to the moving window, the
-guard now stores a cryptographic fingerprint of every `(nodeID, nonce)` pair it
-has seen, so a captured handshake cannot be replayed even after the original
-window has expired.
+Ban length is `PeerBanDuration` (`[p2p] BanDurationSeconds`; 3600 in the repo
+`config.toml`, and 15 minutes if the value is 0). "Score" refers to the
+[reputation](../p2p/reputation.md) score.
 
-### Nonce guard internals
+| Event | Trigger | Action |
+| --- | --- | --- |
+| Handshake violation | Chain ID or genesis mismatch in a handshake that is signed by the node it names | Ban for `PeerBanDuration` (reputation ban plus peerstore `SetBan` and `RecordViolation`). Never applied to a configured persistent peer. |
+| Handshake refused | Signature that does not match the claimed node ID, or a replayed nonce | The connection is closed. Nothing is held against the node ID in the packet. |
+| Protocol violation | Malformed frame or payload, oversize frame, an unsolicited or oversized `PexAddresses`, a payload the node handler reports as invalid | Score -5, peer disconnected; banned if the score crosses `-BanScore`. |
+| Invalid message rate | At least 50% invalid messages among at least 5 messages within one minute (`invalidRateThresholdPerc`, `invalidRateSampleSize`, `invalidRateWindow`) | Disconnect and ban. |
+| Per-peer or per-IP rate limit | Token bucket empty (see [rate limits](../p2p/ratelimits.md)) | Score -10, disconnect; banned if the score crosses `-BanScore`. Not applied to persistent peers. |
+| Global rate cap | Aggregate bucket empty | Disconnect, no penalty. |
+| Write error | A write fails or times out | Score -5, peer disconnected. |
+| Send queue full | A peer's outbound queue has no room for a message | The message is dropped for that peer; the connection is kept and the score is unchanged. |
+| Chain-data request over budget | `GetBlocks` or `GetStatus` above the per-address or shared budget | The request is dropped; no score change, no disconnect. |
+| Operator ban | `net_ban` RPC or gRPC `BanPeer` | Ban for the requested seconds (default `PeerBanDuration`); peer disconnected. |
 
-The guard is implemented by `nonceGuard` (`p2p/nonce.go`). Each nonce is stored
-in an LRU list keyed by the raw hex string. When `Remember` is invoked:
+Score-based bans never apply to persistent peers (their score is held at or
+below 0 and no ban is set), and neither do handshake bans; operator bans do.
 
-1. Entries older than the configured window are pruned from the tail of the list
-   (default: 10 minutes).
-2. A fingerprint keyed by `nodeID||nonce` is checked against the persistent set.
-   If it already exists the handshake is rejected and logged for operator
-   visibility.
-3. Otherwise a new record `{nonce, seenAt}` is inserted at the head of the list
-   and the fingerprint is stored for future comparisons.
+Banned records are kept longer than the others when the peerstore (2,048
+records) or the reputation table (4,096 records) is full, but only while they
+make up at most a quarter of the table. Above that, the least recently seen
+banned record is dropped first, so that a large number of bans cannot push out
+the records of the peers that are not banned, and a ban can be forgotten before
+it expires.
 
-The structure is effectively bounded by the number of handshakes observed within
-the ten minute window. Even at 1,000 handshakes per minute this amounts to ~10k
-entries, easily handled in memory. Operators can reduce the window with
-`P2P.HandshakeReplayWindow` once that configuration surface lands; until then the
-default offers conservative protection without noticeable memory pressure.
+## Inbound admission
 
-In addition to nonce tracking, peers that fail handshake validation accrue
-reputation penalties and may be temporarily banned depending on the configured
-policy.
+`admitInbound` (`p2p/server.go`) runs before anything is read from a new inbound
+connection. Per remote address it allows a burst of 10 new connections and then
+one every 6 seconds, at most 4 handshakes in flight and, at registration, at most
+8 established inbound connections; across all addresses at most 64 handshakes
+may be in flight. Connections from loopback, from a host that is not an IP
+address and from the address of a configured bootnode or persistent peer are
+exempt from the per-address limits, and are never refused a handshake slot on
+account of others. The per-address limits (including the request and message
+budgets) count an IPv4 address on its own and an IPv6 address as its /64 network.
+A refused connection is closed, and a warning
+`Inbound connection refused: too many connections or handshakes` is logged at
+most once a second. Nothing is recorded about a peer before it has been
+registered, except the ban for a signed chain ID or genesis mismatch (see
+[Ban reasons](#ban-reasons-and-default-actions)).
 
-## RPC perimeter expectations
+## Requests for chain data
 
-RPC services inherit the same perimeter assumptions as the P2P layer. Operators
-must either terminate TLS directly on the node via `RPCTLSCertFile` /
-`RPCTLSKeyFile` or place a mutually authenticated proxy in front of the HTTP
-listener. When a proxy is used, declare its addresses in `RPCTrustedProxies`
-before enabling `RPCTrustProxyHeaders`; all other callers will have their
-`X-Forwarded-For` headers ignored, preventing spoofed client identities. The
-server enforces a five-transaction-per-minute quota per resolved client source
-and will return HTTP 429 with code `-32020` when exceeded, so tooling should
-surface retry-after guidance alongside the existing P2P rate-limit telemetry.
-Timeouts configured through `RPCReadHeaderTimeout`, `RPCReadTimeout`,
-`RPCWriteTimeout`, and `RPCIdleTimeout` now gate the full request lifecycle, and
-should be aligned with upstream load-balancer settings to avoid premature
-disconnects.
+A `GetBlocks` or `GetStatus` request costs the node that answers it reads and
+bandwidth. Each remote address has a budget for each (`GetBlocks`: a burst of 16
+and 4 a second; `GetStatus`: a burst of 8 and 2 a second), and one more budget is
+shared by all addresses (`GetBlocks`: a burst of 64 and 32 a second; `GetStatus`:
+a burst of 128 and 64 a second). A request over either budget is dropped and the
+peer is not disconnected or blamed for it, because an honest node can be led into
+sending many. Configured persistent peers are not limited. The answer to a
+request goes to the peer that asked, not to every peer
+(`admitRequest`, `dispatch`, `PeerMessageHandler`).
 
-## Ban reasons & operator guidance
+A node that is told a peer is ahead of it, by a status report or by a block that
+does not follow its own chain, asks its peers for blocks from the height it
+needs. However many such messages arrive, it asks for the blocks from the same
+height at most once a second, and it asks for the next batch as soon as it has
+applied the last one (`core/node.go`, `handleNetworkStatus`, `handleNetworkBlocks`).
+One answer holds at most 128 blocks or 512 KiB of encoded blocks.
 
-| Event | Trigger | Default action | Operator notes |
-| ----- | ------- | -------------- | -------------- |
-| Handshake violation | Chain/genesis mismatch, signature failure, nonce replay | Immediate ban for `PeerBanDuration` (15m default) and peerstore entry marked via `RecordViolation`. | Verify the remote `nodeId` and published chain parameters before unbanning. Persistent mismatches usually indicate misconfiguration or an attempted Sybil. |
-| Invalid message rate | >50% invalid messages within 5-frame window (`invalidRateThresholdPerc`) | Disconnect and ban if repeated; log `Protocol violation from <id>` with reason. | Inspect application logs for malformed payloads. If caused by a buggy release, roll back before whitelisting the peer. |
-| Per-peer rate limit | Message throughput exceeds configured `RateMsgsPerSec` | Disconnect, optionally ban if reputation drops below `BanScore`. | Increase per-peer rate limits only if the remote is a trusted bulk publisher. Otherwise the throttle prevents spam amplification. |
-| Global rate cap | Aggregate throughput exceeds `RateMsgsPerSec * MaxPeers` | Connection dropped (`global rate cap exceeded`) without banning. | Typically symptomatic of DDoS attempts. Raise global caps cautiously and monitor CPU load. |
-| Manual ban (`peerstore.SetBan`) | Operator action via tooling | Persisted until expiry. | Use to quarantine peers for investigative or legal reasons. Document ban rationale for future audits. |
+## Log messages
 
-All bans honour the configured `PeerBanDuration` unless overridden by the
-peerstore entry. Persistent peers are re-dialled automatically once the ban
-expires.
+Structured `slog` messages from the P2P server (peer IDs and addresses are
+masked in log output):
 
-## Security event log taxonomy
+| Message | Meaning |
+| --- | --- |
+| `Inbound connection rejected` (attrs `peer_address`, `error`) | Handshake or registration failed for an inbound connection (logged at most once a second). |
+| `Inbound connection refused: too many connections or handshakes` | `admitInbound` refused a connection before the handshake. |
+| `Dropping chain data requests from a peer over its budget` | `admitRequest` dropped a `GetBlocks` or `GetStatus` request; the peer was not blamed. |
+| `Peer send queue full; dropping messages for this peer` | A peer's outbound queue is full; messages are dropped for it and the connection is kept. |
+| `Handshake nonce replay from <id> rejected` | Printed to stdout when a replayed nonce is seen; the node is not banned. |
+| `Protocol violation` / `Protocol violation: invalid message rate` | A message failed validation (`handleProtocolViolation`). |
+| `Pruned peerstore records while loading` | The peerstore dropped expired, oversized or undecodable records at start. |
+| `Peer exceeded rate limit` | Per-peer or per-IP bucket empty. |
+| `Global rate cap exceeded` | Global bucket empty. |
+| `Ignoring generic rate-limit disconnect for configured persistent peer` | A rate limit tripped for a persistent peer and was ignored. |
+| `Peer disconnected and banned` | A peer left with `ban = true`. |
+| `Pruning peer due to connection limits` | Connection manager pruned a peer above `MaxPeers`. |
+| `Peer connected`, `Peer disconnected` | Lifecycle. |
 
-Operational logs form the primary audit trail for network policy decisions. The
-table below summarises the high-signal log messages emitted by the P2P layer:
+## RPC perimeter
 
-| Log snippet | Source | Meaning |
-| ----------- | ------ | ------- |
-| `Inbound connection from <addr> rejected: <err>` | `server.handleInbound` | Handshake failed. `err` contains specifics (chain mismatch, signature, timeout, nonce replay). |
-| `Handshake nonce replay from <id> rejected` | `verifyHandshake` | A peer attempted to reuse a signed handshake and was banned. Monitor to detect replay probes. |
-| `Protocol violation from <id>: <err> (score X)` | `handleProtocolViolation` | Peer sent malformed or unauthorized messages. Reputation adjusted accordingly. |
-| `Peer <id> exceeded rate limit (score X)` | `handleRateLimit` | Per-peer message rate exceeded allowance; connection dropped and potentially banned. |
-| `Dropping message from <id> due to global rate cap` | `handleRateLimit` (global) | The server hit its aggregate throughput budget and disconnected the peer without banning. |
-| `Peer <id> disconnected and banned: <reason>` | `removePeer` | Final disposition when a peer crosses the ban threshold. Includes the rationale recorded in reputation/peerstore. |
-| `Record handshake violation <id>: <err>` / `record handshake ban` | `markHandshakeViolation` | Persistence layer acknowledgement that the peer was banned for handshake faults. |
+The JSON-RPC server's proxy and rate-limit settings are separate from the P2P
+layer (`rpc/http.go`, keys in `config/config.go`):
 
-Collect these messages alongside RPC access logs to produce a full audit trail.
-For production deployments forward them to a SIEM or long-term log store so that
-investigations can correlate P2P events with application-level symptoms.
+- **Client address.** By default the client address is the TCP peer address. The
+  `X-Forwarded-For` and `X-Real-IP` headers are read only if the caller's address
+  is listed in `RPCTrustedProxies`. `RPCTrustProxyHeaders = true` does not widen
+  that: with an empty `RPCTrustedProxies` it trusts nobody (the server logs a
+  warning at start), so list the proxy's address (`127.0.0.1` for a proxy on the
+  same host). A request that carries one of these headers from a caller that is
+  not listed is rejected with HTTP 403 (`resolveClient`). A forwarded value that
+  is not an IP address is refused the same way, at most 5 addresses are allowed in
+  `X-Forwarded-For`, and the first one is the client. `[RPCProxyHeaders]` sets each
+  header's mode to `single` (exactly one address allowed) or `ignore` (a request
+  carrying the header is rejected). Rate limits count an IPv6 client as its /64.
+- **Rate limits.** `RPCMaxTxPerWindow`, `RPCMaxTxPerIP`, `RPCMaxTxPerIdentity`,
+  `RPCMaxTxPerChain` and `RPCMaxTxPerIdentityChain` are request quotas per
+  `RPCRateLimitWindow` seconds, tracked per client address, JWT identity and
+  caller chain nonce. When a limit is exceeded the server answers HTTP 429 with
+  code `-32020` and increments `nhb_rpc_limiter_hits_total{scope,module,route}`.
+  Only `RPCMaxTxPerWindow` has its own default, 5 when unset or not positive
+  (`config/config.go`, `Load`). When unset, `RPCMaxTxPerIP`,
+  `RPCMaxTxPerIdentity` and `RPCMaxTxPerChain` take the value of
+  `RPCMaxTxPerWindow`, and `RPCMaxTxPerIdentityChain` takes the smaller of the
+  identity and chain limits. The repo `config.toml` sets 120 per 60 seconds.
+- **Expensive public reads.** The public read methods that scan blocks or hold the
+  state lock run in a small admission pool (`RPCQuery*` keys, and
+  `RPCDisableExplorerLoop`). A refused query gets HTTP 429, code `-32020` and a
+  `Retry-After` header; one that runs out of time gets HTTP 503, code `-32021`. See
+  [Public RPC query limits](../ops/rpc-query-limits.md).
+- **Timeouts.** `RPCReadHeaderTimeout`, `RPCReadTimeout`, `RPCWriteTimeout` and
+  `RPCIdleTimeout` (seconds) are passed to the HTTP server (`cmd/nhb/main.go`);
+  the repo `config.toml` sets them to 0.
+- **TLS.** `RPCTLSCertFile` / `RPCTLSKeyFile` enable TLS; `RPCTLSClientCAFile`
+  requires client certificates. Without TLS the server needs `RPCAllowInsecure`
+  and starts only on a loopback address (an unspecified address needs
+  `RPCAllowInsecureUnspecified`), and increments
+  `nhb_security_insecure_binds_total{service,loopback}`.

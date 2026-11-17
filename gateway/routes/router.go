@@ -10,6 +10,10 @@ import (
 	"nhbchain/gateway/middleware"
 )
 
+// CompatRateLimitKey names the rate limit that applies to the /rpc
+// compatibility endpoint.
+const CompatRateLimitKey = "compat"
+
 type ServiceRoute struct {
 	Name           string
 	Prefix         string
@@ -48,7 +52,19 @@ func New(cfg Config) (http.Handler, error) {
 	})
 
 	if cfg.CompatHandler != nil {
-		r.Handle("/rpc", cfg.CompatHandler)
+		// /rpc goes through the same rate limit and the same authenticator as
+		// the routes it stands in for. It used to be mounted ahead of them, so a
+		// caller with no token could reach every service behind it; the dispatcher
+		// holds each call to its service's scopes (see compat.ScopeGuard).
+		r.Group(func(cr chi.Router) {
+			if cfg.RateLimiter != nil {
+				cr.Use(cfg.RateLimiter.Middleware(CompatRateLimitKey))
+			}
+			if cfg.Authenticator != nil {
+				cr.Use(cfg.Authenticator.Middleware())
+			}
+			cr.Handle("/rpc", cfg.CompatHandler)
+		})
 	}
 
 	for _, route := range cfg.Routes {

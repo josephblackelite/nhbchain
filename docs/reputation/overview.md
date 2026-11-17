@@ -1,33 +1,39 @@
 # Reputation service overview
 
-The reputation module introduces a minimal skill verification primitive. Verifiers attest that a subject possesses a specific capability. The current release now enforces verifier authorization within the node; calls from wallets that do not hold the `roleReputationVerifier` assignment fail before any state transition.
+The reputation module stores skill attestations: a verifier records that a subject has a named skill. Code: `native/reputation`, `Node.ReputationVerifySkill` / `ReputationRevokeSkill` in `core/node.go`, `rpc/reputation_handlers.go`.
 
-## Verification flow
+## Status: no live entry point
 
-1. A wallet with verifier privileges calls `reputation_verifySkill`.
-2. The RPC validates addresses, normalises skill strings and forwards the request to the core node.
-3. The node enforces role membership, persists the verification and emits `reputation.skillVerified`.
+A running node cannot create, read or revoke attestations:
 
-The RPC returns the canonical payload comprising the subject, verifier, skill, issuance timestamp and optional expiry.
+- `reputation_verifySkill`, the only reputation RPC method, is still routed but always answers HTTP 410 with JSON-RPC code `-32060` and a message saying the method is disabled (`handleReputationVerifySkill`, `reputationRPCDisabledMessage` in `rpc/reputation_handlers.go`; `codeMethodDisabled` in `rpc/http.go`). It performs no authentication and reads no parameters. The code comment gives the reason: the old handler wrote the attestation to the live state of the one validator that handled the call, outside block execution, and took the verifier address from the request body without proof that the caller held the verifier key.
+- There is no reputation transaction type (`core/types/txtypes_registry.go` lists none) and no `nhb-cli` command.
+- There is no RPC method to read, list or revoke attestations. `Node.ReputationRevokeSkill` exists in Go but nothing calls it.
+- `Node.ReputationVerifySkill` is kept for its tests. Its comment says it must not be exposed again, because a write made there becomes part of one validator's next proposed block only.
 
-### Error semantics
+The rest of this section and [lifecycle](lifecycle.md) describe what the in-process module does, for anyone reading or testing the code. None of it is reachable on a running node.
 
-Validation failures return `codeInvalidParams` (`-32602`) with the specific guard encoded in the `message`/`data` pair (for example `"invalid_params"` + `"invalid bech32 string"` or `"skill required"`). Calls from wallets that lack the verifier role surface `codeUnauthorized` (`-32001`) as the JSON-RPC error code, alongside a separate HTTP `403` status, while infrastructure failures fall back to `codeServerError` (`-32000`).
+## Data model
 
-### Authorization
+- `SkillVerification` (`native/reputation/types.go`): `Subject`, `Skill`, `Verifier` (20-byte addresses and a string), `IssuedAt`, `ExpiresAt` (Unix seconds; `ExpiresAt <= 0` means no expiry).
+- `Validate` requires: non-empty (trimmed) skill, non-zero subject and verifier, positive `IssuedAt`, and `ExpiresAt > IssuedAt` when `ExpiresAt` is set. Skill names compare case-insensitively (the key and the attestation ID use the lower-cased, trimmed name).
+- `Node.ReputationVerifySkill` sets `IssuedAt` to the node's current time, so an `expiresAt` must be later than that.
 
-`Node.ReputationVerifySkill` checks that the caller holds `roleReputationVerifier` and returns `ErrReputationVerifierUnauthorized` when the role is missing. The RPC layer surfaces the error as `codeUnauthorized` (`-32001`, the JSON-RPC error code — returned alongside a separate HTTP `403` status) with the canonical message and `data` payload so client SDKs can present actionable guidance. Follow the [role allow-list governance workflow](../governance/overview.md#supported-proposal-kinds) to grant or revoke verifier privileges; operators running private networks can edit the genesis role map or submit equivalent `role.allowlist` proposals during rollout.
+## In-process issuance flow
 
-### Migration considerations
+1. `Node.ReputationVerifySkill(verifier, subject, skill, expiresAt)` trims the skill (empty: "reputation: skill required"), builds the record with `IssuedAt` = node time and calls `Validate`.
+2. It checks that `verifier` holds the role `ROLE_REPUTATION_VERIFIER` (`roleReputationVerifier`, `core/node.go`). Otherwise it returns `ErrReputationVerifierUnauthorized` ("reputation: caller lacks verifier role").
+3. The record is stored and `reputation.skillVerified` is appended to the node's events. See [lifecycle](lifecycle.md).
 
-Earlier previews only emitted warnings when the caller lacked the verifier role. Integrations that relied on that soft enforcement must now ensure every attesting wallet holds `roleReputationVerifier` before submitting RPC calls. Update automated test fixtures, back-office runbooks, and multisig or KMS policies to cover the stricter requirement; failing to do so will result in `ErrReputationVerifierUnauthorized` responses and no attestation being recorded.
+The verifier address is a plain argument: nothing in this function proves the caller holds the verifier's key. The role check is the only authorization.
 
-## Responsibilities of verifiers
+## Granting the verifier role
 
-* Maintain an auditable log of evidence backing each verification.
-* Ensure expiring attestations are revisited and either renewed or revoked off-chain.
-* Coordinate with governance to define what constitutes acceptable proof for a skill category.
+The role name is `ROLE_REPUTATION_VERIFIER`. Ways to give it to an address:
+
+- The `roles` map in the genesis file (role name to list of addresses; `core/genesis/spec.go`).
+- A `role.allowlist` governance proposal ([governance overview](../governance/overview.md#proposal-kinds)). The proposal is rejected unless the role is listed in the node's `[governance] AllowedRoles`. The `AllowedRoles` list in the repository's `config.toml` does not include `ROLE_REPUTATION_VERIFIER`, and `MINTER_ZNHB` can never be granted this way (`parseRoleAllowlistPayload`, `native/governance/engine.go`).
 
 ## Disputes
 
-The module does not yet ship automated dispute tooling. Consumers should subscribe to the `reputation.skillVerified` event stream and build application-specific review workflows. When the fully stateful module lands it will include revocation semantics and anchoring into escrow dispute committees.
+There is no dispute tooling in the module.

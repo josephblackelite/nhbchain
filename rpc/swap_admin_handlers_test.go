@@ -11,6 +11,7 @@ import (
 
 	"nhbchain/core"
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/types"
 	"nhbchain/crypto"
 	swap "nhbchain/native/swap"
 
@@ -224,7 +225,7 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 		if err := ledger.Put(record); err != nil {
 			return err
 		}
-		return m.SetBalance(recipient[:], "ZNHB", new(big.Int).Set(amount))
+		return m.PutAccount(recipient[:], &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: new(big.Int).Set(amount), Stake: big.NewInt(0)})
 	}); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
@@ -275,17 +276,19 @@ func TestHandleSwapVoucherReverse(t *testing.T) {
 		if record.Status != swap.VoucherStatusReversed {
 			t.Fatalf("expected reversed status, got %s", record.Status)
 		}
-		balance, err := m.Balance(recipient[:], "ZNHB")
+		recipientAcc, err := m.GetAccount(recipient[:])
 		if err != nil {
 			return err
 		}
+		balance := recipientAcc.BalanceZNHB
 		if balance.Cmp(big.NewInt(0)) != 0 {
 			t.Fatalf("expected recipient balance 0, got %s", balance.String())
 		}
-		sinkBalance, err := m.Balance(sinkAddr[:], "ZNHB")
+		sinkAcc, err := m.GetAccount(sinkAddr[:])
 		if err != nil {
 			return err
 		}
+		sinkBalance := sinkAcc.BalanceZNHB
 		if sinkBalance.Cmp(amount) != 0 {
 			t.Fatalf("expected sink balance %s, got %s", amount.String(), sinkBalance.String())
 		}
@@ -347,7 +350,7 @@ func TestHandleSwapVoucherReverseUnauthorizedSigner(t *testing.T) {
 		if err := ledger.Put(record); err != nil {
 			return err
 		}
-		return m.SetBalance(recipient[:], "ZNHB", new(big.Int).Set(amount))
+		return m.PutAccount(recipient[:], &types.Account{BalanceNHB: big.NewInt(0), BalanceZNHB: new(big.Int).Set(amount), Stake: big.NewInt(0)})
 	}); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}

@@ -1,4 +1,10 @@
-### Start email verification (REST)
+# Identity gateway (services/identity-gateway). Every request is a POST with:
+#   X-API-Key        API key
+#   X-API-Timestamp  Unix seconds; must be within the gateway's skew window (default 5 minutes)
+#   X-API-Signature  hex HMAC-SHA256(secret, METHOD + "\n" + path + "\n" + hex(SHA-256(body)) + "\n" + timestamp)
+#   Idempotency-Key  optional
+
+### Start email verification
 POST {{GATEWAY_URL}}/identity/email/register
 Content-Type: application/json
 X-API-Key: {{API_KEY}}
@@ -11,7 +17,7 @@ Idempotency-Key: {{UUID}}
   "aliasHint": "frankrocks"
 }
 
-### Complete email verification (REST)
+### Complete email verification (the response includes a single-use bindToken)
 POST {{GATEWAY_URL}}/identity/email/verify
 Content-Type: application/json
 X-API-Key: {{API_KEY}}
@@ -21,4 +27,22 @@ X-API-Signature: {{HMAC_SIG}}
 {
   "email": "frank@example.com",
   "code": "483921"
+}
+
+### Bind the verified email to an alias
+# aliasId is the alias identifier returned by identity_resolve; aliasSignature is a signature
+# by the alias's on-chain controlling key over (aliasId, emailHash, bindToken).
+POST {{GATEWAY_URL}}/identity/alias/bind-email
+Content-Type: application/json
+X-API-Key: {{API_KEY}}
+X-API-Timestamp: {{TIMESTAMP}}
+X-API-Signature: {{HMAC_SIG}}
+
+{
+  "alias": "frankrocks",
+  "aliasId": "{{ALIAS_ID}}",
+  "email": "frank@example.com",
+  "consent": true,
+  "bindToken": "{{BIND_TOKEN}}",
+  "aliasSignature": "{{ALIAS_SIGNATURE}}"
 }

@@ -93,8 +93,8 @@ var (
 	// ErrNonceTooLow this is genuinely order-dependent -- a different
 	// attempt (later round, different candidate set) can succeed once the
 	// gap closes -- so it is classified SKIP-this-attempt, not PRUNE.
-	ErrNonceTooHigh        = errors.New("transaction nonce mismatch: not yet reached")
-	ErrInvalidChainID      = errors.New("invalid chain id")
+	ErrNonceTooHigh   = errors.New("transaction nonce mismatch: not yet reached")
+	ErrInvalidChainID = errors.New("invalid chain id")
 	// ErrTransactionExpired indicates executeTransaction rejected a
 	// transaction whose MaxBlockHeight has already passed, or whose
 	// IntentExpiry has already passed (NHB-AUDIT-R2) -- checked here,
@@ -104,12 +104,20 @@ var (
 	// never succeed later either; classifyProposalError treats it as
 	// PRUNE-safe, the same disposition ErrSwapExpired already gets for the
 	// identical reason.
-	ErrTransactionExpired = errors.New("transaction expired")
+	ErrTransactionExpired  = errors.New("transaction expired")
 	ErrTransferNHBPaused   = errors.New("nhb transfer: paused")
 	ErrTransferZNHBPaused  = errors.New("znhb transfer: paused")
 	ErrSponsorshipRejected = errors.New("transaction sponsorship rejected")
 	// ErrStakePaused indicates governance has paused staking mutations.
 	ErrStakePaused = errors.New("staking: module paused")
+	// ErrStakeBackedByPOSHold indicates StakeUndelegate refused an amount that
+	// reaches into the part of the account's LockedZNHB that pending POS
+	// authorizations hold. Delegation and POS holds draw on the same locked
+	// balance, so unbonding that part would leave a hold the payer can no longer
+	// cover. Only raised from the POS hold unstake guard's activation height
+	// (see SetPOSHoldUnstakeGuardActivationHeight); the amount becomes available
+	// again once the holds are captured, voided or expired.
+	ErrStakeBackedByPOSHold = errors.New("staking: unstake would release funds that back pending POS holds")
 	// ErrHeartbeatTooSoon indicates applyHeartbeat rejected a heartbeat
 	// transaction because not enough time has elapsed since the account's
 	// on-chain EngagementLastHeartbeat (the rate-limit check) or because
@@ -169,32 +177,35 @@ type BlockCtx struct {
 }
 
 type StateProcessor struct {
-	Trie                       *trie.Trie
-	stateDB                    *gethstate.CachingDB
-	LoyaltyEngine              *loyalty.Engine
-	EscrowEngine               *escrow.Engine
-	TradeEngine                *escrow.TradeEngine
-	pauses                     nativecommon.PauseView
-	escrowFeeTreasury          [20]byte
-	adminWallet                [20]byte
-	hasAdminWallet             bool
-	swapRefundSink             [20]byte
-	buybackConfig              buyback.Config
-	hasBuybackConfig           bool
-	buybackAccrualAddr         crypto.Address
-	subscriptionsConfig        subscriptions.Config
-	hasSubscriptionsConfig     bool
-	usernameToAddr             map[string][]byte
-	ValidatorSet               map[string]*big.Int
-	EligibleValidators         map[string]*big.Int
-	committedRoot              common.Hash
-	events                     []types.Event
-	nowFunc                    func() time.Time
-	execContext                *blockExecutionContext
-	engagementConfig           engagement.Config
-	epochConfig                epoch.Config
-	epochHistory               []epoch.Snapshot
-	rewardConfig               rewards.Config
+	Trie                   *trie.Trie
+	stateDB                *gethstate.CachingDB
+	LoyaltyEngine          *loyalty.Engine
+	EscrowEngine           *escrow.Engine
+	TradeEngine            *escrow.TradeEngine
+	pauses                 nativecommon.PauseView
+	escrowFeeTreasury      [20]byte
+	adminWallet            [20]byte
+	hasAdminWallet         bool
+	swapRefundSink         [20]byte
+	buybackConfig          buyback.Config
+	hasBuybackConfig       bool
+	buybackAccrualAddr     crypto.Address
+	subscriptionsConfig    subscriptions.Config
+	hasSubscriptionsConfig bool
+	usernameToAddr         map[string][]byte
+	ValidatorSet           map[string]*big.Int
+	EligibleValidators     map[string]*big.Int
+	committedRoot          common.Hash
+	events                 []types.Event
+	nowFunc                func() time.Time
+	execContext            *blockExecutionContext
+	engagementConfig       engagement.Config
+	epochConfig            epoch.Config
+	epochHistory           []epoch.Snapshot
+	rewardConfig           rewards.Config
+	// rewardsByStakeFromEpoch is the first epoch whose emission is paid by stake (see settleEpochRewards and distributeStakeWeighted in
+	// rewards_logic.go). 0 means never: the default, byte-identical to every earlier release. It is a consensus value, identical on every validator.
+	rewardsByStakeFromEpoch    uint64
 	rewardAccrual              *rewards.Accumulator
 	rewardHistory              []rewards.EpochSettlement
 	stakeRewardEngine          *rewards.Engine
@@ -222,9 +233,28 @@ type StateProcessor struct {
 	marketEscrowAddr           crypto.Address
 	marketFeeCollectorAddr     crypto.Address
 	govPolicy                  governance.ProposalPolicy
-	blockCtx                   BlockCtx
-	swapPayoutAuthorities      map[string]struct{}
-	swapConfig                 swap.Config
+	// govCreditPreservationActivationHeight gates PL-R1-GOVREFUND's fix to
+	// applyGovFinalizeTransaction/applyGovExecuteTransaction -- see the
+	// SetGovCreditPreservationActivationHeight doc comment (core/governance_tx.go)
+	// for the full rationale. Mirrors Node.quorumCertActivationHeight's
+	// gating shape: blocks below this height keep the original (buggy)
+	// nonce-persist behavior so already-committed history keeps replaying
+	// to the identical state root; blocks at or above it get the fix.
+	// NewStateProcessor defaults this to math.MaxUint64 (disabled -- every
+	// existing caller, including the whole test suite, keeps today's
+	// behavior unchanged unless SetGovCreditPreservationActivationHeight is
+	// called).
+	govCreditPreservationActivationHeight uint64
+	// feeRouteAliasActivationHeight is the first block height at which an NHB
+	// domain fee whose route wallet is the transfer's own sender or recipient is
+	// credited to the caller's already-loaded account (see
+	// SetFeeRouteAliasActivationHeight). The ZNHB half of that fix is not gated
+	// and applies at every height. NewStateProcessor defaults this to
+	// math.MaxUint64 (off), and the copy StateProcessor.Copy returns carries it.
+	feeRouteAliasActivationHeight uint64
+	blockCtx                      BlockCtx
+	swapPayoutAuthorities         map[string]struct{}
+	swapConfig                    swap.Config
 	// swapVoucherChainID is the genesis-derived Blockchain.ChainID() value
 	// that TxTypeSwapVoucherMint payloads' embedded VoucherV1.ChainID field
 	// must match. This is deliberately distinct from types.NHBChainID()
@@ -235,6 +265,24 @@ type StateProcessor struct {
 	// across every validator on the same chain, so comparing against it
 	// here is fully deterministic.
 	swapVoucherChainID uint64
+	// posSweepSkipActivationHeight is the first block height at which the
+	// end-of-block POS expiry sweep carries on past an expired hold its payer
+	// cannot cover instead of ending at it. Zero (the default) leaves the
+	// earlier behaviour in place at every height. It changes the state a block
+	// leaves behind, so every validator must run with the same value; see
+	// config.Config.POSSweepSkipActivationHeight.
+	posSweepSkipActivationHeight uint64
+	// posHoldUnstakeGuardFromHeight is the first block height at which
+	// StakeUndelegate refuses to unbond funds that back pending POS holds. Zero
+	// (the default) leaves the guard off. See
+	// SetPOSHoldUnstakeGuardActivationHeight.
+	posHoldUnstakeGuardFromHeight uint64
+	// lendingFixedTermIDFromHeight is the first block height at which a
+	// fixed-term loan or deposit is stored under an ID that includes its owner,
+	// and an origination whose ID already has a record is refused. Zero (the
+	// default) keeps the transaction hash as the ID at every height. See
+	// SetLendingFixedTermIDActivationHeight.
+	lendingFixedTermIDFromHeight uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -242,46 +290,48 @@ func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
 	escEngine := escrow.NewEngine()
 	tradeEngine := escrow.NewTradeEngine(escEngine)
 	sp := &StateProcessor{
-		Trie:                     tr,
-		stateDB:                  stateDB,
-		LoyaltyEngine:            loyalty.NewEngine(),
-		EscrowEngine:             escEngine,
-		TradeEngine:              tradeEngine,
-		usernameToAddr:           make(map[string][]byte),
-		ValidatorSet:             make(map[string]*big.Int),
-		EligibleValidators:       make(map[string]*big.Int),
-		committedRoot:            tr.Root(),
-		events:                   make([]types.Event, 0),
-		nowFunc:                  time.Now,
-		execContext:              nil,
-		engagementConfig:         engagement.DefaultConfig(),
-		epochConfig:              epoch.DefaultConfig(),
-		epochHistory:             make([]epoch.Snapshot, 0),
-		rewardConfig:             rewards.DefaultConfig(),
-		rewardHistory:            make([]rewards.EpochSettlement, 0),
-		stakeRewardEngine:        rewards.NewEngine(),
-		stakeRewardAPR:           0,
-		potsoRewardConfig:        potso.DefaultRewardConfig(),
-		potsoWeightConfig:        potso.DefaultWeightParams(),
-		paymasterEnabled:         true,
-		paymasterLimits:          PaymasterLimits{},
-		paymasterTopUp:           PaymasterAutoTopUpPolicy{Token: "ZNHB"},
-		quotaConfig:              make(map[string]nativecommon.Quota),
-		intentTTL:                defaultIntentTTL,
-		feePolicy:                fees.Policy{Domains: map[string]fees.DomainPolicy{}},
-		transferGasPolicy:        TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
-		lendingParams:            lending.RiskParameters{},
-		lendingModuleAddr:        deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix),
-		lendingCollateralAddr:    deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix),
-		lendingInterestModel:     lending.DefaultInterestModel.Clone(),
-		lendingReserveFactorBps:  0,
-		lendingProtocolFeeBps:    0,
-		lendingCollateralRouting: lending.CollateralRouting{},
-		marketEscrowAddr:         deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
-		marketFeeCollectorAddr:   deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
-		blockCtx:                 BlockCtx{},
-		swapPayoutAuthorities:    make(map[string]struct{}),
-		swapConfig:               swap.Config{},
+		Trie:                                  tr,
+		stateDB:                               stateDB,
+		LoyaltyEngine:                         loyalty.NewEngine(),
+		EscrowEngine:                          escEngine,
+		TradeEngine:                           tradeEngine,
+		usernameToAddr:                        make(map[string][]byte),
+		ValidatorSet:                          make(map[string]*big.Int),
+		EligibleValidators:                    make(map[string]*big.Int),
+		committedRoot:                         tr.Root(),
+		events:                                make([]types.Event, 0),
+		nowFunc:                               time.Now,
+		execContext:                           nil,
+		engagementConfig:                      engagement.DefaultConfig(),
+		epochConfig:                           epoch.DefaultConfig(),
+		epochHistory:                          make([]epoch.Snapshot, 0),
+		rewardConfig:                          rewards.DefaultConfig(),
+		rewardHistory:                         make([]rewards.EpochSettlement, 0),
+		stakeRewardEngine:                     rewards.NewEngine(),
+		stakeRewardAPR:                        0,
+		potsoRewardConfig:                     potso.DefaultRewardConfig(),
+		potsoWeightConfig:                     potso.DefaultWeightParams(),
+		paymasterEnabled:                      true,
+		paymasterLimits:                       PaymasterLimits{},
+		paymasterTopUp:                        PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
+		quotaConfig:                           make(map[string]nativecommon.Quota),
+		intentTTL:                             defaultIntentTTL,
+		feePolicy:                             fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		transferGasPolicy:                     TransferGasPolicy{FreeSpendLimitWei: big.NewInt(0), Window: TransferGasWindowLifetime},
+		lendingParams:                         lending.RiskParameters{},
+		lendingModuleAddr:                     deriveModuleAddress("module/lending/treasury", crypto.NHBPrefix),
+		lendingCollateralAddr:                 deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix),
+		lendingInterestModel:                  lending.DefaultInterestModel.Clone(),
+		lendingReserveFactorBps:               0,
+		lendingProtocolFeeBps:                 0,
+		lendingCollateralRouting:              lending.CollateralRouting{},
+		marketEscrowAddr:                      deriveModuleAddress("module/market/escrow", crypto.ZNHBPrefix),
+		marketFeeCollectorAddr:                deriveModuleAddress("module/market/feeCollector", crypto.NHBPrefix),
+		govCreditPreservationActivationHeight: math.MaxUint64,
+		feeRouteAliasActivationHeight:         math.MaxUint64,
+		blockCtx:                              BlockCtx{},
+		swapPayoutAuthorities:                 make(map[string]struct{}),
+		swapConfig:                            swap.Config{},
 	}
 	sp.SetSwapPayoutAuthorities(nil)
 	if err := sp.loadUsernameIndex(); err != nil {
@@ -562,9 +612,35 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 				ownerShare = new(big.Int).Sub(routed, buybackShare)
 			}
 		}
-		routeAcc, err := sp.getAccount(result.OwnerWallet[:])
-		if err != nil {
-			return err
+		// The transfer's own sender/recipient accounts (fromAcc/toAcc) are
+		// still unpersisted objects in the caller -- applyTransferZNHB and the
+		// NHB transfer path each write them back only after this function
+		// returns. So when the domain-fee route wallet IS the sender or the
+		// recipient of this same transfer, the credit below must land on that
+		// same object, not on a separately loaded copy: a separate copy would
+		// hold the pre-transfer balance and be silently overwritten by the
+		// caller's later write, destroying the fee. The ZNHB half of this has
+		// been in force at every height since before PL-R1-FEEROUTE; the NHB
+		// half changes the state root of any past NHB transfer whose route
+		// wallet was its own sender or recipient, so it is gated by
+		// sp.feeRouteAliasActivationHeight -- see
+		// SetFeeRouteAliasActivationHeight's doc comment. Below that height an
+		// NHB fee falls through to sp.getAccount below, exactly as it always
+		// has.
+		var routeAcc *types.Account
+		if result.Asset == fees.AssetZNHB || sp.blockHeight() >= sp.feeRouteAliasActivationHeight {
+			switch {
+			case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
+				routeAcc = fromAcc
+			case toAcc != nil && bytes.Equal(result.OwnerWallet[:], tx.To):
+				routeAcc = toAcc
+			}
+		}
+		if routeAcc == nil {
+			routeAcc, err = sp.getAccount(result.OwnerWallet[:])
+			if err != nil {
+				return err
+			}
 		}
 		switch result.Asset {
 		case fees.AssetNHB:
@@ -1812,6 +1888,14 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 	if len(pending) == 0 {
 		return
 	}
+	// Payouts below come out of the loyalty treasury, which the live config
+	// points at the admin/treasury wallet, and can land on it when it is the
+	// spender. Book the net movement into the Reward Pool on every exit path,
+	// in this same state transition. Not a transaction, so a shortfall is
+	// drawn from the Sale Pool rather than failing the block.
+	if before, err := sp.captureTreasuryPoolPosition(); err == nil && before != nil {
+		defer func() { _ = sp.bookTreasuryPoolMovement(before, true) }()
+	}
 	if now.IsZero() {
 		now = sp.blockTimestamp()
 	}
@@ -1911,6 +1995,14 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 		var recipient [20]byte
 		copy(recipient[:], reward.Recipient[:])
 		account, ok := updates[recipient]
+		if !ok && recipient == treasuryAddr {
+			// The spender is the treasury itself: pay it on the treasury's own
+			// loaded object. A second copy of the same address would be
+			// persisted after the debit and overwrite it, minting the payout.
+			account = treasuryAcc
+			updates[recipient] = account
+			ok = true
+		}
 		if !ok {
 			acct, err := sp.getAccount(recipient[:])
 			if err != nil {
@@ -1983,8 +2075,58 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 	sp.blockCtx.PendingRewards.ClearPendingRewards()
 }
 
+// posSweepSkipLogInterval spaces the warning about expired holds the sweep had
+// to leave pending: a hold that stays unreleasable would otherwise be reported
+// again on every block.
+const posSweepSkipLogInterval = 100
+
+// SetPOSSweepSkipActivationHeight sets the first block height at which the
+// POS expiry sweep carries on past an expired hold the payer's locked balance
+// no longer covers (see SweepExpiredPOSAuthorizations). Zero, the default,
+// keeps the earlier behaviour at every height. The value changes the state a
+// block leaves behind, so it must be the same on every validator and must only
+// be changed with all of them restarted together.
+func (sp *StateProcessor) SetPOSSweepSkipActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.posSweepSkipActivationHeight = height
+}
+
+// SetFeeRouteAliasActivationHeight sets the first block height at which
+// applyTransactionFee credits an NHB domain fee to the caller's already-loaded
+// sender or recipient account when the fee's route wallet is that account,
+// instead of to a separately loaded copy that the caller's own later write
+// overwrites (ledger PL-R1-FEEROUTE). Below the height the NHB fee is credited
+// to the separate copy, exactly as in every earlier release; the same fix for
+// ZNHB is not gated and applies at every height. The two behaviours leave
+// different state, so the value must be the same on every validator and is
+// changed only with all of them restarted together, to a height above the chain
+// tip. math.MaxUint64, the default, leaves the fix off.
+func (sp *StateProcessor) SetFeeRouteAliasActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.feeRouteAliasActivationHeight = height
+}
+
+// posSweepSkipActive reports whether the block being applied is at or past the
+// activation height. Outside a block (no execution context, height 0) it is
+// never active.
+func (sp *StateProcessor) posSweepSkipActive() bool {
+	if sp == nil || sp.posSweepSkipActivationHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.posSweepSkipActivationHeight
+}
+
 // SweepExpiredPOSAuthorizations voids pending POS authorizations that have
 // crossed their expiry timestamp and returns the number of records affected.
+// Before the activation height (POSSweepSkipActivationHeight, off by default)
+// the sweep ends at the first expired hold the payer's locked balance no longer
+// covers, with an error, and the records queued behind it stay pending. From
+// the activation height that hold stays pending and is logged, and it does not
+// stop the holds queued behind it from being released.
 func (sp *StateProcessor) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
 	if sp == nil {
 		return 0, fmt.Errorf("state processor unavailable")
@@ -1999,9 +2141,18 @@ func (sp *StateProcessor) SweepExpiredPOSAuthorizations(now time.Time) (int, err
 	lifecycle := pos.NewLifecycle(manager)
 	lifecycle.SetEmitter(stateProcessorEmitter{sp: sp})
 	lifecycle.SetNowFunc(func() time.Time { return now.UTC() })
+	lifecycle.SetSweepSkipsUnreleasable(sp.posSweepSkipActive())
 	expired, err := lifecycle.SweepExpired(now)
 	if err != nil {
-		return 0, err
+		if !errors.Is(err, pos.ErrSweepSkipped) {
+			return 0, err
+		}
+		if height := sp.blockHeight(); height%posSweepSkipLogInterval == 0 {
+			slog.Warn("pos: expired authorizations left pending because the payer's locked balance is below the hold",
+				slog.Uint64("height", height),
+				slog.String("detail", err.Error()),
+			)
+		}
 	}
 	count := len(expired)
 	if count == 0 {
@@ -2099,6 +2250,21 @@ func (sp *StateProcessor) SetRewardConfig(cfg rewards.Config) error {
 	sp.rewardAccrual = nil
 	sp.pruneRewardHistory()
 	return sp.persistRewardHistory()
+}
+
+// SetRewardsByStakeFromEpoch sets the first epoch whose emission is paid by stake to the wallets that locked it, instead of equally per validator and by
+// engagement score to the validator's own account. 0 (the default) means never. Every validator must carry the same value before the epoch it names.
+func (sp *StateProcessor) SetRewardsByStakeFromEpoch(epoch uint64) {
+	sp.rewardsByStakeFromEpoch = epoch
+}
+
+// RewardsByStakeFromEpoch returns the epoch set by SetRewardsByStakeFromEpoch (0 = never).
+func (sp *StateProcessor) RewardsByStakeFromEpoch() uint64 {
+	return sp.rewardsByStakeFromEpoch
+}
+
+func (sp *StateProcessor) rewardsByStakeActive(epochNumber uint64) bool {
+	return sp.rewardsByStakeFromEpoch > 0 && epochNumber >= sp.rewardsByStakeFromEpoch
 }
 
 // PotsoRewardConfig returns the current POTSO reward configuration snapshot.
@@ -2336,19 +2502,10 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		treasuryAcc.BalanceZNHB = big.NewInt(0)
 	}
 	treasuryBalance := new(big.Int).Set(treasuryAcc.BalanceZNHB)
-	// Budget is derived from emission alone, deliberately uncapped by the
-	// treasury's current balance. Capping it here used to make the
-	// shortfall check below structurally unreachable, since totalPaid could
-	// never exceed an already-capped budget -- the actual payout attempt is
-	// what must discover a real shortfall. Unlike PotsoRewardClaim in
-	// core/node.go (and the legacy-accrued and index-based staking reward
-	// mints above), which hard-fail with potso.ErrInsufficientTreasury
-	// because they run from a discretionary, retryable user transaction,
-	// this function runs unconditionally from ProcessBlockLifecycle on every
-	// block: a shortfall here cannot hard-fail without halting the whole
-	// chain, so it is detected the same way and then degraded gracefully
-	// instead -- see the shortfall handling below.
 	budget := new(big.Int).Set(emission)
+	if treasuryBalance.Cmp(budget) < 0 {
+		budget = new(big.Int).Set(treasuryBalance)
+	}
 
 	weightCfg := sp.potsoWeightConfig
 	weightCfg.AlphaStakeBps = cfg.AlphaStakeBps
@@ -2379,179 +2536,100 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 
 	payoutMode := cfg.EffectivePayoutMode()
 	totalPaid := new(big.Int).Set(outcome.TotalPaid)
-
-	// A treasury shortfall must be detected BEFORE any payout/claim/debit
-	// state is written for this epoch (unlike the old ordering, which called
-	// PotsoRewardsSetPayout for the full, unaffordable amount first and only
-	// then checked). processPotsoRewardEpoch is invoked unconditionally on
-	// every block from core/epochs.go's ProcessBlockLifecycle -- not from a
-	// discretionary, skippable transaction. Unlike the ApplyTransaction loop
-	// in core/node.go's CreateBlock, which has classifyProposalError to
-	// skip/prune a single bad transaction and keep building the block, a
-	// ProcessBlockLifecycle error has no such disposition: every caller
-	// (core/node.go's CreateBlock and both CommitBlock paths) treats it as an
-	// unconditional whole-block abort. Returning potso.ErrInsufficientTreasury
-	// here would therefore halt the chain, and since maybeProcessPotsoRewards
-	// only marks an epoch processed AFTER this function returns successfully,
-	// the shortfall -- a routine operational condition, e.g. emission
-	// configured richer than the treasury, or the treasury drawn down by
-	// ordinary claims -- would be retried identically on every subsequent
-	// block, forever, by every validator. Instead, the shortfall is surfaced
-	// (logged, emitted as an event, and recorded in the persisted epoch
-	// meta's Shortfall flag for monitoring) and this epoch's payout is
-	// degraded to zero: no winners, no claims, no treasury debit. The caller
-	// still marks the epoch processed, so it is never retried. Every input
-	// to this decision (treasuryBalance, outcome.TotalPaid) is derived
-	// purely from on-chain state and this epoch's own deterministic inputs,
-	// so every validator -- proposer building the block or peer validating
-	// it -- independently computes the identical shortfall verdict and the
-	// identical (zero) payout for this epoch.
-	shortfall := totalPaid.Sign() > 0 && treasuryBalance.Cmp(totalPaid) < 0
-	if shortfall {
-		required := new(big.Int).Set(totalPaid)
-		available := new(big.Int).Set(treasuryBalance)
-		slog.Error("potso: reward epoch underfunded, payout skipped",
-			slog.Uint64("epoch", epochNumber),
-			slog.String("required", required.String()),
-			slog.String("available", available.String()),
-			slog.String("emission", emission.String()),
-		)
-		if evt := (events.PotsoRewardShortfall{
-			Epoch:     epochNumber,
-			Required:  required,
-			Available: available,
-			Budget:    new(big.Int).Set(outcome.Budget),
-			Emission:  new(big.Int).Set(emission),
-		}).Event(); evt != nil {
-			sp.AppendEvent(evt)
+	for _, winner := range outcome.Winners {
+		if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
+			return err
 		}
-		winnersAddrs = winnersAddrs[:0]
-		totalPaid = big.NewInt(0)
-	} else {
+	}
+	if totalPaid.Sign() > 0 && treasuryBalance.Cmp(totalPaid) < 0 {
+		return potso.ErrInsufficientTreasury
+	}
+	switch payoutMode {
+	case potso.RewardPayoutModeClaim:
 		for _, winner := range outcome.Winners {
-			if err := manager.PotsoRewardsSetPayout(epochNumber, winner.Address, winner.Amount); err != nil {
+			claim := &potso.RewardClaim{
+				Amount:    new(big.Int).Set(winner.Amount),
+				Claimed:   false,
+				ClaimedAt: 0,
+				Mode:      potso.RewardPayoutModeClaim,
+			}
+			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
 				return err
 			}
+			if winner.Amount.Sign() > 0 {
+				if evt := (events.PotsoRewardReady{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeClaim}).Event(); evt != nil {
+					sp.AppendEvent(evt)
+				}
+			}
 		}
-		switch payoutMode {
-		case potso.RewardPayoutModeClaim:
-			// Reserve/debit the full claim-mode obligation from the treasury's
-			// spendable balance NOW, at the moment the obligation is created,
-			// the same way the auto-payout branch below already debits
-			// immediately. The treasury balance read at the top of this
-			// function is a fresh, undebited read every epoch -- without this
-			// debit, successive claim-mode epochs would each size their budget
-			// against the same unreserved balance, promising more in claimable
-			// rewards across epochs than the treasury can actually pay out once
-			// claims are settled. The matching credit happens exactly once,
-			// later, in core/node.go's PotsoRewardClaim when the winner actually
-			// claims -- that path must never debit the treasury again, or this
-			// amount is double-spent.
-			if totalPaid.Sign() > 0 {
-				treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
-				if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
-					return err
-				}
-				// See the identical guard in the auto-payout branch below: when
-				// the reward treasury is the same wallet CheckZNHBSupplyInvariant
-				// tracks, debiting its balance without shrinking the pool label
-				// it backs mints ZNHB from nothing in the invariant's eyes. No
-				// self/external split is needed here (unlike the auto branch) --
-				// in claim mode nobody is credited yet, not even a winner who is
-				// the admin wallet itself, so the full amount leaves the tracked
-				// balance; PotsoRewardClaim adds the matching positive
-				// adjustment back when a self-winning admin wallet later claims.
-				if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
-					if err := sp.adjustRewardPoolForAdminZNHBMovement(new(big.Int).Neg(totalPaid)); err != nil {
-						return err
-					}
-				}
+	default:
+		if totalPaid.Sign() > 0 {
+			treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
+			if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
+				return err
 			}
-			for _, winner := range outcome.Winners {
-				claim := &potso.RewardClaim{
-					Amount:    new(big.Int).Set(winner.Amount),
-					Claimed:   false,
-					ClaimedAt: 0,
-					Mode:      potso.RewardPayoutModeClaim,
-				}
-				if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
-					return err
-				}
-				if winner.Amount.Sign() > 0 {
-					if evt := (events.PotsoRewardReady{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeClaim}).Event(); evt != nil {
-						sp.AppendEvent(evt)
+			// POTSO's reward treasury commonly points at the same
+			// admin/treasury wallet the ZNHB Reward Pool ledger backs (see
+			// CheckZNHBSupplyInvariant). Debiting that wallet's balance
+			// above without also shrinking the pool label it backs mints
+			// ZNHB from nothing in the invariant's eyes -- mirrors the
+			// identical fix already applied to settleEpochRewards for the
+			// halving-schedule payout path.
+			if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
+				selfPaid := big.NewInt(0)
+				for _, winner := range outcome.Winners {
+					if bytes.Equal(winner.Address[:], sp.adminWallet[:]) {
+						selfPaid.Add(selfPaid, winner.Amount)
 					}
 				}
-			}
-		default:
-			if totalPaid.Sign() > 0 {
-				treasuryAcc.BalanceZNHB = new(big.Int).Sub(treasuryAcc.BalanceZNHB, totalPaid)
-				if err := manager.PutAccount(cfg.TreasuryAddress[:], treasuryAcc); err != nil {
-					return err
-				}
-				// POTSO's reward treasury commonly points at the same
-				// admin/treasury wallet the ZNHB Reward Pool ledger backs (see
-				// CheckZNHBSupplyInvariant). Debiting that wallet's balance
-				// above without also shrinking the pool label it backs mints
-				// ZNHB from nothing in the invariant's eyes -- mirrors the
-				// identical fix already applied to settleEpochRewards for the
-				// halving-schedule payout path.
-				if sp.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], sp.adminWallet[:]) {
-					selfPaid := big.NewInt(0)
-					for _, winner := range outcome.Winners {
-						if bytes.Equal(winner.Address[:], sp.adminWallet[:]) {
-							selfPaid.Add(selfPaid, winner.Amount)
-						}
-					}
-					externalPaid := new(big.Int).Sub(totalPaid, selfPaid)
-					if externalPaid.Sign() > 0 {
-						rewardPool, err := manager.ZNHBRewardPoolBalance()
-						if err != nil {
-							return err
-						}
-						newRewardPool := new(big.Int).Sub(rewardPool, externalPaid)
-						if newRewardPool.Sign() < 0 {
-							// Unreachable in practice (the pool dwarfs any single
-							// POTSO epoch's emission), but never let the ledger
-							// go negative regardless of formula/rounding edges.
-							newRewardPool = big.NewInt(0)
-						}
-						if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
-							return err
-						}
-					}
-				}
-			}
-			for _, winner := range outcome.Winners {
-				if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
-					account, err := manager.GetAccount(winner.Address[:])
+				externalPaid := new(big.Int).Sub(totalPaid, selfPaid)
+				if externalPaid.Sign() > 0 {
+					rewardPool, err := manager.ZNHBRewardPoolBalance()
 					if err != nil {
 						return err
 					}
-					if account.BalanceZNHB == nil {
-						account.BalanceZNHB = big.NewInt(0)
+					newRewardPool := new(big.Int).Sub(rewardPool, externalPaid)
+					if newRewardPool.Sign() < 0 {
+						// Unreachable in practice (the pool dwarfs any single
+						// POTSO epoch's emission), but never let the ledger
+						// go negative regardless of formula/rounding edges.
+						newRewardPool = big.NewInt(0)
 					}
-					account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
-					if err := manager.PutAccount(winner.Address[:], account); err != nil {
+					if err := manager.ZNHBSetRewardPoolBalance(newRewardPool); err != nil {
 						return err
 					}
 				}
-				claim := &potso.RewardClaim{
-					Amount:    new(big.Int).Set(winner.Amount),
-					Claimed:   winner.Amount.Sign() <= 0 || totalPaid.Sign() > 0,
-					ClaimedAt: uint64(settledAt),
-					Mode:      potso.RewardPayoutModeAuto,
-				}
-				if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+			}
+		}
+		for _, winner := range outcome.Winners {
+			if totalPaid.Sign() > 0 && winner.Amount.Sign() > 0 {
+				account, err := manager.GetAccount(winner.Address[:])
+				if err != nil {
 					return err
 				}
-				if winner.Amount.Sign() > 0 && totalPaid.Sign() > 0 {
-					if err := manager.PotsoRewardsAppendHistory(winner.Address, potso.RewardHistoryEntry{Epoch: epochNumber, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}); err != nil {
-						return err
-					}
-					if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}).Event(); evt != nil {
-						sp.AppendEvent(evt)
-					}
+				if account.BalanceZNHB == nil {
+					account.BalanceZNHB = big.NewInt(0)
+				}
+				account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, winner.Amount)
+				if err := manager.PutAccount(winner.Address[:], account); err != nil {
+					return err
+				}
+			}
+			claim := &potso.RewardClaim{
+				Amount:    new(big.Int).Set(winner.Amount),
+				Claimed:   winner.Amount.Sign() <= 0 || totalPaid.Sign() > 0,
+				ClaimedAt: uint64(settledAt),
+				Mode:      potso.RewardPayoutModeAuto,
+			}
+			if err := manager.PotsoRewardsSetClaim(epochNumber, winner.Address, claim); err != nil {
+				return err
+			}
+			if winner.Amount.Sign() > 0 && totalPaid.Sign() > 0 {
+				if err := manager.PotsoRewardsAppendHistory(winner.Address, potso.RewardHistoryEntry{Epoch: epochNumber, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}); err != nil {
+					return err
+				}
+				if evt := (events.PotsoRewardPaid{Epoch: epochNumber, Address: winner.Address, Amount: new(big.Int).Set(winner.Amount), Mode: potso.RewardPayoutModeAuto}).Event(); evt != nil {
+					sp.AppendEvent(evt)
 				}
 			}
 		}
@@ -2570,16 +2648,6 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		engagementTotal = new(big.Int).SetUint64(outcome.WeightSnapshot.TotalEngagement)
 	}
 
-	// remainder/winners reflect the ACTUAL outcome of this epoch -- totalPaid
-	// and winnersAddrs, both already degraded to zero above when a treasury
-	// shortfall was detected -- not outcome's pre-degradation figures, so a
-	// shortfall epoch's persisted meta and event honestly show nothing was
-	// paid rather than the unaffordable amount potso.ComputeRewards proposed.
-	remainder := new(big.Int).Sub(outcome.Budget, totalPaid)
-	if remainder.Sign() < 0 {
-		remainder = big.NewInt(0)
-	}
-
 	meta := &potso.RewardEpochMeta{
 		Epoch:           epochNumber,
 		Day:             snapshot.Day,
@@ -2588,10 +2656,9 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		AlphaBps:        cfg.AlphaStakeBps,
 		Emission:        new(big.Int).Set(emission),
 		Budget:          new(big.Int).Set(outcome.Budget),
-		TotalPaid:       new(big.Int).Set(totalPaid),
-		Remainder:       remainder,
-		Winners:         uint64(len(winnersAddrs)),
-		Shortfall:       shortfall,
+		TotalPaid:       new(big.Int).Set(outcome.TotalPaid),
+		Remainder:       new(big.Int).Set(outcome.Remainder),
+		Winners:         uint64(len(outcome.Winners)),
 	}
 	if err := manager.PotsoRewardsSetMeta(epochNumber, meta); err != nil {
 		return err
@@ -2599,11 +2666,11 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 
 	if evt := (events.PotsoRewardEpoch{
 		Epoch:     epochNumber,
-		TotalPaid: new(big.Int).Set(totalPaid),
-		Winners:   uint64(len(winnersAddrs)),
+		TotalPaid: new(big.Int).Set(outcome.TotalPaid),
+		Winners:   uint64(len(outcome.Winners)),
 		Emission:  new(big.Int).Set(emission),
 		Budget:    new(big.Int).Set(outcome.Budget),
-		Remainder: new(big.Int).Set(remainder),
+		Remainder: new(big.Int).Set(outcome.Remainder),
 	}).Event(); evt != nil {
 		sp.AppendEvent(evt)
 	}
@@ -2763,6 +2830,7 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		epochConfig:                sp.epochConfig,
 		epochHistory:               historyCopy,
 		rewardConfig:               sp.rewardConfig.Clone(),
+		rewardsByStakeFromEpoch:    sp.rewardsByStakeFromEpoch,
 		rewardAccrual:              cloneRewardAccumulator(sp.rewardAccrual),
 		rewardHistory:              rewardHistoryCopy,
 		stakeRewardEngine:          clonedEngine,
@@ -2801,6 +2869,16 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		subscriptionsConfig:        sp.subscriptionsConfig,
 		hasSubscriptionsConfig:     sp.hasSubscriptionsConfig,
 		govPolicy:                  cloneGovernancePolicy(sp.govPolicy),
+
+		posSweepSkipActivationHeight:  sp.posSweepSkipActivationHeight,
+		posHoldUnstakeGuardFromHeight: sp.posHoldUnstakeGuardFromHeight,
+		lendingFixedTermIDFromHeight:  sp.lendingFixedTermIDFromHeight,
+
+		// A field left out of this literal is zero on the copy, which for these
+		// two (the default is math.MaxUint64, off) would switch the fix on from
+		// height 0 on every copy a block is built, validated or committed on.
+		govCreditPreservationActivationHeight: sp.govCreditPreservationActivationHeight,
+		feeRouteAliasActivationHeight:         sp.feeRouteAliasActivationHeight,
 	}, nil
 }
 
@@ -2895,8 +2973,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		err           error
 	)
 	if tx.Type != types.TxTypeMint && tx.Type != types.TxTypeSwapVoucherMint && tx.Type != types.TxTypeBuybackRefPrice && tx.Type != types.TxTypeLendingRefPrice &&
-		tx.Type != types.TxTypeSwapVoucherReverse && tx.Type != types.TxTypeSwapMarkReconciled && tx.Type != types.TxTypeSubmitEvidence &&
-		tx.Type != types.TxTypeLendingWithdrawProtocolFees && tx.Type != types.TxTypeLendingWithdrawDeveloperFees {
+		tx.Type != types.TxTypeSwapVoucherReverse && tx.Type != types.TxTypeSwapMarkReconciled {
 		sender, senderAccount, err = sp.validateSenderAccount(tx)
 		if err != nil {
 			return nil, err
@@ -2904,6 +2981,19 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 	}
 	start := len(sp.events)
 	var result *SimulationResult
+	// Captured before the handler runs and booked after it succeeds, both
+	// inside this same state transition: CheckZNHBSupplyInvariant only runs
+	// once per block, after every transaction, so a transaction that moved
+	// the admin/treasury wallet's ZNHB without the pool sub-ledgers following
+	// would poison block building with no single transaction to blame. See
+	// treasuryZNHBFlowTracked.
+	var treasuryBefore *treasuryPoolPosition
+	if treasuryZNHBFlowTracked(tx.Type) {
+		treasuryBefore, err = sp.captureTreasuryPoolPosition()
+		if err != nil {
+			return nil, err
+		}
+	}
 	switch tx.Type {
 	case types.TxTypeMint:
 		err = sp.applyMintTransaction(tx)
@@ -2918,13 +3008,7 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		err = sp.applySwapMarkReconciledTransaction(tx)
 		result = &SimulationResult{}
 	case types.TxTypeSubmitEvidence:
-		err = sp.applySubmitEvidenceTransaction(tx)
-		result = &SimulationResult{}
-	case types.TxTypeLendingWithdrawProtocolFees:
-		err = sp.applyLendingWithdrawProtocolFeesTransaction(tx)
-		result = &SimulationResult{}
-	case types.TxTypeLendingWithdrawDeveloperFees:
-		err = sp.applyLendingWithdrawDeveloperFeesTransaction(tx)
+		err = sp.applySubmitEvidenceTransaction(tx, sender)
 		result = &SimulationResult{}
 	case types.TxTypeBuybackRefPrice:
 		err = sp.applyBuybackRefPrice(tx)
@@ -2956,7 +3040,17 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		result = &SimulationResult{}
 	}
 	if err != nil {
-		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) {
+		// A rejection that is itself reported by an event keeps that event: the
+		// two transfer pauses, a refused sponsorship and a paused staking
+		// module (the stake.paused event StakeDelegate and its siblings emit
+		// before they refuse the request).
+		if len(sp.events) > start && !errors.Is(err, ErrTransferZNHBPaused) && !errors.Is(err, ErrTransferNHBPaused) && !errors.Is(err, ErrSponsorshipRejected) && !errors.Is(err, ErrStakePaused) {
+			sp.events = sp.events[:start]
+		}
+		return nil, err
+	}
+	if err := sp.bookTreasuryPoolMovement(treasuryBefore, false); err != nil {
+		if len(sp.events) > start {
 			sp.events = sp.events[:start]
 		}
 		return nil, err
@@ -3191,9 +3285,22 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			return nil, err
 		}
 		if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
-			sponsorAcc, err := sp.getAccount(tx.Paymaster)
-			if err != nil {
-				return nil, err
+			// The sender and the recipient are persisted below, after this block,
+			// from the objects loaded above. A sponsor that is one of them must
+			// therefore be that very object: a second copy loaded from state
+			// would be overwritten by the later write and the sponsor's debit
+			// would vanish, creating the fee out of nothing.
+			var sponsorAcc *types.Account
+			switch {
+			case bytes.Equal(tx.Paymaster, from):
+				sponsorAcc = fromAcc
+			case bytes.Equal(tx.Paymaster, tx.To):
+				sponsorAcc = recipientAccount
+			default:
+				sponsorAcc, err = sp.getAccount(tx.Paymaster)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if sponsorAcc.BalanceNHB == nil {
 				sponsorAcc.BalanceNHB = big.NewInt(0)
@@ -3202,32 +3309,26 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 				return nil, fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, SponsorshipStatusInsufficientBalance, "paymaster balance below required gas budget")
 			}
 			sponsorAcc.BalanceNHB.Sub(sponsorAcc.BalanceNHB, gasCost)
-			// Always credit the fee somewhere when gasCost was actually
-			// debited from the sponsor above, regardless of
-			// transferGasPolicy.Enabled -- mirroring the self-pay credit
-			// fix a few lines below in this same function (and
-			// applyZNHBTransfer's unconditional `gasCost.Sign() > 0`
-			// credit). Enabled only gates the free-tier eligibility check
-			// (see freeTransferGas above); it must never gate whether an
-			// already-debited fee lands somewhere, or the fee is silently
-			// destroyed whenever Enabled is false but FeeBps > 0
-			// (docs/issue30.md item 7b / audit PL-DC-08, sponsored-path
-			// variant). This previously read `transferGasPolicy.Enabled &&
-			// bytes.Equal(...)` / `else if transferGasPolicy.Enabled`, which
-			// let the unconditional debit above run while both matching
-			// credit branches fired only when Enabled --
-			// buildTransferGasPolicyFromConfig forces Enabled=false
-			// whenever TransferFreeTierSpendWei<=0 independently of
-			// FeeBps, so that config combination burned every sponsored
-			// NHB transfer fee instead of collecting it.
-			if gasCost.Sign() > 0 {
-				if bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]) {
+			if transferGasPolicy.Enabled {
+				// The fee collector is subject to the same rule as the sponsor:
+				// when it is the sender or the recipient the credit goes to the
+				// object persisted below, not to a copy that write overwrites.
+				switch {
+				case bytes.Equal(tx.Paymaster, transferGasPolicy.FeeCollector[:]):
 					sponsorAcc.BalanceNHB.Add(sponsorAcc.BalanceNHB, gasCost)
-				} else if err := sp.routeTransferGasFee(gasCost); err != nil {
-					return nil, err
+				case bytes.Equal(transferGasPolicy.FeeCollector[:], from):
+					fromAcc.BalanceNHB.Add(fromAcc.BalanceNHB, gasCost)
+				case !selfTransfer && bytes.Equal(transferGasPolicy.FeeCollector[:], tx.To):
+					recipientAccount.BalanceNHB.Add(recipientAccount.BalanceNHB, gasCost)
+				default:
+					if err := sp.routeTransferGasFee(gasCost); err != nil {
+						return nil, err
+					}
 				}
 			}
-			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc)
+			// The sender and the recipient are written after this call from the
+			// objects loaded above, so the top-up may not touch their accounts.
+			mutation, err := sp.maybeAutoTopUpPaymaster(sponsorshipCtx.sponsor, tx.Paymaster, sponsorAcc, from, tx.To)
 			if err != nil {
 				return nil, err
 			}
@@ -3351,7 +3452,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			ctx.TxHash = txHash
 		}
 		if sp.LoyaltyEngine != nil {
-			sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+			sp.LoyaltyEngine.OnTransactionSuccess(loyaltyRewardState{sp}, ctx)
 		}
 
 		// Use result simulation mimicking EVM successful consumption
@@ -3405,10 +3506,10 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 	}
 
 	msg := gethcore.Message{
-		From:          fromAddr,
-		To:            toAddrPtr,
-		Nonce:         tx.Nonce,
-		Value:         originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
+		From:  fromAddr,
+		To:    toAddrPtr,
+		Nonce: tx.Nonce,
+		Value: originalValue, // tx.Value, unmodified -- the dynamic global routing tax this
 		// comment used to describe was removed from execution; getGlobalFeeRate is hardcoded to 0.
 		GasLimit:      tx.GasLimit,
 		GasPrice:      tx.GasPrice,
@@ -3581,7 +3682,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		if txHashReady {
 			ctx.TxHash = txHash
 		}
-		sp.LoyaltyEngine.OnTransactionSuccess(sp, ctx)
+		sp.LoyaltyEngine.OnTransactionSuccess(loyaltyRewardState{sp}, ctx)
 	}
 
 	if err := sp.setAccount(from, fromAcc); err != nil {
@@ -3777,10 +3878,21 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 			return nil, fmt.Errorf("znhb transfer: load reward pool balance: %w", err)
 		}
 		newRewardPoolBalance := new(big.Int).Sub(rewardPoolBalance, amount)
+		if newRewardPoolBalance.Sign() < 0 {
+			return nil, fmt.Errorf("znhb transfer: %w: sends %s, reward pool holds %s", ErrTreasuryRewardPoolInsufficient, amount, rewardPoolBalance)
+		}
 		if err := manager.ZNHBSetRewardPoolBalance(newRewardPoolBalance); err != nil {
 			return nil, fmt.Errorf("znhb transfer: update reward pool balance: %w", err)
 		}
 	}
+	// The two blocks above cover the admin wallet as fee collector and as
+	// sender. Every other way this transfer can move the wallet's ZNHB -- it
+	// is the recipient (a plain transfer straight to the public treasury
+	// address used to break CheckZNHBSupplyInvariant on the very next block),
+	// the sender paying the fee to a different collector, or the recipient of
+	// the domain fee routed by applyTransactionFee -- is booked into the
+	// Reward Pool by executeTransaction (see treasuryZNHBFlowTracked), in this
+	// same state transition.
 	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
 		return nil, err
 	}
@@ -4891,7 +5003,10 @@ func (sp *StateProcessor) applyCreateLoyaltyBusiness(tx *types.Transaction, send
 // applyLoyaltySetPaymaster handles TxTypeLoyaltySetPaymaster.
 // native/loyalty/registry.go's SetPaymaster performs the caller ==
 // business.Owner || RoleLoyaltyAdmin authorization check internally, so no
-// manual pre-check is needed here.
+// manual pre-check is needed here. It also refuses an owner naming any
+// wallet but its own (loyalty.ErrPaymasterConsentRequired): rewards are paid
+// out of the paymaster's balance and the named wallet never signs this
+// transaction.
 func (sp *StateProcessor) applyLoyaltySetPaymaster(tx *types.Transaction, sender []byte, senderAccount *types.Account) error {
 	var payload struct {
 		BusinessID string `json:"businessId"`
@@ -5305,10 +5420,40 @@ func (sp *StateProcessor) applySwapPayoutReceipt(tx *types.Transaction) error {
 		return err
 	}
 	store := swap.NewStableStore(manager)
+	// From the activation height the store stamps settlement and inventory
+	// times from the block, as every other swap engine does, so all validators
+	// record the same values, and the attestor's nonce is consumed below.
+	// Before it (and always while the setting is zero) the store keeps its
+	// default host clock and the nonce is left alone, exactly as in the build
+	// that committed the earlier blocks.
+	blockRules := sp.payoutReceiptBlockRulesActive()
+	if blockRules {
+		store.SetClock(func() time.Time { return sp.blockTimestamp() })
+	}
 	if err := store.RecordPayoutReceipt(receipt); err != nil {
 		return fmt.Errorf("swap: record payout receipt: %w", err)
 	}
+	if blockRules {
+		// Consume the attestor's nonce, as applyAttestRedemption does, so the
+		// same signed receipt cannot be applied twice.
+		if err := sp.incrementNativeAccountNonce(sender); err != nil {
+			return fmt.Errorf("swap: increment nonce: %w", err)
+		}
+	}
 	return nil
+}
+
+// payoutReceiptBlockRulesActive reports whether the block being executed is at
+// or past swap.Config.PayoutReceiptActivationHeight. It is false while the
+// setting is zero and outside a block context, so only a block that carries its
+// own height can switch the rule on, and every validator executing that block
+// with the same setting reaches the same answer.
+func (sp *StateProcessor) payoutReceiptBlockRulesActive() bool {
+	if sp == nil || sp.execContext == nil {
+		return false
+	}
+	from := sp.swapConfig.PayoutReceiptActivationHeight
+	return from != 0 && sp.execContext.height >= from
 }
 
 func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt, error) {
@@ -5340,7 +5485,7 @@ func swapPayoutReceiptFromProto(msg *swapv1.PayoutReceipt) (*swap.PayoutReceipt,
 	return receipt, nil
 }
 
-func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *types.Account, releaseToBuyer bool) error {
+func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, senderAccount *types.Account, releaseToBuyer bool) error {
 	_ = releaseToBuyer
 	var payload struct {
 		EscrowID   string   `json:"escrowId"`
@@ -5388,7 +5533,11 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, _ []byte, _ *typ
 	if err := sp.EscrowEngine.ResolveWithSignatures(id, []byte(payload.Decision), sigs); err != nil {
 		return err
 	}
-	return nil
+	// The sender only relays the arbitrators' signed decision, but it still
+	// owns this transaction's nonce: every sibling escrow handler advances it
+	// on success, and without this the relayer's next transaction would carry
+	// the nonce this one just used.
+	return sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1)
 }
 
 // applySwapMint and applySwapBurn are deliberately disabled -- see
@@ -5416,9 +5565,8 @@ func (sp *StateProcessor) applySwapBurn(tx *types.Transaction, sender []byte, se
 // applySwapVoucherMintTransaction) that move ZNHB out of the Sale Pool, and
 // it is strictly one-directional through THIS function -- there is
 // deliberately no corresponding path that lets a buyer convert ZNHB back
-// into NHB through the admin wallet, since that would let unbacked value
-// leave the system disguised as NHB (which is otherwise always backed 1:1
-// by NOWPayments-custodied USDT/USDC). ZNHB, once purchased, moves
+// into NHB through the admin wallet, since that would let value leave the
+// system disguised as NHB. ZNHB, once purchased, moves
 // peer-to-peer (ordinary TxTypeTransferZNHB) or back into the treasury only
 // via the formulaic buyback -- never through this function.
 //
@@ -5620,24 +5768,6 @@ const RoleEscrowRealmAdmin = "ROLE_ESCROW_REALM_ADMIN"
 // registry-internal checks and this dispatch-layer-only check uniformly.
 const RoleLoyaltyAdmin = "ROLE_LOYALTY_ADMIN"
 
-// RoleLendingProtocolAdmin gates TxTypeLendingWithdrawProtocolFees
-// (core/lending_fee_withdraw_tx.go), authorizing withdrawal of the lending
-// module's accrued protocol fee share (native/lending's
-// Engine.WithdrawProtocolFees) to an admin-designated recipient. Checked
-// against the transaction's own embedded-signature recovered signer, not
-// tx.From() -- senderless like TxTypeSwapVoucherReverse/
-// TxTypeSwapMarkReconciled, for the same reason RoleSwapAdmin is (see its own
-// doc comment above): the authorizing operator key is not necessarily this
-// node's own. Granted the same way RoleSwapAdmin is, via genesis or
-// governance roles.
-//
-// Deliberately a distinct role from developer-fee withdrawal's authority
-// (TxTypeLendingWithdrawDeveloperFees checks the target pool's own
-// Market.DeveloperOwner instead, not this role): protocol fees are a
-// chain-wide treasury concern with no single pool to scope a check to, while
-// developer-fee entitlement already belongs to one specific address per pool.
-const RoleLendingProtocolAdmin = "ROLE_LENDING_PROTOCOL_ADMIN"
-
 // applyRedeemNHB lets a user burn their own NHB to request an off-chain
 // stablecoin payout (swap-out). Per the founder's explicit design, the burn
 // is immediate and irreversible the moment this transaction applies -- NHB
@@ -5718,8 +5848,8 @@ func (sp *StateProcessor) applyRedeemNHB(tx *types.Transaction, sender []byte, s
 	}
 
 	// Burn: reduce the sender's balance, credit nothing. Only NHB is ever
-	// destroyed this way -- NOWPayments handles the actual off-chain
-	// release, there is no on-chain path back from a stablecoin to NHB.
+	// destroyed this way -- an external settlement service handles the actual
+	// off-chain release, there is no on-chain path back to NHB.
 	senderAccount.BalanceNHB = new(big.Int).Sub(senderAccount.BalanceNHB, tx.Value)
 	senderAccount.Nonce++
 	if err := sp.setAccount(sender, senderAccount); err != nil {
@@ -6056,6 +6186,69 @@ func (sp *StateProcessor) StakeDelegate(delegator, validator []byte, amount *big
 	return delegatorAcc, nil
 }
 
+// SetPOSHoldUnstakeGuardActivationHeight sets the first block height from which
+// StakeUndelegate refuses to unbond ZNHB that backs pending POS holds. Zero, the
+// default, leaves the guard off and the unstake rules exactly as they were.
+//
+// This is a chain rule: it makes unstakes fail that used to succeed. Every
+// validator must run with the same value, chosen above the chain tip and above
+// the height at which each validator has restarted with it; validators that
+// disagree on it disagree on any block that carries a refused unstake. The value
+// comes from node configuration, not from chain state.
+func (sp *StateProcessor) SetPOSHoldUnstakeGuardActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.posHoldUnstakeGuardFromHeight = height
+}
+
+// posHoldUnstakeGuardActive reports whether the block being applied is at or
+// above the guard's activation height. Outside block execution there is no
+// height (blockHeight reports 0), so the guard is off there.
+func (sp *StateProcessor) posHoldUnstakeGuardActive() bool {
+	if sp == nil || sp.posHoldUnstakeGuardFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.posHoldUnstakeGuardFromHeight
+}
+
+// SetLendingFixedTermIDActivationHeight sets the first block height from which a
+// fixed-term loan or deposit is stored under lendingFixedTermRecordID (the
+// owner's address folded into the transaction hash) instead of under the
+// transaction hash alone, and from which an origination whose ID already has a
+// record is refused (ledger PL-R5T-02). Zero, the default, keeps the transaction
+// hash as the ID at every height.
+//
+// The transaction hash covers no sender, so two accounts that sign field-identical
+// transactions (same nonce, amount, tenure and gas fields) share one hash. Under
+// the hash-only ID the second origination overwrites the first record while both
+// moves of cash and both pool totals stand, so one borrower's obligation is
+// erased while they keep the principal, or a depositor's principal is taken with
+// no record to claim it.
+//
+// This is a chain rule: it changes the key a record is written under, so every
+// validator must run with the same value, chosen above the chain tip, with all of
+// them restarted together. The value comes from node configuration, not from
+// chain state. Records written before the height keep the ID they were written
+// under; every lookup is by an ID that was stored (the active-loan index, the due
+// buckets), never recomputed from a transaction hash.
+func (sp *StateProcessor) SetLendingFixedTermIDActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingFixedTermIDFromHeight = height
+}
+
+// lendingFixedTermIDActive reports whether the block being applied is at or past
+// the activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingFixedTermIDActive() bool {
+	if sp == nil || sp.lendingFixedTermIDFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingFixedTermIDFromHeight
+}
+
 func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*types.StakeUnbond, error) {
 	if len(delegator) == 0 {
 		return nil, fmt.Errorf("delegator address required")
@@ -6083,6 +6276,24 @@ func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*t
 	}
 	if len(delegatorAcc.DelegatedValidator) == 0 {
 		return nil, fmt.Errorf("no active delegation")
+	}
+	if sp.posHoldUnstakeGuardActive() {
+		// LockedZNHB is shared with POS holds: Authorize adds a hold to it and
+		// capture, void and expiry take it back out. Only the part above the
+		// pending holds is delegated stake, so only that part may be unbonded.
+		// Taking more would debit the validator for funds that were never
+		// delegated and leave a hold its payer cannot cover. When the holds
+		// already exceed the locked balance nothing is unbonded until they clear
+		// or the payer delegates more.
+		var payer [20]byte
+		copy(payer[:], delegator)
+		held, err := pos.NewLifecycle(nhbstate.NewManager(sp.Trie)).PendingHeld(payer)
+		if err != nil {
+			return nil, err
+		}
+		if new(big.Int).Sub(delegatorAcc.LockedZNHB, held).Cmp(amount) < 0 {
+			return nil, ErrStakeBackedByPOSHold
+		}
 	}
 
 	validator := append([]byte(nil), delegatorAcc.DelegatedValidator...)
@@ -6248,17 +6459,17 @@ func (sp *StateProcessor) StakeClaim(delegator []byte, unbondID uint64) (*types.
 		return nil, err
 	}
 
-	delegatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, delegator)
-	validatorAddr := crypto.MustNewAddress(crypto.NHBPrefix, entry.Validator)
-	sp.AppendEvent(&types.Event{
-		Type: "stake.claimed",
-		Attributes: map[string]string{
-			"delegator":   delegatorAddr.String(),
-			"validator":   validatorAddr.String(),
-			"amount":      entry.Amount.String(),
-			"unbondingId": strconv.FormatUint(entry.ID, 10),
-		},
-	})
+	// Not "stake.claimed": that name belongs to the legacy alias of the
+	// rewards claim event (events.TypeStakeRewardsClaimedLegacy), which carries
+	// different attributes.
+	if evt := (events.StakeUnbondClaimed{
+		Delegator:   bytesToAddress(delegator),
+		Validator:   bytesToAddress(entry.Validator),
+		Amount:      entry.Amount,
+		UnbondingID: entry.ID,
+	}).Event(); evt != nil {
+		sp.AppendEvent(evt)
+	}
 
 	return &entry, nil
 }
@@ -6589,7 +6800,7 @@ func (sp *StateProcessor) stakingPayoutPeriodSeconds(manager *nhbstate.Manager) 
 			return 0, fmt.Errorf("staking rewards: load payout period: %w", err)
 		}
 		if ok {
-			trimmed := strings.TrimSpace(string(raw))
+			trimmed := nativecommon.ParamDecimal(raw)
 			if trimmed != "" {
 				value, parseErr := strconv.ParseUint(trimmed, 10, 64)
 				if parseErr != nil {
@@ -6624,7 +6835,7 @@ func (sp *StateProcessor) stakingUnbondingPeriod(manager *nhbstate.Manager) (tim
 			return 0, fmt.Errorf("staking: load unbonding period: %w", err)
 		}
 		if ok {
-			trimmed := strings.TrimSpace(string(raw))
+			trimmed := nativecommon.ParamDecimal(raw)
 			if trimmed != "" {
 				days, parseErr := strconv.ParseUint(trimmed, 10, 64)
 				if parseErr != nil {
@@ -7170,18 +7381,10 @@ func (sp *StateProcessor) minimumValidatorStake() (*big.Int, error) {
 	if err := rlp.DecodeBytes(raw, &stored); err != nil {
 		return nil, err
 	}
-	trimmed := strings.TrimSpace(string(stored))
-	if trimmed == "" {
-		return governance.DefaultMinimumValidatorStake(), nil
-	}
-	parsed, success := new(big.Int).SetString(trimmed, 10)
-	if !success {
-		return nil, fmt.Errorf("minimum validator stake must be a base-10 integer")
-	}
-	if parsed.Sign() <= 0 {
-		return nil, fmt.Errorf("minimum validator stake must be positive")
-	}
-	return parsed, nil
+	// The stored value is whatever the proposal wrote (bare or quoted number);
+	// a value that cannot be used degrades to the default instead of failing
+	// every account write -- see MinimumValidatorStakeFromParam.
+	return governance.MinimumValidatorStakeFromParam(stored), nil
 }
 
 // --- Helpers ---
@@ -8239,6 +8442,44 @@ func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error 
 	return sp.setAccount(addr, account)
 }
 
+// loyaltyRewardState is the state view handed to the loyalty engine when it
+// pays a transaction reward. It behaves exactly like the StateProcessor except
+// that persisting the admin/treasury wallet's account also moves the Reward
+// Pool by the same amount of ZNHB (see adjustRewardPoolForAdminZNHBMovement),
+// so a program reward funded by, or paid to, that wallet cannot break
+// CheckZNHBSupplyInvariant. The adjustment is made before the account is
+// written, so a pool that cannot cover it rejects the write and leaves both
+// untouched.
+type loyaltyRewardState struct {
+	*StateProcessor
+}
+
+func (s loyaltyRewardState) PutAccount(addr []byte, account *types.Account) error {
+	sp := s.StateProcessor
+	if sp.hasAdminWallet && bytes.Equal(addr, sp.adminWallet[:]) && account != nil {
+		manager := nhbstate.NewManager(sp.Trie)
+		bootstrapped, err := manager.ZNHBPoolsBootstrapped()
+		if err != nil {
+			return fmt.Errorf("znhb: check pool bootstrap flag: %w", err)
+		}
+		if bootstrapped {
+			stored, err := sp.getAccount(addr)
+			if err != nil {
+				return err
+			}
+			govEscrow, err := manager.GovernanceEscrowBalance(addr)
+			if err != nil {
+				return fmt.Errorf("znhb: load admin governance escrow balance: %w", err)
+			}
+			delta := new(big.Int).Sub(adminZNHBOwned(account, govEscrow), adminZNHBOwned(stored, govEscrow))
+			if err := sp.adjustRewardPoolForAdminZNHBMovement(delta); err != nil {
+				return err
+			}
+		}
+	}
+	return sp.setAccount(addr, account)
+}
+
 func bytesToAddress(b []byte) [20]byte {
 	var addr [20]byte
 	copy(addr[:], b)
@@ -8340,7 +8581,9 @@ func (sp *StateProcessor) convertLegacyEscrow(id [32]byte, legacy *escrow.Legacy
 	default:
 		status = escrow.EscrowFunded
 	}
-	now := sp.now().UTC()
+	// The migration result is persisted, so it is stamped from the block
+	// timestamp rather than the wall clock.
+	now := sp.blockTimestamp().UTC()
 	created := now.Unix()
 	deadline := now.Add(30 * 24 * time.Hour).Unix()
 	if deadline < created {
@@ -8411,7 +8654,7 @@ func (sp *StateProcessor) stakingMaxEmissionPerYear(manager *nhbstate.Manager) (
 	if !ok {
 		return big.NewInt(0), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
+	trimmed := nativecommon.ParamDecimal(raw)
 	if trimmed == "" {
 		return big.NewInt(0), nil
 	}
@@ -8451,7 +8694,7 @@ func (sp *StateProcessor) mintMaxEmissionPerYear(manager *nhbstate.Manager, toke
 	if !ok {
 		return big.NewInt(0), nil
 	}
-	trimmed := strings.TrimSpace(string(raw))
+	trimmed := nativecommon.ParamDecimal(raw)
 	if trimmed == "" {
 		return big.NewInt(0), nil
 	}
@@ -8736,13 +8979,16 @@ func (sp *StateProcessor) configureTradeEngine() (*escrow.TradeEngine, *nhbstate
 	sp.EscrowEngine.SetState(manager)
 	sp.EscrowEngine.SetEmitter(stateProcessorEmitter{sp: sp})
 	sp.EscrowEngine.SetFeeTreasury(sp.escrowFeeTreasury)
-	sp.EscrowEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
+	// Deterministic block timestamp, never the wall clock: CreatedAt/UpdatedAt
+	// and the deadline checks are persisted into consensus state, so every
+	// validator (and any later replay) must derive the identical value.
+	sp.EscrowEngine.SetNowFunc(func() int64 { return sp.blockTimestamp().Unix() })
 	if sp.TradeEngine == nil {
 		sp.TradeEngine = escrow.NewTradeEngine(sp.EscrowEngine)
 	}
 	sp.TradeEngine.SetState(manager)
 	sp.TradeEngine.SetEmitter(stateProcessorEmitter{sp: sp})
-	sp.TradeEngine.SetNowFunc(func() int64 { return sp.now().Unix() })
+	sp.TradeEngine.SetNowFunc(func() int64 { return sp.blockTimestamp().Unix() })
 	return sp.TradeEngine, manager
 }
 

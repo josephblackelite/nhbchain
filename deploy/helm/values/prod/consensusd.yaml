@@ -27,13 +27,14 @@ config:
     # listener on loopback and publish ports with a Service/Ingress or mesh.
     RPCAddress = "127.0.0.1:8081"
     DataDir = "/var/lib/nhb/consensus"
-    GenesisFile = "/var/lib/nhb/genesis.json"
+    # A byte-for-byte copy of config/genesis.relaunch.json, the live network's genesis.
+    GenesisFile = "/var/lib/nhb/genesis.relaunch.json"
     AllowAutogenesis = false
     NetworkName = "nhb-mainnet"
     [mempool]
     MaxTransactions = 20000
     [p2p]
-    NetworkId = 387001
+    NetworkId = 18346390202490284624
     MaxPeers = 96
     MaxInbound = 64
     MaxOutbound = 32

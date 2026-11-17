@@ -1,18 +1,37 @@
-ListenAddress = ":6001"
-RPCAddress = ":8080"
+# Production template. Every key in this file is one the node reads
+# (config/config.go); scripts/verify_prod_config.sh checks it and CI runs that
+# check on this file. Before use:
+#   - install a byte-for-byte copy of config/genesis.relaunch.json at
+#     GenesisFile: its hash is the chain id, so it must never be edited;
+#   - set ListenAddress to this host's interface address (the check rejects
+#     wildcard binds; 192.0.2.10 is a documentation address and cannot bind);
+#   - provide the validator key in the environment variable named by
+#     ValidatorKMSEnv;
+#   - make the consensus-relevant sections ([governance], [potso.*],
+#     [global.*], ...) identical to the other validators' config.toml.
+ListenAddress = "192.0.2.10:6001"
+RPCAddress = "127.0.0.1:8080"
 DataDir = "/var/lib/nhb"
-GenesisFile = "/etc/nhb/genesis.json"
+GenesisFile = "/etc/nhb/genesis.relaunch.json"
 AllowAutogenesis = false
-ValidatorKeystorePath = "/etc/nhb/validator.keys"
-ValidatorKMSURI = "kms://validator"
-ValidatorKMSEnv = "prod"
+ValidatorKeystorePath = ""
+ValidatorKMSURI = ""
+ValidatorKMSEnv = "NHB_VALIDATOR_RAW_KEY"
 NetworkName = "nhb-mainnet"
+
+# The node terminates TLS for the RPC and requires client certificates. These
+# keys must stay above the first table header: below one they belong to that
+# table and the node never reads them.
+RPCAllowInsecure = false
+RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
+RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
+RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
 
 [mempool]
 MaxTransactions = 5000
 
 [p2p]
-NetworkId = 14699254016670310680
+NetworkId = 18346390202490284624
 MaxPeers = 64
 MaxInbound = 60
 MaxOutbound = 30
@@ -48,11 +67,6 @@ ServerCAFile = "/etc/nhb/tls/p2pd-ca.pem"
 AllowedClientCommonNames = ["consensusd"]
 ServerName = "p2pd.internal"
 
-RPCAllowInsecure = false
-RPCTLSCertFile = "/etc/nhb/rpc/rpc.crt"
-RPCTLSKeyFile = "/etc/nhb/rpc/rpc.key"
-RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
-
 [RPCSwapAuth]
 # Secrets = { partner = "shared-secret" }
 # AllowedTimestampSkewSeconds = 120
@@ -69,30 +83,36 @@ RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
 MaxEmissionPerYearWei = "5000000000000000000"
 
 [global.Pauses]
-Consensus = false
-Mempool = false
+Lending = false
+Swap = false
+Escrow = false
+Trade = false
+Loyalty = false
+POTSO = false
+TransferNHB = false
+TransferZNHB = false
 Staking = false
+Subscriptions = false
+SwapRedeem = false
+Market = false
 
-# owner_wallet below MUST be filled in with a real treasury address before
-# using this file to bootstrap a node. It used to be silently ignored (a
-# config-loading bug meant every [global.X] section always fell back to the
-# Go-hardcoded default regardless of what was written here) -- now that
-# that bug is fixed, an empty owner_wallet applies literally as empty,
-# not as a safe fallback.
+# The wallets and rates below are the ones config.toml carries. Key names must
+# match the loader's exactly: it ignores a misspelled key (owner_wallet, for
+# one) and applies the default instead.
 [global.Fees]
-free_tier_tx_per_month = 100
-mdr_basis_points = 150
-owner_wallet = ""
+FreeTierTxPerMonth = 100
+MDRBasisPoints = 150
+OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
 
 [[global.Fees.Assets]]
-asset = "NHB"
-mdr_basis_points = 150
-owner_wallet = ""
+Asset = "NHB"
+MDRBasisPoints = 150
+OwnerWallet = "nhb10lephh6ffd79cc7lk6edc6rkxe9ha8xekt0y8h"
 
 [[global.Fees.Assets]]
-asset = "ZNHB"
-mdr_basis_points = 150
-owner_wallet = ""
+Asset = "ZNHB"
+MDRBasisPoints = 200
+OwnerWallet = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
 
 [global.Loyalty.Dynamic]
 targetbps = 50
@@ -119,7 +139,7 @@ EpochLengthBlocks = 120
 AlphaStakeBps = 7000
 MinPayoutWei = "1000000000000000"
 EmissionPerEpoch = "1000000000000000000"
-TreasuryAddress = ""
+TreasuryAddress = "znhb10lephh6ffd79cc7lk6edc6rkxe9ha8xemef0ak"
 MaxWinnersPerEpoch = 5000
 CarryRemainder = true
 PayoutMode = "auto"

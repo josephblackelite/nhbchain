@@ -140,9 +140,18 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 	}
 
 	rewardMap := make(map[string]*accountReward)
-	validatorPaid := distributeValidatorRewards(validatorsPlan, snapshot.Selected, rewardMap)
-	stakerPaid := sp.distributeStakerRewards(stakersPlan, snapshot.Weights, rewardMap)
-	engagementPaid := distributeEngagementRewards(engagementPlan, snapshot.Weights, rewardMap)
+	var validatorPaid, stakerPaid, engagementPaid *big.Int
+	if sp.rewardsByStakeActive(snapshot.Epoch) {
+		// Paid by investment: the validators' and the engagement pool follow stake exactly like the stakers' pool already does, and every pool reaches the
+		// wallets that locked the stake (not the validator's own account, whose key lives on a server). See distributeStakeWeighted.
+		validatorPaid = sp.distributeStakeWeighted(validatorsPlan, snapshot, false, addValidatorReward, rewardMap)
+		stakerPaid = sp.distributeStakerRewards(stakersPlan, snapshot.Weights, rewardMap)
+		engagementPaid = sp.distributeStakeWeighted(engagementPlan, snapshot, true, addEngagementReward, rewardMap)
+	} else {
+		validatorPaid = distributeValidatorRewards(validatorsPlan, snapshot.Selected, rewardMap)
+		stakerPaid = sp.distributeStakerRewards(stakersPlan, snapshot.Weights, rewardMap)
+		engagementPaid = distributeEngagementRewards(engagementPlan, snapshot.Weights, rewardMap)
+	}
 
 	paidTotal := big.NewInt(0)
 	paidTotal.Add(paidTotal, validatorPaid)
@@ -405,28 +414,34 @@ func (sp *StateProcessor) distributeStakerRewards(total *big.Int, weights []epoc
 // -- whenever there's no indexed delegator or a lookup fails, so this is a
 // byte-identical no-op for every validator nobody has ever delegated to.
 func (sp *StateProcessor) splitStakerReward(manager *nhbstate.Manager, validatorAddr []byte, amount *big.Int, rewardMap map[string]*accountReward) {
+	sp.splitStakeShare(manager, validatorAddr, amount, rewardMap, addStakerReward)
+}
+
+// splitStakeShare is splitStakerReward with the reward category chosen by the caller (add is addStakerReward, addValidatorReward or addEngagementReward). With
+// addStakerReward it is exactly the function it was extracted from.
+func (sp *StateProcessor) splitStakeShare(manager *nhbstate.Manager, validatorAddr []byte, amount *big.Int, rewardMap map[string]*accountReward, add func(map[string]*accountReward, []byte, *big.Int)) {
 	if amount == nil || amount.Sign() == 0 {
 		return
 	}
 	if len(validatorAddr) != 20 {
-		addStakerReward(rewardMap, validatorAddr, amount)
+		add(rewardMap, validatorAddr, amount)
 		return
 	}
 	var validatorKey [20]byte
 	copy(validatorKey[:], validatorAddr)
 	delegators, err := manager.StakeValidatorDelegators(validatorKey)
 	if err != nil || len(delegators) == 0 {
-		addStakerReward(rewardMap, validatorAddr, amount)
+		add(rewardMap, validatorAddr, amount)
 		return
 	}
 	delegatedIn, err := manager.StakeValidatorDelegatedInTotal(validatorKey)
 	if err != nil {
-		addStakerReward(rewardMap, validatorAddr, amount)
+		add(rewardMap, validatorAddr, amount)
 		return
 	}
 	validatorAcc, err := sp.getAccount(validatorAddr)
 	if err != nil {
-		addStakerReward(rewardMap, validatorAddr, amount)
+		add(rewardMap, validatorAddr, amount)
 		return
 	}
 	validatorBasis := big.NewInt(0)
@@ -449,7 +464,7 @@ func (sp *StateProcessor) splitStakerReward(manager *nhbstate.Manager, validator
 		subWeights = append(subWeights, epoch.Weight{Address: delegatorAddr, Stake: new(big.Int).Set(delegatorAcc.LockedZNHB)})
 	}
 	if len(subWeights) == 0 {
-		addStakerReward(rewardMap, validatorAddr, amount)
+		add(rewardMap, validatorAddr, amount)
 		return
 	}
 	distributeProRata(amount, subWeights, func(w epoch.Weight) *big.Int {
@@ -458,7 +473,51 @@ func (sp *StateProcessor) splitStakerReward(manager *nhbstate.Manager, validator
 		}
 		return w.Stake
 	}, func(addr []byte, share *big.Int) {
-		addStakerReward(rewardMap, addr, share)
+		add(rewardMap, addr, share)
+	})
+}
+
+// distributeStakeWeighted pays total to the validators of this epoch in proportion to their stake, then hands each validator's share to the wallets that
+// hold that stake (its delegators by their locked ZNHB, and the validator's own account only for the part it staked itself), with the reward category
+// chosen by add. It is how the validators' and the engagement pool are paid from the epoch named by SetRewardsByStakeFromEpoch on; before that they are paid
+// equally per validator (distributeValidatorRewards) and by engagement score (distributeEngagementRewards), to the validator's own account.
+//
+// Why: the equal split rewards the NUMBER of validators and not the stake behind them, so a stranger could multiply their pay by splitting 10,000 ZNHB per
+// validator, and every validator's pay landed on the key that lives on its server. Paid by stake, splitting earns nothing extra, and a validator that is
+// only delegated to (the install script's path) receives nothing on its own account: everything goes to the delegating wallets.
+//
+// Only validators in the epoch's selected set count. requireEngagement drops a validator whose engagement score is 0 (the engagement pool pays only a
+// validator that is taking part), as the score-weighted split did. Validators are visited in the snapshot's own sorted order, so the result is the same on
+// every node.
+func (sp *StateProcessor) distributeStakeWeighted(total *big.Int, snapshot epoch.Snapshot, requireEngagement bool, add func(map[string]*accountReward, []byte, *big.Int), rewardMap map[string]*accountReward) *big.Int {
+	if total == nil || total.Sign() == 0 {
+		return big.NewInt(0)
+	}
+	selected := make(map[string]struct{}, len(snapshot.Selected))
+	for _, addr := range snapshot.Selected {
+		if len(addr) == 0 {
+			continue
+		}
+		selected[string(addr)] = struct{}{}
+	}
+	weights := make([]epoch.Weight, 0, len(snapshot.Weights))
+	for _, w := range snapshot.Weights {
+		if _, ok := selected[string(w.Address)]; !ok {
+			continue
+		}
+		if requireEngagement && w.Engagement == 0 {
+			continue
+		}
+		weights = append(weights, w)
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	return distributeProRata(total, weights, func(w epoch.Weight) *big.Int {
+		if w.Stake == nil {
+			return big.NewInt(0)
+		}
+		return w.Stake
+	}, func(addr []byte, amount *big.Int) {
+		sp.splitStakeShare(manager, addr, amount, rewardMap, add)
 	})
 }
 

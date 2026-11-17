@@ -181,6 +181,11 @@ func TestSettleLendingAutoDebitsCollectsInterestAndRoutesToPool(t *testing.T) {
 	// Advance past the loan's maturity (single-cycle due date for a 30-day
 	// loan) and run the real block-lifecycle hook.
 	dueAt := issuedAtTime + 30*86400 + 3_600 // one hour past due, comfortably clears the day boundary
+	// This test jumps 30 days of block time in a hundred blocks. The pool's own
+	// interest accrues by the block time that passed, so it is switched off
+	// here: what is under test is the routing of the fixed-term interest, not
+	// the 30 days of flexible-pool interest the jump would otherwise accrue.
+	sp.SetLendingAccrualConfig(0, 0, nil)
 	if err := sp.ProcessBlockLifecycle(100, dueAt); err != nil {
 		t.Fatalf("process block lifecycle at maturity: %v", err)
 	}

@@ -6,10 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
+	"os"
 	"sort"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhbchain/core/engagement"
@@ -27,7 +32,7 @@ type State struct {
 }
 
 // polkaRecord captures the single block that reached a prevote Polka
-// (>=2/3 voting power prevoting the same non-nil block) during one round of
+// (>2/3 voting power prevoting the same non-nil block) during one round of
 // the current height, along with the actual signed prevotes that
 // constitute that Polka -- so this validator, if it becomes proposer
 // again later, can attach them as portable, independently-verifiable
@@ -65,14 +70,14 @@ type Engine struct {
 	// ordinary network delay (no attacker required), two different
 	// quorums could each independently commit a different block at the
 	// same height -- a live fork. These fields are this validator's LOCK:
-	// once >=2/3 voting power prevotes for a block in some round (a
+	// once >2/3 voting power prevotes for a block in some round (a
 	// "Polka"), lockedBlock/lockedRound remember it for the rest of this
 	// HEIGHT (never cleared by a round timeout, only by advancing to a new
 	// height -- see resetLockStateLocked), and prevote()/lockCompliesLocked
 	// refuse to prevote a conflicting block afterward unless a later round
 	// carries CRYPTOGRAPHIC PROOF (never a bare claim, never a "did I
 	// personally witness that round's gossip" check -- see
-	// verifyPolkaProofLocked) that >=2/3 power already moved past that
+	// verifyPolkaProofLocked) that >2/3 power already moved past that
 	// lock. validBlock/validRound track the single most recent Polka seen
 	// (which may be newer than the lock) so this validator, when it
 	// becomes proposer, re-proposes that same value instead of
@@ -129,6 +134,13 @@ type Engine struct {
 	// lock_snapshot.go), so a validator that crashed after locking still
 	// has, once restarted, exactly the one entry it actually needs to
 	// satisfy its own restored lock in propose().
+	//
+	// A record is not always this validator's own tally: learnValidBlock also
+	// records the polka of an earlier round that a message proved to it. Such a
+	// record is only ever of a round this validator has already passed, and
+	// whether a record exists for a round says nothing of whether this
+	// validator locked in it -- the lock is lockedRound, and addVoteIfRelevant
+	// sets it whatever is recorded here.
 	polkaHistory map[int]polkaRecord
 
 	proposalCh chan *SignedProposal
@@ -143,7 +155,9 @@ type Engine struct {
 	// height the network has already finalized, needlessly stalling
 	// (never a safety issue -- it can't manufacture quorum alone -- but a
 	// real, observed liveness bug). Signaling this channel makes runRound
-	// abandon the stale round immediately instead of waiting out the timer.
+	// abandon the stale round immediately instead of waiting out the timer --
+	// unless the chain has not reached the round's height, which means the
+	// signal is for a block this engine committed itself (chainReached).
 	externalCommitCh chan struct{}
 
 	proposalTimeout  time.Duration
@@ -151,9 +165,114 @@ type Engine struct {
 	precommitTimeout time.Duration
 	commitTimeout    time.Duration
 
+	// minBlockInterval is the shortest time this validator lets pass between seeing
+	// one block commit and starting the round of the next height (WithMinBlockInterval;
+	// zero starts it at once). lastCommitNanos is when it last saw a block commit --
+	// its own, or one that reached the node from a peer (NotifyExternalCommit) -- in
+	// nanoseconds on the monotonic clock since started, plus one, so that zero means
+	// none yet. It is atomic rather than guarded by mu because NotifyExternalCommit
+	// never waits for the engine.
+	minBlockInterval time.Duration
+	started          time.Time
+	lastCommitNanos  atomic.Int64
+
 	prevoteSent   bool
 	precommitSent bool
 	lastCatchUpAt time.Time
+
+	// ownFailed counts, per height, this validator's own proposals that did
+	// not turn into a committed block (the build failed, its own validation
+	// rejected it, or the round ended without a commit). emptyAfter is how
+	// many such failures at one height make propose() stop offering
+	// transactions and propose an empty block instead, which depends on no
+	// transaction at all. Zero disables the fallback. Both are guarded by mu.
+	ownFailed  map[uint64]int
+	emptyAfter int
+
+	// signed is the record of the last vote this validator signed, and
+	// signStatePath (WithSignStatePath) is where it is made durable. Together
+	// they are the double-sign guard: createVote signs nothing that conflicts
+	// with them (see sign_state.go). signBlocked, when set, makes createVote sign
+	// nothing: the record on disk was present at start but could not be read.
+	// signMu guards all three; createVote takes it while mu may already be held
+	// (broadcastPrevoteNilLocked), so the lock order is always mu, then signMu,
+	// never the reverse.
+	signMu        sync.Mutex
+	signed        signState
+	signStatePath string
+	signBlocked   error
+
+	// Round synchronisation (see round_sync.go). selfAddr is this validator's
+	// address. roundClaims is, for each other validator, the highest round it has
+	// been seen to send a message in at one height: the evidence a round jump
+	// needs. roundSkipCh wakes the round loop when that evidence says this
+	// validator should be in a later round than it is. dropNotes rate-limits the
+	// warnings about dropped messages. proposerCache holds the proposers chosen
+	// for a height and round since it was last cleared (resetProposerCacheLocked:
+	// at every round start and whenever the height moves on), and proposerEpoch
+	// changes when it is, so a proposer chosen before is never stored into it. All
+	// of these are guarded by mu.
+	selfAddr      []byte
+	roundClaims   map[string]roundClaim
+	roundSkipCh   chan struct{}
+	dropNotes     map[string]*dropNote
+	proposerCache map[proposerKey][]byte
+	proposerEpoch uint64
+	// earlyVotes holds the votes of the current round that arrived before a
+	// proposal was accepted, keyed by validator and vote type (guarded by mu).
+	earlyVotes map[string]*SignedVote
+	// relayedHeight and relayedRound are the round in which this validator last
+	// passed its polka on (relayed says whether it has), so that it does so once a
+	// round (guarded by mu).
+	relayed       bool
+	relayedHeight uint64
+	relayedRound  int
+	// lockRefused is set when prevote refused a proposal because of the lock and
+	// the round loop has not yet acted on it (guarded by mu).
+	lockRefused bool
+	// queueMu serialises who puts a proposal on proposalCh, so that clearing out
+	// what the round loop would ignore (enqueueProposal) cannot lose a proposal
+	// another goroutine is queueing at the same time. The round loop, which only
+	// takes proposals off the channel, does not use it. It is never held together
+	// with mu.
+	queueMu sync.Mutex
+}
+
+// defaultEmptyAfterFailures is how many of its own failed proposals at one
+// height make a proposer fall back to an empty block. Two failures are enough
+// to rule out one-off causes (a dropped message, one slow round) while keeping
+// a peer-rejection stall to a couple of rounds per height.
+const defaultEmptyAfterFailures = 2
+
+// emptyAfterEnv overrides defaultEmptyAfterFailures; "0" disables the fallback.
+const emptyAfterEnv = "NHB_BFT_EMPTY_AFTER_FAILURES"
+
+// proposalFeedback is an optional extension of NodeInterface: a node that
+// implements it is told how this validator's own proposals fared, so it can
+// log, count and attribute failures. It is an optional interface (not part of
+// NodeInterface) so the many NodeInterface test doubles keep compiling.
+type proposalFeedback interface {
+	NoteProposalOutcome(height uint64, round int, kind string, txCount int, err error)
+}
+
+// Proposal outcome kinds passed to proposalFeedback.
+const (
+	outcomeBuildFailed           = "build_failed"
+	outcomeLocalValidationFailed = "local_validation_failed"
+	outcomeNotCommitted          = "not_committed"
+)
+
+func emptyAfterFromEnv() int {
+	raw := os.Getenv(emptyAfterEnv)
+	if raw == "" {
+		return defaultEmptyAfterFailures
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		slog.Warn("ignoring malformed "+emptyAfterEnv, slog.String("value", raw))
+		return defaultEmptyAfterFailures
+	}
+	return n
 }
 
 // TimeoutConfig captures the per-phase round timers used by the engine.
@@ -223,6 +342,45 @@ func WithTimeouts(cfg TimeoutConfig) Option {
 	}
 }
 
+// WithMinBlockInterval makes this validator wait, after it sees a block commit --
+// its own commit, or a block that reached the node from a peer -- until d has passed
+// (on the monotonic clock) before it starts the round of the next height: before it
+// proposes, votes or starts that round's timers. Zero, which is what an engine built
+// without the option does, starts the next round at once.
+//
+// Nothing else in the engine spaces one block from the next, so without it the
+// pace of a chain is whatever the messages, the block build and the commit allow --
+// tens of milliseconds a block while the validators are in step -- less the time
+// lost to rounds that fail and are waited out, which on a two-validator chain takes
+// most of the time and makes the pace a matter of how often they fail (about 0.6 to
+// 1 blocks a second over hours, and 2.5 in a stretch where fewer rounds failed, with
+// the engine at the same speed throughout). An interval makes it a number the
+// operator chooses: at most one block per interval, less the rounds that fail. Every
+// per-block quantity of the chain (epoch length, emission per epoch, interest per
+// block) follows the pace, so it is the operator's to set (config [consensus]
+// MinBlockInterval; see docs/consensus/block-cadence.md).
+//
+// The wait is local. It is not a rule a block is checked against, it puts nothing in
+// a message and changes nothing a validator signs or commits; a validator with a
+// different value, or none, takes part in the same rounds, which is why it needs no
+// coordination beyond the values not being so far apart that a round times out
+// before its proposal comes: an interval of more than half the commit timer is
+// lowered to half of it. The wait is only ever the rest of d since the last commit
+// this validator saw, so it does not delay a round that follows a failed one, or the
+// first round of a validator that has just started and has seen none; one that has
+// just taken the last blocks from its peer waits at most d after the last of them.
+func WithMinBlockInterval(d time.Duration) Option {
+	return func(e *Engine) {
+		if e == nil {
+			return
+		}
+		if d < 0 {
+			d = 0
+		}
+		e.minBlockInterval = d
+	}
+}
+
 // WithLockSnapshotPath enables crash-safe persistence of the
 // Proof-of-Lock-Change lock (see the Engine struct's lockedBlockHash doc
 // comment). NewEngine will attempt to restore the lock from this path if
@@ -268,16 +426,31 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		proposalCh:       make(chan *SignedProposal, defaultProposalQueueSize),
 		voteCh:           make(chan *SignedVote, calculateVoteQueueCapacity(validatorSet)),
 		externalCommitCh: make(chan struct{}, 1),
+		roundSkipCh:      make(chan struct{}, 1),
+		roundClaims:      make(map[string]roundClaim),
 		proposalTimeout:  defaultProposalTimeout,
 		prevoteTimeout:   defaultPrevoteTimeout,
 		precommitTimeout: defaultPrecommitTimeout,
 		commitTimeout:    defaultCommitTimeout,
+		ownFailed:        make(map[uint64]int),
+		emptyAfter:       emptyAfterFromEnv(),
+		started:          time.Now(),
+	}
+	if key != nil {
+		engine.selfAddr = key.PubKey().Address().Bytes()
 	}
 
 	for _, opt := range opts {
 		if opt != nil {
 			opt(engine)
 		}
+	}
+	if limit := engine.commitTimeout / 2; engine.minBlockInterval > limit {
+		slog.Warn("BFT: lowering the minimum block interval to half the commit timeout",
+			slog.String("event", "min_block_interval_lowered"),
+			slog.Duration("configured", engine.minBlockInterval),
+			slog.Duration("used", limit))
+		engine.minBlockInterval = limit
 	}
 
 	// NHB-AUDIT-C2: restore the lock from disk, if this engine was
@@ -315,7 +488,11 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 		// prohibition alone, exactly like the pre-fix behavior.
 		if snap.LockedBlock != nil && snap.LockedBlock.Header != nil && len(snap.PolkaVotes) > 0 {
 			if blockHash, hashErr := snap.LockedBlock.Header.Hash(); hashErr == nil && bytes.Equal(blockHash, snap.LockedBlockHash) {
-				if engine.verifyPolkaProofLocked(snap.PolkaVotes, snap.LockedRound, snap.LockedBlockHash, snap.Height) {
+				if !blockBodyMatchesHeader(snap.LockedBlock) {
+					// The hash covers the header only: a body that is not the one the
+					// header commits to would be re-proposed and fail its validation.
+					fmt.Println("lock snapshot: persisted block's transactions are not the ones its header commits to; restoring lock without a re-propose value")
+				} else if engine.verifyPolkaProofLocked(snap.PolkaVotes, snap.LockedRound, snap.LockedBlockHash, snap.Height) {
 					engine.validBlock = snap.LockedBlock
 					engine.validRound = snap.LockedRound
 					engine.polkaHistory[snap.LockedRound] = polkaRecord{
@@ -331,6 +508,11 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 			}
 		}
 	}
+
+	// Restore the double-sign record: what this validator signed before this
+	// start. Without it a restart in the middle of a height forgets every vote
+	// and can sign a different block for a round it already voted in.
+	engine.restoreSignState()
 
 	return engine
 }
@@ -352,13 +534,28 @@ func (e *Engine) runRound() {
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	proposer := e.proposerFor(height, round)
 	e.replayBufferedMessages(height, round)
 
-	proposer := e.selectProposer(round)
+	// The block just committed has its interval to run before this round proposes or
+	// votes. The height and the round are already this validator's own (startNewRound
+	// above), so what the peer sends in the meantime is queued for the round, not
+	// taken for a message from the past, and is here when the wait ends.
+	if e.waitMinBlockInterval() {
+		return
+	}
+
 	myAddr := e.privKey.PubKey().Address().Bytes()
 	if bytes.Equal(proposer, myAddr) {
 		if err := e.propose(); err != nil {
 			fmt.Printf("failed to propose block: %v\n", err)
+			// Greppable and structured: this line used to be the only signal a
+			// stalled proposer produced, and only on stdout.
+			slog.Error("LIVENESS: failed to propose block",
+				slog.String("event", "propose_failed"),
+				slog.Uint64("height", height),
+				slog.Int("round", round),
+				slog.String("error", boundedErrorText(err)))
 		} else {
 			e.prevote()
 		}
@@ -393,6 +590,15 @@ func (e *Engine) runRound() {
 			// Abandon this round now -- the next startNewRound() will
 			// pick up the real height via syncHeightWithNodeLocked()
 			// instead of continuing to race for a decided height.
+			if !e.chainReached(height) {
+				continue // for a block this engine has already counted: nothing has changed
+			}
+			return
+		case <-e.roundSkipCh:
+			// Enough of the voting power has been seen in a later round than
+			// this one (round_sync.go, supportedRoundLocked): leave this round
+			// now instead of waiting out its timers, and startNewRound moves
+			// there. The rest of this round could not reach a quorum without them.
 			return
 		case sp := <-e.proposalCh:
 			if sp == nil || sp.Proposal == nil || sp.Proposal.Block == nil || sp.Proposal.Block.Header == nil {
@@ -401,16 +607,29 @@ func (e *Engine) runRound() {
 			if sp.Proposal.Block.Header.Height != height || sp.Proposal.Round != round {
 				continue
 			}
+			// Only the round's proposer proposes in it. HandleProposal accepts a
+			// proposal from any validator, so without this any one validator could
+			// front-run the real proposer with a block of its own and draw this
+			// validator's prevote (and, sent a second proposal, its answer to that).
+			// The proposer was chosen from the chain state at the top of this round,
+			// the same choice this validator makes to decide whether to propose.
+			if len(proposer) > 0 && !bytes.Equal(sp.Proposer, proposer) {
+				fmt.Printf("ignoring a proposal for height %d round %d from %x: this round's proposer is %x\n", height, round, sp.Proposer, proposer)
+				continue
+			}
 			if err := e.node.ValidateBlock(sp.Proposal.Block); err != nil {
 				fmt.Printf("rejected invalid proposal for height %d: %v\n", sp.Proposal.Block.Header.Height, err)
-				e.mu.Lock()
-				e.broadcastPrevoteNilLocked(fmt.Sprintf("invalid proposal: %v", err))
-				e.mu.Unlock()
+				e.rejectProposal(err)
 				continue
 			}
 			if e.acceptProposal(sp) {
 				fmt.Printf("Received block proposal for height %d from %x\n", sp.Proposal.Block.Header.Height, sp.Proposer)
+				if e.applyEarlyVotes() {
+					return
+				}
 				e.prevote()
+				// The proposer may not know what this validator's lock rests on.
+				e.relayIfLockRefused()
 			}
 		case sv := <-e.voteCh:
 			if sv == nil || sv.Vote == nil {
@@ -440,6 +659,85 @@ func (e *Engine) runRound() {
 	}
 }
 
+// noteCommitSeen records that a block has just committed, for waitMinBlockInterval.
+func (e *Engine) noteCommitSeen() {
+	e.lastCommitNanos.Store(int64(time.Since(e.started)) + 1)
+}
+
+// waitMinBlockInterval waits out what is left of the minimum block interval, counted
+// from the last commit this validator saw, and reports whether the round was given up
+// instead: a block committed outside this engine's rounds that the chain holds at
+// this round's height (chainReached), or a later round the others are in, means the
+// round just started is not the one to propose or vote in, and the round loop starts
+// another (the same two events end a round in progress).
+// It waits for nothing when there is no interval, no commit yet -- a validator that
+// has just started -- or the interval has already passed, as it has after a round
+// that failed.
+func (e *Engine) waitMinBlockInterval() bool {
+	if e.minBlockInterval <= 0 {
+		return false
+	}
+	seen := e.lastCommitNanos.Load()
+	if seen == 0 {
+		return false
+	}
+	remaining := e.minBlockInterval - (time.Since(e.started) - time.Duration(seen-1))
+	if remaining <= 0 {
+		return false
+	}
+	timer := time.NewTimer(remaining)
+	defer stopTimer(timer)
+	e.mu.RLock()
+	height := e.currentState.Height
+	e.mu.RUnlock()
+	for {
+		select {
+		case <-timer.C:
+			return false
+		case <-e.externalCommitCh:
+			if e.chainReached(height) {
+				return true
+			}
+		case <-e.roundSkipCh:
+			return true
+		}
+	}
+}
+
+// chainReached reports whether the node's chain holds a block at height or later, which
+// is what makes a NotifyExternalCommit signal news to the round of that height. The
+// signal is sent for every block the node takes from its peer, and the peer's block for
+// the height this engine is committing reaches the node while it does: the node commits
+// a block once, whichever of the two is first, and answers the second without an error,
+// so both report a commit and the engine has counted the block (commit moved it on to
+// the next height) by the time the signal is read. Read as news it ended the first
+// round of that next height before anything was done in it, startNewRound took it for a
+// round that failed and started the height in round 2, and the peer, which had no such
+// signal, started it in round 1.
+func (e *Engine) chainReached(height uint64) bool {
+	return e.node != nil && e.node.GetHeight() >= height
+}
+
+// rejectProposal answers a proposal that failed validation with a prevote for
+// nil -- once. A validator votes once per round: if it has already prevoted in
+// this round (for a block, or nil) a further proposal, however bad, draws no
+// second vote. Before this, the nil prevote was signed regardless, so a bad
+// proposal that followed a good one made this validator sign two conflicting
+// prevotes for one round, which anyone can turn into a slashing proof. The
+// double-sign guard in createVote refuses the second vote on its own; checking
+// here as well keeps the intent readable and the log quiet.
+func (e *Engine) rejectProposal(reason error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.prevoteSent {
+		fmt.Printf("PREVOTE NIL: not voting again: this validator already prevoted in round %d\n", e.currentState.Round)
+		return
+	}
+	if e.broadcastPrevoteNilLocked(fmt.Sprintf("invalid proposal: %v", reason)) {
+		e.prevoteSent = true
+	}
+}
+
 func (e *Engine) requeueActiveProposal() {
 	if e == nil || e.node == nil {
 		return
@@ -456,70 +754,171 @@ func (e *Engine) requeueActiveProposal() {
 	e.node.RequeueTransactions(txs)
 }
 
+// ownFailedAt returns how many of this validator's own proposals at height
+// have failed.
+func (e *Engine) ownFailedAt(height uint64) int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.ownFailed[height]
+}
+
+// noteOwnFailure records a failed own proposal at height and tells the node.
+func (e *Engine) noteOwnFailure(height uint64, round int, kind string, txCount int, err error) {
+	e.mu.Lock()
+	if e.ownFailed == nil {
+		e.ownFailed = make(map[uint64]int)
+	}
+	e.ownFailed[height]++
+	e.mu.Unlock()
+	if fb, ok := e.node.(proposalFeedback); ok {
+		fb.NoteProposalOutcome(height, round, kind, txCount, err)
+	}
+}
+
+// countOwnUncommittedLocked counts previous as a failed own proposal if this
+// validator authored it. Must be called with e.mu held.
+func (e *Engine) countOwnUncommittedLocked(previous *SignedProposal) {
+	if previous == nil || previous.Proposal == nil || previous.Proposal.Block == nil || previous.Proposal.Block.Header == nil {
+		return
+	}
+	if !bytes.Equal(previous.Proposer, e.privKey.PubKey().Address().Bytes()) {
+		return
+	}
+	height := previous.Proposal.Block.Header.Height
+	if height != e.currentState.Height {
+		return
+	}
+	if e.ownFailed == nil {
+		e.ownFailed = make(map[uint64]int)
+	}
+	e.ownFailed[height]++
+	if fb, ok := e.node.(proposalFeedback); ok {
+		fb.NoteProposalOutcome(height, e.currentState.Round, outcomeNotCommitted, len(previous.Proposal.Block.Transactions), nil)
+	}
+}
+
+// pruneOwnFailuresLocked forgets failure counts for heights below the current
+// one. Must be called with e.mu held.
+func (e *Engine) pruneOwnFailuresLocked() {
+	for height := range e.ownFailed {
+		if height < e.currentState.Height {
+			delete(e.ownFailed, height)
+		}
+	}
+}
+
+// boundedErrorText keeps an error's text to a length safe for a log line.
+func boundedErrorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if len(text) > 200 {
+		text = text[:200]
+	}
+	return text
+}
+
 func (e *Engine) HandleProposal(p *SignedProposal) error {
+	if p != nil && p.Proposal != nil && !roundInRange(p.Proposal.Round) {
+		return fmt.Errorf("proposal round %d is outside 0..%d", p.Proposal.Round, maxRound)
+	}
 	if err := e.verifySignedProposal(p); err != nil {
 		return err
 	}
 	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
 		return fmt.Errorf("invalid proposal payload")
 	}
-	if _, ok := e.validatorSet[string(p.Proposer)]; !ok {
-		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
-	}
 
 	e.mu.RLock()
+	_, isValidator := e.validatorSet[string(p.Proposer)]
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	if !isValidator {
+		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
+	}
+
+	// A proposal that proves a polka teaches this validator the block and the
+	// polka whoever sent it and whichever round it is for (round_sync.go).
+	e.learnValidBlock(p)
 
 	if p.Proposal.Block.Header.Height != height || p.Proposal.Round < round {
 		if p.Proposal.Block.Header.Height > height {
 			e.requestCatchUp(height)
+		} else if p.Proposal.Block.Header.Height == height {
+			// A validator that is behind: tell it what this one knows of the polka.
+			e.relayValidBlock()
 		}
 		return nil
 	}
 	if p.Proposal.Round > round {
-		e.mu.Lock()
-		e.bufferProposalLocked(p)
-		e.mu.Unlock()
+		// Kept only within the window, only from that round's proposer and in
+		// bounded numbers; where its signer is may move this validator (round_sync.go).
+		e.handleFutureProposal(p, height)
 		return nil
 	}
 
-	select {
-	case e.proposalCh <- p:
-		return nil
-	default:
-		return fmt.Errorf("proposal queue full")
-	}
+	return e.handleCurrentProposal(p, height, round)
 }
 
 func (e *Engine) HandleVote(v *SignedVote) error {
+	// Refused before anything is checked, kept or counted: an honest vote is for a
+	// round in range and carries the hash of a header or none.
+	if v != nil && v.Vote != nil {
+		if !roundInRange(v.Vote.Round) {
+			return fmt.Errorf("vote round %d is outside 0..%d", v.Vote.Round, maxRound)
+		}
+		if len(v.Vote.BlockHash) > maxVoteHashLen {
+			return fmt.Errorf("vote block hash is %d bytes, at most %d allowed", len(v.Vote.BlockHash), maxVoteHashLen)
+		}
+	}
 	if err := e.verifySignedVote(v); err != nil {
 		return err
 	}
 	if v == nil || v.Vote == nil {
 		return fmt.Errorf("invalid vote payload")
 	}
-	if _, ok := e.validatorSet[string(v.Validator)]; !ok {
-		return fmt.Errorf("vote from non-validator %x", v.Validator)
+	// A secp256k1 signature is verified by recovering the signer, so the public
+	// key field is unused for it and not covered by the signature: whatever a
+	// relaying peer put in it is room for padding. Keep the vote without it.
+	if v.Signature.Scheme == SignatureSchemeSecp256k1 && len(v.Signature.PublicKey) > 0 {
+		signature := *v.Signature
+		signature.PublicKey = nil
+		v = &SignedVote{Vote: v.Vote, Validator: v.Validator, Signature: &signature}
 	}
 
 	e.mu.RLock()
+	_, isValidator := e.validatorSet[string(v.Validator)]
 	height := e.currentState.Height
 	round := e.currentState.Round
 	e.mu.RUnlock()
+	if !isValidator {
+		return fmt.Errorf("vote from non-validator %x", v.Validator)
+	}
 
 	if v.Vote.Height != height || v.Vote.Round < round {
 		if v.Vote.Height > height {
 			e.requestCatchUp(height)
+		} else if v.Vote.Height == height {
+			// A validator that is behind: tell it what this one knows of the polka.
+			e.relayValidBlock()
 		}
 		return nil
 	}
 	if v.Vote.Round > round {
+		// Kept only within the window and in bounded numbers; where its signer
+		// is may move this validator (round_sync.go).
 		e.mu.Lock()
-		e.bufferVoteLocked(v)
+		decision := e.admitFutureRoundLocked(v.Validator, "vote", height, v.Vote.Round)
+		if decision == admitBuffer {
+			e.bufferVoteLocked(v)
+		}
 		e.mu.Unlock()
-		return nil
+		if decision != admitNow {
+			return nil
+		}
+		// The round was reached while the vote was being looked at.
 	}
 
 	e.voteCh <- v
@@ -529,6 +928,7 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 func (e *Engine) propose() error {
 	e.mu.RLock()
 	round := e.currentState.Round
+	height := e.currentState.Height
 	revalidBlock := e.validBlock
 	revalidRound := e.validRound
 	var revalidProof []*SignedVote
@@ -557,6 +957,17 @@ func (e *Engine) propose() error {
 		validRound = revalidRound
 	} else {
 		txs := e.node.GetMempool()
+		if len(txs) > 0 && e.emptyAfter > 0 && e.ownFailedAt(height) >= e.emptyAfter {
+			// This validator's own proposals at this height keep failing to
+			// commit although they build and pass its own validation, so
+			// something about the transactions on offer is being rejected
+			// elsewhere. Stop offering them for this height: an empty block
+			// depends on no transaction. They are released, not dropped, and
+			// are offered again at the next height.
+			fmt.Printf("PROPOSE: %d earlier proposals at height %d did not commit; proposing an empty block.\n", e.ownFailedAt(height), height)
+			e.node.RequeueTransactions(txs)
+			txs = nil
+		}
 		if len(txs) == 0 {
 			fmt.Println("PROPOSE: Mempool empty, creating empty block proposal.")
 			block, err = e.node.CreateBlock(nil)
@@ -564,6 +975,7 @@ func (e *Engine) propose() error {
 			block, err = e.node.CreateBlock(txs)
 		}
 		if err != nil {
+			e.noteOwnFailure(height, round, outcomeBuildFailed, len(txs), err)
 			return fmt.Errorf("failed to build block: %w", err)
 		}
 	}
@@ -571,6 +983,10 @@ func (e *Engine) propose() error {
 		return fmt.Errorf("proposed block missing header")
 	}
 	if err := e.node.ValidateBlock(block); err != nil {
+		// The transactions of a block that will never be proposed must not stay
+		// marked in flight; nothing else would release them.
+		e.node.RequeueTransactions(block.Transactions)
+		e.noteOwnFailure(height, round, outcomeLocalValidationFailed, len(block.Transactions), err)
 		return fmt.Errorf("local block validation failed: %w", err)
 	}
 
@@ -616,7 +1032,7 @@ func (e *Engine) prevote() {
 
 	// NHB-AUDIT-C1: this is the safety half of Proof-of-Lock-Change. Refuse
 	// to prevote a block that conflicts with an earlier lock unless the
-	// proposal carries cryptographic proof (>=2/3 signed prevotes) that
+	// proposal carries cryptographic proof (>2/3 signed prevotes) that
 	// enough voting power already moved on -- never merely because the
 	// proposer's message claims it, and never by asking whether this
 	// validator personally witnessed that round's gossip live (an earlier
@@ -631,6 +1047,7 @@ func (e *Engine) prevote() {
 		reason := fmt.Sprintf("proposal for round %d (validRound=%d) conflicts with lock at round %d",
 			round, e.activeProposal.Proposal.ValidRound, e.lockedRound)
 		e.broadcastPrevoteNilLocked(reason)
+		e.lockRefused = true // the round loop tells the proposer what the lock rests on
 		e.mu.Unlock()
 		fmt.Printf("PREVOTE NIL: refusing to prevote a locked-conflicting proposal: %s\n", reason)
 		return
@@ -640,6 +1057,12 @@ func (e *Engine) prevote() {
 
 	vote, err := e.createVote(Prevote, blockHash, round, height)
 	if err != nil {
+		if errors.Is(err, errConflictingVote) {
+			// This validator already voted in this round for something else. That
+			// vote stands and no other is sent, so prevoteSent stays set.
+			fmt.Printf("PREVOTE: not voting for block %x: %v\n", blockHash, err)
+			return
+		}
 		fmt.Printf("failed to create prevote: %v\n", err)
 		e.mu.Lock()
 		e.prevoteSent = false
@@ -674,7 +1097,7 @@ func (e *Engine) prevote() {
 //   - proposal.ValidRound >= 0 (proposer claims a Polka at that round):
 //     allowed only if (a) the claimed round is strictly earlier than this
 //     proposal's own round, (b) proposal.ValidRoundProof cryptographically
-//     verifies as a real >=2/3 Polka for this EXACT block at that round
+//     verifies as a real >2/3 Polka for this EXACT block at that round
 //     (see verifyPolkaProofLocked -- the proposer's claim alone is never
 //     trusted, but neither is this validator's own possibly-incomplete
 //     memory of that round), and (c) this validator's lock (if any) is
@@ -704,7 +1127,7 @@ func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte, height
 
 // verifyPolkaProofLocked cryptographically verifies that proof contains
 // enough distinct, validly-signed Prevote signatures for
-// (height, round=vr, blockHash) to constitute a real Polka (>=2/3 voting
+// (height, round=vr, blockHash) to constitute a real Polka (>2/3 voting
 // power) against the validator set active for the current height. This is
 // a pure, stateless check -- it never asks whether this validator itself
 // witnessed round vr's gossip in real time, which is exactly what makes it
@@ -712,11 +1135,28 @@ func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte, height
 // past vr (see the Engine struct's lockedBlockHash doc comment for why that
 // distinction matters). Must be called with e.mu held.
 func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash []byte, height uint64) bool {
-	if len(proof) == 0 || e.totalVotingPower == nil || e.totalVotingPower.Sign() <= 0 {
+	return verifyPolkaProof(proof, vr, blockHash, height, e.validatorSet, e.totalVotingPower)
+}
+
+// verifyPolkaProof is verifyPolkaProofLocked over a validator set and a total
+// voting power that the caller passes in, so that a caller that holds its own
+// copy of them can check a proof with no lock held: a proof costs a signature
+// check for each vote in it.
+func verifyPolkaProof(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int, total *big.Int) bool {
+	if len(proof) == 0 || total == nil || total.Sign() <= 0 {
 		return false
 	}
+	_, signedPower := countedPolkaVotes(proof, vr, blockHash, height, validators)
+	return types.HasQuorum(signedPower, total)
+}
+
+// countedPolkaVotes returns the votes of proof that count towards a polka of
+// round vr for blockHash at height -- one for each validator of the set, and only
+// if its signature verifies -- and the voting power they hold.
+func countedPolkaVotes(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int) ([]*SignedVote, *big.Int) {
 	seen := make(map[string]struct{}, len(proof))
 	signedPower := big.NewInt(0)
+	var counted []*SignedVote
 	for _, sv := range proof {
 		if sv == nil || sv.Vote == nil {
 			continue
@@ -730,20 +1170,18 @@ func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash [
 		if _, dup := seen[key]; dup {
 			continue
 		}
-		weight, isValidator := e.validatorSet[key]
+		weight, isValidator := validators[key]
 		if !isValidator || weight == nil || weight.Sign() <= 0 {
 			continue
 		}
-		if err := e.verifySignedVote(sv); err != nil {
+		if err := verifyVoteSignature(sv); err != nil {
 			continue
 		}
 		seen[key] = struct{}{}
 		signedPower.Add(signedPower, weight)
+		counted = append(counted, sv)
 	}
-	threshold := new(big.Int).Mul(e.totalVotingPower, big.NewInt(2))
-	threshold.Add(threshold, big.NewInt(2))
-	threshold.Div(threshold, big.NewInt(3))
-	return signedPower.Cmp(threshold) >= 0
+	return counted, signedPower
 }
 
 // lockedBlockHashLocked returns the hash of the currently locked block, or
@@ -777,6 +1215,12 @@ func (e *Engine) precommit() {
 
 	vote, err := e.createVote(Precommit, blockHash, round, height)
 	if err != nil {
+		if errors.Is(err, errConflictingVote) {
+			// Already precommitted in this round for something else: that vote
+			// stands and no other is sent, so precommitSent stays set.
+			fmt.Printf("PRECOMMIT: not voting for block %x: %v\n", blockHash, err)
+			return
+		}
 		fmt.Printf("failed to create precommit: %v\n", err)
 		e.mu.Lock()
 		e.precommitSent = false
@@ -811,7 +1255,13 @@ func (e *Engine) commit() bool {
 		return false
 	}
 
-	// Try to commit the block; on failure, broadcast prevote(nil) and reset.
+	// Try to commit the block; on failure, broadcast prevote(nil) and reset. A
+	// validator that already prevoted this block in this round (the usual case:
+	// it prevoted and precommitted it before getting here) does not get to
+	// change that vote: the prevote for nil is then refused by the double-sign
+	// guard and only the reset happens. The reset clears the "already voted"
+	// flags for the next proposal, but not the guard's record, so no proposal in
+	// this round can draw a vote that conflicts with the ones already signed.
 	block := e.activeProposal.Proposal.Block
 	block.QuorumCert = e.buildQuorumCertLocked(block, e.activeProposal.Proposal.Round)
 	fmt.Printf("COMMIT: Attempting to commit block %d.\n", block.Header.Height)
@@ -821,6 +1271,7 @@ func (e *Engine) commit() bool {
 		e.resetProposalStateLocked()                                          // reset for next round; lock/valid state deliberately untouched, see resetLockStateLocked
 		return false
 	}
+	e.noteCommitSeen()
 	fmt.Printf("COMMIT: Successfully committed block %d.\n", block.Header.Height)
 
 	e.committedBlocks[e.currentState.Height] = true
@@ -832,6 +1283,11 @@ func (e *Engine) commit() bool {
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
+	// Who proposes a round depends on the last block, which is new, and the validator
+	// set may be too: nothing chosen at the height just committed holds for the next.
+	// Proposals for it are handled from here on, before the round loop has started
+	// its first round.
+	e.resetProposerCacheLocked()
 	e.syncHeightWithNodeLocked()
 	e.broadcastCommittedBlock(block)
 	e.broadcastStatus()
@@ -912,18 +1368,26 @@ func (e *Engine) requestStatus() {
 // makes no claim about which height changed, since the engine re-derives the
 // real height itself from e.node.GetHeight() on its next round start. This
 // only needs to happen when the node is genuinely behind (an in-flight round
-// still targeting an already-finalized height); calling it spuriously just
-// causes one harmless extra round restart.
+// still targeting an already-finalized height); a signal read when the chain
+// has not reached the height of the round in progress is for a block the
+// engine has already counted and changes nothing (chainReached).
 func (e *Engine) NotifyExternalCommit() {
 	if e == nil {
 		return
 	}
+	// A block committed here counts for the minimum block interval as one this
+	// engine committed itself.
+	e.noteCommitSeen()
 	select {
 	case e.externalCommitCh <- struct{}{}:
 	default:
 	}
 }
 
+// requestCatchUp asks the peers for the blocks this node lacks. currentHeight is
+// the height the engine is deciding, which is the block after the node's last
+// one, so that is where the request starts: a request that starts one block
+// later is answered by nothing from a peer that is exactly one block ahead.
 func (e *Engine) requestCatchUp(currentHeight uint64) {
 	if e == nil || e.broadcaster == nil {
 		return
@@ -936,7 +1400,14 @@ func (e *Engine) requestCatchUp(currentHeight uint64) {
 	}
 	e.lastCatchUpAt = now
 	e.mu.Unlock()
-	msg, err := p2p.NewGetBlocksMessage(currentHeight + 1)
+	// The node's own chain is what the blocks are asked after, as the node's
+	// block sync does, so a request is right even if the engine's height has
+	// not caught up with a block the node took from a peer.
+	from := currentHeight
+	if e.node != nil {
+		from = e.node.GetHeight() + 1
+	}
+	msg, err := p2p.NewGetBlocksMessage(from)
 	if err != nil {
 		fmt.Printf("failed to build catch-up request: %v\n", err)
 		return
@@ -984,7 +1455,15 @@ func (e *Engine) broadcastVote(vote *SignedVote) {
 	e.broadcaster.Broadcast(msg)
 }
 
+// createVote is the only place a vote is signed. It first claims the vote's
+// slot with the double-sign guard (claimVote): a validator that has already
+// signed a different value for this height, round and vote type -- or has
+// already signed for a later round -- gets errConflictingVote and no signature,
+// whichever path asked. See sign_state.go.
 func (e *Engine) createVote(t VoteType, blockHash []byte, round int, height uint64) (*SignedVote, error) {
+	if err := e.claimVote(t, blockHash, round, height); err != nil {
+		return nil, err
+	}
 	vote := &Vote{BlockHash: blockHash, Round: round, Type: t, Height: height}
 	voteHash := sha256.Sum256(vote.bytes())
 	sig, err := ethcrypto.Sign(voteHash[:], e.privKey.PrivateKey)
@@ -1011,7 +1490,15 @@ func (e *Engine) acceptProposal(p *SignedProposal) bool {
 func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil || v == nil || v.Vote == nil {
+	if v == nil || v.Vote == nil {
+		return false, false, false
+	}
+	if e.activeProposal == nil || e.activeProposal.Proposal == nil || e.activeProposal.Proposal.Block == nil || e.activeProposal.Proposal.Block.Header == nil {
+		// A vote ahead of the proposal it is for (messages of one round do not
+		// always arrive in the order they were sent, and the ones replayed from the
+		// buffer at a round start are queued separately from the proposal): keep it
+		// until the proposal has been accepted instead of losing it.
+		e.stashEarlyVoteLocked(v)
 		return false, false, false
 	}
 
@@ -1050,7 +1537,7 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	reachedPrevote := e.hasTwoThirdsPowerLocked(Prevote)
 	reachedPrecommit := e.hasTwoThirdsPowerLocked(Precommit)
 
-	// NHB-AUDIT-C1: the instant >=2/3 voting power prevotes this round's
+	// NHB-AUDIT-C1: the instant >2/3 voting power prevotes this round's
 	// block for the FIRST time (a Polka), lock onto it for the rest of this
 	// height and snapshot the actual signed prevotes that constitute it --
 	// both read by lockCompliesLocked/propose() to enforce/continue
@@ -1059,11 +1546,15 @@ func (e *Engine) addVoteIfRelevant(v *SignedVote) (bool, bool, bool) {
 	// OTHER validators cryptographic proof instead of asking them to trust
 	// its memory or their own -- see Proposal.ValidRoundProof's doc
 	// comment for why that distinction is the whole point of this design.
-	// Guarded by polkaHistory's own presence check so a Polka is recorded
-	// (and the lock set) at most once per round.
+	// Guarded by the round of the lock itself so a Polka is recorded (and the
+	// lock set) at most once per round, and never raised again to a round this
+	// validator has already locked in. It is not guarded by whether polkaHistory
+	// holds a record of the round: a record is not a lock, and a record of the
+	// round made from anything but this tally must not stand in for locking,
+	// or this validator would precommit a block it is not locked on.
 	if v.Vote.Type == Prevote && reachedPrevote {
 		round := e.currentState.Round
-		if _, already := e.polkaHistory[round]; !already {
+		if e.lockedRound < round {
 			block := e.activeProposal.Proposal.Block
 			hashCopy := append([]byte(nil), expectedHash...)
 			votes := make([]*SignedVote, 0, len(voteMap))
@@ -1120,18 +1611,28 @@ func stopTimer(t *time.Timer) {
 	}
 }
 
+// broadcastPrevoteNilLocked signs and broadcasts a prevote for nil in the current
+// round and reports whether it did. It does not when this validator has already
+// voted in the round for anything else (the double-sign guard refuses -- a nil
+// prevote after a block prevote is exactly the conflicting pair a slashing proof
+// is made of), when it cannot sign, or when there is no broadcaster.
+//
 // NOTE: called with e.mu **locked**
-func (e *Engine) broadcastPrevoteNilLocked(reason string) {
+func (e *Engine) broadcastPrevoteNilLocked(reason string) bool {
 	if e.broadcaster == nil {
-		return
+		return false
 	}
 	round := e.currentState.Round
 	height := e.currentState.Height
 
 	vote, err := e.createVote(Prevote, nil, round, height) // nil = vote for NIL
 	if err != nil {
-		fmt.Printf("failed to create prevote nil: %v\n", err)
-		return
+		if errors.Is(err, errConflictingVote) {
+			fmt.Printf("PREVOTE NIL: not voting nil (%s): %v\n", reason, err)
+		} else {
+			fmt.Printf("failed to create prevote nil: %v\n", err)
+		}
+		return false
 	}
 
 	if _, ok := e.receivedVotes[Prevote]; !ok {
@@ -1143,9 +1644,10 @@ func (e *Engine) broadcastPrevoteNilLocked(reason string) {
 	msg := &p2p.Message{Type: p2p.MsgTypeVote, Payload: payload}
 	if err := e.broadcaster.Broadcast(msg); err != nil {
 		fmt.Printf("failed to broadcast prevote nil: %v\n", err)
-		return
+		return false
 	}
 	fmt.Printf("PREVOTE NIL: Broadcasting nil vote: %s\n", reason)
+	return true
 }
 
 // NOTE: called with e.mu **locked**
@@ -1157,6 +1659,8 @@ func (e *Engine) resetProposalStateLocked() {
 }
 
 func (e *Engine) resetVoteTrackingLocked() {
+	e.earlyVotes = nil
+	e.lockRefused = false
 	e.receivedVotes = map[VoteType]map[string]*SignedVote{
 		Prevote:   make(map[string]*SignedVote),
 		Precommit: make(map[string]*SignedVote),
@@ -1179,6 +1683,9 @@ func (e *Engine) recalculateVotingPowerLocked() {
 	}
 }
 
+// hasTwoThirdsPowerLocked reports whether strictly more than two thirds of
+// the voting power has cast vt for the active proposal (types.HasQuorum;
+// exactly 2/3 is not enough). Must be called with e.mu held.
 func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
 	if e.totalVotingPower == nil || e.totalVotingPower.Sign() <= 0 {
 		return false
@@ -1187,10 +1694,7 @@ func (e *Engine) hasTwoThirdsPowerLocked(vt VoteType) bool {
 	if !ok || power == nil {
 		return false
 	}
-	threshold := new(big.Int).Mul(e.totalVotingPower, big.NewInt(2))
-	threshold.Add(threshold, big.NewInt(2))
-	threshold.Div(threshold, big.NewInt(3))
-	return power.Cmp(threshold) >= 0
+	return types.HasQuorum(power, e.totalVotingPower)
 }
 
 func (e *Engine) startNewRound() {
@@ -1199,6 +1703,7 @@ func (e *Engine) startNewRound() {
 	defer e.mu.Unlock()
 
 	heightBefore := e.currentState.Height
+	previous := e.activeProposal
 	if !e.syncHeightWithNodeLocked() {
 		if e.committedBlocks[e.currentState.Height] {
 			delete(e.committedBlocks, e.currentState.Height)
@@ -1206,9 +1711,26 @@ func (e *Engine) startNewRound() {
 			e.currentState.Round = 0
 			e.syncHeightWithNodeLocked()
 		} else {
-			e.currentState.Round++
+			// Same height, no commit: if the round that just ended was
+			// carrying this validator's own proposal, that proposal failed.
+			e.countOwnUncommittedLocked(previous)
+			e.currentState.Round = roundAfter(e.currentState.Round)
 		}
+	} else {
+		// A block this engine did not commit -- the node took it from its peer -- has
+		// moved the chain on: what starts is a new height, not the next round of one that
+		// failed, and it starts in the round every new height starts in. That is round 1:
+		// commit leaves round 0 and the branch above moves on one round from it, after
+		// this engine's own commit and at a start. It stayed in round 0 here, so the
+		// validator that was told a block started the next height one round behind the
+		// one that committed it, and a validator sends nothing in a round in which it
+		// neither proposes nor has a proposal: the two heard nothing from each other until
+		// the round of the one behind timed out. Round 1 and not 0 because an engine that
+		// has not been replaced yet starts the height after its own commit in round 1,
+		// and the two must agree.
+		e.currentState.Round = roundAfter(e.currentState.Round)
 	}
+	e.pruneOwnFailuresLocked()
 	// NHB-AUDIT-C1: a round TIMING OUT must never clear the lock -- that
 	// was the exact bug (see the Engine struct's lockedBlockHash doc comment).
 	// The lock/valid/polka state is per-HEIGHT, so it's only ever reset
@@ -1223,8 +1745,33 @@ func (e *Engine) startNewRound() {
 	e.precommitSent = false
 	e.validatorSet = e.node.GetValidatorSet()
 	e.recalculateVotingPowerLocked()
-	if nextRound, ok := e.nextBufferedRoundLocked(e.currentState.Height, e.currentState.Round+1); ok {
-		e.currentState.Round = nextRound
+	// The proposers chosen so far were chosen from the previous validator set.
+	e.resetProposerCacheLocked()
+	// Move on to a later round than the next one only when enough of the voting
+	// power has been seen there (round_sync.go, supportedRoundLocked) -- never on
+	// the word of validators that hold less than a third of it, and to the highest
+	// round that is supported, not to the lowest one anyone has mentioned.
+	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
+		e.currentState.Round = min(target, maxJumpRound)
+	}
+	// Never start a round this validator has already signed in (or one before
+	// it): the double-sign guard would refuse every vote there, so the round
+	// could only be dead. This is what a restart does -- the engine comes back at
+	// the first round of the height while its record says it voted in a later one
+	// -- and it skips the rounds in between at once instead of waiting each out.
+	// In a running process it changes nothing: the round has always moved past the
+	// last one signed in.
+	if floor, ok := e.signedRoundFloor(e.currentState.Height); ok && e.currentState.Round <= floor {
+		e.currentState.Round = roundAfter(floor)
+	}
+	// Whatever was kept for the rounds this one has passed or jumped over can no
+	// longer be replayed. The wake-up for a round jump is spent: the evidence that
+	// raised it has just been used, and anything that arrives from here on
+	// raises it again.
+	e.purgeBufferedBelowLocked(e.currentState.Height, e.currentState.Round)
+	select {
+	case <-e.roundSkipCh:
+	default:
 	}
 	e.resetVoteTrackingLocked()
 	fmt.Printf("\n--- Starting BFT round for Height: %d, Round: %d ---\n", e.currentState.Height, e.currentState.Round)
@@ -1277,6 +1824,9 @@ func (e *Engine) syncHeightWithNodeLocked() bool {
 	if e.currentState.Height <= nodeHeight {
 		e.currentState.Height = nodeHeight + 1
 		e.currentState.Round = 0
+		// The node has a new last block: what was chosen for the old height is not
+		// what is chosen for this one.
+		e.resetProposerCacheLocked()
 		for height := range e.bufferedProposal {
 			if height <= nodeHeight {
 				delete(e.bufferedProposal, height)
@@ -1290,94 +1840,6 @@ func (e *Engine) syncHeightWithNodeLocked() bool {
 		return true
 	}
 	return false
-}
-
-func (e *Engine) bufferProposalLocked(p *SignedProposal) {
-	if p == nil || p.Proposal == nil || p.Proposal.Block == nil || p.Proposal.Block.Header == nil {
-		return
-	}
-	height := p.Proposal.Block.Header.Height
-	round := p.Proposal.Round
-	if _, ok := e.bufferedProposal[height]; !ok {
-		e.bufferedProposal[height] = make(map[int][]*SignedProposal)
-	}
-	e.bufferedProposal[height][round] = append(e.bufferedProposal[height][round], p)
-}
-
-func (e *Engine) bufferVoteLocked(v *SignedVote) {
-	if v == nil || v.Vote == nil {
-		return
-	}
-	height := v.Vote.Height
-	round := v.Vote.Round
-	if _, ok := e.bufferedVotes[height]; !ok {
-		e.bufferedVotes[height] = make(map[int][]*SignedVote)
-	}
-	e.bufferedVotes[height][round] = append(e.bufferedVotes[height][round], v)
-}
-
-func (e *Engine) nextBufferedRoundLocked(height uint64, minRound int) (int, bool) {
-	next := 0
-	found := false
-	if rounds := e.bufferedProposal[height]; rounds != nil {
-		for round, proposals := range rounds {
-			if round < minRound || len(proposals) == 0 {
-				continue
-			}
-			if !found || round < next {
-				next = round
-				found = true
-			}
-		}
-	}
-	if rounds := e.bufferedVotes[height]; rounds != nil {
-		for round, votes := range rounds {
-			if round < minRound || len(votes) == 0 {
-				continue
-			}
-			if !found || round < next {
-				next = round
-				found = true
-			}
-		}
-	}
-	return next, found
-}
-
-func (e *Engine) replayBufferedMessages(height uint64, round int) {
-	e.mu.Lock()
-	var proposals []*SignedProposal
-	if rounds := e.bufferedProposal[height]; rounds != nil {
-		proposals = append(proposals, rounds[round]...)
-		delete(rounds, round)
-		if len(rounds) == 0 {
-			delete(e.bufferedProposal, height)
-		}
-	}
-	var votes []*SignedVote
-	if rounds := e.bufferedVotes[height]; rounds != nil {
-		votes = append(votes, rounds[round]...)
-		delete(rounds, round)
-		if len(rounds) == 0 {
-			delete(e.bufferedVotes, height)
-		}
-	}
-	e.mu.Unlock()
-
-	for _, proposal := range proposals {
-		select {
-		case e.proposalCh <- proposal:
-		default:
-			fmt.Printf("dropping buffered proposal for height %d round %d: proposal queue full\n", height, round)
-		}
-	}
-	for _, vote := range votes {
-		select {
-		case e.voteCh <- vote:
-		default:
-			fmt.Printf("dropping buffered vote for height %d round %d: vote queue full\n", height, round)
-		}
-	}
 }
 
 // maxEngagementBoostBps bounds how much a validator's EngagementScore can
@@ -1407,9 +1869,36 @@ func engagementWeightBoost(stake *big.Int, engagementScore uint64) *big.Int {
 	return boost
 }
 
+// roundInRange reports whether round is one this engine is ever in or takes a
+// message for: 0 to maxRound.
+func roundInRange(round int) bool {
+	return round >= 0 && round <= maxRound
+}
+
+// roundAfter returns the round after round, never above maxRound and never
+// negative, whatever round is (it may come from a record on disk). At maxRound it
+// stays there: the round cannot be left, which takes more than a hundred years of
+// rounds that never committed to reach (a message cannot take the engine within
+// half of it, see maxJumpRound) and is no worse than the wrap it replaces.
+func roundAfter(round int) int {
+	if round < 0 {
+		return 0
+	}
+	if round >= maxRound {
+		return maxRound
+	}
+	return round + 1
+}
+
 func (e *Engine) selectProposer(round int) []byte {
-	keys := make([]string, 0, len(e.validatorSet))
-	for addrStr := range e.validatorSet {
+	return e.selectProposerIn(e.validatorSet, round)
+}
+
+// selectProposerIn chooses the proposer of round from validatorSet, so that a
+// caller that does not hold e.mu can pass a snapshot of the set (see proposerFor).
+func (e *Engine) selectProposerIn(validatorSet map[string]*big.Int, round int) []byte {
+	keys := make([]string, 0, len(validatorSet))
+	for addrStr := range validatorSet {
 		keys = append(keys, addrStr)
 	}
 	sort.Slice(keys, func(i, j int) bool { return bytes.Compare([]byte(keys[i]), []byte(keys[j])) < 0 })
@@ -1439,7 +1928,8 @@ func (e *Engine) selectProposer(round int) []byte {
 		return nil
 	}
 	if totalPower.Sign() == 0 {
-		return validators[round%len(validators)]
+		// Unsigned, so that any round (not only 0 to maxRound) picks a validator.
+		return validators[uint64(round)%uint64(len(validators))]
 	}
 
 	lastCommit := e.node.GetLastCommitHash()
@@ -1491,12 +1981,22 @@ func (e *Engine) verifySignedProposal(p *SignedProposal) error {
 }
 
 func (e *Engine) verifySignedVote(v *SignedVote) error {
+	return verifyVoteSignature(v)
+}
+
+// verifyVoteSignature checks that v is signed by the validator it names. It reads
+// nothing of the engine's state.
+func verifyVoteSignature(v *SignedVote) error {
 	if v == nil || v.Vote == nil || v.Signature == nil {
 		return fmt.Errorf("invalid signed vote")
 	}
 	hash := sha256.Sum256(v.Vote.bytes())
 	return verifySignature(hash[:], v.Signature, v.Validator)
 }
+
+// secp256k1HalfN is half the order of the secp256k1 group: the largest s that
+// ethcrypto.Sign produces.
+var secp256k1HalfN = new(big.Int).Rsh(ethcrypto.S256().Params().N, 1)
 
 func verifySignature(msgHash []byte, sig *Signature, expectedAddr []byte) error {
 	if sig == nil {
@@ -1506,6 +2006,13 @@ func verifySignature(msgHash []byte, sig *Signature, expectedAddr []byte) error 
 	case SignatureSchemeSecp256k1:
 		if len(sig.Signature) != 65 {
 			return fmt.Errorf("invalid secp256k1 signature length")
+		}
+		// The signer is recovered from (r, s, v), and (r, n-s, v^1) recovers the same
+		// one, so every message would have two valid encodings. Signing
+		// (ethcrypto.Sign) always yields the low s, so this refuses nothing an
+		// honest validator sends, and it makes the encoding of a signature unique.
+		if new(big.Int).SetBytes(sig.Signature[32:64]).Cmp(secp256k1HalfN) > 0 {
+			return fmt.Errorf("secp256k1 signature is not in canonical (low-s) form")
 		}
 		pubKey, err := ethcrypto.SigToPub(msgHash, sig.Signature)
 		if err != nil {
@@ -1538,4 +2045,57 @@ func (vt VoteType) String() string {
 		return "Prevote"
 	}
 	return "Precommit"
+}
+
+// MinBlockInterval returns the minimum block interval in force (WithMinBlockInterval,
+// after it has been lowered to half the commit timeout if it was longer than that).
+func (e *Engine) MinBlockInterval() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return e.minBlockInterval
+}
+
+// Status returns the engine's current height, round and locked round (-1 when
+// unlocked). It is a read-only view for liveness reporting: the watchdog puts
+// it in its diagnostics so a stall can be told apart from a peer that is down
+// or a lock that cannot be satisfied.
+func (e *Engine) Status() (height uint64, round int, lockedRound int) {
+	if e == nil {
+		return 0, 0, -1
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.currentState.Height, e.currentState.Round, e.lockedRound
+}
+
+// statusPollInterval is how long StatusWithin sleeps between attempts to take
+// the engine's read lock.
+const statusPollInterval = 5 * time.Millisecond
+
+// StatusWithin is Status for a caller that must not be held up by the engine.
+// commit holds the engine's lock for as long as the node takes to commit a
+// block, so Status can wait as long as a slow or stuck commit does; a stall
+// report that waited on it would say nothing at the moment it is needed. This
+// retries for at most wait and reports ok=false, with zero values that carry no
+// meaning, if the engine's lock was never free in that time. It starts no
+// goroutine, so repeated calls against a stuck engine leave nothing behind. A
+// wait of zero or less makes a single attempt.
+func (e *Engine) StatusWithin(wait time.Duration) (height uint64, round int, lockedRound int, ok bool) {
+	if e == nil {
+		return 0, 0, -1, true
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if e.mu.TryRLock() {
+			height, round, lockedRound = e.currentState.Height, e.currentState.Round, e.lockedRound
+			e.mu.RUnlock()
+			return height, round, lockedRound, true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, 0, 0, false
+		}
+		time.Sleep(min(remaining, statusPollInterval))
+	}
 }

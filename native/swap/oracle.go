@@ -339,7 +339,7 @@ type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-// NowPaymentsOracle fetches price data from the NOWPayments quote endpoint.
+// NowPaymentsOracle fetches price data from an external payment provider's quote endpoint.
 type NowPaymentsOracle struct {
 	client   HTTPDoer
 	endpoint string
@@ -348,7 +348,7 @@ type NowPaymentsOracle struct {
 
 const defaultNowPaymentsEndpoint = "https://api.nowpayments.io/v1/exchange/rates"
 
-// NewNowPaymentsOracle constructs a NOWPayments oracle adapter. When the client is
+// NewNowPaymentsOracle constructs a payment-provider oracle adapter. When the client is
 // nil http.DefaultClient is used. The API key is optional and only added to the
 // request headers when supplied.
 func NewNowPaymentsOracle(client HTTPDoer, endpoint, apiKey string) *NowPaymentsOracle {
@@ -867,14 +867,21 @@ type Config struct {
 	TwapSampleCap             int
 	PriceProofMaxDeviationBps uint64
 	PayoutAuthorities         []string
+	// PayoutReceiptActivationHeight is the first block height at which a swap
+	// payout receipt (transaction type 0x0F) takes the times it records from
+	// the block timestamp and consumes the attestor's nonce. Zero, the default,
+	// keeps the earlier behaviour: the times come from the host clock and the
+	// nonce is left alone. Choosing a height changes the state root of every
+	// block that carries a receipt, so every validator must be configured with
+	// the same value, and be running this build, before the chain reaches it.
+	PayoutReceiptActivationHeight uint64
 	// Risk configures the mint-side (fiat-gateway voucher mint) guardrails
-	// still left in local config -- velocity, sanctions,
-	// price-proof-signature enforcement, cash-out. The numeric circuit
-	// breaker caps (per-tx min/max, per-address daily/monthly) that used to
-	// live here, and the entire redeem-side [swap.redeemRisk] section, are
-	// GONE from local config -- both are now exclusively
-	// governance-controlled. See RiskConfig's doc comment and
-	// core/swap_risk_params.go.
+	// kept in local config: the static per-tx min/max and per-address
+	// daily/monthly caps, velocity, sanctions, price-proof-signature
+	// enforcement and cash-out. RiskConfig's doc comment (native/swap/risk.go)
+	// explains why the caps were restored there. Only the redeem-side
+	// [swap.redeemRisk] section is gone from local config; that side is
+	// exclusively governance-controlled (core/swap_risk_params.go).
 	Risk      RiskConfig      `toml:"risk"`
 	Providers ProviderConfig  `toml:"providers"`
 	Sanctions SanctionsConfig `toml:"sanctions"`
@@ -894,6 +901,8 @@ func (c Config) Normalise() Config {
 		Risk:                      c.Risk.Normalise(),
 		Providers:                 c.Providers.Normalise(),
 		Sanctions:                 c.Sanctions.Normalise(),
+
+		PayoutReceiptActivationHeight: c.PayoutReceiptActivationHeight,
 	}
 	if len(cfg.AllowedFiat) == 0 {
 		cfg.AllowedFiat = []string{"USD"}

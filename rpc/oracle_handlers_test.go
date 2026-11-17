@@ -13,8 +13,7 @@ import (
 // fakeOraclePriceEngine implements stablequote.Engine using only
 // CurrentPrice's return values -- handleGetOraclePrice never calls the
 // other four methods, and this test only needs to control staleness, so
-// a real engine (now living in the private nhbchain-services repo,
-// unreachable from this repo's own tests) is unnecessary. Price/Reserve/
+// a real engine (which is not part of this repo) is unnecessary. Price/Reserve/
 // CashOut/Status are unused stubs to satisfy the interface.
 type fakeOraclePriceEngine struct {
 	rate      float64

@@ -41,9 +41,10 @@ type lendingPositionResult struct {
 }
 
 // lendingAccountResult is the JSON-tagged account view returned over RPC.
-// lending.UserAccount itself has no JSON tags and carries an unexported
-// crypto.Address field that serializes as "{}", so it can never be returned
-// to clients directly -- this type is the properly-shaped replacement.
+// lending.UserAccount itself has no JSON tags, so returned directly it would
+// expose Go field names instead of the API's own; this type is the
+// properly-shaped replacement. (Its crypto.Address field is not the problem:
+// that type marshals as its bech32 text, see crypto.Address.MarshalText.)
 type lendingAccountResult struct {
 	Address  string                  `json:"address"`
 	Supplied []lendingPositionResult `json:"supplied"`
@@ -252,7 +253,7 @@ func newLendingAccountResult(poolID string, addr [20]byte, account *lending.User
 	return result
 }
 
-func (s *Server) handleLendingGetMarket(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleLendingGetMarket(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	var poolID string
 	if len(req.Params) == 1 {
 		var raw interface{}
@@ -275,6 +276,11 @@ func (s *Server) handleLendingGetMarket(w http.ResponseWriter, _ *http.Request, 
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "too many parameters", nil)
 		return
 	}
+	// The read below holds the node's exclusive state lock while it works, so it
+	// takes a slot in the query pool first (see query_gate.go).
+	if !s.admitHeavy(w, r, req) {
+		return
+	}
 	market, params, moduleErr := s.lending.GetMarket(poolID)
 	if moduleErr != nil {
 		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
@@ -287,9 +293,12 @@ func (s *Server) handleLendingGetMarket(w http.ResponseWriter, _ *http.Request, 
 	writeResult(w, req.ID, result)
 }
 
-func (s *Server) handleLendGetPools(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleLendGetPools(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) != 0 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "no parameters expected", nil)
+		return
+	}
+	if !s.admitHeavy(w, r, req) {
 		return
 	}
 	pools, params, moduleErr := s.lending.GetPools()
@@ -315,7 +324,7 @@ func (s *Server) handleLendGetPools(w http.ResponseWriter, _ *http.Request, req 
 // Confirmed via full-repo grep before removal: lending_createPool had no
 // callers anywhere in this repo or the web wallet.
 
-func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected address parameter", nil)
 		return
@@ -341,6 +350,9 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, _ *http.Requ
 	addr, err := decodeBech32(trimmed)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid address", err.Error())
+		return
+	}
+	if !s.admitHeavy(w, r, req) {
 		return
 	}
 	account, moduleErr := s.lending.GetUserAccount(poolID, addr)

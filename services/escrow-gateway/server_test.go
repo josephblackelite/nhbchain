@@ -62,9 +62,6 @@ type mockNodeClient struct {
 	p2pTradeResp *P2PTradeState
 	p2pTradeErr  error
 
-	events       []NodeEvent
-	eventsCalled int
-
 	balanceResp  *big.Int
 	balanceErr   error
 	balanceCalls int
@@ -197,13 +194,6 @@ func (m *mockNodeClient) P2PGetTrade(ctx context.Context, tradeID string) (*P2PT
 		return &resp, nil
 	}
 	return nil, nil
-}
-
-func (m *mockNodeClient) FetchEvents(ctx context.Context, afterSeq int64, limit int) ([]NodeEvent, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.eventsCalled++
-	return append([]NodeEvent(nil), m.events...), nil
 }
 
 func (m *mockNodeClient) RelayerBalance(ctx context.Context) (*big.Int, error) {
@@ -468,7 +458,7 @@ func TestEscrowGetIncludesProviderMetadata(t *testing.T) {
 	server, store, _ := newTestServer(t, node, nil)
 	defer store.Close()
 
-	req := httptest.NewRequest(http.MethodGet, "/escrow/0xabc", nil)
+	req := signedGet("/escrow/0xabc", 1700000001, "nonce-get-escrow")
 	rec := httptest.NewRecorder()
 	server.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -501,7 +491,6 @@ func TestCreateRejectsRealmOutsideMerchantScope(t *testing.T) {
 			ID: "core",
 			Metadata: &EscrowRealmMetadata{
 				Scope: "platform",
-				Type:  "public",
 			},
 		},
 		createResp: &EscrowCreateResponse{ID: "0xescrow"},
@@ -866,7 +855,7 @@ func TestP2POfferLifecycle(t *testing.T) {
 		t.Fatalf("expected offer id")
 	}
 
-	listReq := httptest.NewRequest(http.MethodGet, "/p2p/offers", nil)
+	listReq := signedGet("/p2p/offers", 1700000005, "nonce-list-offers")
 	listRec := httptest.NewRecorder()
 	server.ServeHTTP(listRec, listReq)
 	if listRec.Code != http.StatusOK {
@@ -896,75 +885,11 @@ func TestP2POfferLifecycle(t *testing.T) {
 		t.Fatalf("expected p2p create invoked once, got %d", node.p2pCreateCalls)
 	}
 
-	tradeReq := httptest.NewRequest(http.MethodGet, "/p2p/trades/0xtrade", nil)
+	tradeReq := signedGet("/p2p/trades/0xtrade", 1700000020, "nonce-get-trade")
 	tradeRec := httptest.NewRecorder()
 	server.ServeHTTP(tradeRec, tradeReq)
 	if tradeRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 trade get got %d", tradeRec.Code)
-	}
-}
-
-func TestEventWatcherProcessesEvents(t *testing.T) {
-	ctx := context.Background()
-	store, err := NewSQLiteStore("file:testwatcher?mode=memory&cache=shared")
-	if err != nil {
-		t.Fatalf("store: %v", err)
-	}
-	defer store.Close()
-	queue := NewWebhookQueue()
-	now := time.Unix(1700001000, 0).UTC()
-	trade := P2PTrade{
-		ID:            "0xtrade",
-		OfferID:       "OFF_1",
-		Buyer:         "nhb1buyer",
-		Seller:        "nhb1seller",
-		BaseToken:     "NHB",
-		BaseAmount:    "5",
-		QuoteToken:    "ZNHB",
-		QuoteAmount:   "10",
-		EscrowBaseID:  "0xbase",
-		EscrowQuoteID: "0xquote",
-		Status:        "created",
-		CreatedAt:     now,
-		UpdatedAt:     now,
-	}
-	if err := store.InsertTrade(ctx, trade); err != nil {
-		t.Fatalf("insert trade: %v", err)
-	}
-	if err := store.LinkEscrowToTrade(ctx, "0xbase", trade.ID); err != nil {
-		t.Fatalf("link base: %v", err)
-	}
-	if err := store.LinkEscrowToTrade(ctx, "0xquote", trade.ID); err != nil {
-		t.Fatalf("link quote: %v", err)
-	}
-	node := &mockNodeClient{
-		events: []NodeEvent{{
-			Sequence:   1,
-			Type:       "escrow.trade.funded",
-			Attributes: map[string]string{"tradeId": "trade"},
-			Timestamp:  now.Unix(),
-		}},
-	}
-	watcher := NewEventWatcher(node, store, queue)
-	watcher.nowFn = func() time.Time { return now }
-	watcher.poll(ctx, 0)
-
-	events := queue.Events()
-	if len(events) != 1 {
-		t.Fatalf("expected one webhook event, got %d", len(events))
-	}
-	if events[0].Type != "escrow.trade.funded" {
-		t.Fatalf("unexpected event type %s", events[0].Type)
-	}
-	if events[0].TradeID != trade.ID {
-		t.Fatalf("expected trade id %s got %s", trade.ID, events[0].TradeID)
-	}
-	storedTrade, err := store.GetTrade(ctx, trade.ID)
-	if err != nil {
-		t.Fatalf("get trade: %v", err)
-	}
-	if storedTrade.Status != "funded" {
-		t.Fatalf("expected trade status funded, got %s", storedTrade.Status)
 	}
 }
 

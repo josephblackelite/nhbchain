@@ -37,7 +37,7 @@
   "panels": [
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Trailing 24h minted ZNHB through automatic paymaster top-ups compared to the configured cap.",
+      "description": "Trailing 24h ZNHB transferred to paymasters by automatic top-ups compared to the configured cap.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -64,7 +64,7 @@
           "exemplar": false,
           "expr": "sum(increase(nhb_paymaster_autotopup_amount_wei_total{outcome=\"success\"}[1d])) / 1e18",
           "interval": "",
-          "legendFormat": "Minted (24h)",
+          "legendFormat": "Top-ups (24h)",
           "refId": "A"
         },
         {
@@ -212,7 +212,7 @@
     },
     {
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-      "description": "Snapshot of the trailing 24h minted volume compared with the configured auto top-up cap.",
+      "description": "Snapshot of the trailing 24h top-up volume (a transfer, not a mint) compared with the configured auto top-up cap.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -248,7 +248,7 @@
           "exemplar": false,
           "expr": "sum(increase(nhb_paymaster_autotopup_amount_wei_total{outcome=\"success\"}[1d])) / 1e18",
           "interval": "",
-          "legendFormat": "Minted (24h)",
+          "legendFormat": "Top-ups (24h)",
           "refId": "A"
         },
         {
@@ -259,7 +259,7 @@
           "refId": "B"
         }
       ],
-      "title": "24h Minted vs Cap Snapshot",
+      "title": "24h Top-ups vs Cap Snapshot",
       "type": "stat"
     }
   ],

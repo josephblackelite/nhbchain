@@ -7,7 +7,7 @@ We thank the following researchers for responsibly reporting findings through ou
 - **Fixed** — the researcher's report matches a real issue, and the running network is not exposed to it.
 - **Investigated** — the report has been reviewed. Some of these are confirmed real and scheduled for a future fix; others did not reproduce against our current code. We are not publishing which is which here so as not to signal anything about an unresolved issue.
 
-Reward and disclosure-timeline details are handled privately with each researcher per our [disclosure policy](disclosure.md) and are not listed here.
+Where every researcher's reports currently stand is on the [bug bounty status page](bounty-status.md). Reward and disclosure-timeline details are handled privately with each researcher per our [disclosure policy](disclosure.md) and are not listed here.
 
 | Researcher | Status |
 | --- | --- |
@@ -22,6 +22,6 @@ Reward and disclosure-timeline details are handled privately with each researche
 | aldiboncel49 | Investigated |
 | samirnof knof (0xlab) | Investigated |
 | Yusrizal Ahmad | Investigated |
-| Cerena (Azethra) | Investigated |
+| ASHWINI JADHAO (Azethra) | Investigated |
 
 This list grows as new reports are triaged. If you believe your report should be credited here, or credited differently, email **security@nhbcoin.com**.

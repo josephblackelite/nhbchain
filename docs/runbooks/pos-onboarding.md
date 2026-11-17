@@ -1,17 +1,69 @@
 # POS Merchant & Device Onboarding Runbook
 
-The POS registry lets operations teams bootstrap merchants and their payment devices before rolling out sponsored transactions. Merchant entries default to an active sponsorship state and devices inherit their merchant binding while preserving any prior revocation flags, so the onboarding flow is idempotent.【F:native/pos/registry.go†L77-L184】 The registry is exposed over the `pos.v1.Registry` gRPC surface so governance tooling can stage the mutations alongside other administrative actions.【F:proto/pos/registry.proto†L7-L82】
+The POS registry records which merchants and devices exist and whether sponsorship for them is
+paused or revoked. Merchant entries default to an active state and a device keeps its
+`Revoked` flag when it is registered again, so registering twice is safe
+(`native/pos/registry.go`). The `pos.v1.Registry` message definitions live in
+`proto/pos/registry.proto`.
+
+> **Status note (verified against the code):** the `pos.v1.Registry` gRPC service is retired and
+> not registered on the node (`rpc/http.go` `Serve`, comment NHB-AUDIT-S3; the implementation in
+> `rpc/pos_grpc.go` is left unregistered). Registry changes are `TxTypePOSRegistry` (`0x23`)
+> transactions. `applyPOSRegistry` (`core/state_pos.go`) applies all six registry messages:
+> `MsgRegisterMerchant`, `MsgPauseMerchant`, `MsgResumeMerchant`, `MsgRegisterDevice`,
+> `MsgRevokeDevice` and `MsgRestoreDevice`; any other payload is refused with
+> `pos: invalid registry payload`. Steps below that mention `pos.v1.Msg*` refer to those
+> transaction payloads, not to a gRPC endpoint.
+
+## Who may submit a registry transaction
+
+The signer of the transaction is the authority (`applyPOSRegistry`, `core/state_pos.go`). If a
+message carries an `authority` field it must name the signer, otherwise the transaction is
+refused (`requirePOSRegistrySignerIsAuthority`) -- the field is not the source of authority, the
+signature is. The signer must be the owner of the merchant address being changed (the merchant
+address, written as bech32 or `0x` hex, must be the signer's own address) or hold the role
+`ROLE_POS_REGISTRY_ADMIN` (`requirePOSRegistryAuthority`); otherwise the error is
+`pos: signer may not change this registry entry`. A merchant given as a free-form label that is
+not an address can therefore only be changed by a role holder. Roles are granted in the `roles`
+object of the genesis file or by a governance `role.allowlist` proposal for a role listed in
+`Governance.AllowedRoles`. The `roles` object of the live network's
+`config/genesis.relaunch.json` lists only `MINTER_NHB`, and the sample `config.toml` does not
+list `ROLE_POS_REGISTRY_ADMIN` in `AllowedRoles`, so on that chain only merchant owners can
+change the registry until a role is added to that list and granted.
+
+* Registering a device needs authority over the merchant named in the message. If the device
+  already exists, the merchant it is currently bound to must also agree, so one merchant cannot
+  take over another's device.
+* Revoking or restoring a device needs authority over the merchant the device is bound to
+  (`requirePOSRegistryDeviceAuthority`); if the message names a merchant it must be that one, and
+  an unregistered device is refused with `pos: device <id> not registered`.
+* Every call needs a nonce greater than zero and greater than the last nonce used by the same
+  signer, stored at `pos/signer/<signer address>` (`pos: stale nonce <n> (last <m>)`,
+  `native/pos/registry.go` `ensureFreshNonce`). The `nonce`, `expires_at` and `chain_id` of a
+  message are stored on the record; the registry does not check `expires_at` or `chain_id`
+  itself.
 
 ## Register a merchant
 
-1. Submit a `pos.v1.MsgRegisterMerchant` request through the governance channel that owns the registry. The RPC normalises the supplied address, creates the merchant record if it does not already exist, and leaves the sponsorship flag enabled.【F:native/pos/registry.go†L77-L133】
-2. Confirm the record landed by reading the merchant snapshot with a state query. The manager helper returns `(nil, false)` when the merchant has not been onboarded yet, so any subsequent calls can reuse the same check.【F:core/state/pos_registry.go†L22-L55】
+Submit a signed `TxTypePOSRegistry` transaction carrying `MsgRegisterMerchant`, signed by the
+merchant owner or a `ROLE_POS_REGISTRY_ADMIN` holder. Its payload (`tx.Data`) is the serialized
+`google.protobuf.Any` wrapping the message, which `consensus/codec` builds from a `TxEnvelope`
+whose payload is that message. Confirm the merchant by reading the key `pos/merchant/<address>`
+with the state manager (`Manager.POSGetMerchant`); it returns "not found" for an unregistered
+merchant. No RPC method returns registry records.
+
+Registering does not change an existing merchant's paused flag.
 
 ## Register a device
 
-1. Call `pos.v1.MsgRegisterDevice` to bind the device identifier to the merchant. Repeated invocations update the association deterministically and carry forward any existing revocation flag so that migrations cannot silently re-enable a blocked terminal.【F:native/pos/registry.go†L155-L204】
-2. Inspect the device record through the state manager to confirm the binding and revocation state. The helpers apply the same normalisation as the runtime, so the read-back values match the data that gates sponsorship at execution time.【F:core/state/pos_registry.go†L69-L104】
+Submit `MsgRegisterDevice` the same way and read `pos/device/<device id>`
+(`Manager.POSGetDevice`) to confirm the merchant binding and the `Revoked` flag.
 
-## Validate sponsorship gating
+Registration is not a precondition for sponsorship: the sponsorship check only acts on a
+merchant record that is paused and a device record that is revoked or bound to another merchant
+(see [paymaster budget](./paymaster-budgets.md)).
 
-After onboarding, broadcast a sponsored transfer and verify that the evaluation path observes the merchant/device metadata. The state processor loads the registry before enforcing quota caps, so any pause or revocation applied later immediately suppresses sponsorship while leaving raw transfers untouched.【F:core/sponsorship.go†L231-L247】 Use the regression tests as a reference if you need to reproduce the acceptance checks locally.【F:core/sponsorship_test.go†L203-L330】
+## Remove a record
+
+`Manager.POSDeleteMerchant` and `Manager.POSDeleteDevice` delete a record. No transaction type
+calls them, so records cannot be removed through the chain.

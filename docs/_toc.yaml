@@ -7,8 +7,6 @@ toc:
         toc:
           - name: NHB Pay intents
             path: specs/nhb-pay.md
-          - name: NFC NDEF payloads
-            path: specs/nfc-ndef.md
           - name: Intent field reference
             path: specs/pos-intent-fields.md
           - name: Quality of service
@@ -27,7 +25,7 @@ toc:
         toc:
           - name: Device onboarding
             path: runbooks/pos-onboarding.md
-          - name: Device attestation
+          - name: Device registry
             path: runbooks/device-attestation.md
           - name: Paymaster budgets
             path: runbooks/paymaster-budgets.md

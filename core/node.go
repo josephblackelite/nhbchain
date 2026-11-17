@@ -2,7 +2,6 @@ package core
 
 import (
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhbchain/config"
@@ -24,7 +24,6 @@ import (
 	"nhbchain/consensus/bft"
 	"nhbchain/consensus/codec"
 	"nhbchain/consensus/potso/evidence"
-	"nhbchain/consensus/potso/penalty"
 	"nhbchain/core/claimable"
 	"nhbchain/core/engagement"
 	"nhbchain/core/epoch"
@@ -47,6 +46,7 @@ import (
 	"nhbchain/native/governance"
 	"nhbchain/native/lending"
 	"nhbchain/native/loyalty"
+	"nhbchain/native/market"
 	nativeparams "nhbchain/native/params"
 	"nhbchain/native/pos"
 	"nhbchain/native/potso"
@@ -59,9 +59,6 @@ import (
 	"nhbchain/storage"
 	"nhbchain/storage/trie"
 
-	statebank "nhbchain/state/bank"
-	statepotso "nhbchain/state/potso"
-
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -71,14 +68,42 @@ import (
 
 // Node is the central controller, wiring all components together.
 type Node struct {
-	db                    storage.Database
-	state                 *StateProcessor
-	chain                 *Blockchain
-	syncMgr               *syncmgr.Manager
-	validatorKey          *crypto.PrivateKey
-	mempool               []*types.Transaction
-	mempoolMu             sync.Mutex
-	proposedTxs           map[string]struct{}
+	db           storage.Database
+	state        *StateProcessor
+	chain        *Blockchain
+	syncMgr      *syncmgr.Manager
+	validatorKey *crypto.PrivateKey
+	mempool      []*types.Transaction
+	mempoolMu    sync.Mutex
+	// proposedTxs marks transactions currently offered to a block proposal
+	// ("in flight") so GetMempool does not offer them again. The value is the
+	// lease expiry: a lease that lapses (a proposal that never finished, a
+	// polling consumer of GetMempool, any missed release path) simply makes
+	// the transaction offerable again instead of hiding it forever.
+	proposedTxs map[string]time.Time
+	// Block-production containment (core/proposal_containment.go). None of
+	// this is consensus state: it only decides which transactions this
+	// proposer includes, and reports on it.
+	//
+	//   poison          bounded strike book of failing resident transactions
+	//   getMempoolCalls counts GetMempool calls for the periodic sweep
+	//                   (guarded by mempoolMu)
+	//   buildMu         guards buildCfg and buildClock
+	//   hooks           test seams, nil in production
+	//   isolating       single-flight guard for async isolation
+	//   build           counters and watchdog state
+	//   lastBuilt       transactions of the block most recently sealed
+	poison          *txStrikeBook
+	getMempoolCalls uint64
+	buildMu         sync.RWMutex
+	buildCfg        buildConfig
+	buildClock      func() time.Time
+	hooks           atomic.Pointer[proposalHooks]
+	isolating       atomic.Bool
+	build           buildTelemetry
+	lastBuilt       atomic.Pointer[builtRecord]
+	watchdogOnce    sync.Once
+
 	mempoolLimit          int
 	allowUnlimitedMempool bool
 	senderUsage           map[string]*senderQuotaUsage
@@ -89,6 +114,7 @@ type Node struct {
 	txSimulationEnabled   bool
 	bftEngine             *bft.Engine
 	stateMu               sync.RWMutex
+	eventLog              *eventLog // events of committed blocks, bounded (event_log.go)
 	// selfProposedHash is the header hash of the block CreateBlock most
 	// recently built from the current, possibly-drifted n.state (guarded by
 	// stateMu). ValidateBlock/commitBlock skip the committed-head drift
@@ -114,53 +140,89 @@ type Node struct {
 	// validator, as part of one coordinated upgrade -- deliberately NOT
 	// auto-detected from chain state, since that could let one validator
 	// silently enforce while its peers don't.
-	quorumCertActivationHeight   uint64
-	escrowTreasury               [20]byte
-	engagementMgr                *engagement.Manager
-	govPolicy                    governance.ProposalPolicy
-	govPolicyMu                  sync.RWMutex
-	swapCfgMu                    sync.RWMutex
-	swapCfg                      swap.Config
-	swapOracle                   swap.PriceOracle
-	swapManual                   *swap.ManualOracle
-	swapSanctions                swap.SanctionsChecker
-	swapStatusMu                 sync.RWMutex
-	swapOracleLast               int64
-	evidenceMaxAge               uint64
-	paymasterMu                  sync.RWMutex
-	paymasterEnabled             bool
-	paymasterLimits              PaymasterLimits
-	paymasterTopUpPolicy         PaymasterAutoTopUpPolicy
-	timestampTolerance           time.Duration
-	timeConfigMu                 sync.RWMutex
-	timeSource                   func() time.Time
-	lendingMu                    sync.RWMutex
-	lendingParams                lending.RiskParameters
-	lendingModuleAddr            crypto.Address
-	lendingCollateralAddr        crypto.Address
-	lendingDeveloperFeeBps       uint64
-	lendingDeveloperFeeCollector crypto.Address
-	lendingInterestModel         *lending.InterestModel
-	lendingReserveFactorBps      uint64
-	lendingProtocolFeeBps        uint64
-	lendingCollateralRouting     lending.CollateralRouting
-	creatorPayoutVaultAddr       crypto.Address
-	creatorRewardsTreasuryAddr   crypto.Address
-	modulePauseMu                sync.RWMutex
-	modulePauses                 map[string]bool
-	moduleQuotaMu                sync.RWMutex
-	moduleQuotas                 map[string]nativecommon.Quota
-	feesMu                       sync.RWMutex
-	feesPolicy                   fees.Policy
-	transferGasPolicy            TransferGasPolicy
-	potsoEngineMu                sync.Mutex
-	potsoEngine                  *potso.Engine
-	potsoLedger                  *statepotso.Ledger
-	globalCfgMu                  sync.RWMutex
-	globalCfg                    config.Global
-	networkMode                  string
-	networkBroadcaster           p2p.Broadcaster
-	blockSyncMu                  sync.Mutex
+	quorumCertActivationHeight uint64
+	// govCreditPreservationActivationHeight gates PL-R1-GOVREFUND's fix to
+	// applyGovFinalizeTransaction/applyGovExecuteTransaction (core/governance_tx.go):
+	// below this height, a nonce-bump persist after engine.Finalize/Execute
+	// reuses the handler's pre-call sender snapshot (the original behavior,
+	// so already-committed history keeps replaying to the identical state
+	// root); at or above it, the sender account is reloaded fresh first, so
+	// a same-address credit the engine just wrote (a deposit refund, a
+	// forfeited-deposit sweep, or a treasury-directive payout) survives.
+	// Mirrors quorumCertActivationHeight's gating shape exactly -- see
+	// StateProcessor.SetGovCreditPreservationActivationHeight's doc comment
+	// for the full rationale. NewNode defaults this to math.MaxUint64
+	// (disabled -- every existing caller, including the whole test suite,
+	// keeps today's behavior unchanged). Enabling this is an explicit,
+	// deploy-time decision, not automatic: SetGovCreditPreservationActivationHeight
+	// must be called with the chain's current tip height, on every
+	// validator, as part of one coordinated upgrade -- deliberately NOT
+	// auto-detected from chain state, for the same reason
+	// SetQuorumCertActivationHeight's doc comment gives.
+	govCreditPreservationActivationHeight uint64
+	// feeRouteAliasActivationHeight gates the NHB half of PL-R1-FEEROUTE's fix
+	// to applyTransactionFee (core/state_transition.go): below this height an
+	// NHB domain fee whose route wallet is the transfer's own sender or
+	// recipient is credited to a separately loaded copy that the caller's own
+	// later write overwrites (the behavior every earlier release has, so
+	// already-committed history keeps replaying to the identical state root);
+	// at or above it the credit lands on the caller's already-loaded account
+	// and survives. The ZNHB half is not gated. NewNode defaults this to
+	// math.MaxUint64 (off); SetFeeRouteAliasActivationHeight is an explicit,
+	// coordinated, every-validator-at-once decision, never inferred from chain
+	// state (see SetQuorumCertActivationHeight for the same reason).
+	feeRouteAliasActivationHeight uint64
+	escrowTreasury                [20]byte
+	engagementMgr                 *engagement.Manager
+	govPolicy                     governance.ProposalPolicy
+	govPolicyMu                   sync.RWMutex
+	swapCfgMu                     sync.RWMutex
+	swapCfg                       swap.Config
+	swapOracle                    swap.PriceOracle
+	swapManual                    *swap.ManualOracle
+	swapSanctions                 swap.SanctionsChecker
+	swapStatusMu                  sync.RWMutex
+	swapOracleLast                int64
+	paymasterMu                   sync.RWMutex
+	paymasterEnabled              bool
+	paymasterLimits               PaymasterLimits
+	paymasterTopUpPolicy          PaymasterAutoTopUpPolicy
+	timestampTolerance            time.Duration
+	timeConfigMu                  sync.RWMutex
+	timeSource                    func() time.Time
+	lendingMu                     sync.RWMutex
+	lendingParams                 lending.RiskParameters
+	lendingModuleAddr             crypto.Address
+	lendingCollateralAddr         crypto.Address
+	lendingDeveloperFeeBps        uint64
+	lendingDeveloperFeeCollector  crypto.Address
+	lendingInterestModel          *lending.InterestModel
+	lendingReserveFactorBps       uint64
+	lendingProtocolFeeBps         uint64
+	lendingCollateralRouting      lending.CollateralRouting
+	creatorPayoutVaultAddr        crypto.Address
+	creatorRewardsTreasuryAddr    crypto.Address
+	modulePauseMu                 sync.RWMutex
+	modulePauses                  map[string]bool
+	moduleQuotaMu                 sync.RWMutex
+	moduleQuotas                  map[string]nativecommon.Quota
+	feesMu                        sync.RWMutex
+	feesPolicy                    fees.Policy
+	transferGasPolicy             TransferGasPolicy
+	potsoEngineMu                 sync.Mutex
+	potsoEngine                   *potso.Engine
+	globalCfgMu                   sync.RWMutex
+	globalCfg                     config.Global
+	networkMode                   string
+	networkBroadcaster            p2p.Broadcaster
+	blockSyncMu                   sync.Mutex
+	// blockSyncRequest* remember the last block request sent to the peers, so
+	// that a request for the same blocks is not sent again within
+	// networkBlockSyncRequestGap. Node-local pacing only: nothing here reaches
+	// state or the outcome of a transaction or a block.
+	blockSyncRequestMu   sync.Mutex
+	blockSyncRequestFrom uint64
+	blockSyncRequestAt   time.Time
 	// externalCommitNotifier, if set, is called after a block committed via
 	// the peer-sync path (handleNetworkBlocks/commitSyncedBlock) so the BFT
 	// engine can immediately abandon a stale in-flight round for a height
@@ -185,10 +247,21 @@ type Node struct {
 	// evict a still-live cache entry while the second is still present.
 	posIntentTxHash      map[string][]byte
 	posIntentTxHashOrder []string
+
+	// posHoldUnstakeGuardHeight is the activation height of the POS hold
+	// unstake guard (see SetPOSHoldUnstakeGuardActivationHeight). Zero leaves
+	// it off. Kept here as well as on the state processor so a rebuilt
+	// state processor carries it. Guarded by stateMu.
+	posHoldUnstakeGuardHeight uint64
+
+	// lendingFixedTermIDHeight is the activation height of the owner-scoped
+	// fixed-term loan and deposit IDs (see SetLendingFixedTermIDActivationHeight).
+	// Zero leaves them on the transaction hash. Kept here as well as on the state
+	// processor so a rebuilt state processor carries it. Guarded by stateMu.
+	lendingFixedTermIDHeight uint64
 }
 
 const (
-	rolePaymasterAdmin     = "ROLE_PAYMASTER_ADMIN"
 	roleReputationVerifier = "ROLE_REPUTATION_VERIFIER"
 	moduleLending          = "lending"
 	moduleSwap             = "swap"
@@ -213,8 +286,6 @@ const (
 	moduleMarket = "market"
 )
 
-var ErrPaymasterUnauthorized = errors.New("paymaster: caller lacks ROLE_PAYMASTER_ADMIN")
-
 // ErrReputationVerifierUnauthorized is returned when a caller lacks the
 // required verifier role to issue skill attestations.
 var ErrReputationVerifierUnauthorized = errors.New("reputation: caller lacks verifier role")
@@ -224,6 +295,16 @@ var ErrMempoolFull = errors.New("mempool: transaction limit reached")
 
 // ErrInvalidTransaction marks transactions that fail basic validation or cannot be executed.
 var ErrInvalidTransaction = errors.New("mempool: invalid transaction")
+
+// localLimitError marks a transaction refused only because of a limit this node
+// derives from its own frame configuration (the most JSON one block may hold).
+// It is always wrapped together with ErrInvalidTransaction so callers that map
+// invalid transactions keep doing so, but a peer that relays such a transaction
+// has broken no protocol rule: a node with a different limit accepts it.
+// ProcessNetworkMessage therefore does not report it as an invalid payload.
+type localLimitError struct{ msg string }
+
+func (e *localLimitError) Error() string { return e.msg }
 
 // ErrMempoolByteLimit indicates the aggregate mempool byte capacity has been reached.
 var ErrMempoolByteLimit = errors.New("mempool: byte capacity reached")
@@ -375,6 +456,11 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetLendingDeveloperFee(n.lendingDeveloperFeeBps, n.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(n.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(n.governancePolicy())
+	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
+	stateProcessor.SetPOSHoldUnstakeGuardActivationHeight(n.posHoldUnstakeGuardHeight)
+	stateProcessor.SetLendingFixedTermIDActivationHeight(n.lendingFixedTermIDHeight)
+	stateProcessor.SetGovCreditPreservationActivationHeight(n.govCreditPreservationActivationHeight)
+	stateProcessor.SetFeeRouteAliasActivationHeight(n.feeRouteAliasActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
@@ -389,6 +475,7 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	if err := stateProcessor.SetRewardConfig(n.state.RewardConfig()); err != nil {
 		return err
 	}
+	stateProcessor.SetRewardsByStakeFromEpoch(n.state.RewardsByStakeFromEpoch())
 	if err := stateProcessor.SetPotsoRewardConfig(n.state.PotsoRewardConfig()); err != nil {
 		return err
 	}
@@ -580,15 +667,14 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetSwapConfig(defaultSwapCfg)
 	stateProcessor.SetSwapVoucherChainID(chain.ChainID())
 
-	pLedger, _ := statepotso.NewLedger(nil, nil)
-
 	node := &Node{
 		db:                   db,
 		state:                stateProcessor,
 		chain:                chain,
 		validatorKey:         key,
 		mempool:              make([]*types.Transaction, 0),
-		proposedTxs:          make(map[string]struct{}),
+		proposedTxs:          make(map[string]time.Time),
+		poison:               newTxStrikeBook(defaultStrikeBookCapacity),
 		posArrival:           make(map[string]time.Time),
 		senderUsage:          make(map[string]*senderQuotaUsage),
 		senderNonces:         make(map[string]map[uint64]time.Time),
@@ -597,10 +683,10 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		engagementMgr:        engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapCfg:              defaultSwapCfg,
 		swapSanctions:        swap.DefaultSanctionsChecker,
-		evidenceMaxAge:       evidence.DefaultMaxAgeBlocks,
 		paymasterEnabled:     stateProcessor.PaymasterEnabled(),
 		paymasterLimits:      PaymasterLimits{},
-		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: "ZNHB"},
+		paymasterTopUpPolicy: PaymasterAutoTopUpPolicy{Token: paymasterSponsoredAsset},
+		eventLog:             newEventLog(maxRetainedEvents, maxPinnedEvents),
 		timestampTolerance:   DefaultBlockTimestampTolerance,
 		timeSource:           func() time.Time { return time.Now().UTC() },
 		// Disabled by default (see the field doc comment): every existing
@@ -608,13 +694,21 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		// unchanged behavior unless SetQuorumCertActivationHeight is
 		// called explicitly to opt in.
 		quorumCertActivationHeight: math.MaxUint64,
-		lendingModuleAddr:          moduleAddr,
-		lendingCollateralAddr:      collateralAddr,
-		creatorPayoutVaultAddr:     creatorVaultAddr,
-		creatorRewardsTreasuryAddr: creatorRewardsAddr,
-		modulePauses:               make(map[string]bool),
-		moduleQuotas:               make(map[string]nativecommon.Quota),
-		feesPolicy:                 fees.Policy{Domains: map[string]fees.DomainPolicy{}},
+		// Disabled by default (see the field doc comment): every existing
+		// caller of NewNode, including the whole test suite, gets today's
+		// unchanged behavior unless SetGovCreditPreservationActivationHeight
+		// is called explicitly to opt in.
+		govCreditPreservationActivationHeight: math.MaxUint64,
+		// Same for the NHB fee-route fix: off unless
+		// SetFeeRouteAliasActivationHeight is called.
+		feeRouteAliasActivationHeight: math.MaxUint64,
+		lendingModuleAddr:             moduleAddr,
+		lendingCollateralAddr:         collateralAddr,
+		creatorPayoutVaultAddr:        creatorVaultAddr,
+		creatorRewardsTreasuryAddr:    creatorRewardsAddr,
+		modulePauses:                  make(map[string]bool),
+		moduleQuotas:                  make(map[string]nativecommon.Quota),
+		feesPolicy:                    fees.Policy{Domains: map[string]fees.DomainPolicy{}},
 		transferGasPolicy: TransferGasPolicy{
 			Enabled: true,
 			// 1000 NHB (18 decimals), not 1000 base units -- the founder's
@@ -633,7 +727,6 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 			FeeBpsZNHB: 10,
 		},
 		potsoEngine:         potsoEngine,
-		potsoLedger:         pLedger,
 		txSimulationEnabled: true,
 		globalCfg: config.Global{
 			Governance: config.Governance{
@@ -677,6 +770,15 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		node.networkMode = "prod"
 	}
 
+	// Block-production containment tunables: built-in defaults, then any
+	// NHB_* environment overrides. Malformed values are reported and ignored;
+	// a typo in a tuning knob must never stop a validator from starting.
+	buildCfg, buildCfgWarnings := loadBuildConfig(defaultBuildConfig(), os.Getenv)
+	node.buildCfg = buildCfg
+	for _, warning := range buildCfgWarnings {
+		slog.Warn("block-production configuration override ignored", slog.String("detail", warning))
+	}
+
 	stateProcessor.SetQuotaConfig(node.moduleQuotas)
 	stateProcessor.SetPaymasterLimits(node.paymasterLimits)
 	stateProcessor.SetPaymasterAutoTopUpPolicy(node.paymasterTopUpPolicy)
@@ -688,6 +790,8 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetLendingDeveloperFee(node.lendingDeveloperFeeBps, node.lendingDeveloperFeeCollector)
 	stateProcessor.SetLendingCollateralRouting(node.lendingCollateralRouting)
 	stateProcessor.SetGovernancePolicy(node.governancePolicy())
+	stateProcessor.SetGovCreditPreservationActivationHeight(node.govCreditPreservationActivationHeight)
+	stateProcessor.SetFeeRouteAliasActivationHeight(node.feeRouteAliasActivationHeight)
 
 	node.SetModulePauses(config.Pauses{})
 	node.stateMu.Lock()
@@ -1304,6 +1408,7 @@ func (n *Node) SetMempoolLimit(limit int) {
 						delete(n.posArrival, key)
 					}
 					n.untrackTransactionLocked(key)
+					n.poison.forget(key)
 				}
 			}
 		}
@@ -1349,6 +1454,8 @@ func (n *Node) SetGovernancePolicy(policy governance.ProposalPolicy) {
 		AllowedRoles:                   append([]string{}, policy.AllowedRoles...),
 		TreasuryAllowList:              append([][20]byte{}, policy.TreasuryAllowList...),
 		BlockTimestampToleranceSeconds: policy.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: policy.RejectAmbiguousParamKeysFromUnix,
 	}
 	if policy.MinDepositWei != nil {
 		copyPolicy.MinDepositWei = new(big.Int).Set(policy.MinDepositWei)
@@ -1494,14 +1601,16 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingAprBps, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingAprBps, parseErr)
+				// A stored value that cannot be read keeps the configured
+				// value (loudly) instead of aborting startup.
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingAprBps, raw, parseErr, strconv.FormatUint(uint64(merged.AprBps), 10))
+			} else {
+				merged.AprBps = uint32(value)
 			}
-			merged.AprBps = uint32(value)
 		}
 	}
 
@@ -1509,14 +1618,14 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingPayoutPeriodDays, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingPayoutPeriodDays, parseErr)
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingPayoutPeriodDays, raw, parseErr, strconv.FormatUint(uint64(merged.PayoutPeriodDays), 10))
+			} else {
+				merged.PayoutPeriodDays = uint32(value)
 			}
-			merged.PayoutPeriodDays = uint32(value)
 		}
 	}
 
@@ -1524,14 +1633,14 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingUnbondingDays, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseUint(trimmed, 10, 32)
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingUnbondingDays, parseErr)
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingUnbondingDays, raw, parseErr, strconv.FormatUint(uint64(merged.UnbondingDays), 10))
+			} else {
+				merged.UnbondingDays = uint32(value)
 			}
-			merged.UnbondingDays = uint32(value)
 		}
 	}
 
@@ -1539,9 +1648,13 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingMinStakeWei, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
-			merged.MinStakeWei = trimmed
+			if _, valid := new(big.Int).SetString(trimmed, 10); !valid {
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingMinStakeWei, raw, fmt.Errorf("not a base-10 integer"), merged.MinStakeWei)
+			} else {
+				merged.MinStakeWei = trimmed
+			}
 		}
 	}
 
@@ -1549,9 +1662,13 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingMaxEmissionPerYearWei, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
-			merged.MaxEmissionPerYearWei = trimmed
+			if _, valid := new(big.Int).SetString(trimmed, 10); !valid {
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingMaxEmissionPerYearWei, raw, fmt.Errorf("not a base-10 integer"), merged.MaxEmissionPerYearWei)
+			} else {
+				merged.MaxEmissionPerYearWei = trimmed
+			}
 		}
 	}
 
@@ -1559,7 +1676,9 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingRewardAsset, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		// The value is always stored as a JSON string, so the quotes are
+		// stripped before it is used as the asset symbol.
+		trimmed := nativecommon.ParamText(raw)
 		if trimmed != "" {
 			merged.RewardAsset = trimmed
 		}
@@ -1569,14 +1688,14 @@ func (n *Node) SyncStakingParams() error {
 		n.stateMu.Unlock()
 		return fmt.Errorf("load %s: %w", governance.ParamKeyStakingCompoundDefault, err)
 	} else if ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamText(raw)
 		if trimmed != "" {
 			value, parseErr := strconv.ParseBool(strings.ToLower(trimmed))
 			if parseErr != nil {
-				n.stateMu.Unlock()
-				return fmt.Errorf("parse %s: %w", governance.ParamKeyStakingCompoundDefault, parseErr)
+				nativecommon.ReportMalformedParam(governance.ParamKeyStakingCompoundDefault, raw, parseErr, strconv.FormatBool(merged.CompoundDefault))
+			} else {
+				merged.CompoundDefault = value
 			}
-			merged.CompoundDefault = value
 		}
 	}
 
@@ -1697,6 +1816,8 @@ func (n *Node) governancePolicy() governance.ProposalPolicy {
 		AllowedRoles:                   append([]string{}, n.govPolicy.AllowedRoles...),
 		TreasuryAllowList:              append([][20]byte{}, n.govPolicy.TreasuryAllowList...),
 		BlockTimestampToleranceSeconds: n.govPolicy.BlockTimestampToleranceSeconds,
+
+		RejectAmbiguousParamKeysFromUnix: n.govPolicy.RejectAmbiguousParamKeysFromUnix,
 	}
 	if n.govPolicy.MinDepositWei != nil {
 		policy.MinDepositWei = new(big.Int).Set(n.govPolicy.MinDepositWei)
@@ -1812,28 +1933,11 @@ func (n *Node) PaymasterAutoTopUpPolicy() PaymasterAutoTopUpPolicy {
 	return n.paymasterTopUpPolicy.Clone()
 }
 
-// SetPaymasterModuleEnabled toggles the paymaster module after verifying the caller has admin privileges.
-func (n *Node) SetPaymasterModuleEnabled(caller []byte, enabled bool) error {
-	if n == nil {
-		return fmt.Errorf("node unavailable")
-	}
-	if len(caller) == 0 {
-		return fmt.Errorf("caller address required")
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	if n.state == nil {
-		return fmt.Errorf("state unavailable")
-	}
-	if !n.state.HasRole(rolePaymasterAdmin, caller) {
-		return ErrPaymasterUnauthorized
-	}
-	n.state.SetPaymasterEnabled(enabled)
-	n.paymasterMu.Lock()
-	n.paymasterEnabled = enabled
-	n.paymasterMu.Unlock()
-	return nil
-}
+// The paymaster module's enabled flag has no runtime setter: it decides whether
+// a sponsored transaction is valid, so it must be identical on every validator
+// and cannot be flipped on one node by a caller that never signed anything.
+// (SetPaymasterModuleEnabled, which did that on an unsigned "caller" address
+// behind the tx_setSponsorshipEnabled RPC, has been removed along with it.)
 
 // EvaluateSponsorship returns the sponsorship assessment for the provided transaction without executing it.
 func (n *Node) EvaluateSponsorship(tx *types.Transaction) (*SponsorshipAssessment, error) {
@@ -2209,6 +2313,10 @@ func (n *Node) emitSwapSanctionAlert(alert events.SwapSanctionAlert) {
 }
 
 func (n *Node) StartConsensus() {
+	// The watchdog starts before the engine: bftEngine.Start blocks for the
+	// life of the process, and a stall is exactly when the engine cannot be
+	// relied on to report on itself.
+	n.startLivenessWatchdog()
 	if n.bftEngine != nil {
 		n.bftEngine.Start()
 	}
@@ -2227,6 +2335,13 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		// today's small topology (and risks a flood loop once the network grows
 		// beyond two nodes, absent real multi-hop relay/dedup semantics).
 		if err := n.addTransaction(tx, false); err != nil {
+			var local *localLimitError
+			if errors.As(err, &local) {
+				// Refused by this node's own size limit, not by any rule the
+				// network shares: dropped, and the relaying peer is left alone.
+				slog.Debug("gossiped transaction over this node's size limit dropped", slog.String("reason", local.Error()))
+				return nil
+			}
 			if errors.Is(err, ErrInvalidTransaction) {
 				return fmt.Errorf("%w: %v", p2p.ErrInvalidPayload, err)
 			}
@@ -2252,7 +2367,7 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		}
 
 	case p2p.MsgTypeGetStatus:
-		return n.handleNetworkGetStatus()
+		return n.handleNetworkGetStatus(n.networkBroadcast())
 
 	case p2p.MsgTypeStatus:
 		var status p2p.StatusPayload
@@ -2266,7 +2381,7 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			return err
 		}
-		return n.handleNetworkGetBlocks(payload)
+		return n.handleNetworkGetBlocks(payload, n.networkBroadcast())
 
 	case p2p.MsgTypeBlocks:
 		var payload p2p.BlocksPayload
@@ -2285,17 +2400,64 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 	return nil
 }
 
-const networkBlockSyncBatchSize = 128
+const (
+	networkBlockSyncBatchSize = 128
+	// networkBlockSyncMaxBytes bounds the encoded size of the blocks in one
+	// reply to a block request, on top of the block count: a batch of large
+	// blocks must still fit the peer-to-peer message size limit (1 MiB by
+	// default) once it is wrapped in a message. The first block is always sent.
+	networkBlockSyncMaxBytes = 512 * 1024
+	// networkBlockSyncRequestGap is the shortest time between two requests for
+	// the blocks that start at the same height. A status report, or a block that
+	// is ahead of this node, comes from a peer that has proved nothing and is
+	// answered with a request to every peer: a stream of such messages must not
+	// become a stream of requests. A request for the next height, which follows
+	// applying blocks, is not held back.
+	networkBlockSyncRequestGap = time.Second
+)
 
-func (n *Node) handleNetworkGetStatus() error {
+// networkBroadcast returns the function that broadcasts to every connected
+// peer, or nil when this node has no network attached.
+func (n *Node) networkBroadcast() func(*p2p.Message) error {
 	if n == nil || n.networkBroadcaster == nil {
+		return nil
+	}
+	return n.networkBroadcaster.Broadcast
+}
+
+// HandlePeerMessage is the entry point the peer-to-peer server uses when it can
+// say which peer a message came from. A request for chain data is answered to
+// that peer alone; every other message is handled exactly as
+// ProcessNetworkMessage handles it.
+func (n *Node) HandlePeerMessage(from p2p.PeerSender, msg *p2p.Message) error {
+	if n == nil {
+		return fmt.Errorf("node unavailable")
+	}
+	if from != nil && msg != nil {
+		switch msg.Type {
+		case p2p.MsgTypeGetStatus:
+			return n.handleNetworkGetStatus(from.Enqueue)
+		case p2p.MsgTypeGetBlocks:
+			var payload p2p.GetBlocksPayload
+			if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+				return err
+			}
+			return n.handleNetworkGetBlocks(payload, from.Enqueue)
+		}
+	}
+	return n.ProcessNetworkMessage(msg)
+}
+
+// handleNetworkGetStatus answers a status request through send.
+func (n *Node) handleNetworkGetStatus(send func(*p2p.Message) error) error {
+	if n == nil || send == nil {
 		return nil
 	}
 	msg, err := p2p.NewStatusMessage(n.GetHeight())
 	if err != nil {
 		return err
 	}
-	return n.networkBroadcaster.Broadcast(msg)
+	return send(msg)
 }
 
 func (n *Node) handleNetworkStatus(status p2p.StatusPayload) error {
@@ -2309,8 +2471,11 @@ func (n *Node) handleNetworkStatus(status p2p.StatusPayload) error {
 	return n.requestBlockSync(localHeight + 1)
 }
 
-func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload) error {
-	if n == nil || n.chain == nil || n.networkBroadcaster == nil {
+// handleNetworkGetBlocks answers a block request through send with at most
+// networkBlockSyncBatchSize blocks and networkBlockSyncMaxBytes of encoded
+// blocks (but always at least one block).
+func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload, send func(*p2p.Message) error) error {
+	if n == nil || n.chain == nil || send == nil {
 		return nil
 	}
 	from := payload.From
@@ -2325,14 +2490,7 @@ func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload) error {
 	if to < from || to > latest {
 		to = latest
 	}
-	blocks := make([]*types.Block, 0, to-from+1)
-	for height := from; height <= to; height++ {
-		block, err := n.chain.GetBlockByHeight(height)
-		if err != nil || block == nil {
-			break
-		}
-		blocks = append(blocks, block)
-	}
+	blocks := n.syncBatch(from, to, networkBlockSyncMaxBytes)
 	if len(blocks) == 0 {
 		return nil
 	}
@@ -2340,7 +2498,44 @@ func (n *Node) handleNetworkGetBlocks(payload p2p.GetBlocksPayload) error {
 	if err != nil {
 		return err
 	}
-	return n.networkBroadcaster.Broadcast(msg)
+	if err := send(msg); err != nil {
+		if errors.Is(err, p2p.ErrMessageTooLarge) {
+			// The first block alone is too large for a frame, so nothing can
+			// be sent for this request; peers asking for it get no reply.
+			slog.Error("block sync reply is larger than the p2p frame limit and was not sent",
+				slog.Uint64("from", from),
+				slog.Int("blocks", len(blocks)),
+				slog.Any("error", err),
+			)
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// syncBatch returns the blocks from height from up to height to, stopping
+// before the block that would take their encoded size past maxBytes. The first
+// block is returned whatever its size.
+func (n *Node) syncBatch(from, to uint64, maxBytes int) []*types.Block {
+	blocks := make([]*types.Block, 0, to-from+1)
+	encodedBytes := 0
+	for height := from; height <= to; height++ {
+		block, err := n.chain.GetBlockByHeight(height)
+		if err != nil || block == nil {
+			break
+		}
+		encoded, err := json.Marshal(block)
+		if err != nil {
+			break
+		}
+		if len(blocks) > 0 && encodedBytes+len(encoded) > maxBytes {
+			break
+		}
+		encodedBytes += len(encoded)
+		blocks = append(blocks, block)
+	}
+	return blocks
 }
 
 func (n *Node) handleNetworkBlocks(blocks []*types.Block) error {
@@ -2371,7 +2566,14 @@ func (n *Node) handleNetworkBlocks(blocks []*types.Block) error {
 		}
 	}
 
-	if applied > 0 && len(blocks) >= networkBlockSyncBatchSize {
+	// Ask for what follows whenever this reply moved the chain. A peer cuts a
+	// reply off at networkBlockSyncBatchSize blocks or networkBlockSyncMaxBytes
+	// of encoded blocks, whichever comes first, so a reply shorter than a full
+	// batch does not mean the peer has nothing more; waiting for the next
+	// status report would stall the catch-up. A peer that has nothing more
+	// answers with nothing, and requestBlockSync's pacing keeps a request for
+	// the same height from going out twice within the gap.
+	if applied > 0 {
 		return n.requestBlockSync(n.GetHeight() + 1)
 	}
 	return nil
@@ -2381,11 +2583,29 @@ func (n *Node) requestBlockSync(from uint64) error {
 	if n == nil || n.networkBroadcaster == nil {
 		return nil
 	}
+	if !n.allowBlockSyncRequest(from) {
+		return nil
+	}
 	msg, err := p2p.NewGetBlocksMessage(from)
 	if err != nil {
 		return err
 	}
 	return n.networkBroadcaster.Broadcast(msg)
+}
+
+// allowBlockSyncRequest reports whether a request for the blocks from the given
+// height may be sent now, and notes it when it may. The request is the same
+// whoever asked for it, so one that is already out serves every trigger that
+// arrives within networkBlockSyncRequestGap of it.
+func (n *Node) allowBlockSyncRequest(from uint64) bool {
+	now := time.Now()
+	n.blockSyncRequestMu.Lock()
+	defer n.blockSyncRequestMu.Unlock()
+	if !n.blockSyncRequestAt.IsZero() && n.blockSyncRequestFrom == from && now.Sub(n.blockSyncRequestAt) < networkBlockSyncRequestGap {
+		return false
+	}
+	n.blockSyncRequestFrom, n.blockSyncRequestAt = from, now
+	return true
 }
 
 // HandleMessage satisfies the p2p.MessageHandler interface by forwarding to ProcessNetworkMessage.
@@ -2421,24 +2641,21 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 		if tx.IntentExpiry > 0 && uint64(time.Now().Unix()) > tx.IntentExpiry {
 			return fmt.Errorf("%w: transaction expired", ErrInvalidTransaction)
 		}
-		// Defense in depth for the NHB-AUDIT TTL-clamp-gap fix
-		// (core/lending_fee_withdraw_tx.go's ErrLendingFeeWithdrawExpiryTooFar):
-		// a transaction whose signed IntentExpiry already exceeds what the
-		// intent registry will ever retain can never pass apply-time
-		// validation, so reject it here too instead of letting it sit in the
-		// mempool until a proposer includes it only to have it fail then.
-		if (tx.Type == types.TxTypeLendingWithdrawProtocolFees || tx.Type == types.TxTypeLendingWithdrawDeveloperFees) && n.state != nil {
-			ttl := n.state.lendingFeeWithdrawExpiryTTL()
-			limit := uint64(time.Now().Unix()) + uint64(ttl/time.Second)
-			if tx.IntentExpiry > limit {
-				return fmt.Errorf("%w: %v", ErrInvalidTransaction, ErrLendingFeeWithdrawExpiryTooFar)
-			}
-		}
 	}
 	snapshot := n.globalConfigSnapshot()
 	txSize, err := transactionSize(tx)
 	if err != nil {
 		return fmt.Errorf("%w: encode transaction: %w", ErrInvalidTransaction, err)
+	}
+	// A transaction whose encoding could not fit a block by itself is refused
+	// before anything else looks at it: it could never be proposed, and the
+	// replace-by-fee branch below does not look at sizes.
+	encoded, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("%w: encode transaction: %w", ErrInvalidTransaction, err)
+	}
+	if limit := n.maxTransactionBytes(); len(encoded) > limit {
+		return fmt.Errorf("%w: %w", ErrInvalidTransaction, &localLimitError{msg: fmt.Sprintf("transaction encodes to %d bytes, over the %d byte limit", len(encoded), limit)})
 	}
 	var sender []byte
 	var senderKey string
@@ -2490,6 +2707,17 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 					}
 
 					if newFee.Cmp(existingFee) > 0 {
+						// The swap is not exempt from the byte limits: it may
+						// only grow the pool as far as a new transaction could.
+						if err := n.replacementWithinLimitsLocked(existing, senderKey, txSize, snapshot.Mempool.MaxBytes); err != nil {
+							return err
+						}
+						// The replaced transaction leaves the mempool: drop its
+						// in-flight lease and failure history with it.
+						if replacedKey, replacedErr := transactionKey(existing); replacedErr == nil {
+							delete(n.proposedTxs, replacedKey)
+							n.poison.forget(replacedKey)
+						}
 						n.mempool[i] = tx
 						if key, keyErr := transactionKey(tx); keyErr == nil {
 							n.trackTransactionLocked(key, sender, nonce, now)
@@ -2572,25 +2800,7 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	var senderBytes int64
 	maxBytes := snapshot.Mempool.MaxBytes
 	if maxBytes > 0 || senderKey != "" {
-		for _, existing := range n.mempool {
-			if existing == nil {
-				continue
-			}
-			sz, sizeErr := transactionSize(existing)
-			if sizeErr != nil {
-				continue
-			}
-			if maxBytes > 0 {
-				currentBytes += int64(sz)
-			}
-			if senderKey != "" && types.RequiresSignature(existing.Type) {
-				existingFrom, fromErr := existing.From()
-				if fromErr == nil && hex.EncodeToString(existingFrom) == senderKey {
-					senderCount++
-					senderBytes += int64(sz)
-				}
-			}
-		}
+		currentBytes, senderCount, senderBytes = n.mempoolUsageLocked(senderKey, maxBytes > 0)
 	}
 	if maxBytes > 0 && currentBytes+int64(txSize) > maxBytes {
 		return ErrMempoolByteLimit
@@ -2641,6 +2851,58 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	return nil
 }
 
+// mempoolUsageLocked measures the mempool: the encoded bytes of every
+// transaction (only when wantTotal), and the number and encoded bytes of the
+// transactions senderKey has in it (only when senderKey is set). The caller
+// must hold n.mempoolMu.
+func (n *Node) mempoolUsageLocked(senderKey string, wantTotal bool) (total int64, senderCount int, senderBytes int64) {
+	for _, existing := range n.mempool {
+		if existing == nil {
+			continue
+		}
+		sz, sizeErr := transactionSize(existing)
+		if sizeErr != nil {
+			continue
+		}
+		if wantTotal {
+			total += int64(sz)
+		}
+		if senderKey != "" && types.RequiresSignature(existing.Type) {
+			existingFrom, fromErr := existing.From()
+			if fromErr == nil && hex.EncodeToString(existingFrom) == senderKey {
+				senderCount++
+				senderBytes += int64(sz)
+			}
+		}
+	}
+	return total, senderCount, senderBytes
+}
+
+// replacementWithinLimitsLocked applies the mempool byte limit and the
+// per-sender byte window to a replace-by-fee swap of replaced for a transaction
+// of newSize bytes. A swap that does not make the pool larger always fits; one
+// that does must stay within the limits, as a new transaction of that growth
+// would. maxBytes is the aggregate limit, zero for none. The caller must hold
+// n.mempoolMu.
+func (n *Node) replacementWithinLimitsLocked(replaced *types.Transaction, senderKey string, newSize int, maxBytes int64) error {
+	oldSize, err := transactionSize(replaced)
+	if err != nil {
+		oldSize = 0
+	}
+	growth := int64(newSize) - int64(oldSize)
+	if growth <= 0 {
+		return nil
+	}
+	total, _, senderBytes := n.mempoolUsageLocked(senderKey, maxBytes > 0)
+	if maxBytes > 0 && total+growth > maxBytes {
+		return ErrMempoolByteLimit
+	}
+	if senderKey != "" && senderBytes+growth > mempoolMaxSenderBytes {
+		return ErrMempoolSenderLimit
+	}
+	return nil
+}
+
 // gossipTransactionLocked broadcasts tx to connected peers so a validator
 // other than this one can include it in a block -- without this, a
 // transaction submitted to any validator that isn't currently the block
@@ -2668,6 +2930,10 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 		return fmt.Errorf("add transaction: nil transaction")
 	}
 	if err := tx.ValidateBasic(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
+	}
+	// Admission only, never block execution: see ValidateSigningEncoding.
+	if err := tx.ValidateSigningEncoding(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
 	}
 	if tx.ChainID == nil {
@@ -2741,6 +3007,29 @@ func (n *Node) SubmitTxEnvelope(envelope *consensusv1.SignedTxEnvelope) error {
 
 // --- Methods for bft.NodeInterface ---
 
+// strikeBookSweepInterval is how often (in GetMempool calls) the strike book is
+// reconciled against the live mempool, as a safety net for any mempool exit
+// path that forgot to drop a transaction's failure history.
+const strikeBookSweepInterval = 64
+
+// GetMempool returns the transactions eligible for the next block proposal, in
+// scheduling order, and leases the first Blocks.MaxTxs of them so they are not
+// offered again while that proposal is in flight.
+//
+// Ineligible transactions are filtered out BEFORE scheduling, so a transaction
+// that is in flight, backing off after a failure, or excluded by the operator
+// never displaces an eligible one from the MaxTxs window:
+//
+//   - leased (in flight) transactions, until the lease lapses;
+//   - transactions whose failure backoff has not elapsed (see txStrikeBook.gate);
+//   - transactions of an operator-excluded type (NHB_PROPOSER_EXCLUDE_TXTYPES);
+//   - transactions whose failure-history TTL has elapsed are evicted outright.
+//
+// Only the first MaxTxs of the returned list are leased. The full list is still
+// returned so existing callers are unchanged; CreateBlock clamps to the same
+// window. The old behaviour leased every returned transaction even though a
+// proposal can hold at most MaxTxs, so a burst above the cap hid the overflow
+// from every later call until restart.
 func (n *Node) GetMempool() []*types.Transaction {
 	if n == nil {
 		return nil
@@ -2749,18 +3038,41 @@ func (n *Node) GetMempool() []*types.Transaction {
 	defer n.mempoolMu.Unlock()
 
 	if n.proposedTxs == nil {
-		n.proposedTxs = make(map[string]struct{})
+		n.proposedTxs = make(map[string]time.Time)
 	}
+
+	cfg := n.buildConfigSnapshot()
+	localNow := n.localNow()
+	var nextHeight uint64 = 1
+	if n.chain != nil {
+		nextHeight = n.chain.GetHeight() + 1
+	}
+	metrics := observability.Mempool()
 
 	var (
 		lanes   mempool.Lanes
 		ordered []*types.Transaction
+		keys    map[*types.Transaction]string
 	)
+	n.getMempoolCalls++
+	sweep := n.getMempoolCalls%strikeBookSweepInterval == 0
+	var liveKeys map[string]struct{}
+	if sweep {
+		liveKeys = make(map[string]struct{}, len(n.mempool))
+	}
 	if len(n.mempool) > 0 {
 		now := n.currentTime().Unix()
 		original := n.mempool
 		filtered := original[:0]
+		keys = make(map[*types.Transaction]string, len(original))
 		lanes = mempool.Lanes{POS: make([]*types.Transaction, 0, len(original)), Normal: make([]*types.Transaction, 0, len(original))}
+		forgetKey := func(key string) {
+			delete(n.proposedTxs, key)
+			if n.posArrival != nil {
+				delete(n.posArrival, key)
+			}
+			n.poison.forget(key)
+		}
 		for _, tx := range original {
 			if tx == nil {
 				continue
@@ -2769,10 +3081,7 @@ func (n *Node) GetMempool() []*types.Transaction {
 				voucher, _, err := decodeMintTransaction(tx.Data)
 				if err != nil || voucher == nil || voucher.Expiry <= now {
 					if key, keyErr := transactionKey(tx); keyErr == nil {
-						delete(n.proposedTxs, key)
-						if n.posArrival != nil {
-							delete(n.posArrival, key)
-						}
+						forgetKey(key)
 					}
 					continue
 				}
@@ -2781,15 +3090,52 @@ func (n *Node) GetMempool() []*types.Transaction {
 				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
 				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= now {
 					if key, keyErr := transactionKey(tx); keyErr == nil {
-						delete(n.proposedTxs, key)
-						if n.posArrival != nil {
-							delete(n.posArrival, key)
-						}
+						forgetKey(key)
 					}
 					continue
 				}
 			}
+			key, keyErr := transactionKey(tx)
+			if keyErr != nil {
+				// Not schedulable, but not this function's business to drop.
+				filtered = append(filtered, tx)
+				continue
+			}
+			keys[tx] = key
+
+			// Failure-history TTL: evict, do not just hide.
+			if verdict, reason := n.poison.gate(key, nextHeight, localNow, cfg.SkipTTL, cfg.AbsoluteTTL); verdict == gateExpired {
+				forgetKey(key)
+				n.untrackTransactionLocked(key)
+				metrics.RecordEviction("ttl")
+				slog.Warn("transaction evicted from the local mempool",
+					slog.String("txType", types.TxTypeName(tx.Type)),
+					slog.String("key", truncateText(key, 24)),
+					slog.String("reason", reason))
+				continue
+			} else if verdict == gateBackoff {
+				filtered = append(filtered, tx)
+				if sweep {
+					liveKeys[key] = struct{}{}
+				}
+				continue
+			}
 			filtered = append(filtered, tx)
+			if sweep {
+				liveKeys[key] = struct{}{}
+			}
+
+			// In flight: hidden until the lease lapses.
+			if expiry, inFlight := n.proposedTxs[key]; inFlight {
+				if localNow.Before(expiry) {
+					continue
+				}
+				delete(n.proposedTxs, key)
+				metrics.RecordInflightLeaseExpired()
+			}
+			if _, excluded := cfg.ExcludeTypes[tx.Type]; excluded {
+				continue
+			}
 			if mempool.IsPOSLaneEligible(tx) {
 				lanes.POS = append(lanes.POS, tx)
 			} else {
@@ -2801,35 +3147,39 @@ func (n *Node) GetMempool() []*types.Transaction {
 		}
 		n.mempool = filtered
 	}
+	if sweep {
+		n.poison.sweep(liveKeys)
+	}
+	metrics.SetStrikeRecords(n.poison.size())
 
-	if len(n.mempool) == 0 {
-		if metrics := observability.Mempool(); metrics != nil {
-			metrics.RecordPOSLaneFill(mempool.Usage{})
-		}
+	if len(lanes.POS)+len(lanes.Normal) == 0 {
+		metrics.RecordPOSLaneFill(mempool.Usage{})
 		return nil
 	}
 
 	snapshot := n.globalConfigSnapshot()
 	maxTxs := snapshot.Blocks.MaxTxs
 	if maxTxs <= 0 || maxTxs > int64(math.MaxInt) {
-		maxTxs = int64(len(n.mempool))
+		maxTxs = int64(len(lanes.POS) + len(lanes.Normal))
 	}
 	planner := consensus.POSQuota{ReservationBPS: snapshot.Mempool.POSReservationBPS}
 	ordered, usage := mempool.Schedule(lanes, int(maxTxs), planner)
-	if metrics := observability.Mempool(); metrics != nil {
-		metrics.RecordPOSLaneFill(usage)
-	}
+	metrics.RecordPOSLaneFill(usage)
 
+	lease := cfg.InflightLease
+	if lease <= 0 {
+		lease = defaultInflightLease
+	}
+	leaseUntil := localNow.Add(lease)
 	txs := make([]*types.Transaction, 0, len(ordered))
 	for _, tx := range ordered {
-		key, err := transactionKey(tx)
-		if err != nil {
+		key, ok := keys[tx]
+		if !ok {
 			continue
 		}
-		if _, alreadyProposed := n.proposedTxs[key]; alreadyProposed {
-			continue
+		if int64(len(txs)) < maxTxs {
+			n.proposedTxs[key] = leaseUntil
 		}
-		n.proposedTxs[key] = struct{}{}
 		txs = append(txs, tx)
 	}
 	return txs
@@ -2935,6 +3285,34 @@ func (n *Node) requeueTransactions(txs []*types.Transaction) {
 	}
 }
 
+// releaseInflightKeys is requeueTransactions for callers that already hold the
+// transactions' keys (CreateBlock's completion step), so nothing is hashed
+// twice.
+func (n *Node) releaseInflightKeys(keys []string) {
+	if n == nil || len(keys) == 0 {
+		return
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	if len(n.proposedTxs) == 0 {
+		return
+	}
+	for _, key := range keys {
+		delete(n.proposedTxs, key)
+	}
+}
+
+// mempoolCounts reports the resident and in-flight transaction counts for
+// diagnostics, without mutating proposal bookkeeping.
+func (n *Node) mempoolCounts() (resident, inFlight int) {
+	if n == nil {
+		return 0, 0
+	}
+	n.mempoolMu.Lock()
+	defer n.mempoolMu.Unlock()
+	return len(n.mempool), len(n.proposedTxs)
+}
+
 // RequeueTransactions releases proposal bookkeeping for transactions that were
 // selected into a round but not finalized, allowing them to be proposed again
 // in a later round.
@@ -2961,6 +3339,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		committed[key] = struct{}{}
 		delete(n.proposedTxs, key)
 		n.untrackTransactionLocked(key)
+		n.poison.forget(key)
 		if mempool.IsPOSLaneEligible(tx) && n.posArrival != nil {
 			if enqueuedAt, ok := n.posArrival[key]; ok {
 				latency := n.currentTime().Sub(enqueuedAt)
@@ -2984,6 +3363,7 @@ func (n *Node) markTransactionsCommitted(txs []*types.Transaction) {
 		}
 		if _, ok := committed[key]; ok {
 			n.untrackTransactionLocked(key)
+			n.poison.forget(key)
 			continue
 		}
 		filtered = append(filtered, tx)
@@ -3013,6 +3393,7 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 			delete(n.posArrival, key)
 		}
 		n.untrackTransactionLocked(key)
+		n.poison.forget(key)
 	}
 	if len(dropped) == 0 || len(n.mempool) == 0 {
 		return
@@ -3036,19 +3417,21 @@ func (n *Node) dropTransactionsFromMempool(txs []*types.Transaction) {
 	n.mempool = filtered
 }
 
-// proposalTxDisposition is classifyProposalError's verdict for a transaction
-// that failed stateCopy.ApplyTransaction while CreateBlock's buildProposalState
-// is speculatively assembling a block.
+// proposalTxDisposition is the verdict for a transaction that failed
+// ApplyTransaction while CreateBlock (core/proposal_containment.go) is
+// speculatively assembling a block. It is produced by classifyProposalError
+// (plus the two verdicts only the wave engine can reach).
 type proposalTxDisposition int
 
 const (
-	// proposalDispositionAbort is the zero value and the safe default for
-	// any error classifyProposalError does not explicitly recognize: the
-	// whole in-progress proposal attempt fails and CreateBlock returns the
-	// error to its caller. This is deliberately what "unclassified" means
-	// -- adding a new disposition always requires a positive, reviewed
-	// decision (see the ABORT-is-correct discussion below); silence must
-	// never be read as "safe to skip or prune".
+	// proposalDispositionAbort is the zero value. After the block-production
+	// hardening it means exactly one thing: an INFRASTRUCTURE error -- this
+	// node cannot read or write state (see isInfrastructureError) -- which is
+	// not attributable to the transaction and which excluding transactions
+	// cannot fix. The wave fails, no transaction is struck, and CreateBlock
+	// falls back to the empty block. Unclassified errors used to land here
+	// and halted the chain; they now default to
+	// proposalDispositionQuarantine instead.
 	proposalDispositionAbort proposalTxDisposition = iota
 	// proposalDispositionPrune means the transaction is permanently
 	// unexecutable -- a pure function of its own immutable payload, or of
@@ -3062,24 +3445,51 @@ const (
 	// registry) or on ordering within this attempt -- a later attempt
 	// (next round, a different candidate set, state that has since
 	// changed) can genuinely succeed. It is excluded from THIS attempt's
-	// block but its mempool "in-flight" mark is released
-	// (n.requeueTransactions) so it is reconsidered next round; it is
-	// never removed from n.mempool.
+	// block and released from the "in-flight" bookkeeping so it is
+	// reconsidered later; it is never removed from n.mempool by this
+	// verdict, carries no strike, and backs off by height only after
+	// repeated skips (see txStrikeBook.noteSkip).
 	proposalDispositionSkip
+	// proposalDispositionQuarantine is the default for every error nobody
+	// classified: the transaction is excluded from this proposal, struck, and
+	// held back for a height or two. It is evicted only after several strikes
+	// AND a solo dry run showing it fails even on its own against committed
+	// state, so an innocent transaction that merely lost a same-block conflict
+	// is never evicted by it (see Node.confirmAndEvict). A contained panic is
+	// always quarantined and confirmed at its first strike.
+	proposalDispositionQuarantine
+	// proposalDispositionNondeterministic marks a transaction that read the
+	// wall clock while applying. Such a transaction succeeds here but cannot
+	// be re-executed identically by a validator a moment later (a wall-clock
+	// value written into state differs from one execution to the next), so a
+	// block that contains it can fail to commit and, through the BFT lock,
+	// deadlock the validators. No shipped transaction type does this: escrow
+	// and trade timestamps come from the block time. The detector is the
+	// guard against a new code path that does. Such a transaction is never
+	// proposed; it is struck like a quarantined transaction. Produced by the
+	// wave engine's clock detector, never by classifyProposalError.
+	proposalDispositionNondeterministic
 )
 
 // classifyProposalError reports the disposition for a transaction that
-// failed during proposal building (stateCopy.ApplyTransaction in
-// CreateBlock's buildProposalState). Getting this wrong in either direction
-// is dangerous: classifying a transiently-failing error as PRUNE silently
-// and permanently destroys a transaction that would have succeeded later;
-// leaving a routinely-occurring error unclassified (ABORT) lets it block
-// EVERY OTHER pending transaction, for EVERY subsequent round, until the
-// offending transaction's own expiry -- a validator-wide liveness stall, not
-// just a loss for one submitter. This function (and the SKIP disposition
-// specifically) exists because that second failure mode was found to be far
-// more common, and far more severe, than originally assumed -- see the
-// module-pause discussion below.
+// failed during proposal building (ApplyTransaction inside CreateBlock's
+// wave engine, core/proposal_containment.go). It is called ONLY from
+// CreateBlock: ValidateBlock and commitBlock never call it -- they re-execute
+// a block's transactions and reject the block on any apply error -- so what
+// it returns can only change which transactions THIS proposer includes, never
+// what any validator accepts.
+//
+// Classification is now a matter of speed and precision, not of liveness:
+// every error this function does not recognise is QUARANTINED (excluded from
+// the proposal, struck, evicted after repeated confirmed failures), so an
+// unclassified error can no longer halt block production. Getting a verdict
+// wrong in either direction still matters for the submitter: classifying a
+// transiently-failing error as PRUNE silently and permanently destroys a
+// transaction that would have succeeded later, while leaving a permanently
+// dead one unclassified keeps it resident for a few rounds until its strikes
+// run out. The SKIP disposition specifically exists for designed-transient
+// causes (a module pause, a rolling cap) that are routine and must never be
+// struck -- see the module-pause discussion below.
 //
 // This matters most for TxTypeSwapVoucherMint: when the same fiat voucher
 // reaches two validators nearly simultaneously (each independently
@@ -3170,6 +3580,38 @@ const (
 //     counterpart -- it has no epochs, but the accepted timestamp only
 //     moves forward, so a submission at or before the last accepted
 //     timestamp is equally permanently dead.
+//   - subscriptions.ErrSelfSubscription, market.ErrSelfFill,
+//     lending.ErrSelfLiquidation: a transaction whose signer and a counterparty
+//     address already fixed in committed state (the plan's merchant, the
+//     listing's seller, the payload's borrower) are the same address can never
+//     become valid.
+//   - ErrPOSInvalidAuthorizationID: a capture or void whose authorization id
+//     is not 64 hex characters is decided by the payload alone.
+//   - ErrBuybackAskTooSmall: an ask below the fixed minimum is decided by its
+//     own amount.
+//   - subscriptions.ErrInvalidPlan: plan terms outside the fixed bounds (a
+//     price or interval under the minimum, an interval or trial over the
+//     maximum, no name, an unknown asset) are decided by the payload alone.
+//   - ErrPOSRegistryInvalidPayload, pos.ErrInvalidRequest, pos.ErrStaleNonce: a
+//     registry transaction that does not decode, names no registry message,
+//     claims an authority other than its signer or breaks a rule of the
+//     request itself is decided by its own bytes, and an authority's registry
+//     nonce only grows.
+//   - swap.ErrVoucherNotReconcilable: a TxTypeSwapMarkReconciled naming a
+//     reversed voucher; a voucher's status only moves forward, so it can never
+//     become reconcilable (the same one-way rule as ErrSwapVoucherNotMinted).
+//   - loyalty.ErrPaymasterConsentRequired: an owner naming a wallet other than
+//     its own as the loyalty paymaster can never succeed for that signer (only
+//     a loyalty admin may name another wallet).
+//   - ErrEvidenceInvalidPayload, ErrEvidenceReporterMismatch,
+//     ErrEvidenceAlreadyRecorded and every evidence.ValidationError reason
+//     decided by the report alone (expired, invalid type/offender/reporter/
+//     signature/equivocation proof -- which includes a proof for a height the
+//     report does not list or the chain has not reached --, empty or unsorted
+//     heights, oversized, negative timestamp): a TxTypeSubmitEvidence report
+//     that cannot become valid later. RejectReasonFutureHeight is the
+//     exception (SKIP below), and RejectReasonUnknown /
+//     RejectReasonUnknownHeight are left to the default.
 //
 // == SKIP: depends on mutable state shared across transactions in this
 // attempt, or on ordering within this attempt -- a later attempt can
@@ -3246,57 +3688,118 @@ const (
 //     the chain has not entered yet becomes valid the moment that epoch
 //     opens, so it stays in the mempool and is offered again -- the
 //     counterpart to ErrBuybackRefPriceStaleEpoch (PRUNE) above.
+//   - swap.ErrVoucherNotFound: a TxTypeSwapMarkReconciled naming a provider
+//     transaction id the ledger does not know yet; the voucher can still be
+//     minted by a later transaction (ErrSwapVoucherReversalNotFound's reasoning).
+//   - ErrBuybackAskLimit: the epoch's ask list, or the seller's share of it, is
+//     full; the count starts again with the next epoch.
+//   - ErrPOSRegistryUnauthorized, pos.ErrDeviceNotRegistered: a registry change
+//     whose signer is neither the merchant's owner nor a holder of
+//     RolePOSRegistryAdmin (the role can be granted later), and a change to a
+//     device that can still be registered.
+//   - loyalty.ErrPaymasterConsent: a loyalty admin naming a wallet that has
+//     not yet recorded its own opt-in; the opt-in is a later transaction from
+//     the named wallet, after which the same assignment succeeds.
+//   - ErrTreasuryRewardPoolInsufficient: the treasury wallet's outflow is
+//     capped by the Reward Pool, which later inflows (fees, forfeited
+//     deposits) refill.
+//   - ErrEvidenceReporterNotBonded, evidence.ErrIndexFull,
+//     evidence.ErrReporterQuota, and an evidence.ValidationError with
+//     RejectReasonFutureHeight: a reporter can bond more stake, the evidence
+//     index frees up as records age out of the evidence window, and a claimed
+//     height becomes valid once the chain reaches it.
 //
-// == ABORT: deliberately still unclassified ==
+// == QUARANTINE: the default for everything else ==
 //
-//   - ErrSwapPriceProofInvalid: its signature-mismatch case is checked
-//     against the SAME mutable SwapPriceSigner registry as
-//     ErrSwapPriceProofSignerUnknown (recovered-pubkey-vs-currently-
-//     registered-signer), so a correction to a stale/incorrect signer
-//     registration could make a later resubmission succeed -- SKIP-shaped
-//     reasoning. But it ALSO covers pure-payload causes (domain/pair
-//     mismatch, a non-positive rate) that are PRUNE-shaped, and Go's
-//     errors.Is cannot distinguish which branch fired. The conservative,
-//     correct choice for an ambiguous sentinel is to leave it unclassified
-//     (ABORT) rather than risk either silently, permanently dropping a
-//     transaction that would have succeeded (wrong PRUNE), or endlessly
-//     retrying real corruption forever masked as "try again later" (wrong
-//     SKIP). This is intentionally NOT the same risk profile as a routine
-//     operational event like a pause or a cap -- it requires a genuinely
-//     malformed or adversarial payload to trigger, so ABORT's liveness cost
-//     is bounded to that rare case rather than to ordinary usage.
-//   - Two node-infrastructure failure classes that run in buildProposalState
-//     before or after the per-tx loop, not inside it, and are therefore
-//     never seen by this function at all: n.refreshModulePauses() /
-//     n.state.Copy() failures (a precondition for building ANY block,
-//     including an empty one -- no transaction-exclusion strategy can fix
-//     an inability to read config or snapshot state), and
-//     stateCopy.ProcessBlockLifecycle / n.processPendingEvidenceForState
-//     failures (whole-block epoch rollover and slashing-evidence
-//     processing, not attributable to any single pending transaction).
-//     Both are surfaced as CreateBlock errors so the round fails visibly
-//     and another validator's block production can cover it.
+// Any error not listed above or below -- including a bare fmt.Errorf from a
+// handler that nobody has reviewed yet, and a recovered panic -- is excluded
+// from this proposal, struck, and held back for a height or two; after
+// Strikes failures across distinct builds, and only if a solo dry run shows
+// it fails even alone against committed state, it is evicted from the local
+// mempool (see Node.confirmAndEvict). This is what closes the class the
+// three incidents belonged to: an unknown apply error costs the submitter
+// their transaction, never the chain its liveness.
+//
+//   - ErrSwapPriceProofInvalid used to be deliberately left unclassified
+//     (ABORT) because Go's errors.Is cannot tell its signature-mismatch
+//     branch (checked against the same mutable signer registry as
+//     ErrSwapPriceProofSignerUnknown, so SKIP-shaped) from its pure-payload
+//     branches (domain/pair mismatch, a non-positive rate, so PRUNE-shaped),
+//     and neither wrong verdict was acceptable. Quarantine is the verdict
+//     that needs no guess: a transaction whose proof is wrong stays a few
+//     rounds, fails alone, and is evicted; one whose signer registration is
+//     corrected in the meantime simply passes.
+//
+// == ABORT: infrastructure errors only ==
+//
+// The only errors that still abort a wave are those isolated by
+// isInfrastructureError (a closed or corrupt database, a missing trie node, a
+// cancelled context, a full disk): they say nothing about the transaction,
+// and excluding transactions cannot fix them. No transaction is struck for
+// one, and CreateBlock falls back to the empty block.
+//
+// Two node-level failure classes never reach this function at all because
+// they are not attributable to any transaction: state copy / pause refresh
+// failures (a precondition for building ANY block) and
+// ProcessBlockLifecycle / processPendingEvidenceForState failures (whole-block
+// epoch rollover and evidence processing). CreateBlock reports them, falls
+// back to an empty block, and -- because the lifecycle also runs for the empty
+// block -- can only alarm (LIVENESS log lines, metrics, the watchdog) when the
+// fault is in committed state itself.
 //
 // == Termination ==
 //
-// The per-tx loop in buildProposalState never stops scanning on a PRUNE or
-// SKIP verdict (it `continue`s), so every candidate is attempted exactly
-// once per retry. CreateBlock's outer loop retries only when the candidate
-// set strictly shrank (at least one PRUNE or SKIP hit), so it terminates in
-// at most len(original txs)+1 iterations -- the last one either succeeding
-// (trivially, on an empty set if every transaction was excluded) or
-// hard-erroring via an ABORT-classified error. Worst case, EVERY mempool
-// transaction is SKIP-classified (e.g. a burst that trips a shared cap, or
-// a module pause hitting a fully-transfer-heavy mempool): the candidate set
-// shrinks to empty within that same bound, computeDependencyGraph(nil)
-// succeeds trivially, and buildProposalState returns a valid, successful,
-// EMPTY *StateProcessor -- CreateBlock returns an empty block, not an
-// error, not a hang. The validator stays live and proposes an empty block
-// instead of dropping out of the round entirely. See
-// TestCreateBlockAllSkippableTransactionsProducesEmptyBlockNotHang for a
-// test that exercises exactly this worst case with a large synthetic
-// mempool.
+// CreateBlock executes waves: each wave applies every remaining candidate
+// against a fresh state copy and collects ALL failures instead of stopping at
+// the first; the failed candidates are excluded and the survivors run again.
+// Every wave either finishes clean or removes at least one candidate, the
+// number of waves is capped, and a wall-clock budget is checked between
+// transactions. On exhaustion the clean prefix of the last wave is
+// re-verified and used, and failing that an EMPTY block is built -- the block a
+// proposer builds on every idle round -- which depends on no transaction at
+// all. See TestCreateBlockAllSkippableTransactionsProducesEmptyBlockNotHang
+// for the all-skipped worst case and the poison-matrix tests
+// (core/poison_matrix_test.go) for every transaction type.
 func classifyProposalError(err error) proposalTxDisposition {
+	// A recovered apply panic (see applyTx) is never the transaction's
+	// "fault" in the sense of a known sentinel, but it is exactly as
+	// unexecutable as any other error -- quarantine it, and confirm it at its
+	// first strike.
+	var panicErr *txPanicError
+	if errors.As(err, &panicErr) {
+		return proposalDispositionQuarantine
+	}
+	if isInfrastructureError(err) {
+		return proposalDispositionAbort
+	}
+	// *evidence.ValidationError is the outcome of evidence.ValidateEvidence for
+	// a TxTypeSubmitEvidence report: a pure function of the report itself and
+	// the block height, so it is prunable, with one exception -- a report
+	// citing a height the chain has not reached yet becomes valid the moment it
+	// does, so that one is skippable. Each of the pruned reasons is decided by
+	// the payload alone (or, for expiry, by a height that only grows), so they
+	// are dead on arrival. A reason nobody has classified (the catch-all
+	// RejectReasonUnknown, or RejectReasonUnknownHeight, which depends on this
+	// node's own chain index and is never produced on the transaction path)
+	// falls through to the default: quarantine.
+	var evidenceErr *evidence.ValidationError
+	if errors.As(err, &evidenceErr) && evidenceErr != nil {
+		switch evidenceErr.Reason {
+		case evidence.RejectReasonExpired,
+			evidence.RejectReasonInvalidType,
+			evidence.RejectReasonInvalidOffender,
+			evidence.RejectReasonInvalidReporter,
+			evidence.RejectReasonEmptyHeights,
+			evidence.RejectReasonUnsortedHeights,
+			evidence.RejectReasonInvalidSignature,
+			evidence.RejectReasonInvalidEquivocationProof,
+			evidence.RejectReasonOversized,
+			evidence.RejectReasonInvalidTimestamp:
+			return proposalDispositionPrune
+		case evidence.RejectReasonFutureHeight:
+			return proposalDispositionSkip
+		}
+	}
 	// *swap.RedeemRiskViolation is a struct type, not a sentinel value, so it
 	// needs errors.As rather than errors.Is -- same disposition as the
 	// mint-side cap-violation sentinels below (a redeem risk cap can free up
@@ -3331,6 +3834,11 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrMintInvalidChainID),
 		errors.Is(err, ErrMintExpired),
 		errors.Is(err, ErrMintInvalidPayload),
+		// Self-dealing: the signer and the counterparty recorded in committed
+		// state are one address, which can never change.
+		errors.Is(err, subscriptions.ErrSelfSubscription),
+		errors.Is(err, market.ErrSelfFill),
+		errors.Is(err, lending.ErrSelfLiquidation),
 		errors.Is(err, ErrRedeemRequestExists),
 		errors.Is(err, nhbstate.ErrRedeemRequestNotPending),
 		errors.Is(err, ErrRedeemInvalidPayload),
@@ -3345,6 +3853,8 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// already-committed ledger state" reasoning above.
 		errors.Is(err, ErrSwapVoucherNotMinted),
 		errors.Is(err, ErrSwapVoucherAlreadyReversed),
+		// Reconciling a reversed voucher is the same one-way status rule.
+		errors.Is(err, swap.ErrVoucherNotReconcilable),
 		// A ref price for a given epoch, once recorded, can never become
 		// unrecorded -- the epoch number only moves forward -- so a
 		// duplicate submission is a permanently dead transaction, never
@@ -3363,11 +3873,51 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// equally dead. See ErrLendingRefPriceStaleTimestamp's doc comment
 		// (core/lending_tx.go).
 		errors.Is(err, ErrLendingRefPriceStaleTimestamp),
+		// A TxTypeSubmitEvidence payload that does not decode, or whose
+		// reporter is not the account that signed it, is a pure function of
+		// the transaction's own immutable bytes. A report that is already
+		// recorded, or that reports an offense already recorded, can never
+		// become a first report again (a record only leaves state once the
+		// height of its offense is too old for any report of it to be
+		// submitted). None of them can ever succeed later.
+		errors.Is(err, ErrEvidenceInvalidPayload),
+		errors.Is(err, ErrEvidenceReporterMismatch),
+		errors.Is(err, ErrEvidenceAlreadyRecorded),
 		// NHB-AUDIT-R2: a transaction whose MaxBlockHeight or IntentExpiry
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
 		// advance -- same reasoning as ErrSwapExpired above.
-		errors.Is(err, ErrTransactionExpired):
+		errors.Is(err, ErrTransactionExpired),
+		// A capture or void whose authorization id is not a 32-byte hex
+		// string is a pure function of the transaction's own payload, so
+		// it can never become valid. See ErrPOSInvalidAuthorizationID
+		// (core/state_pos.go).
+		errors.Is(err, ErrPOSInvalidAuthorizationID),
+		// A registry transaction that does not decode, names no registry
+		// message, claims an authority other than its signer, or breaks a
+		// rule of the request itself (a zero nonce, a missing id) is decided
+		// by its own bytes; a nonce at or below the authority's last one can
+		// never be valid again, since that nonce only grows.
+		errors.Is(err, ErrPOSRegistryInvalidPayload),
+		// A buyback ask under the minimum is a pure function of its own amount.
+		errors.Is(err, ErrBuybackAskTooSmall),
+		// Plan terms are checked against constants, so a plan that breaks a
+		// bound can never be created by the same transaction later.
+		errors.Is(err, subscriptions.ErrInvalidPlan),
+		errors.Is(err, pos.ErrInvalidRequest),
+		errors.Is(err, pos.ErrStaleNonce),
+		// An owner naming a wallet other than its own as the loyalty paymaster
+		// is refused as a pure function of the transaction's own sender and
+		// payload and the business's owner, which never changes, so it can
+		// never become valid later. A sender later granted the loyalty admin
+		// role resubmits. See loyalty.ErrPaymasterConsentRequired.
+		errors.Is(err, loyalty.ErrPaymasterConsentRequired),
+		// The outer envelope's chain id is a pure function of the
+		// transaction's own immutable payload; it cannot become valid later.
+		// (Unreachable through the mempool today because admission rejects
+		// it, which is exactly why it used to be left at ABORT; a
+		// gRPC-supplied or injected transaction can still carry one.)
+		errors.Is(err, ErrInvalidChainID):
 		return proposalDispositionPrune
 	case errors.Is(err, ErrNonceTooHigh),
 		errors.Is(err, ErrSwapDailyCapExceeded),
@@ -3404,6 +3954,16 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// transaction (e.g. one still sitting in the same mempool) -- see
 		// ErrSwapVoucherReversalNotFound's doc comment (core/swap.go).
 		errors.Is(err, ErrSwapVoucherReversalNotFound),
+		// The same for a reconciliation naming a voucher not minted yet.
+		errors.Is(err, swap.ErrVoucherNotFound),
+		// A registry change by a signer that is neither the merchant's owner
+		// nor a registry admin: the role can be granted later. And a change to
+		// a device that is not registered yet, which can still be registered.
+		errors.Is(err, ErrPOSRegistryUnauthorized),
+		errors.Is(err, pos.ErrDeviceNotRegistered),
+		// The ask list of an epoch is full, or the seller's share of it is; the
+		// count starts again with the next epoch.
+		errors.Is(err, ErrBuybackAskLimit),
 		// A same-block-or-later credit to the voucher's recipient could
 		// make a currently-insufficient reversal succeed on a later
 		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning
@@ -3429,259 +3989,32 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// RegisterIdentity, don't abort the whole block over it. See
 		// ErrIdentityUsernameTaken's doc comment (core/state_transition.go).
 		errors.Is(err, ErrIdentityUsernameTaken),
+		// A TxTypeSubmitEvidence reporter can bond more stake later, and the
+		// evidence index and a reporter's share of it free up as records age
+		// out of the evidence window -- all transient, so skippable rather
+		// than prunable, like the caps and pauses above.
+		errors.Is(err, ErrEvidenceReporterNotBonded),
+		errors.Is(err, evidence.ErrIndexFull),
+		errors.Is(err, evidence.ErrReporterQuota),
 		// A ref price for an epoch the chain has not reached yet becomes
 		// valid the moment that epoch opens, so it is skippable (kept in
 		// the mempool, offered again), not prunable -- mirroring the
 		// stale-epoch case above from the other side. See
 		// ErrBuybackRefPriceFutureEpoch's doc comment (core/buyback_tx.go).
-		errors.Is(err, ErrBuybackRefPriceFutureEpoch):
+		errors.Is(err, ErrBuybackRefPriceFutureEpoch),
+		// A paymaster's opt-in for a business can be recorded by a later (or
+		// same-attempt) transaction from the paymaster address, after which
+		// the same assignment succeeds.
+		errors.Is(err, loyalty.ErrPaymasterConsent),
+		// The treasury wallet's outflow is capped by the Reward Pool
+		// sub-ledger, which later inflows (fees, forfeited deposits) can
+		// refill, so this is skippable, not prunable. See
+		// ErrTreasuryRewardPoolInsufficient's doc comment
+		// (core/znhb_treasury_pool.go).
+		errors.Is(err, ErrTreasuryRewardPoolInsufficient):
 		return proposalDispositionSkip
 	}
-	return proposalDispositionAbort
-}
-
-func (n *Node) CreateBlock(txs []*types.Transaction) (block *types.Block, err error) {
-	proposedTxs := append([]*types.Transaction(nil), txs...)
-	var prunedTxs []*types.Transaction
-	// skippedTxs accumulates every transaction excluded from this attempt via
-	// proposalDispositionSkip across every buildProposalState retry within
-	// this single CreateBlock call. Unlike prunedTxs it is never a mempool
-	// structure and never persisted -- it exists only for the duration of
-	// this call, exactly like prunedTxs already does.
-	var skippedTxs []*types.Transaction
-	defer func() {
-		// Unconditional release, regardless of whether CreateBlock ultimately
-		// succeeds or fails: buildProposalState already calls
-		// n.requeueTransactions(attemptSkipped) immediately upon detecting a
-		// SKIP disposition (see below), releasing the mempool "in-flight"
-		// mark as early as correctness allows. This second call is
-		// deliberately redundant -- requeueTransactions only ever does
-		// delete(n.proposedTxs, key), so deleting an already-deleted key is a
-		// safe no-op -- and exists as a structural guarantee: on the SUCCESS
-		// path (err == nil) the rest of this defer never runs (see the next
-		// check), so without this unconditional release here, a
-		// successfully-skipped transaction's "in-flight" mark would never be
-		// cleared, permanently hiding it from every future GetMempool() call
-		// even though it is still physically resident in n.mempool -- a
-		// silent, latent "phantom prune" bug distinct from, but just as bad
-		// as, calling dropTransactionsFromMempool on it.
-		if len(skippedTxs) > 0 {
-			n.requeueTransactions(skippedTxs)
-		}
-		if err == nil || len(proposedTxs) == 0 {
-			return
-		}
-		if len(prunedTxs) == 0 {
-			n.requeueTransactions(proposedTxs)
-			return
-		}
-		dropped := make(map[string]struct{}, len(prunedTxs))
-		for _, tx := range prunedTxs {
-			key, keyErr := transactionKey(tx)
-			if keyErr != nil {
-				continue
-			}
-			dropped[key] = struct{}{}
-		}
-		if len(dropped) == 0 {
-			n.requeueTransactions(proposedTxs)
-			return
-		}
-		requeue := make([]*types.Transaction, 0, len(proposedTxs))
-		for _, tx := range proposedTxs {
-			key, keyErr := transactionKey(tx)
-			if keyErr != nil {
-				continue
-			}
-			if _, skip := dropped[key]; skip {
-				continue
-			}
-			requeue = append(requeue, tx)
-		}
-		n.requeueTransactions(requeue)
-	}()
-
-	blockTime := n.currentTime()
-	timestamp := blockTime.Unix()
-
-	if len(txs) > 0 {
-		filtered := make([]*types.Transaction, 0, len(txs))
-		for _, tx := range txs {
-			if tx == nil {
-				continue
-			}
-			if tx.Type == types.TxTypeMint {
-				voucher, _, err := decodeMintTransaction(tx.Data)
-				if err != nil || voucher == nil || voucher.Expiry <= timestamp {
-					prunedTxs = append(prunedTxs, tx)
-					continue
-				}
-			}
-			if tx.Type == types.TxTypeSwapVoucherMint {
-				submission, err := decodeSwapVoucherMintTransaction(tx.Data)
-				if err != nil || submission == nil || submission.Voucher == nil || submission.Voucher.Expiry <= timestamp {
-					prunedTxs = append(prunedTxs, tx)
-					continue
-				}
-			}
-			filtered = append(filtered, tx)
-		}
-		txs = filtered
-	}
-
-	if len(prunedTxs) > 0 {
-		n.markTransactionsCommitted(prunedTxs)
-	}
-
-	// Clamp the proposal to the configured transaction cap to avoid building
-	// blocks that exceed the active limit. The slice header is adjusted
-	// locally so callers (for example, the mempool) retain their full view of
-	// pending transactions.
-	maxTxs := n.globalConfigSnapshot().Blocks.MaxTxs
-	if maxTxs > 0 && int64(len(txs)) > maxTxs {
-		if maxTxs > int64(math.MaxInt) {
-			maxTxs = int64(math.MaxInt)
-		}
-		txs = txs[:int(maxTxs)]
-	}
-
-	height := n.chain.GetHeight() + 1
-	prevHash := n.chain.Tip()
-	validator := n.validatorKey.PubKey().Address().Bytes()
-
-	buildProposalState := func(candidateTxs []*types.Transaction) (*StateProcessor, []*types.Transaction, []byte, error) {
-		orderedTxs, executionGraphRoot, err := computeDependencyGraph(candidateTxs)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("canonical scheduler failed: %w", err)
-		}
-
-		n.stateMu.Lock()
-		if err := n.refreshModulePauses(); err != nil {
-			n.stateMu.Unlock()
-			return nil, nil, nil, err
-		}
-		stateCopy, err := n.state.Copy()
-		n.stateMu.Unlock()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		stateCopy.SetPauseView(n)
-		stateCopy.SetQuotaConfig(n.moduleQuotaSnapshot())
-		blockTime = time.Unix(timestamp, 0).UTC()
-		stateCopy.BeginBlock(height, blockTime)
-
-		// Must run before this block's own transactions, not just before
-		// ProcessBlockLifecycle further below -- ProcessBlockLifecycle only
-		// runs AFTER the tx-application loop, so relying on it alone leaves
-		// a window where a TxTypeRedeemNHB burn in this very block executes
-		// before the genesis supply is seeded and underflows (the exact
-		// 2026-08-24 incident this seed exists to fix, now reproducible as a
-		// full block-production abort instead of one rejected tx). Idempotent
-		// and cheap after its first real run, so calling it here in addition
-		// to its existing call inside ProcessBlockLifecycle is safe.
-		if err := stateCopy.SeedGenesisNHBSupplyOnce(); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, fmt.Errorf("seed genesis NHB supply: %w", err)
-		}
-		if err := stateCopy.ReconcileNHBMintSupplyDriftOnce(); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, fmt.Errorf("reconcile NHB mint supply drift: %w", err)
-		}
-
-		keptTxs := make([]*types.Transaction, 0, len(orderedTxs))
-		attemptPruned := make([]*types.Transaction, 0)
-		// attemptSkipped collects this attempt's SKIP-classified failures --
-		// see classifyProposalError's proposalDispositionSkip doc for why
-		// these must NOT be treated like attemptPruned (mempool-removed) or
-		// silently left in-flight (never reconsidered again).
-		attemptSkipped := make([]*types.Transaction, 0)
-		for _, tx := range orderedTxs {
-			if err := stateCopy.ApplyTransaction(tx); err != nil {
-				switch classifyProposalError(err) {
-				case proposalDispositionPrune:
-					attemptPruned = append(attemptPruned, tx)
-					continue
-				case proposalDispositionSkip:
-					attemptSkipped = append(attemptSkipped, tx)
-					if hash, hashErr := tx.Hash(); hashErr == nil {
-						slog.Warn("transaction skipped from block, remains in mempool",
-							slog.String("txHash", "0x"+hex.EncodeToString(hash)),
-							slog.Any("reason", err))
-					}
-					continue
-				default: // proposalDispositionAbort
-					stateCopy.EndBlock()
-					return nil, nil, nil, err
-				}
-			}
-			keptTxs = append(keptTxs, tx)
-		}
-		if len(attemptPruned) > 0 || len(attemptSkipped) > 0 {
-			prunedTxs = append(prunedTxs, attemptPruned...)
-			skippedTxs = append(skippedTxs, attemptSkipped...)
-			// PRUNE txs are permanently removed from the real mempool.
-			n.dropTransactionsFromMempool(attemptPruned)
-			// SKIP txs are released from "in-flight" bookkeeping immediately
-			// (as early as correctness allows, matching
-			// dropTransactionsFromMempool's timing above) so the next
-			// GetMempool() call can offer them again -- but n.mempool itself
-			// is deliberately left untouched: requeueTransactions only ever
-			// deletes from n.proposedTxs, never from n.mempool. See
-			// CreateBlock's top-level defer for the unconditional,
-			// idempotent backstop release of the same set.
-			n.requeueTransactions(attemptSkipped)
-			stateCopy.EndBlock()
-			return nil, keptTxs, nil, nil
-		}
-		if err := stateCopy.ProcessBlockLifecycle(height, timestamp); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, err
-		}
-		if err := n.processPendingEvidenceForState(stateCopy, height); err != nil {
-			stateCopy.EndBlock()
-			return nil, nil, nil, err
-		}
-		stateCopy.FinalizeBlock()
-		return stateCopy, keptTxs, executionGraphRoot, nil
-	}
-
-	var (
-		stateCopy          *StateProcessor
-		executionGraphRoot []byte
-	)
-	for {
-		stateCopy, txs, executionGraphRoot, err = buildProposalState(txs)
-		if err != nil {
-			return nil, err
-		}
-		if stateCopy != nil {
-			break
-		}
-	}
-	defer stateCopy.EndBlock()
-
-	header := &types.BlockHeader{
-		Height:             height,
-		Timestamp:          timestamp,
-		PrevHash:           prevHash,
-		Validator:          validator,
-		ExecutionGraphRoot: executionGraphRoot,
-	}
-
-	txRoot, err := ComputeTxRoot(txs)
-	if err != nil {
-		return nil, err
-	}
-	header.TxRoot = txRoot
-	header.StateRoot = stateCopy.PendingRoot().Bytes()
-
-	block = types.NewBlock(header, txs)
-	if hash, hashErr := header.Hash(); hashErr == nil {
-		n.stateMu.Lock()
-		n.selfProposedHash = hash
-		n.stateMu.Unlock()
-	}
-	return block, nil
+	return proposalDispositionQuarantine
 }
 
 func (n *Node) CommitBlock(b *types.Block) error {
@@ -3801,7 +4134,10 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 	}
 	for i, tx := range orderedTxs {
 		if err := stateCopy.ApplyTransaction(tx); err != nil {
-			return fmt.Errorf("apply transaction %d: %w", i, err)
+			// Same message as before ("apply transaction N: ..."); the typed
+			// wrapper only lets a proposer attribute a rejection of its own
+			// block to the transaction that caused it.
+			return &blockApplyError{Index: i, Err: err}
 		}
 	}
 	if err := stateCopy.ProcessBlockLifecycle(b.Header.Height, b.Header.Timestamp); err != nil {
@@ -4045,7 +4381,7 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 				prunedTxs = append(prunedTxs, tx)
 				n.markTransactionsCommitted([]*types.Transaction{tx})
 			}
-			return fmt.Errorf("apply transaction %d: %w", i, err)
+			return &blockApplyError{Index: i, Err: err}
 		}
 		if tx != nil && tx.Type == types.TxTypeBuyZNHB {
 			if record, ok := extractBuyZNHBCostRecord(tx, stateCopy.events[eventsBefore:]); ok {
@@ -4139,6 +4475,10 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		}
 	}
 	n.state = stateCopy
+	// The committed state carries the events of every block still to be handed
+	// over; move them to the node's bounded log so the next copy of the state
+	// starts with an empty one.
+	n.retainCommittedEventsLocked()
 	if err := n.refreshModulePauses(); err != nil {
 		return fmt.Errorf("refresh module pauses: %w", err)
 	}
@@ -4315,6 +4655,101 @@ func (n *Node) SetQuorumCertActivationHeight(height uint64) {
 	n.quorumCertActivationHeight = height
 }
 
+// SetPOSSweepSkipActivationHeight configures the block height from which the
+// end-of-block POS expiry sweep carries on past an expired hold the payer's
+// locked balance no longer covers, instead of ending at it. Zero, the default,
+// keeps the earlier behaviour at every height. The two behaviours leave
+// different state, so every validator MUST be given the same value, and a live
+// chain may only change it with every validator restarted together and the
+// height set above the chain tip at that moment. Call it before the node
+// processes blocks (startup wiring); every state copy a block is built or
+// validated on inherits it from the node's state processor.
+func (n *Node) SetPOSSweepSkipActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.state.SetPOSSweepSkipActivationHeight(height)
+}
+
+// SetPOSHoldUnstakeGuardActivationHeight sets the first block height from
+// which an unstake may not unbond ZNHB that backs pending POS holds (see
+// StateProcessor.SetPOSHoldUnstakeGuardActivationHeight). Zero, the default,
+// leaves the guard off. It is a chain rule and must be the same on every
+// validator, set before the chain reaches the height.
+func (n *Node) SetPOSHoldUnstakeGuardActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.posHoldUnstakeGuardHeight = height
+	if n.state != nil {
+		n.state.SetPOSHoldUnstakeGuardActivationHeight(height)
+	}
+}
+
+// SetLendingFixedTermIDActivationHeight sets the first block height from which
+// fixed-term loans and deposits are stored under an owner-scoped ID (see
+// StateProcessor.SetLendingFixedTermIDActivationHeight). Zero, the default, keeps
+// the transaction hash as the ID. It is a chain rule and must be the same on every
+// validator, set before the chain reaches the height.
+func (n *Node) SetLendingFixedTermIDActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingFixedTermIDHeight = height
+	if n.state != nil {
+		n.state.SetLendingFixedTermIDActivationHeight(height)
+	}
+}
+
+// SetGovCreditPreservationActivationHeight configures the height at and
+// above which TxTypeGovFinalize/TxTypeGovExecute reload the sender's
+// account fresh before their nonce-bump persist instead of reusing the
+// pre-engine-call snapshot -- see the field doc comment on
+// Node.govCreditPreservationActivationHeight and
+// StateProcessor.SetGovCreditPreservationActivationHeight's doc comment
+// (core/governance_tx.go) for the full PL-R1-GOVREFUND rationale. A live
+// chain being upgraded to enable this MUST call it with its current tip
+// height, identically on every validator, as part of a coordinated deploy.
+func (n *Node) SetGovCreditPreservationActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	n.govCreditPreservationActivationHeight = height
+	state := n.state
+	n.stateMu.Unlock()
+	if state != nil {
+		state.SetGovCreditPreservationActivationHeight(height)
+	}
+}
+
+// SetFeeRouteAliasActivationHeight configures the height at and above which
+// applyTransactionFee credits an NHB domain fee to the caller's already-loaded
+// sender or recipient account when the fee's route wallet is that account -- see
+// the field doc comment on Node.feeRouteAliasActivationHeight and
+// StateProcessor.SetFeeRouteAliasActivationHeight's doc comment
+// (core/state_transition.go) for the PL-R1-FEEROUTE rationale. A live chain
+// being upgraded to enable this MUST call it with a height above its tip,
+// identically on every validator, as part of a coordinated restart.
+func (n *Node) SetFeeRouteAliasActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	n.feeRouteAliasActivationHeight = height
+	state := n.state
+	n.stateMu.Unlock()
+	if state != nil {
+		state.SetFeeRouteAliasActivationHeight(height)
+	}
+}
+
 // RemoveValidatorFromSet permanently removes addr from the active and
 // eligible validator sets and persists the change to the trie (staged, not
 // yet committed to a block). This is an operator recovery primitive for a
@@ -4439,72 +4874,10 @@ func (n *Node) GetBlockByHeight(height uint64) (*types.Block, error) {
 	return n.chain.GetBlockByHeight(height)
 }
 
-// PotsoSubmitEvidence is a client convenience that constructs and submits a
-// signed TxTypeSubmitEvidence transaction, returning a receipt shaped like
-// the old direct-write API's.
-//
-// NHB-AUDIT-C10 follow-up: this used to validate the report and write it
-// straight into a node-local evidence.Store, entirely outside CreateBlock/
-// ApplyTransaction/ValidateBlock -- a different validator that never
-// independently received this exact RPC call would never learn about the
-// evidence at all, a real state-root-divergence/fork risk (see
-// TxTypeSubmitEvidence's doc comment, core/types/transaction.go). Routing
-// through AddTransaction -> mempool -> gossip -> ApplyTransaction makes it a
-// real, network-wide-agreed state transition: see
-// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) for the
-// deterministic execution path every validator now runs identically,
-// including the evidence.ValidateEvidence check this method used to run
-// only against its own local chain height.
-//
-// AddTransaction synchronously simulates the transaction before admitting it
-// to the mempool (see SwapReverseVoucher's identical doc comment for why),
-// so a malformed or forged submission still fails synchronously from this
-// caller's point of view: a validation failure surfaces here as
-// *evidence.ValidationError (via errors.As), reconstructed into a Rejected
-// receipt exactly like the old direct-write path returned, rather than as a
-// bare error.
-func (n *Node) PotsoSubmitEvidence(ev evidence.Evidence) (*evidence.Receipt, error) {
-	if n == nil {
-		return nil, fmt.Errorf("node not initialised")
-	}
-	if err := nativecommon.Guard(n, modulePotso); err != nil {
-		return nil, err
-	}
-	hash, err := ev.CanonicalHash()
-	if err != nil {
-		return nil, err
-	}
-	if record, ok, err := n.PotsoEvidenceByHash(hash); err == nil && ok {
-		return &evidence.Receipt{Hash: hash, Status: evidence.ReceiptStatusIdempotent, Record: record}, nil
-	}
-	payload, err := encodeSubmitEvidenceTransaction(ev)
-	if err != nil {
-		return nil, err
-	}
-	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
-		Type:     types.TxTypeSubmitEvidence,
-		Data:     payload,
-		GasLimit: 0,
-		GasPrice: big.NewInt(0),
-	}
-	receipt := &evidence.Receipt{Hash: hash}
-	if err := n.AddTransaction(tx); err != nil {
-		var verr *evidence.ValidationError
-		if errors.As(err, &verr) {
-			receipt.Status = evidence.ReceiptStatusRejected
-			receipt.Reason = verr
-			return receipt, nil
-		}
-		return nil, err
-	}
-	receipt.Status = evidence.ReceiptStatusAccepted
-	return receipt, nil
-}
-
 // PotsoEvidenceByHash retrieves persisted evidence by canonical hash from
-// the state trie -- see PotsoEvidencePendingHashes'/PotsoSubmitEvidence's
-// doc comments for why this is trie-backed rather than a node-local store.
+// the state trie -- see applySubmitEvidenceTransaction's doc comment for why
+// this is trie-backed rather than a node-local store. Records are dropped once
+// they age out of the evidence window.
 func (n *Node) PotsoEvidenceByHash(hash [32]byte) (*evidence.Record, bool, error) {
 	if n == nil {
 		return nil, false, fmt.Errorf("node not initialised")
@@ -4527,95 +4900,33 @@ func (n *Node) processPendingEvidence(currentHeight uint64) error {
 }
 
 // processPendingEvidenceForState applies every trie-recorded evidence
-// report's penalty against state.
+// report's penalty against state, and drops the records that have aged out of
+// the evidence window (see StateProcessor.processPendingEvidence).
 //
 // NHB-AUDIT-C10 follow-up: this used to list evidence from a node-local
-// evidence.Store fed directly by an RPC handler (PotsoSubmitEvidence),
-// meaning two validators processing the identical block height could
-// legitimately hold different evidence and therefore compute different
-// state roots. The evidence set is now read via nhbstate.Manager from
-// state.Trie itself, written only by applySubmitEvidenceTransaction
-// (core/potso_evidence_tx.go) as part of applying a real, gossiped
-// TxTypeSubmitEvidence transaction -- since every validator applies the
-// identical transaction sequence to reach a given block, this set (and the
-// penalties computed from it below) is now byte-identical on every
-// validator that reaches that block, the same guarantee CreateBlock/
-// ValidateBlock/CommitBlock already provide for every other piece of
-// consensus state.
+// evidence.Store fed directly by an RPC handler, meaning two validators
+// processing the identical block height could legitimately hold different
+// evidence and therefore compute different state roots. The evidence set is
+// now read via nhbstate.Manager from state.Trie itself, written only by
+// applySubmitEvidenceTransaction (core/potso_evidence_tx.go) as part of
+// applying a real, gossiped TxTypeSubmitEvidence transaction. It also no
+// longer keeps anything in this Node: the record of which penalties have been
+// applied is a trie record too, so this is a pure function of state and gives
+// the same result whether it is run while building, validating, committing or
+// replaying a block.
 func (n *Node) processPendingEvidenceForState(state *StateProcessor, currentHeight uint64) error {
 	if n == nil || state == nil {
 		return nil
 	}
-
-	cfg := penalty.DefaultConfig()
-	cfg.SlashEnabled = true
-	cfg.EquivocationSlashBps = 10000 // 100% slashing on equivocation
-
-	catalog, err := penalty.BuildCatalog(cfg)
-	if err != nil {
-		return fmt.Errorf("build penalty catalog: %w", err)
-	}
-
-	manager := nhbstate.NewManager(state.Trie)
-	slasher := statebank.NewValidatorSlasher(manager, n.escrowTreasury)
-	engine := penalty.NewEngine(catalog, n.potsoLedger, slasher)
-
-	fromHeight := uint64(0)
-	if currentHeight > n.evidenceMaxAge {
-		fromHeight = currentHeight - n.evidenceMaxAge
-	}
-
-	hashes, err := manager.PotsoEvidencePendingHashes()
-	if err != nil {
-		return fmt.Errorf("list evidence: %w", err)
-	}
-
-	for _, hash := range hashes {
-		rec, ok, err := manager.PotsoEvidenceGetRecord(hash)
-		if err != nil {
-			return fmt.Errorf("load evidence %x: %w", hash, err)
-		}
-		if !ok || rec == nil {
-			continue
-		}
-		if rec.MinHeight() < fromHeight {
-			continue
-		}
-
-		// NHB-AUDIT-C10: refresh this offender's tracked Base weight
-		// from their REAL, current on-chain stake immediately before
-		// computing any penalty against them -- without this, Base
-		// silently defaults to the ledger's floor (nil -> zero in
-		// production), making every slash/decay percentage compute
-		// against zero regardless of actual stake or misconduct. See
-		// EnsureBaseline's doc comment. A missing/unreadable account
-		// is not fatal here -- it just leaves this offender's weight
-		// untouched for this pass, same as before this fix existed.
-		if account, acctErr := manager.GetAccount(rec.Evidence.Offender[:]); acctErr == nil && account != nil && account.Stake != nil {
-			if _, err := n.potsoLedger.EnsureBaseline(rec.Evidence.Offender, account.Stake); err != nil {
-				return fmt.Errorf("potso: ensure baseline weight for %x: %w", rec.Evidence.Offender, err)
-			}
-		}
-		ctx := penalty.Context{
-			BlockHeight:  currentHeight,
-			MissedEpochs: 0,
-		}
-		res, err := engine.Apply(rec, ctx)
-		if err != nil {
-			return fmt.Errorf("apply penalty for %x: %w", rec.Hash, err)
-		}
-		if !res.Idempotent && res.Event != nil {
-			state.AppendEvent(res.Event)
-		}
-	}
-
-	return nil
+	return state.processPendingEvidence(currentHeight)
 }
 
 // PotsoEvidenceList returns trie-recorded evidence filtered by the provided
 // constraints, newest-submitted first -- the same ordering and pagination
 // contract (Offset/Limit/NextOffset) the old node-local evidence.Store.List
-// provided.
+// provided. It reads only the bounded evidence index (at most
+// evidence.MaxPendingRecords live records) and never returns more than
+// evidence.MaxPageLimit records in one page.
 func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, int, error) {
 	if n == nil {
 		return nil, 0, fmt.Errorf("node not initialised")
@@ -4634,6 +4945,9 @@ func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, in
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = evidence.DefaultPageLimit
+	}
+	if limit > evidence.MaxPageLimit {
+		limit = evidence.MaxPageLimit
 	}
 	offset := filter.Offset
 	if offset < 0 {
@@ -4686,65 +5000,6 @@ func (n *Node) PotsoEvidenceList(filter evidence.Filter) ([]*evidence.Record, in
 // SyncManager exposes the fast-sync subsystem for RPC handlers.
 func (n *Node) SyncManager() *syncmgr.Manager { return n.syncMgr }
 
-// SnapshotExport produces a snapshot manifest in the supplied directory.
-func (n *Node) SnapshotExport(ctx context.Context, outDir string) (*syncmgr.SnapshotManifest, error) {
-	if n == nil || n.syncMgr == nil {
-		return nil, fmt.Errorf("fast-sync manager not initialised")
-	}
-	root := n.state.CurrentRoot()
-	var checkpointHash []byte
-	height := n.chain.Height()
-	if header := n.chain.CurrentHeader(); header != nil {
-		height = header.Height
-		if len(header.StateRoot) > 0 {
-			root = common.BytesToHash(header.StateRoot)
-		}
-		if hash, err := header.Hash(); err == nil {
-			checkpointHash = hash
-		}
-	}
-	manifest, err := n.syncMgr.ExportSnapshot(ctx, height, root, outDir)
-	if err != nil {
-		return nil, err
-	}
-	if len(checkpointHash) > 0 {
-		manifest.Checkpoint = append([]byte(nil), checkpointHash...)
-		if manifest.Metadata == nil {
-			manifest.Metadata = make(map[string]string)
-		}
-		manifest.Metadata["checkpointHeight"] = strconv.FormatUint(height, 10)
-		manifest.Metadata["checkpointHash"] = hex.EncodeToString(checkpointHash)
-	}
-	return manifest, nil
-}
-
-// SnapshotImport verifies and installs a snapshot manifest/chunk set.
-func (n *Node) SnapshotImport(ctx context.Context, manifest *syncmgr.SnapshotManifest, chunkDir string) (common.Hash, error) {
-	if n == nil || n.syncMgr == nil {
-		return common.Hash{}, fmt.Errorf("fast-sync manager not initialised")
-	}
-	if manifest.ChainID != 0 && manifest.ChainID != n.chain.ChainID() {
-		return common.Hash{}, fmt.Errorf("snapshot chain mismatch: manifest=%d local=%d", manifest.ChainID, n.chain.ChainID())
-	}
-	root, err := n.syncMgr.ImportSnapshot(ctx, manifest, chunkDir)
-	if err != nil {
-		return common.Hash{}, err
-	}
-	n.stateMu.Lock()
-	if err := n.state.ResetToRoot(root); err != nil {
-		n.stateMu.Unlock()
-		return common.Hash{}, err
-	}
-	if err := n.refreshModulePauses(); err != nil {
-		n.stateMu.Unlock()
-		return common.Hash{}, err
-	}
-	n.stateMu.Unlock()
-	n.syncMgr.SetHeight(manifest.Height)
-	n.refreshValidatorSet()
-	return root, nil
-}
-
 func (n *Node) refreshValidatorSet() {
 	if n == nil || n.syncMgr == nil {
 		return
@@ -4758,21 +5013,12 @@ func buildValidatorSet(source map[string]*big.Int) *syncmgr.ValidatorSet {
 		addr := []byte(key)
 		validators = append(validators, syncmgr.Validator{
 			Address: append([]byte(nil), addr...),
-			Power:   validatorPower(power),
+			Power:   power, // the full stake-scale power: NewValidatorSet copies it
 		})
 	}
 	return syncmgr.NewValidatorSet(validators)
 }
 
-func validatorPower(v *big.Int) uint64 {
-	if v == nil || v.Sign() <= 0 {
-		return 0
-	}
-	if v.BitLen() > 63 {
-		return math.MaxUint64
-	}
-	return v.Uint64()
-}
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	if n == nil {
 		return nil, fmt.Errorf("node unavailable")
@@ -4783,19 +5029,6 @@ func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 		return nil, fmt.Errorf("state unavailable")
 	}
 	return n.state.GetAccount(addr)
-}
-
-// SweepExpiredPOSAuthorizations triggers an on-demand sweep of expired POS authorizations.
-func (n *Node) SweepExpiredPOSAuthorizations(now time.Time) (int, error) {
-	if n == nil {
-		return 0, fmt.Errorf("node unavailable")
-	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	if n.state == nil {
-		return 0, fmt.Errorf("state unavailable")
-	}
-	return n.state.SweepExpiredPOSAuthorizations(now)
 }
 
 // GetPOSAuthorization returns the authorization record for the given ID.
@@ -4912,6 +5145,20 @@ func (n *Node) GlobalConfig() config.Global {
 		return config.Global{}
 	}
 	return n.globalConfigSnapshot()
+}
+
+// SetRewardsByStakeFromEpoch sets the first epoch whose emission is paid by stake (see StateProcessor.SetRewardsByStakeFromEpoch). 0 = never. A live chain
+// must give every validator the same value before that epoch begins, in the same coordinated restart, like SetQuorumCertActivationHeight.
+func (n *Node) SetRewardsByStakeFromEpoch(epoch uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return
+	}
+	n.state.SetRewardsByStakeFromEpoch(epoch)
 }
 
 func (n *Node) SetRewardConfig(cfg rewards.Config) error {
@@ -5157,6 +5404,11 @@ func (n *Node) NetworkSeedsParam() ([]byte, bool, error) {
 	return append([]byte(nil), raw...), true, nil
 }
 
+// PotsoRewardClaim pays one claim-mode reward out of the treasury on the live
+// state trie, outside block execution. No RPC calls it any more (potso_reward_claim
+// is retired, see potsoRewardClaimRPCDisabledMessage in rpc/potso_reward_handlers.go);
+// it is kept for its tests. Do not expose it again: a write made here becomes part
+// of this validator's next proposed block only, so the validators would disagree.
 func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, error) {
 	if err := nativecommon.Guard(n, modulePotso); err != nil {
 		return false, nil, err
@@ -5185,11 +5437,17 @@ func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, er
 		return false, amount, nil
 	}
 
-	// The treasury was already reserved/debited for this exact amount at
-	// epoch close (core/state_transition.go's processPotsoRewardEpoch,
-	// RewardPayoutModeClaim branch), the same moment this claim record was
-	// created -- not here. Debiting it again on this path would double-spend
-	// that reservation; this function now only ever credits the winner.
+	treasury, err := manager.GetAccount(cfg.TreasuryAddress[:])
+	if err != nil {
+		return false, nil, err
+	}
+	if treasury.BalanceZNHB == nil {
+		treasury.BalanceZNHB = big.NewInt(0)
+	}
+	if treasury.BalanceZNHB.Cmp(amount) < 0 {
+		return false, nil, potso.ErrInsufficientTreasury
+	}
+
 	account, err := manager.GetAccount(addr[:])
 	if err != nil {
 		return false, nil, err
@@ -5198,21 +5456,14 @@ func (n *Node) PotsoRewardClaim(epoch uint64, addr [20]byte) (bool, *big.Int, er
 		account.BalanceZNHB = big.NewInt(0)
 	}
 
+	treasury.BalanceZNHB = new(big.Int).Sub(treasury.BalanceZNHB, amount)
 	account.BalanceZNHB = new(big.Int).Add(account.BalanceZNHB, amount)
 
-	if err := manager.PutAccount(addr[:], account); err != nil {
+	if err := manager.PutAccount(cfg.TreasuryAddress[:], treasury); err != nil {
 		return false, nil, err
 	}
-
-	if amount.Sign() > 0 && n.state.hasAdminWallet && bytes.Equal(cfg.TreasuryAddress[:], n.state.adminWallet[:]) && bytes.Equal(addr[:], n.state.adminWallet[:]) {
-		// Mirrors processPotsoRewardEpoch's negative adjustment at the point
-		// this amount was reserved: a self-winning admin/treasury wallet's
-		// own claim is ZNHB finally landing back on the exact tracked
-		// balance that was debited at epoch close, so the pool label must
-		// grow back by the same amount or CheckZNHBSupplyInvariant breaks.
-		if err := n.state.adjustRewardPoolForAdminZNHBMovement(new(big.Int).Set(amount)); err != nil {
-			return false, nil, err
-		}
+	if err := manager.PutAccount(addr[:], account); err != nil {
+		return false, nil, err
 	}
 
 	claim.Claimed = true
@@ -5424,6 +5675,66 @@ func (n *Node) LoyaltyProgramsByOwner(owner [20]byte) ([]loyalty.ProgramID, erro
 
 func (n *Node) LoyaltyBusinessesByOwner(owner [20]byte) ([]loyalty.BusinessID, error) {
 	return n.state.LoyaltyBusinessesByOwner(owner)
+}
+
+// LoyaltyBudgetStatus is the loyalty engine's base-reward budget for the current
+// UTC day, as the engine itself works it out when it settles a block's rewards.
+type LoyaltyBudgetStatus struct {
+	// Day is the UTC day the figures are for, formatted YYYYMMDD.
+	Day string
+	// BudgetRemainingZNHB is what the engine could still pay out today, in wei.
+	BudgetRemainingZNHB *big.Int
+	// PaidTodayZNHB and ProposedTodayZNHB are the running totals the engine keeps
+	// for the day: what it has paid and what the rewards it settled asked for.
+	PaidTodayZNHB     *big.Int
+	ProposedTodayZNHB *big.Int
+	// ResetAt is when the day rolls over and the budget starts again.
+	ResetAt time.Time
+	// GuardFallback names the fallback the price guard has the budget computed
+	// with ("last_good_price" or "min_emission"), or is empty when it is not
+	// using one.
+	GuardFallback string
+}
+
+// LoyaltyBudgetStatus reads the loyalty engine's budget for the current UTC day.
+// It runs against a disposable view of the state (see WithStateView) and only
+// reads: the budget is worked out by the same function the block executor calls
+// (Manager.GetRemainingDailyBudgetZNHB), and a zero amount asks the day totals
+// for their current value without adding to them.
+func (n *Node) LoyaltyBudgetStatus() (*LoyaltyBudgetStatus, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	now := n.currentTime()
+	status := &LoyaltyBudgetStatus{}
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
+		remaining, fallback, err := m.GetRemainingDailyBudgetZNHB(now)
+		if err != nil {
+			return err
+		}
+		paid, err := m.AddPaidTodayZNHB(now, nil)
+		if err != nil {
+			return err
+		}
+		proposed, err := m.AddProposedTodayZNHB(now, nil)
+		if err != nil {
+			return err
+		}
+		status.BudgetRemainingZNHB = remaining
+		status.PaidTodayZNHB = paid
+		status.ProposedTodayZNHB = proposed
+		if fallback != nil {
+			status.GuardFallback = fallback.Strategy
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	day := now.UTC()
+	status.Day = day.Format("20060102")
+	status.ResetAt = time.Date(day.Year(), day.Month(), day.Day()+1, 0, 0, 0, 0, time.UTC)
+	return status, nil
 }
 
 // SubscriptionsManager returns a fresh state.Manager over the node's
@@ -5800,7 +6111,7 @@ func (n *Node) StakePreviewClaim(addr [20]byte, at time.Time) (*big.Int, uint64,
 
 	payoutDays := uint64(30)
 	if raw, ok, err := manager.ParamStoreGet(governance.ParamKeyStakingPayoutPeriodDays); err == nil && ok {
-		trimmed := strings.TrimSpace(string(raw))
+		trimmed := nativecommon.ParamDecimal(raw)
 		if trimmed != "" {
 			if value, parseErr := strconv.ParseUint(trimmed, 10, 64); parseErr == nil && value > 0 {
 				payoutDays = value
@@ -6490,7 +6801,11 @@ func (n *Node) EscrowMilestoneSubscriptionUpdate(id [32]byte, active bool, signa
 }
 
 // ReputationVerifySkill validates the caller's verifier role and records a
-// skill verification.
+// skill verification on the live state trie, outside block execution. No RPC
+// calls it any more (reputation_verifySkill is retired, see
+// reputationRPCDisabledMessage in rpc/reputation_handlers.go); it is kept for its
+// tests. Do not expose it again: a write made here becomes part of this
+// validator's next proposed block only, so the validators would disagree.
 func (n *Node) ReputationVerifySkill(verifier, subject [20]byte, skill string, expiresAt int64) (*reputation.SkillVerification, error) {
 	if n == nil {
 		return nil, fmt.Errorf("reputation: node unavailable")
@@ -8083,7 +8398,8 @@ func (n *Node) SubmitLendingRefPrice(rateNum, rateDenom *big.Int, timestamp uint
 }
 
 // SwapGetVoucher returns the ledger record for the supplied provider
-// transaction identifier.
+// transaction identifier. It reads a disposable view of the state (see
+// WithStateView), like the other read-only queries.
 func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {
 	trimmed := strings.TrimSpace(providerTxID)
 	if trimmed == "" {
@@ -8093,7 +8409,7 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 		record *swap.VoucherRecord
 		ok     bool
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
 		record, ok, err = ledger.Get(trimmed)
@@ -8108,13 +8424,15 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 	return record.Copy(), true, nil
 }
 
-// SwapListVouchers paginates voucher records for the supplied time range.
+// SwapListVouchers paginates voucher records for the supplied time range. It
+// reads a disposable view of the state (see WithStateView), like the other
+// read-only queries.
 func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) ([]*swap.VoucherRecord, string, error) {
 	var (
 		results    []*swap.VoucherRecord
 		nextCursor string
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		records, cursorOut, err := ledger.List(startTs, endTs, cursor, limit)
 		if err != nil {
@@ -8134,13 +8452,15 @@ func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) 
 }
 
 // SwapExportVouchers produces a base64 encoded CSV export and accompanying totals.
+// It reads a disposable view of the state (see WithStateView), like the other
+// read-only queries.
 func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, error) {
 	var (
 		encoded string
 		count   int
 		total   *big.Int
 	)
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
 		encoded, count, total, err = ledger.ExportCSV(startTs, endTs)
@@ -8196,7 +8516,7 @@ func (n *Node) SwapLimits(addr [20]byte) (*swap.RiskUsage, swap.RiskParameters, 
 // treasury Sale Pool rather than minting new supply (see
 // core/swap_voucher_tx.go's applySwapVoucherMintTransaction), so they carry
 // no external financial risk needing a governance-adjustable circuit
-// breaker -- only the NHB-custody-backed redeem direction does.
+// breaker -- only the redeem direction does.
 func (n *Node) SwapRiskParams() (swap.RedeemRiskParameters, error) {
 	var redeem swap.RedeemRiskParameters
 	err := n.WithState(func(m *nhbstate.Manager) error {
@@ -8397,10 +8717,6 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 		return fmt.Errorf("swap: burn receiptId required")
 	}
 	return n.WithState(func(m *nhbstate.Manager) error {
-		burnLedger := swap.NewBurnLedger(m)
-		if err := burnLedger.Put(receipt); err != nil {
-			return err
-		}
 		var proofIDs []string
 		if len(receipt.VoucherIDs) > 0 {
 			voucherLedger := swap.NewLedger(m)
@@ -8420,9 +8736,15 @@ func (n *Node) SwapRecordBurn(receipt *swap.BurnReceipt) error {
 					}
 				}
 			}
+			// MarkReconciled refuses a reversed or unknown voucher without
+			// writing anything, and it runs before the receipt is stored, so a
+			// refused receipt leaves no trace.
 			if err := voucherLedger.MarkReconciled(receipt.VoucherIDs); err != nil {
 				return err
 			}
+		}
+		if err := swap.NewBurnLedger(m).Put(receipt); err != nil {
+			return err
 		}
 		observed := receipt.ObservedAt
 		if observed <= 0 {
@@ -8521,11 +8843,30 @@ func (n *Node) HasRole(role string, addr []byte) bool {
 	return n.state.HasRole(role, addr)
 }
 
+// retainCommittedEventsLocked moves the events the live state has logged into
+// the node's bounded event log. Callers must hold stateMu for writing.
+func (n *Node) retainCommittedEventsLocked() {
+	if n == nil || n.state == nil || n.eventLog == nil {
+		return
+	}
+	n.eventLog.append(n.state.takeEvents())
+}
+
+// Events returns the events the node has seen, oldest first: the most recent of
+// those committed blocks produced (see event_log.go for how many are kept),
+// then the ones the live state has logged since the last commit. It is read
+// under the state lock so an event is never missed or counted twice while a
+// block is being committed.
 func (n *Node) Events() []types.Event {
-	if n == nil || n.state == nil {
+	if n == nil {
 		return nil
 	}
-	return n.state.Events()
+	n.stateMu.RLock()
+	defer n.stateMu.RUnlock()
+	if n.state == nil {
+		return nil
+	}
+	return append(n.eventLog.snapshot(), n.state.Events()...)
 }
 
 func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {

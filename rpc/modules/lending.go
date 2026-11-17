@@ -20,6 +20,9 @@ import (
 
 type LendingModule struct {
 	node *core.Node
+	// replayHeights remembers which blocks hold a committed lending
+	// transaction (see lending_replay_index.go).
+	replayHeights lendingHeightIndex
 }
 
 func NewLendingModule(node *core.Node) *LendingModule {
@@ -58,6 +61,7 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 		id = defaultLendingPoolID
 	}
 	params := m.node.LendingRiskParameters()
+	m.warmReplayIndex()
 	var market *lending.Market
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetMarket(id)
@@ -114,7 +118,18 @@ func (m *LendingModule) projectMarketAccrual(manager *nhbstate.Manager, poolID s
 	engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 	engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 	engine.SetBlockHeight(m.node.GetHeight())
+	engine.SetBlockTimestamp(m.headBlockTimestamp())
 	return engine.ProjectAccrual(market)
+}
+
+// headBlockTimestamp is the header timestamp of the newest committed block, the
+// block time interest is projected to: committed chain data, never the clock of
+// the machine answering the call.
+func (m *LendingModule) headBlockTimestamp() int64 {
+	if chain := m.node.Chain(); chain != nil {
+		return chain.LastTimestamp()
+	}
+	return 0
 }
 
 func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *ModuleError) {
@@ -122,6 +137,7 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 		return nil, lending.RiskParameters{}, m.moduleUnavailable()
 	}
 	params := m.node.LendingRiskParameters()
+	m.warmReplayIndex()
 	var markets []*lending.Market
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		list, err := manager.LendingListMarkets()
@@ -263,6 +279,7 @@ func (m *LendingModule) CreatePool(poolID string, owner [20]byte) (*lending.Mark
 			DeveloperFeeCollector: collector,
 			ReserveFactor:         m.node.LendingReserveFactorBps(),
 			LastUpdateBlock:       m.node.GetHeight(),
+			LastUpdateTimestamp:   uint64(max(m.headBlockTimestamp(), 0)),
 			TotalNHBSupplied:      big.NewInt(0),
 			TotalSupplyShares:     big.NewInt(0),
 			TotalNHBBorrowed:      big.NewInt(0),
@@ -289,6 +306,7 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 		id = defaultLendingPoolID
 	}
 	var account *lending.UserAccount
+	m.warmReplayIndex()
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetUserAccount(id, addr)
 		if err != nil {
@@ -457,7 +475,10 @@ func (m *LendingModule) replayCommittedPoolState(poolID string) (*lending.Market
 	users := make(map[[20]byte]*lending.UserAccount)
 	var sawLendingTx bool
 	height := m.node.GetHeight()
-	for blockHeight := uint64(1); blockHeight <= height; blockHeight++ {
+	// Only blocks that hold a committed lending transaction change anything here,
+	// so only those are visited, in the same ascending order as a walk over every
+	// height would reach them.
+	for _, blockHeight := range m.replayHeights.through(m.node, height) {
 		block, err := m.node.GetBlockByHeight(blockHeight)
 		if err != nil || block == nil {
 			continue
@@ -590,6 +611,15 @@ func (m *LendingModule) reconcileLegacyPoolStateInto(manager *nhbstate.Manager, 
 	id := strings.TrimSpace(poolID)
 	if id == "" {
 		id = defaultLendingPoolID
+	}
+	// Once a lending transaction has completed the sweep for this pool, every
+	// account that held a legacy position has been migrated already (see
+	// core/lending_native.go's reconcileLegacyPoolState), and listing them all
+	// again would find nothing.
+	if done, err := manager.LendingLegacyReconciled(id); err != nil {
+		return err
+	} else if done {
+		return nil
 	}
 	accounts, err := manager.AccountList()
 	if err != nil {
@@ -747,6 +777,15 @@ func mustBigInt(value string) *big.Int {
 	return out
 }
 
+// SupplyNHB, WithdrawNHB, DepositZNHB, WithdrawZNHB, BorrowNHB,
+// BorrowNHBWithFee, RepayNHB and Liquidate (and CreatePool above) are TEST-ONLY.
+// They write the live state trie directly, outside block execution, with no
+// proof that the caller holds the address's key, so no RPC handler calls any of
+// them: the matching lending_* methods answer 410, and the real operations are
+// signed lending transactions applied by consensus. They are kept only because
+// a few tests drive the engine through them.
+// TestNoRPCHandlerCallsTheLendingModuleWriteMethods fails if a non-test file
+// under rpc/ ever calls one.
 func (m *LendingModule) SupplyNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()
@@ -928,6 +967,7 @@ func (m *LendingModule) withEngine(poolID string, fn func(*lending.Engine, *lend
 		engine.SetReserveFactor(m.node.LendingReserveFactorBps())
 		engine.SetProtocolFeeBps(m.node.LendingProtocolFeeBps())
 		engine.SetBlockHeight(m.node.GetHeight())
+		engine.SetBlockTimestamp(m.headBlockTimestamp())
 		engine.SetCollateralRouting(m.node.LendingCollateralRouting())
 		var market *lending.Market
 		stored, ok, err := manager.LendingGetMarket(id)
