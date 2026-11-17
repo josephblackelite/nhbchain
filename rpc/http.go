@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,7 +54,9 @@ const (
 	defaultRateLimitWindow        = time.Minute
 	defaultMaxTxPerWindow         = 5
 	txSeenTTL                     = 15 * time.Minute
-	rateLimiterMaxEntries         = 512
+	rateLimiterMaxEntries         = 2048
+	rateLimiterEvictBatch         = rateLimiterMaxEntries / 16
+	rateLimiterFullSweepEvery     = time.Second
 	rateLimiterStaleMultiple      = 10
 	maxForwardedForAddrs          = 5
 	maxTrustedProxyEntries        = 32
@@ -950,7 +953,7 @@ func (s *Server) Serve(listener net.Listener) error {
 	// future real client-signed-envelope submission path if one is ever
 	// built with an actual signature field on the wire messages.
 
-	baseHandler := grpcHandler(grpcServer, mux)
+	baseHandler := s.grpcHandler(grpcServer, mux)
 	srv := &http.Server{
 		Addr:              listener.Addr().String(),
 		Handler:           baseHandler,
@@ -1045,11 +1048,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
-func grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
+// grpcHandler sends the gRPC POS services to grpcServer and everything else to
+// other. The finality stream is public like the WebSocket streams, so it is
+// admitted the same way: the client address must resolve, be on the allowlist
+// and fit under the stream caps, and it holds its slot until the stream ends.
+func (s *Server) grpcHandler(grpcServer *grpc.Server, other http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.ProtoMajor == 2 && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
 			// Only intercept registered POS services, forward others to the proxy
 			if strings.HasPrefix(r.URL.Path, "/pos.v1.") {
+				release, ok := s.admitGRPCStream(w, r)
+				if !ok {
+					return
+				}
+				defer release()
 				grpcServer.ServeHTTP(w, r)
 				return
 			}
@@ -1674,7 +1686,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			writeError(recorder, http.StatusUnauthorized, req.ID, codeUnauthorized, err.Error(), nil)
 			return
 		}
-		if !s.allowSwapPrincipal(principal.APIKey, s.swapNow()) {
+		if allowed, retryAfter := s.allowSwapPrincipalWithRetryAfter(principal.APIKey, s.swapNow()); !allowed {
+			recorder.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "swap partner rate limit exceeded", nil)
 			return
 		}
@@ -2979,16 +2992,25 @@ func (s *Server) authenticateSwapRequest(r *http.Request, body []byte) (*gateway
 }
 
 func (s *Server) allowSwapPrincipal(apiKey string, now time.Time) bool {
+	allowed, _ := s.allowSwapPrincipalWithRetryAfter(apiKey, now)
+	return allowed
+}
+
+// allowSwapPrincipalWithRetryAfter is the same fixed-window per-partner swap
+// quota allowSwapPrincipal exposes, extended to also report how long the
+// caller should wait before its window resets. The returned duration is only
+// meaningful when allowed is false.
+func (s *Server) allowSwapPrincipalWithRetryAfter(apiKey string, now time.Time) (bool, time.Duration) {
 	if len(s.swapPartnerLimits) == 0 {
-		return true
+		return true, 0
 	}
 	normalized := strings.TrimSpace(apiKey)
 	if normalized == "" {
-		return true
+		return true, 0
 	}
 	limit, ok := s.swapPartnerLimits[normalized]
 	if !ok || limit <= 0 {
-		return true
+		return true, 0
 	}
 	s.swapRateMu.Lock()
 	defer s.swapRateMu.Unlock()
@@ -3003,11 +3025,11 @@ func (s *Server) allowSwapPrincipal(apiKey string, now time.Time) bool {
 	}
 	if limiter.count >= limit {
 		limiter.lastSeen = now
-		return false
+		return false, limiter.windowStart.Add(s.swapRateWindow).Sub(now)
 	}
 	limiter.count++
 	limiter.lastSeen = now
-	return true
+	return true, 0
 }
 
 func (s *Server) swapNow() time.Time {
@@ -3119,7 +3141,7 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 		limiter, ok := s.rateLimiters[descriptor.key]
 		if !ok {
 			if len(s.rateLimiters) >= rateLimiterMaxEntries {
-				s.evictOldestLimiterLocked()
+				s.evictOldestLimiterLocked(now)
 			}
 			limiter = &rateLimiter{lastSeen: now}
 			if limit > 0 {
@@ -3200,8 +3222,14 @@ func (s *Server) evictRateLimitersLocked(now time.Time) {
 	if len(s.rateLimiters) == 0 {
 		return
 	}
-	if s.rateLimiterSweepBackoff > 0 && !s.rateLimiterSweep.IsZero() && now.Sub(s.rateLimiterSweep) < s.rateLimiterSweepBackoff && len(s.rateLimiters) < rateLimiterMaxEntries {
-		return
+	if s.rateLimiterSweepBackoff > 0 && !s.rateLimiterSweep.IsZero() {
+		sinceSweep := now.Sub(s.rateLimiterSweep)
+		// A full table may sweep again early, but at most once per
+		// rateLimiterFullSweepEvery: without that bound every request against a
+		// full table walked all of it.
+		if sinceSweep < s.rateLimiterSweepBackoff && (len(s.rateLimiters) < rateLimiterMaxEntries || sinceSweep < rateLimiterFullSweepEvery) {
+			return
+		}
 	}
 	for key, limiter := range s.rateLimiters {
 		if limiter.lastSeen.IsZero() {
@@ -3214,14 +3242,40 @@ func (s *Server) evictRateLimitersLocked(now time.Time) {
 	s.rateLimiterSweep = now
 }
 
-func (s *Server) evictOldestLimiterLocked() {
+// limiterIsIdle reports whether dropping l loses nothing: it has no bucket (no
+// limit is configured for its scope) or its bucket has refilled to its full
+// burst, which is exactly the state a new bucket starts in.
+func limiterIsIdle(l *rateLimiter, now time.Time) bool {
+	if l == nil || l.limiter == nil {
+		return true
+	}
+	return l.limiter.TokensAt(now) >= float64(l.limiter.Burst())
+}
+
+// evictOldestLimiterLocked makes room in a full limiter table. It drops idle
+// entries first, a batch at a time and least recently seen first, because an
+// idle entry carries no state: a caller whose bucket is still draining or empty
+// keeps it, so churning many distinct sources through the table does not hand a
+// throttled caller a fresh burst unless every entry in the table is in use at
+// the same moment. Only when no entry is idle does it fall back to dropping the
+// single least recently seen one.
+func (s *Server) evictOldestLimiterLocked(now time.Time) {
 	if len(s.rateLimiters) == 0 {
 		return
 	}
+	type idleEntry struct {
+		key      string
+		lastSeen time.Time
+	}
+	var idle []idleEntry
 	var oldestKey string
 	var oldestTime time.Time
 	hasOldest := false
 	for key, limiter := range s.rateLimiters {
+		if limiterIsIdle(limiter, now) {
+			idle = append(idle, idleEntry{key: key, lastSeen: limiter.lastSeen})
+			continue
+		}
 		switch {
 		case !hasOldest:
 			oldestKey = key
@@ -3234,6 +3288,17 @@ func (s *Server) evictOldestLimiterLocked() {
 			oldestKey = key
 			oldestTime = limiter.lastSeen
 		}
+	}
+	if len(idle) > 0 {
+		sort.Slice(idle, func(i, j int) bool { return idle[i].lastSeen.Before(idle[j].lastSeen) })
+		count := len(idle)
+		if count > rateLimiterEvictBatch {
+			count = rateLimiterEvictBatch
+		}
+		for _, entry := range idle[:count] {
+			delete(s.rateLimiters, entry.key)
+		}
+		return
 	}
 	if hasOldest {
 		delete(s.rateLimiters, oldestKey)
@@ -3774,7 +3839,8 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	if chainKey != "" {
 		nonceKey = chainKey + ":" + nonceKey
 	}
-	if !s.allowSource(source, identity, nonceKey, req.Method, now) {
+	if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, nonceKey, req.Method, now); !allowed {
+		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "transaction rate limit exceeded", source)
 		return
 	}

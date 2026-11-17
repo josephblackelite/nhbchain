@@ -130,8 +130,23 @@ func (b *chainBuilder) addBlock(n int) {
 	}
 }
 
+// addBlockWithTxs is addBlock for a block that also carries transactions, with
+// the transaction root the real code computes for them in its header.
+func (b *chainBuilder) addBlockWithTxs(n int, txs []*types.Transaction) {
+	b.t.Helper()
+	var err error
+	quietly(func() { err = b.tryAddBlockWithTxs(n, txs) })
+	if err != nil {
+		b.t.Fatal(err)
+	}
+}
+
 // tryAddBlock is addBlock for callers that are not the test's own goroutine.
 func (b *chainBuilder) tryAddBlock(n int) error {
+	return b.tryAddBlockWithTxs(n, nil)
+}
+
+func (b *chainBuilder) tryAddBlockWithTxs(n int, txs []*types.Transaction) error {
 	height := b.bc.Height() + 1
 	tr, err := trie.NewTrie(b.db, b.root.Bytes())
 	if err != nil {
@@ -159,14 +174,20 @@ func (b *chainBuilder) tryAddBlock(n int) error {
 	if err != nil {
 		return fmt.Errorf("commit state: %w", err)
 	}
+	txRoot := gethtypes.EmptyRootHash.Bytes()
+	if len(txs) > 0 {
+		if txRoot, err = core.ComputeTxRoot(txs); err != nil {
+			return fmt.Errorf("transaction root: %w", err)
+		}
+	}
 	header := &types.BlockHeader{
 		Height:    height,
 		Timestamp: 1_700_000_000 + int64(height),
 		PrevHash:  b.bc.Tip(),
 		StateRoot: root.Bytes(),
-		TxRoot:    gethtypes.EmptyRootHash.Bytes(),
+		TxRoot:    txRoot,
 	}
-	if err := b.bc.AddBlock(types.NewBlock(header, nil)); err != nil {
+	if err := b.bc.AddBlock(types.NewBlock(header, txs)); err != nil {
 		return fmt.Errorf("add block %d: %w", height, err)
 	}
 	b.root = root

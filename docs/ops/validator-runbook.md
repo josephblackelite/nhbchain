@@ -134,7 +134,10 @@ Every `LIVENESS:` line carries structured fields (`height`, `since_commit_s`,
 `consecutive_build_failures`, `last_build_error`, `mempool`, `inflight`,
 `quarantined`, `bft_round`, `bft_locked_round`) that separate a peer that is down from
 a build that is failing, from own proposals being rejected, from a lock that cannot be
-satisfied.
+satisfied. The line is built without waiting on the consensus engine for longer than
+half a second: if the engine is busy (typically inside a slow block commit) the line
+still goes out with `bft_engine_busy=true`, and the `bft_height`, `bft_round` and
+`bft_locked_round` values on it are zero and mean nothing.
 
 ### Metrics and alerts
 
@@ -188,6 +191,14 @@ flight. Nothing else is asked of the operator, but:
 - `SAFETY: refused to sign a conflicting vote` (event `double_sign_refused`) is the
   guard doing its job. Note the height and round; a validator that logs it repeatedly is
   receiving conflicting proposals or is being run twice.
+- `SAFETY: this validator starts on a chain that already has blocks and has no vote
+  record` (event `sign_state_missing`) is expected on a validator's first start. On any
+  other start it means the record was lost, so the validator cannot know whether it voted
+  in the height in flight. Before it starts, find the last `Starting BFT round for Height:
+  H, Round: R` line in the log from before the stop and write the record by hand, as one
+  line, to `<DataDir>/bft_sign_state.json`: `{"height":H,"round":R,"prevote":{},"precommit":{}}`
+  (a vote for nothing in that round, so the validator will not sign in it again and moves on
+  to the next). The format is pinned by a test (`sign_state_missing_test.go`).
 - `SAFETY: could not persist the vote record` (event `sign_state_write_failed`) means the
   disk refused the write. The vote that needed the record is not signed, so the validator
   misses that vote; it tries again at its next vote and signs as soon as the disk accepts

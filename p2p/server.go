@@ -1060,11 +1060,17 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	}
 
 	trimmedDial := strings.TrimSpace(dialAddr)
-	addresses := append([]string{}, remote.addrs...)
+	// The addresses a peer advertises are its own claim and the handshake
+	// signature does not cover them. Only those at the host the connection came
+	// from are used to recognise, store or pass on the peer. When there are none,
+	// the address this node dialed stands in for a connection it opened; a peer
+	// that connected inbound and advertised only addresses elsewhere is not known
+	// by any address, and it stays connected all the same.
+	addresses := sourceBoundAddrs(remote.addrs, conn.RemoteAddr())
 	if len(addresses) == 0 && trimmedDial != "" {
 		addresses = append(addresses, trimmedDial)
 	}
-	if len(addresses) == 0 {
+	if len(addresses) == 0 && len(remote.addrs) == 0 {
 		addresses = append(addresses, conn.RemoteAddr().String())
 	}
 
@@ -1084,27 +1090,37 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 		return err
 	}
 
-	// Nothing about the peer is recorded or persisted before registerPeer has
-	// accepted it: a handshake proves only that the remote holds some key, and a
-	// peer that never gets a slot must not leave state behind.
+	// Apart from a ban for a handshake that the node itself signed for another
+	// chain or genesis (markHandshakeViolation, recorded while the handshake is
+	// verified), nothing about the peer is recorded or persisted before
+	// registerPeer has accepted it: a handshake proves only that the remote holds
+	// some key, and a peer that never gets a slot must not leave state behind.
+	// Those bans are held within a bounded share of the peerstore and the
+	// reputation table.
 	s.recordPeerHandshake(remote)
 	if s.pex != nil {
 		for _, addr := range addresses {
 			s.pex.recordPeer(remote.nodeID, addr, now)
 		}
 	}
-	if s.peerstore != nil && primaryAddr != "" {
-		entry := PeerstoreEntry{Addr: primaryAddr, NodeID: remote.nodeID}
-		if err := s.peerstore.Put(entry); err != nil {
-			s.log().Warn("Failed to persist peer entry",
-				logging.MaskField("peer_id", remote.nodeID),
-				logging.MaskField("peer_address", entry.Addr),
-				slog.Any("error", err))
+	if s.peerstore != nil {
+		if primaryAddr != "" {
+			entry := PeerstoreEntry{Addr: primaryAddr, NodeID: remote.nodeID}
+			if err := s.peerstore.Put(entry); err != nil {
+				s.log().Warn("Failed to persist peer entry",
+					logging.MaskField("peer_id", remote.nodeID),
+					logging.MaskField("peer_address", entry.Addr),
+					slog.Any("error", err))
+			}
 		}
-		if _, err := s.peerstore.RecordSuccess(remote.nodeID, now); err != nil {
-			s.log().Warn("Failed to record peer success",
-				logging.MaskField("peer_id", remote.nodeID),
-				slog.Any("error", err))
+		// A peer stored earlier is credited with the connection even when no
+		// address is stored for it now.
+		if _, stored := s.peerstore.ByNodeID(remote.nodeID); stored {
+			if _, err := s.peerstore.RecordSuccess(remote.nodeID, now); err != nil {
+				s.log().Warn("Failed to record peer success",
+					logging.MaskField("peer_id", remote.nodeID),
+					slog.Any("error", err))
+			}
 		}
 	}
 	if peer.persistent {
@@ -1319,7 +1335,11 @@ func (s *Server) registerPeer(peer *Peer) error {
 		s.peerstore.Protect(peer.id)
 	}
 	if peer.dialAddr != "" {
-		s.byAddr[peer.dialAddr] = peer.id
+		// An inbound peer's address is not one this node chose, so it never takes
+		// the place of an address that is already held by another peer.
+		if _, held := s.byAddr[peer.dialAddr]; !held || !peer.inbound {
+			s.byAddr[peer.dialAddr] = peer.id
+		}
 	}
 	if peer.persistent {
 		s.persistentIDs[peer.id] = struct{}{}
@@ -1345,7 +1365,7 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 				s.outboundCount--
 			}
 		}
-		if peer.dialAddr != "" {
+		if peer.dialAddr != "" && s.byAddr[peer.dialAddr] == peer.id {
 			delete(s.byAddr, peer.dialAddr)
 		}
 		if peer.persistent {

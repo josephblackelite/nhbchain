@@ -274,8 +274,11 @@ in `cmd/nhb-snapshot/snapshot_test.go`):
   refused snapshot leaves nothing behind;
 - that what was unpacked opens read-only as a chain database: every table file
   the MANIFEST refers to is present and as long as it says; the tip, the height
-  index and the genesis agree; the newest 256 headers hash and link to their
-  parents; the tip's state root is present and **every node of the state trie
+  index and the genesis agree; the record of the last block time, which the node
+  loads as the earliest time it accepts for its next block, is the tip's time
+  (or absent, when the node uses the tip's time); the newest 256 blocks hash and
+  link to their parents and hold the transactions their header's root commits
+  to; the tip's state root is present and **every node of the state trie
   re-hashes to its address** (so a state altered under an unchanged root is
   refused); and the chain id, genesis hash, height, tip hash, state root and tip
   time equal what the manifest claims.
@@ -452,8 +455,9 @@ host can ask for:
   accepted by `extract`, and then never gets there.
   (`TestAForgedSnapshotIsRefusedAndAnUnconnectedNodeOnItIsNeverAtTheTip`)
 - **History below the tip is trusted.** Old blocks and old state are checked for
-  consistency (headers link and hash for the newest 256 blocks, the whole height
-  index is present), not against the network. Use a snapshot from a source you
+  consistency (headers link and hash and the transactions match the header for
+  the newest 256 blocks, the whole height index is present), not against the
+  network; blocks below that window are not opened. Use a snapshot from a source you
   trust, and compare its `tipHash` and `stateRoot` with two nodes you trust
   before you register (`nhb_getLatestBlocks` shows the newest blocks; a
   snapshot's tip is normally beyond that window by the time you read it, so
@@ -822,9 +826,18 @@ sudo install -m 0755 $B/bin/nhb $B/bin/nhb-cli $B/bin/nhb-snapshot /opt/nhbchain
 sudo chown -R nhb:nhb /opt/nhbchain
 
 # 1. This validator's key, made on this machine and never passed in (ensure_key),
-#    with the tool root built.
-( cd "$(mktemp -d)" && $B/bin/nhb-cli generate-key >/dev/null && \
-  sudo install -m 0600 -o nhb -g nhb wallet.key /etc/nhbchain/validator.key )
+#    with the tool root built. The key is made in plain text in a temporary
+#    directory, which is removed whether the step succeeds or fails; if you ran an
+#    earlier version of this step, delete any wallet.key left in a tmp.* directory
+#    under /tmp (or $TMPDIR).
+(
+  set -eo pipefail
+  KD=$(mktemp -d)
+  trap 'rm -rf "$KD"' EXIT
+  cd "$KD"
+  $B/bin/nhb-cli generate-key >/dev/null
+  sudo install -m 0600 -o nhb -g nhb wallet.key /etc/nhbchain/validator.key
+)
 
 # 2. Fetch the manifest, then the archive it names (https), as the service user,
 #    into a directory only that user can enter (fetch_manifest, install_snapshot).
@@ -983,6 +996,27 @@ unsigned with nothing that signs manifests, the governance anchor unable to
 verify, and an import that leaves the chain height at zero and is discarded by
 the state drift guard at the next block or restart. This procedure does not use
 them.
+
+One more rule belongs on that list: since release r5, ZNHB that enters or leaves
+the treasury wallet is booked into the Reward Pool and Sale Pool ledgers as part of
+the same block, and that booking has no activation height of its own. A node that
+replayed pre-r5 history with a post-r5 binary would compute different pool balances
+than the chain did, so a new node must always start from a snapshot taken after r5
+(every hosted snapshot is), never from an older copy of a data directory. The
+tests in `core/znhb_treasury_booking_sequence_test.go` pin the booking's behavior.
+
+The same applies, for the same reason, to four more value-engine rules that arrived
+with r5 and have no activation height: the nonce an arbitration consumes, the
+refusals of self-dealing (an escrow, market fill or subscription in which one
+account fills two roles), the block-time stamps on escrow, trade and realm records
+(they used to be read from the host clock, which no replay can reproduce, and the
+tests in `core/state_transition_escrow_clock_test.go` pin the block-time behavior),
+and the signed form of evidence reports. Gating the self-dealing refusals would
+keep the old paths that created value, and the old wall-clock stamps cannot be
+rebuilt, so there is nothing to gate: history that contains a transaction these
+rules treat differently could only be replayed by a separate, height-gated legacy
+release. The only way to use a node on this chain is therefore the same one as
+above, from a post-r5 snapshot.
 
 A change that makes genesis sync work would ship the five behaviours as
 height-gated code and a chain-level governance-timer table as a release that is

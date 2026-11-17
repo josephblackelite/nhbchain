@@ -410,6 +410,15 @@ func (l *Lifecycle) Void(id [32]byte, reason string, caller [20]byte) (*Authoriz
 // autoVoid releases the locked balance and persists the voided authorization
 // with the provided status and reason.
 func (l *Lifecycle) autoVoid(auth *Authorization, status AuthorizationStatus, reason string) (*Authorization, error) {
+	return l.autoVoidIndexed(auth, status, reason, true)
+}
+
+// autoVoidIndexed is autoVoid with the pending-index removal made optional. SweepExpired
+// passes updateIndex=false and does its own single batched removal after the whole sweep,
+// so voiding N authorizations in one sweep rewrites the pending index once instead of N
+// times (PL-EXT-26); every other caller is unaffected and still gets the index updated
+// immediately, through the autoVoid wrapper above.
+func (l *Lifecycle) autoVoidIndexed(auth *Authorization, status AuthorizationStatus, reason string, updateIndex bool) (*Authorization, error) {
 	if auth == nil {
 		return nil, errAuthorizationNotFound
 	}
@@ -440,13 +449,15 @@ func (l *Lifecycle) autoVoid(auth *Authorization, status AuthorizationStatus, re
 		_ = l.state.PutAccount(auth.Payer[:], payerAcc)
 		return nil, err
 	}
-	if err := l.removePendingAuthorization(auth.ID); err != nil {
-		_ = l.state.PutAccount(auth.Payer[:], originalPayer)
-		if originalAuth != nil {
-			_ = l.persistAuthorization(originalAuth)
-			_ = l.addPendingAuthorization(originalAuth.ID)
+	if updateIndex {
+		if err := l.removePendingAuthorization(auth.ID); err != nil {
+			_ = l.state.PutAccount(auth.Payer[:], originalPayer)
+			if originalAuth != nil {
+				_ = l.persistAuthorization(originalAuth)
+				_ = l.addPendingAuthorization(originalAuth.ID)
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 	l.emitter.Emit(events.PaymentVoided{
 		AuthorizationID: auth.ID,
@@ -590,6 +601,46 @@ func (l *Lifecycle) removePendingAuthorization(id [32]byte) error {
 	return l.state.KVPut(authorizationPendingIndex, trimmed)
 }
 
+// removePendingAuthorizations is removePendingAuthorization for a whole set of ids at once:
+// it reads the pending index and writes it back ONE time no matter how many ids are being
+// dropped, instead of once per id. SweepExpired uses this to avoid rewriting the whole
+// index on every single removal when many authorizations expire together (PL-EXT-26).
+func (l *Lifecycle) removePendingAuthorizations(ids map[[32]byte]struct{}) error {
+	if l == nil || l.state == nil {
+		return errLifecycleUninitialised
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	current, err := l.pendingAuthorizationIDs()
+	if err != nil {
+		return err
+	}
+	if len(current) == 0 {
+		return nil
+	}
+	trimmed := make([][]byte, 0, len(current))
+	removedAny := false
+	for _, existing := range current {
+		if len(existing) == 32 {
+			var id [32]byte
+			copy(id[:], existing)
+			if _, drop := ids[id]; drop {
+				removedAny = true
+				continue
+			}
+		}
+		trimmed = append(trimmed, append([]byte(nil), existing...))
+	}
+	if !removedAny {
+		return nil
+	}
+	if len(trimmed) == 0 {
+		return l.state.KVDelete(authorizationPendingIndex)
+	}
+	return l.state.KVPut(authorizationPendingIndex, trimmed)
+}
+
 // SweepExpired scans the pending authorization index and voids any records past
 // their expiry timestamp. The returned slice contains the updated authorization
 // records for each auto-voided lock.
@@ -602,6 +653,12 @@ func (l *Lifecycle) removePendingAuthorization(id [32]byte) error {
 // behind it; if any were left, the voided records are returned together with an
 // error wrapping ErrSweepSkipped. Any other error still ends the sweep and no
 // result is returned.
+//
+// The pending index is rewritten at most once per call, through
+// removePendingAuthorizations, instead of once per id dropped from it: an id is only
+// marked for removal as the loop reaches it, and every mark made so far is flushed
+// before any return (early or not), so a sweep that stops partway through still
+// leaves the index exactly as it would have under the old per-id removal (PL-EXT-26).
 func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 	if l == nil || l.state == nil {
 		return nil, errLifecycleUninitialised
@@ -628,6 +685,8 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 	cutoff := uint64(now.Unix())
 	expired := make([]*Authorization, 0)
 	skipped := 0
+	toRemove := make(map[[32]byte]struct{})
+	flush := func() error { return l.removePendingAuthorizations(toRemove) }
 	for _, entry := range ids {
 		if len(entry) != 32 {
 			continue
@@ -637,26 +696,33 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 		auth, err := l.loadAuthorization(id)
 		if err != nil {
 			if errors.Is(err, errAuthorizationNotFound) {
-				_ = l.removePendingAuthorization(id)
+				toRemove[id] = struct{}{}
 				continue
+			}
+			if ferr := flush(); ferr != nil {
+				return nil, ferr
 			}
 			return nil, err
 		}
 		if auth.Status != AuthorizationStatusPending {
-			_ = l.removePendingAuthorization(id)
+			toRemove[id] = struct{}{}
 			continue
 		}
 		if auth.Expiry == 0 || auth.Expiry > cutoff {
 			continue
 		}
-		updated, err := l.autoVoid(auth, AuthorizationStatusExpired, "expired")
+		updated, err := l.autoVoidIndexed(auth, AuthorizationStatusExpired, "expired", false)
 		if err != nil {
 			if l.sweepSkipsUnreleasable && errors.Is(err, errLockedBalanceInconsistent) {
 				skipped++
 				continue
 			}
+			if ferr := flush(); ferr != nil {
+				return nil, ferr
+			}
 			return nil, err
 		}
+		toRemove[id] = struct{}{}
 		expired = append(expired, updated.Clone())
 		amount := big.NewInt(0)
 		if updated.Amount != nil {
@@ -666,6 +732,9 @@ func (l *Lifecycle) SweepExpired(now time.Time) ([]*Authorization, error) {
 			AuthorizationID: updated.ID,
 			Amount:          amount,
 		})
+	}
+	if err := flush(); err != nil {
+		return nil, err
 	}
 	if skipped > 0 {
 		return expired, fmt.Errorf("%w: %d", ErrSweepSkipped, skipped)

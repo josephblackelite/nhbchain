@@ -160,6 +160,8 @@ func main() {
 		// it is a deliberate, coordinated, every-validator-at-once decision
 		// made in config.toml, never inferred.
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	} else {
+		logger.Warn("QuorumCertActivationHeight is not set: this node does not check quorum certificates on blocks it receives through peer sync, so a peer could make it accept a block the validators never agreed on; set it to the value the network you follow uses (docs/validators/onboarding.md)")
 	}
 	if cfg.RewardsByStakeFromEpoch > 0 {
 		// See config.Config.RewardsByStakeFromEpoch's doc comment -- left unset (0) the epoch rewards are split exactly as in every prior release.

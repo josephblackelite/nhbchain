@@ -41,9 +41,10 @@ type lendingPositionResult struct {
 }
 
 // lendingAccountResult is the JSON-tagged account view returned over RPC.
-// lending.UserAccount itself has no JSON tags and carries an unexported
-// crypto.Address field that serializes as "{}", so it can never be returned
-// to clients directly -- this type is the properly-shaped replacement.
+// lending.UserAccount itself has no JSON tags, so returned directly it would
+// expose Go field names instead of the API's own; this type is the
+// properly-shaped replacement. (Its crypto.Address field is not the problem:
+// that type marshals as its bech32 text, see crypto.Address.MarshalText.)
 type lendingAccountResult struct {
 	Address  string                  `json:"address"`
 	Supplied []lendingPositionResult `json:"supplied"`

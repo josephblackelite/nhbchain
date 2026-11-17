@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -83,6 +84,9 @@ var defaultAllowedGovernanceParams = []string{
 }
 
 type Config struct {
+	// UndecodedKeys lists the keys in the config file that this build does not know (a misspelling, or a setting from another version); they are ignored.
+	// Filled by Load, never read from the file.
+	UndecodedKeys              []string `toml:"-"`
 	ListenAddress              string   `toml:"ListenAddress"`
 	RPCAddress                 string   `toml:"RPCAddress"`
 	RPCTrustedProxies          []string `toml:"RPCTrustedProxies"`
@@ -154,7 +158,15 @@ type Config struct {
 	// 0 means "disabled" here, there is no way to express "enforce from
 	// height 1" via this config field specifically -- that only matters for
 	// a brand-new chain wanting the protection from genesis, not for
-	// upgrading an already-live one.
+	// upgrading an already-live one. This field only gates the CERTIFICATE
+	// CHECK; it does not gate the quorum bar itself. The bar a certificate (or
+	// an ordinary vote tally) must clear -- strictly more than two thirds of
+	// voting power -- has no gate at all and has been unconditional since the
+	// DC-01 safety fix: any value set here, on a fresh replay or a live
+	// upgrade alike, must be at or above the first height actually committed
+	// under a binary that already enforces that strict bar, or a node
+	// replaying from genesis with an older, looser-quorum binary in its
+	// history could compute a different chain than one that never ran it.
 	QuorumCertActivationHeight uint64 `toml:"QuorumCertActivationHeight"`
 	// RewardsByStakeFromEpoch is the first epoch whose emission is paid by stake: the validators' and the engagement pool follow each validator's stake,
 	// like the stakers' pool already does, and every pool is credited to the wallets that locked that stake instead of to the validator's own account (the
@@ -646,7 +658,9 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		if len(undecoded) == 1 && undecoded[0] == "ValidatorKey" {
 			return nil, fmt.Errorf("config file %s uses deprecated ValidatorKey field; run nhbctl migrate-keystore", path)
 		}
+		cfg.UndecodedKeys = append(cfg.UndecodedKeys, strings.Join(undecoded, "."))
 	}
+	sort.Strings(cfg.UndecodedKeys)
 
 	if raw := strings.TrimSpace(cfg.P2P.NetworkIDRaw); raw != "" {
 		parsed, err := strconv.ParseUint(raw, 10, 64)
@@ -1423,10 +1437,12 @@ func ensureKeystore(configPath string, cfg *Config, resolvePassphrase func() (st
 		return err
 	}
 
-	if cfg.ValidatorKeystorePath != keystorePath {
-		cfg.ValidatorKeystorePath = keystorePath
-		return persist(configPath, cfg)
-	}
+	// Keep the resolved path in memory only. The default is derived from the
+	// config path on every Load, so there is nothing to record, and writing the
+	// struct back here would store every key the operator left out as an
+	// explicit zero before the defaults below have been applied: the next Load
+	// would then take those zeros as the operator's own values.
+	cfg.ValidatorKeystorePath = keystorePath
 
 	return nil
 }

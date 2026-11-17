@@ -49,6 +49,21 @@ type buildTelemetry struct {
 	wdAdvancedAt time.Time
 	wdStalled    bool
 	wdLastAlert  time.Time
+
+	// bftStatus, when set, is read instead of the attached BFT engine for the
+	// engine's status in a snapshot. Only tests set it.
+	bftStatus bftStatusReader
+}
+
+// bftStatusWait bounds how long a liveness report waits for the BFT engine to
+// give up its lock. The engine holds that lock while it commits a block, which
+// is exactly when a stall is being reported, so the report must go out without
+// the engine's numbers rather than not at all.
+const bftStatusWait = 500 * time.Millisecond
+
+// bftStatusReader is the part of the BFT engine a liveness snapshot reads.
+type bftStatusReader interface {
+	StatusWithin(wait time.Duration) (height uint64, round int, lockedRound int, ok bool)
 }
 
 // LivenessSnapshot is a point-in-time view of block-production health.
@@ -76,6 +91,10 @@ type LivenessSnapshot struct {
 	BFTHeight      uint64
 	BFTRound       int
 	BFTLockedRound int
+	// BFTBusy is true when the engine did not give up its lock within
+	// bftStatusWait (it is committing a block); the BFT* values are then zero and
+	// carry no meaning.
+	BFTBusy bool
 }
 
 // LivenessSnapshot returns the current block-production health.
@@ -99,8 +118,17 @@ func (n *Node) LivenessSnapshot() LivenessSnapshot {
 	snap.LocalValidationFailures = n.build.localValidationFailures.Load()
 	snap.MempoolSize, snap.InFlight = n.mempoolCounts()
 	snap.StrikeRecords = n.poison.size()
-	if n.bftEngine != nil {
-		snap.BFTHeight, snap.BFTRound, snap.BFTLockedRound = n.bftEngine.Status()
+	var status bftStatusReader
+	switch {
+	case n.build.bftStatus != nil:
+		status = n.build.bftStatus
+	case n.bftEngine != nil:
+		status = n.bftEngine
+	}
+	if status != nil {
+		var ok bool
+		snap.BFTHeight, snap.BFTRound, snap.BFTLockedRound, ok = status.StatusWithin(bftStatusWait)
+		snap.BFTBusy = !ok
 	}
 	return snap
 }
@@ -142,6 +170,7 @@ func (n *Node) livenessFields(event string) []any {
 		slog.Uint64("bft_height", snap.BFTHeight),
 		slog.Int("bft_round", snap.BFTRound),
 		slog.Int("bft_locked_round", snap.BFTLockedRound),
+		slog.Bool("bft_engine_busy", snap.BFTBusy),
 	}
 }
 
@@ -248,7 +277,8 @@ func (n *Node) noteNondeterminism(t types.TxType, now time.Time) {
 // Locking: the "not_committed" kind is reported by the BFT engine while it
 // holds its own lock, so that branch must stay a plain counter bump and must
 // never call back into the engine (LivenessSnapshot reads the engine's status
-// and would deadlock). The other kinds are reported with no lock held.
+// and would wait out its bound for a lock the caller itself holds). The other
+// kinds are reported with no lock held.
 func (n *Node) NoteProposalOutcome(height uint64, round int, kind string, txCount int, err error) {
 	if n == nil {
 		return

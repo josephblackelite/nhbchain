@@ -134,6 +134,76 @@ func TestCommitRequiresEveryValidatorOfThreeEqualValidators(t *testing.T) {
 	}
 }
 
+// TestCommitRequiresBothValidatorsOfTwoWithTwoToOnePower drives the real vote
+// path on a two-validator set with an exact 2:1 power ratio (PL-R5T-73): the
+// live network today is two EQUAL validators, but nothing in the quorum math
+// assumes equal power, and a set this lopsided is the sharpest case the
+// strict (>2/3, not >=2/3) bar can face with only two validators -- the
+// larger validator's own power (2 of 3) is naively "two thirds" but the
+// strict threshold (floor(2*3/3)+1 = 3) still requires both.
+func TestCommitRequiresBothValidatorsOfTwoWithTwoToOnePower(t *testing.T) {
+	keys, addrs, weights := newValidatorFixture(t, 2, 1)
+
+	node := &trackingNode{validatorSet: weights}
+	engine := NewEngine(node, keys[0], &recordingBroadcaster{})
+
+	block := types.NewBlock(&types.BlockHeader{Height: 1, Validator: addrs[0]}, nil)
+	blockHash, err := block.Header.Hash()
+	if err != nil {
+		t.Fatalf("hash block: %v", err)
+	}
+
+	engine.mu.Lock()
+	engine.currentState = State{Height: 1, Round: 0}
+	engine.activeProposal = &SignedProposal{Proposal: &Proposal{Block: block, Round: 0}}
+	engine.resetVoteTrackingLocked()
+	engine.mu.Unlock()
+
+	// The heavier validator (power 2 of 3) voting alone must not reach quorum
+	// on its own, even though its own power alone is naively "two thirds".
+	_, reachedPrevote, _ := engine.addVoteIfRelevant(&SignedVote{
+		Vote:      &Vote{BlockHash: blockHash, Round: 0, Type: Prevote, Height: 1},
+		Validator: addrs[0],
+	})
+	if reachedPrevote {
+		t.Fatalf("SECURITY: the heavier validator alone (power 2 of 3) reported a prevote quorum")
+	}
+	_, _, reachedPrecommit := engine.addVoteIfRelevant(&SignedVote{
+		Vote:      &Vote{BlockHash: blockHash, Round: 0, Type: Precommit, Height: 1},
+		Validator: addrs[0],
+	})
+	if reachedPrecommit {
+		t.Fatalf("SECURITY: the heavier validator alone (power 2 of 3) reported a precommit quorum")
+	}
+	if engine.commit() {
+		t.Fatalf("SECURITY: commit succeeded with only the heavier validator (power 2 of 3)")
+	}
+	if len(node.committed) != 0 {
+		t.Fatalf("SECURITY: a block was committed with only the heavier validator (power 2 of 3)")
+	}
+
+	// The lighter validator joining in reaches quorum (power 3 of 3).
+	if _, reachedPrevote, _ := engine.addVoteIfRelevant(&SignedVote{
+		Vote:      &Vote{BlockHash: blockHash, Round: 0, Type: Prevote, Height: 1},
+		Validator: addrs[1],
+	}); !reachedPrevote {
+		t.Fatalf("expected both validators' prevotes to reach quorum")
+	}
+	_, _, reachedPrecommit = engine.addVoteIfRelevant(&SignedVote{
+		Vote:      &Vote{BlockHash: blockHash, Round: 0, Type: Precommit, Height: 1},
+		Validator: addrs[1],
+	})
+	if !reachedPrecommit {
+		t.Fatalf("expected both validators' precommits to reach quorum")
+	}
+	if !engine.commit() {
+		t.Fatalf("expected commit to succeed once both validators of the 2:1 set precommitted")
+	}
+	if len(node.committed) != 1 {
+		t.Fatalf("expected exactly one committed block, got %d", len(node.committed))
+	}
+}
+
 // TestVerifyPolkaProofLockedRejectsExactlyTwoThirds covers the second site the
 // threshold was computed at: the Proof-of-Lock-Change check of a re-proposal.
 func TestVerifyPolkaProofLockedRejectsExactlyTwoThirds(t *testing.T) {
@@ -151,6 +221,8 @@ func TestVerifyPolkaProofLockedRejectsExactlyTwoThirds(t *testing.T) {
 		{"nine equal validators, seven signed", []int64{1, 1, 1, 1, 1, 1, 1, 1, 1}, []int{0, 1, 2, 3, 4, 5, 6}, true},
 		{"weighted set exactly two thirds", []int64{4, 1, 1}, []int{0}, false},
 		{"weighted set above two thirds", []int64{4, 1, 1}, []int{0, 2}, true},
+		{"two validators, exact 2:1 power, heavier alone", []int64{2, 1}, []int{0}, false},
+		{"two validators, exact 2:1 power, both", []int64{2, 1}, []int{0, 1}, true},
 		{"four equal validators keep the 3-of-4 bar", []int64{1, 1, 1, 1}, []int{0, 1, 2}, true},
 	}
 	for _, tt := range tests {

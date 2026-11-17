@@ -216,7 +216,7 @@ func (e *e2eEnv) sendSigned(n *e2eNode, tx *types.Transaction) error {
 	return nil
 }
 
-// delegate has wallet from delegate amount ZNHB to the validator, the way any wallet does it: a stake transaction whose data is the RLP of
+// delegate has wallet from delegate amount ZNHB to the validator, the way the portal's Validator Hub does it: a stake transaction whose data is the RLP of
 // the validator's address.
 func (e *e2eEnv) delegate(n *e2eNode, from, to *e2eKey, amount *big.Int) {
 	t := e.t

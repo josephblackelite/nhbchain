@@ -19,7 +19,9 @@ Operational notes for the P2P layer, taken from the code. Settings live in the
 - **Set `[p2p] ExternalAddress`** (`host:port`) when `ListenAddress` is
   `0.0.0.0`. A peer only learns a dialable address for you from the
   `listenAddrs` in your handshake, and an unspecified host is filtered out. The
-  validator bootstrap script auto-detects it.
+  validator bootstrap script auto-detects it. A peer that reaches you inbound
+  only has your address recorded when it is the IP your connection comes from, so
+  use the address your peers see you connect from.
 - Behind NAT, forward the TCP port to the node by hand. The node logs a notice at
   start-up (`PUBLIC NODE SETUP REQUIRED`) and never attempts UPnP or NAT-PMP.
 

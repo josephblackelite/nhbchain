@@ -12,8 +12,8 @@ The node streams status transitions for transactions that carry an `intentRef`
 
 | Transport | Endpoint | Notes |
 | --- | --- | --- |
-| gRPC | `pos.v1.Realtime/SubscribeFinality` on the node's RPC address | Served by the same listener as JSON-RPC (`grpcHandler` in `rpc/http.go`), so it needs HTTP/2 (TLS or h2c). |
-| WebSocket | `/ws/pos/finality` on the RPC address | Optional `?cursor=<n>` query. Any browser origin is accepted unless `RPCWebSocketOrigins` lists host patterns (`streamAcceptOptions`, `rpc/ws.go`); the client-address allowlist applies. At most 256 streams are open at once and 8 per client address by default (`RPCWebSocketMaxConnections`, `RPCWebSocketMaxPerIP`); beyond that the upgrade is refused with HTTP 429 `too many open streams`. |
+| gRPC | `pos.v1.Realtime/SubscribeFinality` on the node's RPC address | Served by the same listener as JSON-RPC (`grpcHandler` in `rpc/http.go`), so it needs HTTP/2 (TLS or h2c). The client-address allowlist and the stream caps below apply: a refused client gets the gRPC status `PermissionDenied` (not allowed) or `ResourceExhausted` (over a cap). |
+| WebSocket | `/ws/pos/finality` on the RPC address | Optional `?cursor=<n>` query. Any browser origin is accepted unless `RPCWebSocketOrigins` lists host patterns (`streamAcceptOptions`, `rpc/ws.go`); the client-address allowlist applies. At most 256 streams are open at once and 8 per client address by default (`RPCWebSocketMaxConnections`, `RPCWebSocketMaxPerIP`), counting the gRPC streams too and counting an IPv6 client as its /64; beyond that the upgrade is refused with HTTP 429 `too many open streams`. |
 
 Neither transport requires the JWT used for privileged JSON-RPC methods.
 

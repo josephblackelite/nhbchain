@@ -17,11 +17,17 @@ import (
 // in the environment so the test touches no keystore.
 func loadShippedConfig(t *testing.T) *config.Config {
 	t.Helper()
+	return loadShippedConfigWith(t, "")
+}
+
+// loadShippedConfigWith is loadShippedConfig with extra top-level lines placed before everything else in the file.
+func loadShippedConfigWith(t *testing.T, topLevel string) *config.Config {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config.toml"))
 	if err != nil {
 		t.Fatalf("read config.toml: %v", err)
 	}
-	content := strings.Replace(string(raw), `ValidatorKMSEnv = ""`, `ValidatorKMSEnv = "NHB_TEST_VALIDATOR_KEY"`, 1)
+	content := topLevel + strings.Replace(string(raw), `ValidatorKMSEnv = ""`, `ValidatorKMSEnv = "NHB_TEST_VALIDATOR_KEY"`, 1)
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -104,5 +110,24 @@ func TestCheckConfigurationLogsEveryProblemAndDoesNotStop(t *testing.T) {
 	}
 	if sections["global"] != 2 || sections["consensus"] != 1 {
 		t.Fatalf("warnings by section: %v, want 2 global and 1 consensus", sections)
+	}
+}
+
+// A setting the operator believes is in force and the build does not know is ignored without a word (a misspelled activation height would leave the quorum
+// check off). The check names every such key.
+func TestCheckConfigurationNamesAKeyThisBuildDoesNotKnow(t *testing.T) {
+	cfg := loadShippedConfigWith(t, "QuorumCertActivationHeigth = 1380200\n")
+	if len(cfg.UndecodedKeys) != 1 || cfg.UndecodedKeys[0] != "QuorumCertActivationHeigth" {
+		t.Fatalf("undecoded keys = %v, want the misspelled one only", cfg.UndecodedKeys)
+	}
+	logger, buf := capturedLogger()
+	found := checkConfiguration(logger, cfg)
+
+	got := warnings(t, buf)
+	if found != 1 || len(got) != 1 {
+		t.Fatalf("found %d problems and %d warnings, want 1 of each: %s", found, len(got), buf.String())
+	}
+	if got[0]["section"] != "file" || !strings.Contains(got[0]["problem"].(string), "QuorumCertActivationHeigth") {
+		t.Fatalf("the warning does not name the key: %v", got[0])
 	}
 }

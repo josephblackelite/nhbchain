@@ -28,38 +28,48 @@ type BlockProof struct {
 	Signatures []BlockSignature   `json:"signatures"`
 }
 
-// Validator models the consensus voting power and public key metadata for a validator.
+// Validator models the consensus voting power and public key metadata for a
+// validator. Power is the full stake-scale voting power, not a clamped copy of
+// it: with stakes in the 10^25 range a 64-bit value saturates, and a saturated
+// power is blind to how much stake a validator really holds.
 type Validator struct {
 	Address []byte
-	Power   uint64
+	Power   *big.Int
 }
 
 // ValidatorSet verifies quorum signatures.
 type ValidatorSet struct {
 	validators map[string]Validator
-	totalPower uint64
+	totalPower *big.Int
 }
 
 // NewValidatorSet constructs a deterministic validator set keyed by normalized address bytes.
+// A missing or negative power counts as zero; the set keeps its own copies.
 func NewValidatorSet(list []Validator) *ValidatorSet {
-	set := &ValidatorSet{validators: make(map[string]Validator)}
+	set := &ValidatorSet{validators: make(map[string]Validator), totalPower: new(big.Int)}
 	for _, v := range list {
 		key := normalizeAddress(v.Address)
 		if key == "" {
 			continue
 		}
-		set.validators[key] = v
-		set.totalPower += v.Power
+		power := new(big.Int)
+		if v.Power != nil && v.Power.Sign() > 0 {
+			power.Set(v.Power)
+		}
+		set.validators[key] = Validator{Address: v.Address, Power: power}
+	}
+	for _, v := range set.validators {
+		set.totalPower.Add(set.totalPower, v.Power)
 	}
 	return set
 }
 
-// TotalPower returns the cumulative voting power of the set.
-func (s *ValidatorSet) TotalPower() uint64 {
-	if s == nil {
-		return 0
+// TotalPower returns the cumulative voting power of the set (a copy).
+func (s *ValidatorSet) TotalPower() *big.Int {
+	if s == nil || s.totalPower == nil {
+		return new(big.Int)
 	}
-	return s.totalPower
+	return new(big.Int).Set(s.totalPower)
 }
 
 // VerifyQuorum ensures the provided signatures collectively represent more
@@ -94,15 +104,10 @@ func (s *ValidatorSet) VerifyQuorum(digest []byte, signatures []BlockSignature) 
 		if !bytes.Equal(derived.Bytes(), validator.Address) {
 			return fmt.Errorf("signature address mismatch: expected %x got %x", validator.Address, derived.Bytes())
 		}
-		signed.Add(signed, new(big.Int).SetUint64(validator.Power))
+		signed.Add(signed, validator.Power)
 		seen[key] = struct{}{}
 	}
-	// Summed as big integers: with stake-scale powers the uint64 running
-	// total (s.totalPower) wraps around and would corrupt the comparison.
-	total := new(big.Int)
-	for _, validator := range s.validators {
-		total.Add(total, new(big.Int).SetUint64(validator.Power))
-	}
+	total := s.TotalPower()
 	if total.Sign() == 0 {
 		return fmt.Errorf("validator set has zero total power")
 	}

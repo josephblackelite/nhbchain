@@ -26,8 +26,9 @@ type ReputationConfig struct {
 	GreylistDuration time.Duration
 	DecayHalfLife    time.Duration
 	// MaxRecords caps the number of peers tracked at once; the least recently
-	// updated peer without an active ban is dropped first. Zero selects the
-	// default.
+	// updated peer without an active ban is dropped first, unless more than a
+	// quarter of the table is under a ban, in which case the least recently
+	// updated banned peer goes first. Zero selects the default.
 	MaxRecords int
 }
 
@@ -326,12 +327,15 @@ func (m *ReputationManager) ensureRecordLocked(id string, now time.Time) *reputa
 }
 
 // evictOneLocked drops the least recently updated record, preferring peers that
-// are not currently banned, and reports whether a record was removed.
+// are not currently banned while the banned ones hold no more than bannedQuota
+// records, and reports whether a record was removed.
 func (m *ReputationManager) evictOneLocked(now time.Time) bool {
 	victim, banned := "", ""
 	var victimAt, bannedAt time.Time
+	bannedCount := 0
 	for id, rec := range m.records {
 		if rec.bannedTill.After(now) {
+			bannedCount++
 			if banned == "" || rec.updatedAt.Before(bannedAt) || (rec.updatedAt.Equal(bannedAt) && id < banned) {
 				banned, bannedAt = id, rec.updatedAt
 			}
@@ -341,7 +345,7 @@ func (m *ReputationManager) evictOneLocked(now time.Time) bool {
 			victim, victimAt = id, rec.updatedAt
 		}
 	}
-	if victim == "" {
+	if victim == "" || bannedCount > bannedQuota(m.cfg.MaxRecords) {
 		victim = banned
 	}
 	if victim == "" {

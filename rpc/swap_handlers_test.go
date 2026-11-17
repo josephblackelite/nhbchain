@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -910,6 +911,13 @@ func TestSwapHandlersRateLimitPerPartner(t *testing.T) {
 	}
 	if _, rpcErr := decodeRPCResponse(t, secondRec); rpcErr == nil || rpcErr.Code != codeRateLimited {
 		t.Fatalf("expected rate limited error, got %+v", rpcErr)
+	}
+	retryAfter := secondRec.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatalf("expected Retry-After header on the swap partner rate-limited response")
+	}
+	if seconds, err := strconv.Atoi(retryAfter); err != nil || seconds < 1 {
+		t.Fatalf("expected Retry-After to be a positive integer number of seconds, got %q (err=%v)", retryAfter, err)
 	}
 }
 

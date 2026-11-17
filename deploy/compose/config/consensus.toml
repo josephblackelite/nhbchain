@@ -1,3 +1,6 @@
+# Local docker-compose dev network only (NetworkName "nhb-local", NetworkId
+# 187001, AllowAutogenesis true). Starts an isolated private chain; does not
+# join the live NHBCoin network. See the validators page for a real join.
 ListenAddress = "127.0.0.1:6002"
 # Bind consensusd's RPC loopback-only and expose it via the compose reverse
 # proxy or host networking when required.

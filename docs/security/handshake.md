@@ -14,7 +14,7 @@ Each side writes one newline-terminated JSON object, then reads the peer's. The 
 | `nodeId` | Canonical node ID (below). |
 | `nonce` | 12 random bytes, `0x`-prefixed lowercase hex. |
 | `clientVersion` | Required, non-empty, at most 256 bytes (`maxClientVersionLen`) made of printable characters. It is not covered by the signature. |
-| `listenAddrs` | Optional list of `host:port` strings; entries with an empty host, port `0` or an unspecified IP are dropped. Only the first 64 entries are examined and at most 8 are kept (`maxHandshakeListenAddrScan`, `maxHandshakeListenAddrs` in `p2p/handshake.go`). |
+| `listenAddrs` | Optional list of `host:port` strings; entries with an empty host, port `0` or an unspecified IP are dropped. Only the first 64 entries are examined and at most 8 are kept (`maxHandshakeListenAddrScan`, `maxHandshakeListenAddrs` in `p2p/handshake.go`). The signature does not cover this field; the receiver only acts on an entry whose host is the IP the connection came from (`sourceBoundAddrs`). |
 | `sig` | 65-byte recoverable secp256k1 signature, hex. |
 
 A frame larger than the configured maximum message size (default 1 MiB) is rejected with `handshake frame exceeds maximum size`.

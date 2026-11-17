@@ -24,6 +24,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 
 	nhbstate "nhbchain/core/state"
+	"nhbchain/core/txroot"
 	"nhbchain/core/types"
 	nhbcrypto "nhbchain/crypto"
 )
@@ -33,10 +34,11 @@ import (
 // read-only reader; TestReaderMatchesCoreBlockchain builds a chain with the
 // real code and fails if the two ever disagree.
 var (
-	keyTip       = []byte("tip")
-	keyGenesis   = []byte("genesis")
-	keyHeight    = []byte("height")
-	prefixHeight = []byte("height:")
+	keyTip           = []byte("tip")
+	keyGenesis       = []byte("genesis")
+	keyHeight        = []byte("height")
+	keyLastTimestamp = []byte("lastTimestamp")
+	prefixHeight     = []byte("height:")
 
 	// validatorSetKey is where core/state_transition.go keeps the validator set
 	// inside the state trie.
@@ -194,7 +196,9 @@ func decodeBlock(raw []byte) (*types.Block, error) {
 }
 
 // blockAt reads the block at height h through the height index and checks that
-// its header hashes to the indexed hash.
+// its header hashes to the indexed hash and that its transactions are the ones
+// the header commits to. The genesis block is not held to the second check: the
+// node does not make it either, and the genesis hash pins it.
 func (c *chainDB) blockAt(h uint64) (*types.Block, []byte, error) {
 	hash, err := c.get(heightKey(h))
 	if err != nil {
@@ -221,13 +225,54 @@ func (c *chainDB) blockAt(h uint64) (*types.Block, []byte, error) {
 	if block.Header.Height != h {
 		return nil, nil, fmt.Errorf("block %x claims height %d but is indexed at %d", hash, block.Header.Height, h)
 	}
+	if h > 0 {
+		// The header hash covers the transactions only through their root, which
+		// the node checks before it stores a block; check it here too, so a body
+		// that was changed under an unchanged header is not carried along.
+		root, err := txroot.Compute(block.Transactions)
+		if err != nil {
+			return nil, nil, fmt.Errorf("block %d: compute transaction root: %w", h, err)
+		}
+		if !bytes.Equal(root, block.Header.TxRoot) {
+			return nil, nil, fmt.Errorf("block %d: its transactions give root %x but the header says %x", h, root, block.Header.TxRoot)
+		}
+	}
 	return block, hash, nil
+}
+
+// checkLastTimestamp checks the record a node loads, when it starts, as the
+// earliest time it will accept for a later block. The node writes it in the same
+// batch as the tip, so it is the tip header's time; a node that finds no record
+// uses the tip's time instead, so an absent record is accepted. Anything else is
+// refused here rather than left for the node to trip over (a time ahead of the
+// tip's makes it reject the blocks that follow, and a record of the wrong length
+// stops it at start-up).
+func (c *chainDB) checkLastTimestamp(tipTime int64) error {
+	has, err := c.disk.Has(keyLastTimestamp)
+	if err != nil {
+		return fmt.Errorf("look for the last block time record: %w", err)
+	}
+	if !has {
+		return nil
+	}
+	raw, err := c.get(keyLastTimestamp)
+	if err != nil {
+		return fmt.Errorf("read the last block time record: %w", err)
+	}
+	if len(raw) != 8 {
+		return fmt.Errorf("last block time record is %d bytes, want 8", len(raw))
+	}
+	if got := int64(binary.BigEndian.Uint64(raw)); got != tipTime {
+		return fmt.Errorf("last block time record is %d but the tip header is dated %d", got, tipTime)
+	}
+	return nil
 }
 
 // readIdentity reads the chain identity and checks the database the way the
 // node itself would at start-up (tip and height index agree, the index has no
-// holes), plus that the newest headers hash and link correctly and that the
-// tip's state trie is complete and every node of it hashes to its address.
+// holes, the last block time record is usable), plus that the newest blocks hash,
+// link and hold the transactions their header commits to and that the tip's
+// state trie is complete and every node of it hashes to its address.
 func (c *chainDB) readIdentity(opts checkOptions) (*chainIdentity, error) {
 	genesis, err := c.get(keyGenesis)
 	if err != nil {
@@ -281,6 +326,9 @@ func (c *chainDB) readIdentity(opts checkOptions) (*chainIdentity, error) {
 	}
 	if len(tipBlock.Header.StateRoot) != 32 {
 		return nil, fmt.Errorf("tip header state root is %d bytes, want 32", len(tipBlock.Header.StateRoot))
+	}
+	if err := c.checkLastTimestamp(tipBlock.Header.Timestamp); err != nil {
+		return nil, err
 	}
 	id := &chainIdentity{
 		ChainID:      binary.BigEndian.Uint64(genesis[:8]),
@@ -350,15 +398,29 @@ func (c *chainDB) readIdentity(opts checkOptions) (*chainIdentity, error) {
 // verifyTrieNodes walks every node reachable from the trie's root and checks
 // that the bytes stored under each node's hash really hash to it, so a state
 // trie that was altered under an unchanged root cannot pass.
+//
+// A node is hashed the first time it is met and not again: a branch may point at
+// the same child many times (an honest trie shares subtrees only by accident, a
+// built one by design), and a walk that took every path would visit 16^depth
+// paths of a few stored nodes. On a repeat the iterator is told not to descend,
+// so the work is linear in the number of distinct nodes, a tampered node is still
+// caught at first sight, and the count returned is of distinct nodes.
 func verifyTrieNodes(t *gethtrie.Trie) (uint64, error) {
 	it, err := t.NodeIterator(nil)
 	if err != nil {
 		return 0, err
 	}
 	var nodes uint64
-	for it.Next(true) {
+	verified := make(map[common.Hash]struct{})
+	descend := true
+	for it.Next(descend) {
+		descend = true
 		hash := it.Hash()
 		if hash == (common.Hash{}) {
+			continue
+		}
+		if _, seen := verified[hash]; seen {
+			descend = false
 			continue
 		}
 		blob := it.NodeBlob()
@@ -368,6 +430,7 @@ func verifyTrieNodes(t *gethtrie.Trie) (uint64, error) {
 		if crypto.Keccak256Hash(blob) != hash {
 			return nodes, fmt.Errorf("node %x holds bytes that hash to %x", hash, crypto.Keccak256Hash(blob))
 		}
+		verified[hash] = struct{}{}
 		nodes++
 	}
 	if err := it.Error(); err != nil {

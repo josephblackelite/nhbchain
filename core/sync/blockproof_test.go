@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"math"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -72,7 +73,7 @@ func TestVerifyQuorumRejectsExactlyTwoThirds(t *testing.T) {
 			vals := newProofValidators(t, len(tt.powers))
 			list := make([]Validator, len(vals))
 			for i, v := range vals {
-				list[i] = Validator{Address: v.addr, Power: tt.powers[i]}
+				list[i] = Validator{Address: v.addr, Power: new(big.Int).SetUint64(tt.powers[i])}
 			}
 			set := NewValidatorSet(list)
 			signers := make([]proofValidator, 0, len(tt.signers))
@@ -104,8 +105,8 @@ func TestVerifyQuorumHandlesStakeScalePowers(t *testing.T) {
 	digest := digestArr[:]
 	vals := newProofValidators(t, 2)
 	set := NewValidatorSet([]Validator{
-		{Address: vals[0].addr, Power: math.MaxUint64},
-		{Address: vals[1].addr, Power: math.MaxUint64},
+		{Address: vals[0].addr, Power: new(big.Int).SetUint64(math.MaxUint64)},
+		{Address: vals[1].addr, Power: new(big.Int).SetUint64(math.MaxUint64)},
 	})
 
 	if err := set.VerifyQuorum(digest, signDigest(t, digest, vals[0], vals[1])); err != nil {
@@ -116,14 +117,77 @@ func TestVerifyQuorumHandlesStakeScalePowers(t *testing.T) {
 	}
 }
 
+// PL-R5T-44: powers are stake-scale and stay that way. With every power
+// clamped to MaxUint64 a validator holding 1 of 100 units of stake counted as
+// much as one holding 99, so three small holders (under 3% of the stake) formed
+// a quorum. The powers here are all far above 2^64 (about 1.8 * 10^19).
+func TestVerifyQuorumIsStakeWeightedAboveTwoToTheSixtyFour(t *testing.T) {
+	digestArr := sha256.Sum256([]byte("stake-weighted-digest"))
+	digest := digestArr[:]
+	unit := new(big.Int).Exp(big.NewInt(10), big.NewInt(24), nil) // 10^24 per unit, 5 orders above 2^64
+	power := func(n int64) *big.Int { return new(big.Int).Mul(big.NewInt(n), unit) }
+
+	// Five holders with 1 unit each and two with 49 units each: the small five
+	// hold 5 of 103 units, and with every power clamped to the same value they
+	// would have been five of seven equal votes, a quorum.
+	vals := newProofValidators(t, 7)
+	set := NewValidatorSet([]Validator{
+		{Address: vals[0].addr, Power: power(1)},
+		{Address: vals[1].addr, Power: power(1)},
+		{Address: vals[2].addr, Power: power(1)},
+		{Address: vals[3].addr, Power: power(1)},
+		{Address: vals[4].addr, Power: power(1)},
+		{Address: vals[5].addr, Power: power(49)},
+		{Address: vals[6].addr, Power: power(49)},
+	})
+	if got, want := set.TotalPower(), power(103); got.Cmp(want) != 0 {
+		t.Fatalf("total power = %s, want %s", got, want)
+	}
+
+	err := set.VerifyQuorum(digest, signDigest(t, digest, vals[0], vals[1], vals[2], vals[3], vals[4]))
+	if err == nil {
+		t.Fatalf("SECURITY: five holders with 5 of 103 units of stake formed a quorum")
+	}
+	if !strings.Contains(err.Error(), "insufficient voting power") {
+		t.Fatalf("expected an insufficient-power error, got %v", err)
+	}
+	if err := set.VerifyQuorum(digest, signDigest(t, digest, vals[5], vals[6], vals[0])); err != nil {
+		t.Fatalf("the two large holders and a small one (99 of 103 units) must form a quorum, got %v", err)
+	}
+	if err := set.VerifyQuorum(digest, signDigest(t, digest, vals[5], vals[6])); err != nil {
+		t.Fatalf("the two large holders alone (98 of 103 units) must form a quorum, got %v", err)
+	}
+	if err := set.VerifyQuorum(digest, signDigest(t, digest, vals[5])); err == nil {
+		t.Fatalf("SECURITY: one large holder (49 of 103 units) must not form a quorum")
+	}
+}
+
+func TestNewValidatorSetKeepsItsOwnCopyOfEachPower(t *testing.T) {
+	vals := newProofValidators(t, 2)
+	p0 := big.NewInt(5)
+	set := NewValidatorSet([]Validator{
+		{Address: vals[0].addr, Power: p0},
+		{Address: vals[1].addr, Power: nil},
+	})
+	p0.SetInt64(1_000_000)
+	if got := set.TotalPower(); got.Cmp(big.NewInt(5)) != 0 {
+		t.Fatalf("total power = %s after the caller changed its own value, want 5 (a nil power counts as zero)", got)
+	}
+	got := set.TotalPower()
+	got.SetInt64(7)
+	if again := set.TotalPower(); again.Cmp(big.NewInt(5)) != 0 {
+		t.Fatalf("TotalPower handed out the set's own integer: %s", again)
+	}
+}
+
 func TestVerifyQuorumRejectsBadInputs(t *testing.T) {
 	digestArr := sha256.Sum256([]byte("bad-input-digest"))
 	digest := digestArr[:]
 	vals := newProofValidators(t, 3)
 	set := NewValidatorSet([]Validator{
-		{Address: vals[0].addr, Power: 1},
-		{Address: vals[1].addr, Power: 1},
-		{Address: vals[2].addr, Power: 1},
+		{Address: vals[0].addr, Power: big.NewInt(1)},
+		{Address: vals[1].addr, Power: big.NewInt(1)},
+		{Address: vals[2].addr, Power: big.NewInt(1)},
 	})
 
 	var nilSet *ValidatorSet

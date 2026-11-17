@@ -17,6 +17,10 @@ const (
 
 	// How often peers not seen for the peerstore's time-to-live are pruned.
 	peerstorePruneInterval = time.Hour
+
+	// How long a seed loop waits before it looks at a seed it is connected to
+	// again.
+	seedRecheckInterval = 5 * time.Second
 )
 
 type connManager struct {
@@ -162,8 +166,8 @@ func (m *connManager) runSeedLoop(seed seedEndpoint) {
 		if m.server == nil {
 			return
 		}
-		if m.server.isConnectedToAddress(seed.Address) {
-			if !m.wait(5 * time.Second) {
+		if m.seedConnected(seed) {
+			if !m.wait(seedRecheckInterval) {
 				return
 			}
 			continue
@@ -176,7 +180,22 @@ func (m *connManager) runSeedLoop(seed seedEndpoint) {
 			m.markFailure(seed)
 			continue
 		}
+		// Connect also returns nil when the node it reached is one this node is
+		// already connected to, which leaves nothing to find connected above.
+		if !m.seedConnected(seed) && !m.wait(seedRecheckInterval) {
+			return
+		}
 	}
+}
+
+// seedConnected reports whether this node is connected to the seed, by its
+// address or by its node ID. A peer that connected inbound is not necessarily
+// known by the address the seed list gives for it.
+func (m *connManager) seedConnected(seed seedEndpoint) bool {
+	if m.server.isConnectedToAddress(seed.Address) {
+		return true
+	}
+	return seed.NodeID != "" && m.server.hasPeer(normalizeHex(seed.NodeID))
 }
 
 func (m *connManager) run() {
@@ -451,7 +470,7 @@ func (m *connManager) selectDialCandidates(limit int) []PeerstoreEntry {
 		if addr == "" {
 			continue
 		}
-		if m.server.isConnectedToAddress(addr) {
+		if m.seedConnected(seed) {
 			continue
 		}
 		if seed.NodeID != "" && m.server.isBanned(seed.NodeID) {

@@ -338,6 +338,65 @@ func TestRateLimiterEvictsOldestWhenCapacityExceeded(t *testing.T) {
 	}
 }
 
+// TestRateLimiterFullTableDropsIdleEntriesBeforeThrottledOnes checks that when
+// the table is full, entries whose bucket has refilled go first, so a caller
+// whose bucket is still empty keeps it. The churn here fills the table, waits
+// until those buckets have refilled, and then pushes more sources through: with
+// oldest-first eviction the exhausted caller (the oldest entry) would be dropped
+// and get a fresh burst.
+func TestRateLimiterFullTableDropsIdleEntriesBeforeThrottledOnes(t *testing.T) {
+	server := newTestServer(t, nil, nil, ServerConfig{})
+	t0 := time.Now()
+	source := "198.51.100.77"
+
+	limit := server.rateLimitMax[limiterScopeIP][""]
+	if limit < 3 {
+		t.Fatalf("test needs an IP limit of at least 3, got %d", limit)
+	}
+	for i := 0; i < limit; i++ {
+		if !server.allowSource(source, "", "", rateLimitTestMethod, t0) {
+			t.Fatalf("expected request %d to be allowed", i)
+		}
+	}
+	if server.allowSource(source, "", "", rateLimitTestMethod, t0) {
+		t.Fatalf("expected the caller to be throttled after its burst")
+	}
+
+	for i := 0; i < rateLimiterMaxEntries-1; i++ {
+		at := t0.Add(time.Duration(i+1) * time.Microsecond)
+		if !server.allowSource(fmt.Sprintf("churn-%d", i), "", "", rateLimitTestMethod, at) {
+			t.Fatalf("expected churn source %d to be allowed", i)
+		}
+	}
+	server.mu.Lock()
+	if len(server.rateLimiters) != rateLimiterMaxEntries {
+		count := len(server.rateLimiters)
+		server.mu.Unlock()
+		t.Fatalf("expected the table to be full (%d), got %d", rateLimiterMaxEntries, count)
+	}
+	server.mu.Unlock()
+
+	// Long enough for every churn bucket (one token used) to refill, short of
+	// what the throttled caller needs to refill completely.
+	step := server.rateLimitWindow / time.Duration(limit)
+	t1 := t0.Add(2 * step)
+	for i := 0; i < 10; i++ {
+		if !server.allowSource(fmt.Sprintf("later-%d", i), "", "", rateLimitTestMethod, t1) {
+			t.Fatalf("expected later source %d to be allowed", i)
+		}
+	}
+
+	server.mu.Lock()
+	tracked := len(server.rateLimiters)
+	server.mu.Unlock()
+	if tracked > rateLimiterMaxEntries {
+		t.Fatalf("limiter table grew past its cap: %d", tracked)
+	}
+	if server.allowSource(source, "", "", rateLimitTestMethod, t1) && server.allowSource(source, "", "", rateLimitTestMethod, t1) && server.allowSource(source, "", "", rateLimitTestMethod, t1) {
+		t.Fatalf("the throttled caller got a fresh burst after other sources pushed through a full table")
+	}
+}
+
 func TestRateLimiterChurnEnforcesLimits(t *testing.T) {
 	server := newTestServer(t, nil, nil, ServerConfig{})
 	now := time.Now()

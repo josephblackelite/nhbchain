@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"log"
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +57,7 @@ func (r *RateLimiter) Middleware(key string) func(http.Handler) http.Handler {
 			limiter := r.obtainLimiter(bucketKey, limit)
 			tokens := r.tokensFor(limit, req)
 			if !limiter.AllowN(r.clockNow(), tokens) {
+				w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecondsFor(limit.RatePerSecond, tokens)))
 				http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 				return
 			}
@@ -99,6 +102,27 @@ func (r *RateLimiter) tokensFor(limit RateLimit, req *http.Request) int {
 		return limit.DefaultTokens
 	}
 	return 1
+}
+
+// retryAfterSecondsFor is a stateless worst-case Retry-After hint for a
+// refused request needing tokens tokens from a bucket refilling at
+// perSecond tokens/second: the time to accumulate them from empty, rounded
+// up. It does not read the limiter's actual remaining tokens (AllowN does
+// not expose them), so it is the same kind of advisory upper bound the
+// portal's own retryAfterSecondsFor (src/lib/server/rateLimit.ts) gives for
+// its token-bucket limits, not an exact wait.
+func retryAfterSecondsFor(perSecond float64, tokens int) int {
+	if perSecond <= 0 {
+		perSecond = 1
+	}
+	if tokens <= 0 {
+		tokens = 1
+	}
+	secs := int(math.Ceil(float64(tokens) / perSecond))
+	if secs < 1 {
+		secs = 1
+	}
+	return secs
 }
 
 func (r *RateLimiter) cleanup(id string) {

@@ -195,6 +195,8 @@ func main() {
 	// inferred.
 	if cfg.QuorumCertActivationHeight > 0 {
 		node.SetQuorumCertActivationHeight(cfg.QuorumCertActivationHeight)
+	} else {
+		slog.Warn("QuorumCertActivationHeight is not set: this node does not check quorum certificates on blocks it receives through peer sync, so a peer could make it accept a block the validators never agreed on; set it to the value the network you follow uses (docs/validators/onboarding.md)")
 	}
 	if cfg.RewardsByStakeFromEpoch > 0 {
 		node.SetRewardsByStakeFromEpoch(cfg.RewardsByStakeFromEpoch)

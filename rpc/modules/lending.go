@@ -279,6 +279,7 @@ func (m *LendingModule) CreatePool(poolID string, owner [20]byte) (*lending.Mark
 			DeveloperFeeCollector: collector,
 			ReserveFactor:         m.node.LendingReserveFactorBps(),
 			LastUpdateBlock:       m.node.GetHeight(),
+			LastUpdateTimestamp:   uint64(max(m.headBlockTimestamp(), 0)),
 			TotalNHBSupplied:      big.NewInt(0),
 			TotalSupplyShares:     big.NewInt(0),
 			TotalNHBBorrowed:      big.NewInt(0),
@@ -776,6 +777,15 @@ func mustBigInt(value string) *big.Int {
 	return out
 }
 
+// SupplyNHB, WithdrawNHB, DepositZNHB, WithdrawZNHB, BorrowNHB,
+// BorrowNHBWithFee, RepayNHB and Liquidate (and CreatePool above) are TEST-ONLY.
+// They write the live state trie directly, outside block execution, with no
+// proof that the caller holds the address's key, so no RPC handler calls any of
+// them: the matching lending_* methods answer 410, and the real operations are
+// signed lending transactions applied by consensus. They are kept only because
+// a few tests drive the engine through them.
+// TestNoRPCHandlerCallsTheLendingModuleWriteMethods fails if a non-test file
+// under rpc/ ever calls one.
 func (m *LendingModule) SupplyNHB(poolID string, addr [20]byte, amount *big.Int) (string, *ModuleError) {
 	if m == nil || m.node == nil {
 		return "", m.moduleUnavailable()

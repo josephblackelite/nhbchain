@@ -45,8 +45,11 @@ the packet is chosen by the sender, so a ban on it would lock out whoever really
 holds it (`p2p/handshake.go`).
 
 The reputation table holds at most 4,096 peers; when it is full the least
-recently updated peer without an active ban is dropped first
-(`defaultReputationMaxRecords`, `p2p/reputation.go`).
+recently updated peer without an active ban is dropped first, unless more than a
+quarter of the table (1,024 peers) is under a ban, in which case the least
+recently updated banned peer is dropped first
+(`defaultReputationMaxRecords` in `p2p/reputation.go`, `bannedQuota` in
+`p2p/peerstore.go`).
 
 Scores decay with a half-life of 10 minutes (`DecayHalfLife` default), applied
 whenever the record is read or adjusted.

@@ -307,6 +307,34 @@ func sanitizeListenAddrs(addrs []string) []string {
 	return cleaned
 }
 
+// sourceBoundAddrs returns the advertised addresses that are at the host the
+// connection came from, in their original order. The addresses in a handshake
+// are the sender's own claim and the signature does not cover them, so only an
+// address at the connection's own IP is one this node can stand behind. A host
+// name never qualifies: it says nothing about where the connection came from.
+// The port is not compared, since a listening port is not the port a connection
+// is opened from.
+func sourceBoundAddrs(addrs []string, remote net.Addr) []string {
+	if len(addrs) == 0 || remote == nil {
+		return nil
+	}
+	source := net.ParseIP(remoteHost(remote.String()))
+	if source == nil {
+		return nil
+	}
+	bound := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+		if err != nil {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.Equal(source) {
+			bound = append(bound, addr)
+		}
+	}
+	return bound
+}
+
 // handshakeSignedByClaimedNode reports whether the packet's signature really
 // comes from the node ID the packet claims. It has no side effects.
 func handshakeSignedByClaimedNode(packet *handshakePacket) bool {

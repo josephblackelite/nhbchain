@@ -46,6 +46,20 @@ logging `governed parameter has a malformed stored value`
 (`nativecommon.ReportMalformedParam`); the payout-period, unbonding-period and
 emission-cap readers in `core/state_transition.go` return an error instead.
 
+Upgrade note on the reader change of release r1: before it, the readers parsed the
+stored text with `strings.TrimSpace` and then `strconv.ParseUint` or
+`big.Int.SetString`, so a quoted, padded or `+`-prefixed spelling that validation
+accepted could not be read back. The change that reads those spellings has no
+activation height, because it can only give a different answer for a stored value
+that is not a plain decimal. On the live chain no such value exists: a read-only
+listing of every governance proposal on 2026-11-09 shows three, all `role.allowlist`,
+and no `param.update` has ever been created, let alone executed.
+`native/common/paramvalue_reader_equivalence_test.go` pins that plain decimals read
+identically under the old and the new reader, that the other spellings read as the
+number they spell and never as a different one, and that no reader turns garbage or
+a negative number into a number. A chain that replays history from before r1 must
+start from a snapshot taken after it.
+
 ## Default `AllowedParams`
 
 `AllowedParams` in the node's `[governance]` block replaces the default list

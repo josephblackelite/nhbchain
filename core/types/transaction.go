@@ -593,6 +593,39 @@ func (tx *Transaction) ValidateBasic() error {
 	return nil
 }
 
+// maxV3NumberBytes is the longest big-endian byte length accepted, at admission,
+// for the two numbers the V3 signing text writes behind a 16-bit length (Value
+// and GasPrice). 256 bits is more than any balance or price can be.
+const maxV3NumberBytes = 32
+
+// ValidateSigningEncoding refuses a V3 transaction whose Value or GasPrice is
+// longer than maxV3NumberBytes. Hash() writes uint16(len(bytes)) before each of
+// them without checking that the length fits, so a 65,537-byte Value is written
+// with the same two-byte prefix as a 1-byte one and bytes can be moved across the
+// Value/Data boundary while the signing text, and so the signature, stay the
+// same: one signature can be reused on a different transaction.
+//
+// This is deliberately not part of ValidateBasic. ValidateBasic runs inside
+// Hash(), so it runs again when a block is executed, and tightening it would
+// change which blocks are valid. This check runs only where a transaction is first
+// admitted (Node.validateTransaction), which is local policy: a transaction
+// already inside a block is judged exactly as before.
+func (tx *Transaction) ValidateSigningEncoding() error {
+	if tx == nil {
+		return fmt.Errorf("transaction required")
+	}
+	if tx.Type == 0 {
+		return nil
+	}
+	if tx.Value != nil && len(tx.Value.Bytes()) > maxV3NumberBytes {
+		return fmt.Errorf("value must not exceed %d bytes", maxV3NumberBytes)
+	}
+	if tx.GasPrice != nil && len(tx.GasPrice.Bytes()) > maxV3NumberBytes {
+		return fmt.Errorf("gasPrice must not exceed %d bytes", maxV3NumberBytes)
+	}
+	return nil
+}
+
 // writeString securely encodes strings for binary hashing.
 func writeString(buf *bytes.Buffer, s string) {
 	strBytes := []byte(strings.TrimSpace(s))

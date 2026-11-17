@@ -376,8 +376,19 @@ func TestEstablishedInboundPeersFromOneAddressAreLimited(t *testing.T) {
 // server's hello and answers with the remote's own.
 func dialHello(t *testing.T, server, remote *Server) net.Conn {
 	t.Helper()
+	return dialHelloFrom(t, server, remote, nil)
+}
+
+// dialHelloFrom is dialHello for a remote that connects from the given address;
+// a nil address leaves the connection's own, which is not an IP address.
+func dialHelloFrom(t *testing.T, server, remote *Server, source net.Addr) net.Conn {
+	t.Helper()
 	left, right := net.Pipe()
-	go server.handleInbound(left)
+	var conn net.Conn = left
+	if source != nil {
+		conn = addrConn{Conn: left, remote: source}
+	}
+	go server.handleInbound(conn)
 	reader := bufio.NewReader(right)
 	if _, err := reader.ReadBytes('\n'); err != nil {
 		t.Fatalf("read local handshake: %v", err)
@@ -411,10 +422,12 @@ func TestPeerIsRecordedAndPersistedOnlyOnceItIsRegistered(t *testing.T) {
 	turnedAway := NewServer(noopHandler{}, mustKey(t), cfg)
 	turnedAway.addListenAddress("127.0.0.1:34002")
 
-	dialHello(t, server, admitted)
+	// The peers connect from the host they advertise: an address is only
+	// recorded for a peer when it is at the host the connection came from.
+	dialHelloFrom(t, server, admitted, tcpAddr("127.0.0.1", 50001))
 	waitUntil(t, 2*time.Second, "the first peer to register", func() bool { return server.hasPeer(admitted.nodeID) })
 
-	dialHello(t, server, turnedAway)
+	dialHelloFrom(t, server, turnedAway, tcpAddr("127.0.0.1", 50002))
 	// The handshake of the second peer completes but there is no slot for it.
 	waitUntil(t, 2*time.Second, "the second handshake to be turned down", func() bool {
 		server.inboundMu.Lock()

@@ -23,6 +23,11 @@ func checkConfiguration(logger *slog.Logger, cfg *config.Config) int {
 		logger = slog.Default()
 	}
 	found := 0
+	for _, key := range cfg.UndecodedKeys {
+		found++
+		logger.Warn("configuration problem", slog.String("section", "file"),
+			slog.String("problem", "the key "+key+" in the config file is not a setting this build knows, so it is ignored (a misspelling, or a setting from another version)"))
+	}
 	for _, problem := range config.ConfigProblems(cfg.Global) {
 		found++
 		logger.Warn("configuration problem", slog.String("section", "global"), slog.String("problem", problem.Error()))

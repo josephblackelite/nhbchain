@@ -2068,3 +2068,34 @@ func (e *Engine) Status() (height uint64, round int, lockedRound int) {
 	defer e.mu.RUnlock()
 	return e.currentState.Height, e.currentState.Round, e.lockedRound
 }
+
+// statusPollInterval is how long StatusWithin sleeps between attempts to take
+// the engine's read lock.
+const statusPollInterval = 5 * time.Millisecond
+
+// StatusWithin is Status for a caller that must not be held up by the engine.
+// commit holds the engine's lock for as long as the node takes to commit a
+// block, so Status can wait as long as a slow or stuck commit does; a stall
+// report that waited on it would say nothing at the moment it is needed. This
+// retries for at most wait and reports ok=false, with zero values that carry no
+// meaning, if the engine's lock was never free in that time. It starts no
+// goroutine, so repeated calls against a stuck engine leave nothing behind. A
+// wait of zero or less makes a single attempt.
+func (e *Engine) StatusWithin(wait time.Duration) (height uint64, round int, lockedRound int, ok bool) {
+	if e == nil {
+		return 0, 0, -1, true
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if e.mu.TryRLock() {
+			height, round, lockedRound = e.currentState.Height, e.currentState.Round, e.lockedRound
+			e.mu.RUnlock()
+			return height, round, lockedRound, true
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return 0, 0, 0, false
+		}
+		time.Sleep(min(remaining, statusPollInterval))
+	}
+}

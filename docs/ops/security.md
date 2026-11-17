@@ -78,10 +78,13 @@ These `config.toml` settings apply to the node's JSON-RPC server
   are disabled the same way. See
   [Snapshot onboarding](../validators/snapshot-onboarding.md) for how a new
   validator is brought up.
-- **WebSocket streams.** `RPCWebSocketOrigins` (host patterns, matched with
+- **WebSocket and gRPC streams.** `RPCWebSocketOrigins` (host patterns, matched with
   `path.Match`; empty allows any origin), `RPCWebSocketMaxConnections` (default
-  256) and `RPCWebSocketMaxPerIP` (default 8) bound the streams; a client over
-  either cap gets HTTP `429` (`too many open streams`) (`rpc/ws.go`).
+  256) and `RPCWebSocketMaxPerIP` (default 8) bound the streams, the gRPC
+  finality stream included; an IPv6 client counts as its /64. A WebSocket client
+  over either cap gets HTTP `429` (`too many open streams`), a gRPC client the
+  status `ResourceExhausted` (`rpc/ws.go`). `RPCAllowlistCIDRs` applies to the
+  gRPC stream as well.
 - **Read-query pool.** Expensive public reads are admitted through a small pool;
   see [RPC query limits](./rpc-query-limits.md).
 - **Rate limits.** See [Validator Operations Runbook](./validator-runbook.md#rpc-hardening-and-transaction-quotas).

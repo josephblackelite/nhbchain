@@ -23,6 +23,19 @@ key names exactly, so the section and key names must use the Go spelling
 that are strings (for example `MinStakeWei`, `OwnerWallet`) are defaulted when
 empty rather than when absent.
 
+## The config file is not rewritten
+
+`config.Load` writes the config file only when there is none, to create a
+default one together with its keystore. It never rewrites an existing file. When
+the file names neither `ValidatorKeystorePath` nor a KMS key source, the
+keystore is read from (or, when a passphrase is supplied, created at)
+`validator.keystore` next to the config file, and that path is held in memory
+only. Earlier builds wrote the file back in that case with every key the
+operator had left out stored as an explicit `0` or `"0s"`, and those stored
+values then counted as set and kept the defaults from applying. A file that was
+rewritten that way keeps those values; delete the keys you never set, or restore
+the file from a backup, to get the defaults back.
+
 ## Defaults for `[global]`
 
 From `defaultGlobalConfig` in `config/config.go`:

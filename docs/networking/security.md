@@ -64,6 +64,13 @@ Ban length is `PeerBanDuration` (`[p2p] BanDurationSeconds`; 3600 in the repo
 Score-based bans never apply to persistent peers (their score is held at or
 below 0 and no ban is set), and neither do handshake bans; operator bans do.
 
+Banned records are kept longer than the others when the peerstore (2,048
+records) or the reputation table (4,096 records) is full, but only while they
+make up at most a quarter of the table. Above that, the least recently seen
+banned record is dropped first, so that a large number of bans cannot push out
+the records of the peers that are not banned, and a ban can be forgotten before
+it expires.
+
 ## Inbound admission
 
 `admitInbound` (`p2p/server.go`) runs before anything is read from a new inbound
@@ -78,7 +85,8 @@ budgets) count an IPv4 address on its own and an IPv6 address as its /64 network
 A refused connection is closed, and a warning
 `Inbound connection refused: too many connections or handshakes` is logged at
 most once a second. Nothing is recorded about a peer before it has been
-registered.
+registered, except the ban for a signed chain ID or genesis mismatch (see
+[Ban reasons](#ban-reasons-and-default-actions)).
 
 ## Requests for chain data
 

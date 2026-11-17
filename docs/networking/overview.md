@@ -100,7 +100,8 @@ node ID that is already connected, and registers the peer subject to `MaxPeers`,
 `MaxInbound`, `MaxOutbound` and a limit of 8 established inbound connections per
 remote address (configured peers, loopback and non-IP hosts excepted). A peer is
 recorded in the peer records, the PEX book and the peerstore only after
-`registerPeer` has accepted it.
+`registerPeer` has accepted it, except for the ban on a chain ID or genesis
+mismatch above, which is recorded while the handshake is verified.
 
 Before the handshake starts, `admitInbound` applies per-address and global
 limits to a new inbound connection; see [security](security.md#inbound-admission).
@@ -112,6 +113,16 @@ counted in `nhb_p2p_handshakes_total{result="success"|"failure"}`.
 Persistent-peer status is granted by node ID only. The `listenAddrs` a peer
 reports are unsigned, so matching them against the configured bootnode and
 persistent-peer list does not confer trust (`isPersistentRemote`).
+
+The same addresses are not trusted to say where a peer can be found either. An
+advertised address is used to recognise a connection, to store the peer in the
+peerstore and to pass it on in peer exchange only when its host is the IP the
+connection came from (`sourceBoundAddrs`; the port is not compared and a host
+name never matches). For a connection this node opened, the address it dialed is
+used when none matches. A peer that connected inbound and advertised only
+addresses at other hosts stays connected but is not stored or passed on. The
+seed loop treats a seed whose node ID is connected as connected, whatever address
+the connection is known by.
 
 ## Peer lifecycle
 
@@ -178,7 +189,10 @@ record no larger than 4,096 bytes (address at most 255 characters, node ID at mo
 connection manager prunes once an hour, and loading the store at start drops
 expired, oversized and undecodable records). When it is full, the least recently
 seen record that is not connected and not banned is evicted first; peers that are
-connected right now are protected from eviction and pruning. In addition the
+connected right now are protected from eviction and pruning. Banned records are
+evicted last, but only while they hold at most a quarter of the capacity (512
+records): above that, the least recently seen banned record goes first, so bans
+cannot take the store away from the peers that are not banned. In addition the
 server keeps at most 4,096 in-memory peer records.
 
 Dial scheduling (`NextDialAt`): a banned peer waits until `bannedUntil`; with no

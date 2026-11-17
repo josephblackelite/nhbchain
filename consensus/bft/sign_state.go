@@ -245,6 +245,14 @@ func (e *Engine) restoreSignState() {
 		e.signMu.Unlock()
 		return
 	}
+	if st.empty() && e.currentState.Height > 1 {
+		if _, isValidator := e.validatorSet[string(e.selfAddr)]; isValidator {
+			slog.Warn("SAFETY: this validator starts on a chain that already has blocks and has no vote record, so it cannot know whether it voted in the height in flight; expected on a first start, but after a restore or a changed data directory write the record by hand (docs/ops/validator-runbook.md)",
+				slog.String("event", "sign_state_missing"),
+				slog.String("path", e.signStatePath),
+				slog.Uint64("chain_height", e.currentState.Height-1))
+		}
+	}
 	if st.empty() || st.Height < e.currentState.Height {
 		return
 	}

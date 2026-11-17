@@ -1010,3 +1010,102 @@ func TestLoadCreatesDefaultConfigTheSubscriptionsEngineAccepts(t *testing.T) {
 		t.Fatalf("the generated subscriptions config is not accepted: %v (%+v)", err, cfg.Subscriptions)
 	}
 }
+
+// Loading a config that does not name a key path used to write the file back
+// from the half-filled in-memory struct, before the defaults were applied. That
+// stored every key the operator had left out as an explicit zero, and the next
+// Load took the zeros as the operator's choice. The file must stay exactly as
+// the operator wrote it, and each Load must give the same result as the one
+// before, whichever way the keystore at the default path comes to exist.
+func TestLoadWithoutAKeyPathLeavesTheConfigFileAlone(t *testing.T) {
+	const body = `ListenAddress = "0.0.0.0:6001"
+
+[consensus]
+ProposalTimeout = "0s"
+PrevoteTimeout = "0s"
+PrecommitTimeout = "0s"
+CommitTimeout = "0s"
+`
+	for _, tc := range []struct {
+		name string
+		// header is written before body in the config file.
+		header string
+		// existing creates the keystore at the default path before the first Load.
+		existing bool
+		// passphrase is handed to Load; empty loads the way the diagnostic tools do.
+		passphrase string
+	}{
+		{"keystore at the default path, no passphrase", "", true, ""},
+		{"keystore at the default path, with passphrase", "", true, testKeystorePassphrase},
+		{"keystore created by the first Load", "", false, testKeystorePassphrase},
+		{"explicitly empty key path", "ValidatorKeystorePath = \"\"\n", true, testKeystorePassphrase},
+		{"key path named in the file", "", true, testKeystorePassphrase},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			keystorePath := filepath.Join(dir, "validator.keystore")
+			if tc.existing {
+				key, err := crypto.GeneratePrivateKey()
+				if err != nil {
+					t.Fatalf("generate key: %v", err)
+				}
+				if err := crypto.SaveToKeystore(keystorePath, key, testKeystorePassphrase); err != nil {
+					t.Fatalf("save keystore: %v", err)
+				}
+			}
+			header := tc.header
+			if tc.name == "key path named in the file" {
+				header = "ValidatorKeystorePath = " + tomlQuoted(keystorePath) + "\n"
+			}
+			written := []byte(header + body)
+			if err := os.WriteFile(path, written, 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			var opts []LoadOption
+			if tc.passphrase != "" {
+				opts = append(opts, WithKeystorePassphrase(tc.passphrase))
+			}
+			first, err := Load(path, opts...)
+			if err != nil {
+				t.Fatalf("first load: %v", err)
+			}
+			afterFirst, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if string(afterFirst) != string(written) {
+				t.Fatalf("the first load rewrote the config file:\n%s", afterFirst)
+			}
+			second, err := Load(path, opts...)
+			if err != nil {
+				t.Fatalf("second load: %v", err)
+			}
+			afterSecond, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read config: %v", err)
+			}
+			if string(afterSecond) != string(written) {
+				t.Fatalf("the second load rewrote the config file:\n%s", afterSecond)
+			}
+
+			if first.ValidatorKeystorePath != keystorePath {
+				t.Fatalf("keystore path %q, want %q", first.ValidatorKeystorePath, keystorePath)
+			}
+			if _, err := os.Stat(keystorePath); err != nil {
+				t.Fatalf("keystore missing at the default path: %v", err)
+			}
+			if !reflect.DeepEqual(first, second) {
+				t.Fatalf("a second load differs from the first:\nfirst:  %+v\nsecond: %+v", first, second)
+			}
+			if want := defaultGlobalConfig(); !reflect.DeepEqual(second.Global, want) {
+				t.Fatalf("the second load did not keep the global defaults: %+v", second.Global)
+			}
+			if got := second.Consensus.MinBlockInterval; got != defaultConsensusConfig().MinBlockInterval {
+				t.Fatalf("MinBlockInterval %v after the second load, want the default", got)
+			}
+		})
+	}
+}

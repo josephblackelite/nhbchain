@@ -49,8 +49,10 @@ type Params struct {
 	// when this curve was designed.
 	P0 *big.Rat
 	// Ratio is the exact per-tranche multiplicative step, r. Chosen so
-	// that P0 * Ratio^(TrancheCount-1) reaches the curve's terminal price
-	// (a 20x multiple, $1.00) at the last tranche.
+	// that P0 * Ratio^TrancheCount reaches the curve's terminal price (a 20x
+	// multiple, $1.00): the price at 100% sold, one step beyond the last
+	// tranche (see TerminalPrice). The last tranche itself, index
+	// TrancheCount-1, is priced P0 * Ratio^(TrancheCount-1), one step below.
 	//
 	// r = 20^(1/16000) is irrational, so it is NOT computed at runtime --
 	// that would require a numerically unstable Nth-root routine with no

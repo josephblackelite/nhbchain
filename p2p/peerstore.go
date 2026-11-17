@@ -30,6 +30,13 @@ const (
 	maxPeerstoreRecordBytes    = 4096
 	maxPeerstoreAddrLen        = 255
 	maxPeerstoreNodeIDLen      = 128
+
+	// Entries under an active ban are evicted after the ones that are not, but
+	// only while they hold no more than one in bannedShareDivisor of a table
+	// (see bannedQuota). Bans are recorded for identities that remote peers
+	// choose, so without a limit they could take the whole table from peers
+	// that are not banned.
+	bannedShareDivisor = 4
 )
 
 var errPeerstoreFull = errors.New("peerstore full")
@@ -448,18 +455,31 @@ func clampScore(value float64) float64 {
 	return value
 }
 
+// bannedQuota is how many unprotected entries under an active ban a table that
+// holds capacity entries keeps ahead of the entries that are not banned: a
+// quarter of the table, and at least one.
+func bannedQuota(capacity int) int {
+	if quota := capacity / bannedShareDivisor; quota > 1 {
+		return quota
+	}
+	return 1
+}
+
 // pickVictimLocked chooses the entry to evict: the least recently seen one that
 // is neither protected nor under an active ban. Entries under an active ban are
-// only chosen when nothing else is left. It returns "" when every entry is
+// chosen, least recently seen first, when nothing else is left or when they
+// hold more than bannedQuota entries. It returns "" when every entry is
 // protected.
 func (ps *Peerstore) pickVictimLocked(now time.Time) string {
 	victim, banned := "", ""
 	var victimSeen, bannedSeen time.Time
+	bannedCount := 0
 	for nodeID, rec := range ps.byNode {
 		if _, keep := ps.protected[nodeID]; keep {
 			continue
 		}
 		if rec.BannedUntil.After(now) {
+			bannedCount++
 			if banned == "" || rec.LastSeen.Before(bannedSeen) || (rec.LastSeen.Equal(bannedSeen) && nodeID < banned) {
 				banned, bannedSeen = nodeID, rec.LastSeen
 			}
@@ -469,7 +489,7 @@ func (ps *Peerstore) pickVictimLocked(now time.Time) string {
 			victim, victimSeen = nodeID, rec.LastSeen
 		}
 	}
-	if victim == "" {
+	if victim == "" || bannedCount > bannedQuota(ps.maxEntries) {
 		return banned
 	}
 	return victim

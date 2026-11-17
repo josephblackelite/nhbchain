@@ -876,13 +876,12 @@ type Config struct {
 	// the same value, and be running this build, before the chain reaches it.
 	PayoutReceiptActivationHeight uint64
 	// Risk configures the mint-side (fiat-gateway voucher mint) guardrails
-	// still left in local config -- velocity, sanctions,
-	// price-proof-signature enforcement, cash-out. The numeric circuit
-	// breaker caps (per-tx min/max, per-address daily/monthly) that used to
-	// live here, and the entire redeem-side [swap.redeemRisk] section, are
-	// GONE from local config -- both are now exclusively
-	// governance-controlled. See RiskConfig's doc comment and
-	// core/swap_risk_params.go.
+	// kept in local config: the static per-tx min/max and per-address
+	// daily/monthly caps, velocity, sanctions, price-proof-signature
+	// enforcement and cash-out. RiskConfig's doc comment (native/swap/risk.go)
+	// explains why the caps were restored there. Only the redeem-side
+	// [swap.redeemRisk] section is gone from local config; that side is
+	// exclusively governance-controlled (core/swap_risk_params.go).
 	Risk      RiskConfig      `toml:"risk"`
 	Providers ProviderConfig  `toml:"providers"`
 	Sanctions SanctionsConfig `toml:"sanctions"`

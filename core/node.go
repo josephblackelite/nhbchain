@@ -296,6 +296,16 @@ var ErrMempoolFull = errors.New("mempool: transaction limit reached")
 // ErrInvalidTransaction marks transactions that fail basic validation or cannot be executed.
 var ErrInvalidTransaction = errors.New("mempool: invalid transaction")
 
+// localLimitError marks a transaction refused only because of a limit this node
+// derives from its own frame configuration (the most JSON one block may hold).
+// It is always wrapped together with ErrInvalidTransaction so callers that map
+// invalid transactions keep doing so, but a peer that relays such a transaction
+// has broken no protocol rule: a node with a different limit accepts it.
+// ProcessNetworkMessage therefore does not report it as an invalid payload.
+type localLimitError struct{ msg string }
+
+func (e *localLimitError) Error() string { return e.msg }
+
 // ErrMempoolByteLimit indicates the aggregate mempool byte capacity has been reached.
 var ErrMempoolByteLimit = errors.New("mempool: byte capacity reached")
 
@@ -2325,6 +2335,13 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		// today's small topology (and risks a flood loop once the network grows
 		// beyond two nodes, absent real multi-hop relay/dedup semantics).
 		if err := n.addTransaction(tx, false); err != nil {
+			var local *localLimitError
+			if errors.As(err, &local) {
+				// Refused by this node's own size limit, not by any rule the
+				// network shares: dropped, and the relaying peer is left alone.
+				slog.Debug("gossiped transaction over this node's size limit dropped", slog.String("reason", local.Error()))
+				return nil
+			}
 			if errors.Is(err, ErrInvalidTransaction) {
 				return fmt.Errorf("%w: %v", p2p.ErrInvalidPayload, err)
 			}
@@ -2638,7 +2655,7 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 		return fmt.Errorf("%w: encode transaction: %w", ErrInvalidTransaction, err)
 	}
 	if limit := n.maxTransactionBytes(); len(encoded) > limit {
-		return fmt.Errorf("%w: transaction encodes to %d bytes, over the %d byte limit", ErrInvalidTransaction, len(encoded), limit)
+		return fmt.Errorf("%w: %w", ErrInvalidTransaction, &localLimitError{msg: fmt.Sprintf("transaction encodes to %d bytes, over the %d byte limit", len(encoded), limit)})
 	}
 	var sender []byte
 	var senderKey string
@@ -2913,6 +2930,10 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 		return fmt.Errorf("add transaction: nil transaction")
 	}
 	if err := tx.ValidateBasic(); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
+	}
+	// Admission only, never block execution: see ValidateSigningEncoding.
+	if err := tx.ValidateSigningEncoding(); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidTransaction, err)
 	}
 	if tx.ChainID == nil {
@@ -4992,21 +5013,12 @@ func buildValidatorSet(source map[string]*big.Int) *syncmgr.ValidatorSet {
 		addr := []byte(key)
 		validators = append(validators, syncmgr.Validator{
 			Address: append([]byte(nil), addr...),
-			Power:   validatorPower(power),
+			Power:   power, // the full stake-scale power: NewValidatorSet copies it
 		})
 	}
 	return syncmgr.NewValidatorSet(validators)
 }
 
-func validatorPower(v *big.Int) uint64 {
-	if v == nil || v.Sign() <= 0 {
-		return 0
-	}
-	if v.BitLen() > 63 {
-		return math.MaxUint64
-	}
-	return v.Uint64()
-}
 func (n *Node) GetAccount(addr []byte) (*types.Account, error) {
 	if n == nil {
 		return nil, fmt.Errorf("node unavailable")

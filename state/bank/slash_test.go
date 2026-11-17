@@ -288,6 +288,70 @@ func TestValidatorSlasherIsBoundedByTheStake(t *testing.T) {
 	}
 }
 
+// PL-R5T-95: the slash rule was tightened (the penalty is also bounded by the
+// recorded stake) without an activation height. That is only safe because the
+// engine asks for exactly the offender's recorded Stake, a case where the old
+// and the new rule agree. This pins that agreement over a grid that includes
+// delegated stake (locked ZNHB above the recorded stake) and a stake above the
+// locked balance, with the old rule written out as the oracle.
+func TestValidatorSlasherMatchesTheOldRuleWhenAskedForTheWholeStake(t *testing.T) {
+	oldRule := func(stake, locked, amount int64) (penalty, stakeAfter, lockedAfter int64) {
+		penalty = amount
+		if locked < penalty {
+			penalty = locked
+		}
+		lockedAfter = locked - penalty
+		stakeAfter = stake
+		if stakeAfter > 0 {
+			stakeAfter -= penalty
+			if stakeAfter < 0 {
+				stakeAfter = 0
+			}
+		}
+		return penalty, stakeAfter, lockedAfter
+	}
+
+	stakes := []int64{1, 7, 100, 10_000}
+	lockedExtras := []int64{-90, -1, 0, 1, 500, 1_000_000}
+	for _, stake := range stakes {
+		for _, extra := range lockedExtras {
+			locked := stake + extra
+			if locked < 0 {
+				continue
+			}
+			wantPenalty, wantStake, wantLocked := oldRule(stake, locked, stake)
+
+			mgr := newTestManager(t)
+			var offender, treasury [20]byte
+			offender[19] = 20
+			treasury[19] = 21
+			if err := mgr.PutAccount(offender[:], &types.Account{LockedZNHB: big.NewInt(locked), Stake: big.NewInt(stake)}); err != nil {
+				t.Fatalf("seed offender: %v", err)
+			}
+			s := NewValidatorSlasher(mgr, treasury)
+			applied, err := s.SlashApplied(offender, big.NewInt(stake))
+			if err != nil {
+				t.Fatalf("stake %d locked %d: slash: %v", stake, locked, err)
+			}
+			after, err := mgr.GetAccount(offender[:])
+			if err != nil {
+				t.Fatalf("get offender: %v", err)
+			}
+			if applied.Cmp(big.NewInt(wantPenalty)) != 0 || after.Stake.Cmp(big.NewInt(wantStake)) != 0 || after.LockedZNHB.Cmp(big.NewInt(wantLocked)) != 0 {
+				t.Fatalf("stake %d locked %d: got penalty=%s stake=%s locked=%s, the old rule gives %d %d %d",
+					stake, locked, applied, after.Stake, after.LockedZNHB, wantPenalty, wantStake, wantLocked)
+			}
+			treasuryAfter, err := mgr.GetAccount(treasury[:])
+			if err != nil {
+				t.Fatalf("get treasury: %v", err)
+			}
+			if treasuryAfter.BalanceZNHB.Cmp(applied) != 0 {
+				t.Fatalf("stake %d locked %d: treasury holds %s, penalty was %s", stake, locked, treasuryAfter.BalanceZNHB, applied)
+			}
+		}
+	}
+}
+
 // A validator that is its own treasury forfeits into the same account: the
 // ZNHB moves from locked to liquid and nothing is lost.
 func TestValidatorSlasherWhenTheOffenderIsTheTreasury(t *testing.T) {

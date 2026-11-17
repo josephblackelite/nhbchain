@@ -35,8 +35,9 @@ methods of the node's JSON-RPC server (`rpc/http.go`). Module-specific methods
   token's `sub` claim is its key (`limiterKeyFor`).
 * WebSocket streams: `/ws/pos/finality` and `/ws/explorer` on the same address
   (`rpc/ws.go`). They are read-only and need no token. At most 256 are open at
-  once and 8 per client address by default (`RPCWebSocketMaxConnections`,
-  `RPCWebSocketMaxPerIP`); beyond that the upgrade is refused with HTTP 429. Browser
+  once and 8 per client address (an IPv6 /64 counts as one) by default
+  (`RPCWebSocketMaxConnections`, `RPCWebSocketMaxPerIP`), shared with the gRPC
+  finality stream; beyond that the upgrade is refused with HTTP 429. Browser
   origins are unrestricted unless `RPCWebSocketOrigins` lists host patterns.
   `/ws/explorer` answers 503 when `RPCDisableExplorerLoop` is true.
 
