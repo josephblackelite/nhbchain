@@ -8,11 +8,103 @@ import (
 
 	"nhbchain/consensus"
 	"nhbchain/native/fees"
+	"nhbchain/native/governance"
 )
 
 var (
 	MinVotingPeriodSeconds = uint64(3600)
+
+	// MinTimelockSeconds is the shortest timelock between a governance proposal
+	// passing and its execution that a node accepts in its [governance] block. It
+	// is the lower bound the proposal engine already puts on the
+	// gov.timelock.DurationSeconds parameter.
+	MinTimelockSeconds = uint64(3600)
 )
+
+// GovernancePolicyProblems reports each voting window of the [governance] block
+// that is below its floor: the voting period below MinVotingPeriodSeconds, the
+// timelock below MinTimelockSeconds. This is the block the proposal engine reads;
+// the voting-period floor ConfigProblems puts on [global.Governance] covers a
+// different block that the engine does not use.
+//
+// The windows come from each validator's own configuration file, not from chain
+// state, so this is a check on the file in front of the node, not a rule the chain
+// enforces. A window left out of the file is filled with its default before this
+// runs (7 days and 2 days), so only a value written into the file can be reported.
+func GovernancePolicyProblems(g GovConfig) []error {
+	var problems []error
+	if g.VotingPeriodSeconds < MinVotingPeriodSeconds {
+		problems = append(problems, fmt.Errorf("governance: VotingPeriodSeconds %d is below the minimum of %d seconds", g.VotingPeriodSeconds, MinVotingPeriodSeconds))
+	}
+	if g.TimelockSeconds < MinTimelockSeconds {
+		problems = append(problems, fmt.Errorf("governance: TimelockSeconds %d is below the minimum of %d seconds", g.TimelockSeconds, MinTimelockSeconds))
+	}
+	return problems
+}
+
+// EnforceGovernanceWindowFloors is the error that refuses a start: nil unless
+// [governance] EnforceWindowFloors is on and GovernancePolicyProblems finds a
+// window below its floor. Off, the same problems are only warned about at
+// start-up, because a running validator must keep starting; the setting is how an
+// operator who has checked every validator's file turns the warning into a stop.
+func EnforceGovernanceWindowFloors(g GovConfig) error {
+	if !g.EnforceWindowFloors {
+		return nil
+	}
+	problems := GovernancePolicyProblems(g)
+	if len(problems) == 0 {
+		return nil
+	}
+	parts := make([]string, len(problems))
+	for i, problem := range problems {
+		parts[i] = problem.Error()
+	}
+	return fmt.Errorf("[governance] EnforceWindowFloors is on and the voting windows are below their floors: %s", strings.Join(parts, "; "))
+}
+
+// FeeScheduleProblems reports the transfer-fee settings that do not fit the governed schedule once
+// TransferFeeGovernanceActivationHeight is set (it reports nothing while that is 0): a delay below
+// governance.MinFeeScheduleDelayBlocks, which the chain raises to the minimum, and a configured rate
+// above governance.MaxTransferFeeBps, which no proposal could set again.
+//
+// Like the voting-window floors this checks the file in front of the node, not a rule the chain
+// enforces: the delay a proposal actually gets is the raised value on every validator. It is a
+// warning at start-up and a refusal only under [governance] EnforceWindowFloors
+// (EnforceFeeScheduleFloors).
+func FeeScheduleProblems(cfg *Config) []error {
+	if cfg == nil || cfg.TransferFeeGovernanceActivationHeight == 0 {
+		return nil
+	}
+	var problems []error
+	if cfg.TransferFeeGovernanceDelayBlocks < governance.MinFeeScheduleDelayBlocks {
+		problems = append(problems, fmt.Errorf("fees: TransferFeeGovernanceDelayBlocks %d is below the minimum of %d blocks (the chain raises it to the minimum)", cfg.TransferFeeGovernanceDelayBlocks, governance.MinFeeScheduleDelayBlocks))
+	}
+	if cfg.Global.Fees.TransferFeeBps > governance.MaxTransferFeeBps {
+		problems = append(problems, fmt.Errorf("fees: TransferFeeBps %d is above the governed ceiling of %d basis points", cfg.Global.Fees.TransferFeeBps, governance.MaxTransferFeeBps))
+	}
+	if cfg.Global.Fees.TransferFeeBpsZNHB > governance.MaxTransferFeeBps {
+		problems = append(problems, fmt.Errorf("fees: TransferFeeBpsZNHB %d is above the governed ceiling of %d basis points", cfg.Global.Fees.TransferFeeBpsZNHB, governance.MaxTransferFeeBps))
+	}
+	return problems
+}
+
+// EnforceFeeScheduleFloors is the error that refuses a start: nil unless [governance]
+// EnforceWindowFloors is on and FeeScheduleProblems finds something. Off, the same problems are only
+// warned about, because a running validator must keep starting.
+func EnforceFeeScheduleFloors(cfg *Config) error {
+	if cfg == nil || !cfg.Governance.EnforceWindowFloors {
+		return nil
+	}
+	problems := FeeScheduleProblems(cfg)
+	if len(problems) == 0 {
+		return nil
+	}
+	parts := make([]string, len(problems))
+	for i, problem := range problems {
+		parts[i] = problem.Error()
+	}
+	return fmt.Errorf("[governance] EnforceWindowFloors is on and the transfer fee schedule settings are below their floors: %s", strings.Join(parts, "; "))
+}
 
 // ValidateConfig returns the first problem ConfigProblems finds, or nil.
 func ValidateConfig(g Global) error {
@@ -189,19 +281,38 @@ func EffectiveConsensus(c Consensus) Consensus {
 	return c
 }
 
-// ValidateConsensus returns the first problem ConsensusProblems finds, or nil.
+// ValidateConsensus returns the first setting a node cannot run on, or nil: a
+// timeout that is not positive, or a negative minimum block interval. An interval
+// longer than half the commit timeout is not one of them, because the engine
+// lowers it (see ConsensusAdvisories), and the interval a config gets by default
+// must not make a shorter commit timeout, set in the file or by an override,
+// fatal.
 func ValidateConsensus(c Consensus) error {
-	if problems := ConsensusProblems(c); len(problems) > 0 {
-		return problems[0]
+	if errs := consensusErrors(c); len(errs) > 0 {
+		return errs[0]
 	}
 	return nil
 }
 
-// ConsensusProblems reports everything wrong with the consensus settings: a
-// timeout that is not a positive duration, and a minimum block interval that is
-// negative or longer than half the commit timeout (zero turns the wait off; the
-// engine lowers a longer one to that bound).
+// ConsensusProblems reports everything wrong with the consensus settings: the
+// settings ValidateConsensus refuses, then the advisories of ConsensusAdvisories.
 func ConsensusProblems(c Consensus) []error {
+	return append(consensusErrors(c), ConsensusAdvisories(c)...)
+}
+
+// ConsensusAdvisories reports the settings the engine does not run as written
+// but can run on: a minimum block interval longer than half the commit timeout
+// (zero turns the wait off; the engine lowers a longer one to that bound).
+func ConsensusAdvisories(c Consensus) []error {
+	if c.MinBlockInterval > c.CommitTimeout/2 {
+		return []error{fmt.Errorf("consensus: minimum block interval %s is longer than half the commit timeout (%s) and is lowered to it", c.MinBlockInterval, c.CommitTimeout/2)}
+	}
+	return nil
+}
+
+// consensusErrors reports the consensus settings a node cannot run on: a
+// timeout that is not a positive duration, and a negative minimum block interval.
+func consensusErrors(c Consensus) []error {
 	var problems []error
 	if c.ProposalTimeout <= 0 {
 		problems = append(problems, fmt.Errorf("consensus: proposal timeout must be positive"))
@@ -217,9 +328,6 @@ func ConsensusProblems(c Consensus) []error {
 	}
 	if c.MinBlockInterval < 0 {
 		problems = append(problems, fmt.Errorf("consensus: minimum block interval must not be negative"))
-	}
-	if c.MinBlockInterval > c.CommitTimeout/2 {
-		problems = append(problems, fmt.Errorf("consensus: minimum block interval %s must not exceed half the commit timeout (%s)", c.MinBlockInterval, c.CommitTimeout/2))
 	}
 	return problems
 }

@@ -187,6 +187,20 @@ func (m *Manager) AddPaidTodayZNHB(now time.Time, amount *big.Int) (*big.Int, er
 // expressed in ZNHB for the supplied timestamp. When price guard checks fail or
 // configuration is missing the function returns zero without error.
 func (m *Manager) GetRemainingDailyBudgetZNHB(now time.Time) (*big.Int, *LoyaltyPriceFallbackSignal, error) {
+	return m.GetRemainingDailyBudgetZNHBWithFloor(now, nil)
+}
+
+// GetRemainingDailyBudgetZNHBWithFloor is GetRemainingDailyBudgetZNHB with a
+// daily budget floor (ledger PL-CLM-02). A nil or non-positive floor is the
+// plain function, byte for byte. A positive floor raises the day's budget to at
+// least the floor, so base rewards do not pro-rate to nothing on a day (or a
+// week) when no fees were collected; it never raises it past the existing daily
+// USD cap: the floor is first limited to DailyCapUsd at the day's reference
+// price, and when that cap is set but the price is unavailable the floor does not
+// apply at all. The per-transaction, per-user and per-counterparty caps are
+// separate checks that still run, and the amount already paid today is still
+// subtracted.
+func (m *Manager) GetRemainingDailyBudgetZNHBWithFloor(now time.Time, floor *big.Int) (*big.Int, *LoyaltyPriceFallbackSignal, error) {
 	if m == nil {
 		return big.NewInt(0), nil, fmt.Errorf("loyalty budget: state manager unavailable")
 	}
@@ -241,6 +255,10 @@ func (m *Manager) GetRemainingDailyBudgetZNHB(now time.Time) (*big.Int, *Loyalty
 		budget = CalcDailyBudgetZNHB(now, feesNHB, feesZNHB, priceForBudget, &normalized.Dynamic)
 	} else {
 		budget = big.NewInt(0)
+	}
+
+	if floor != nil {
+		budget = applyLoyaltyBudgetFloor(budget, floor, priceForBudget, &normalized.Dynamic)
 	}
 
 	minEmission := guard.FallbackMinEmissionZNHB

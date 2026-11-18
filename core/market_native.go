@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -29,10 +30,13 @@ const defaultMarketFlatFeeWei = "100000000000000000"
 // core/state/manager.go.
 type marketStateAdapter struct {
 	manager *nhbstate.Manager
+	// indexFills also records each fill in the market-wide fill sequence. It is true only from the pool's
+	// activation height (ledger PL-BC-B2), so a chain with the pool off writes exactly the state it always wrote.
+	indexFills bool
 }
 
 func (sp *StateProcessor) marketStateAdapter() *marketStateAdapter {
-	return &marketStateAdapter{manager: nhbstate.NewManager(sp.Trie)}
+	return &marketStateAdapter{manager: nhbstate.NewManager(sp.Trie), indexFills: sp.ammActive()}
 }
 
 func (a *marketStateAdapter) GetAccount(addr crypto.Address) (*types.Account, error) {
@@ -96,7 +100,13 @@ func (a *marketStateAdapter) AppendFill(fill *market.Fill) error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("market: state manager unavailable")
 	}
-	return a.manager.AppendMarketFill(fill)
+	if err := a.manager.AppendMarketFill(fill); err != nil {
+		return err
+	}
+	if a.indexFills {
+		return a.manager.AppendMarketFillGlobal(fill)
+	}
+	return nil
 }
 
 func (a *marketStateAdapter) ListFillsByBuyer(addr crypto.Address) ([]*market.Fill, error) {
@@ -177,7 +187,8 @@ func (sp *StateProcessor) applyMarketCreateListing(tx *types.Transaction, sender
 		return fmt.Errorf("marketCreateListing: decode payload: %w", err)
 	}
 	seller := crypto.MustNewAddress(crypto.NHBPrefix, append([]byte(nil), sender...))
-	if _, err := sp.marketEngine().CreateListing(seller, tx.Value, payload.RateNumerator, payload.RateDenominator, payload.AllowPartial); err != nil {
+	_, created, err := sp.marketEngine().CreateListingReport(seller, tx.Value, payload.RateNumerator, payload.RateDenominator, payload.AllowPartial)
+	if err != nil {
 		return err
 	}
 	// CreateListing moves tx.Value out of the seller's BalanceZNHB into
@@ -187,12 +198,25 @@ func (sp *StateProcessor) applyMarketCreateListing(tx *types.Transaction, sender
 	// here or CheckZNHBSupplyInvariant halts the chain on the very next
 	// block (see adjustRewardPoolForAdminZNHBMovement's doc comment).
 	if sp.hasAdminWallet && bytes.Equal(sender, sp.adminWallet[:]) {
+		if !created {
+			// An identical listing from this wallet already exists in this block second: the engine moved nothing, so
+			// there is nothing to book, and booking it anyway debited the Reward Pool a second time for one debit of the
+			// wallet, which the supply invariant then refuses at the end of the block (ledger PL-EXT-49). Refused
+			// here instead: a block holding such a pair was never valid (the invariant failed it), so this changes no
+			// block that was valid before; a proposer skips the transaction and it is listed in a later second.
+			return ErrMarketDuplicateAdminListing
+		}
 		if err := sp.adjustRewardPoolForAdminZNHBMovement(new(big.Int).Neg(tx.Value)); err != nil {
 			return fmt.Errorf("marketCreateListing: %w", err)
 		}
 	}
 	return sp.incrementNativeAccountNonce(sender)
 }
+
+// ErrMarketDuplicateAdminListing is returned for a second, identical listing from the admin/treasury wallet in the same block
+// second (same amount, rate and partial flag). The first listing stands; the second would escrow nothing, and the pool bookkeeping
+// of the admin wallet has no movement to mirror. It is skippable: in a later second the same transaction lists normally.
+var ErrMarketDuplicateAdminListing = errors.New("marketCreateListing: an identical listing from this wallet already exists in this block second")
 
 // applyMarketFillListing handles TxTypeMarketFillListing. tx.Value is
 // unused; tx.Data is RLP([listingID, znhbAmountRequested]) -- the NHB cost

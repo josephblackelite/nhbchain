@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,5 +116,26 @@ auth:
 	}
 	if cfg.NodeRPCURL != "https://127.0.0.1:8081" {
 		t.Fatalf("expected default node rpc url, got %q", cfg.NodeRPCURL)
+	}
+}
+
+// The configuration the daemon reads when it is started without flags must pass
+// its own checks and bind a loopback address, so that the default start works
+// without NHB_ENV=dev (PL-DC-42). It carries a placeholder token that is only
+// meaningful on a loopback listener.
+func TestShippedDefaultConfigLoadsAndListensOnLoopbackOnly(t *testing.T) {
+	cfg, err := Load("../../lending/config.yaml")
+	if err != nil {
+		t.Fatalf("the shipped default configuration does not load: %v", err)
+	}
+	host, _, err := net.SplitHostPort(cfg.ListenAddress)
+	if err != nil {
+		t.Fatalf("listen %q: %v", cfg.ListenAddress, err)
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		t.Fatalf("the shipped default must listen on a loopback address, got %q", cfg.ListenAddress)
+	}
+	if !cfg.TLS.AllowInsecure {
+		t.Fatalf("the shipped default is plaintext on loopback and must say so")
 	}
 }

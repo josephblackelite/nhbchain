@@ -29,6 +29,10 @@ import (
 //   - node (authoritative for enforcement):   rpc/operator_methods.go (this file)
 //   - gateway (authoritative for the browser): the browser-facing gateway's own list
 //
+// The node's side is exported, sorted, to rpc/testdata/operator_only_methods.txt, and
+// a test fails when the table and that file differ (PL-DC-51), so a change here is a
+// visible diff that the gateway's list can be compared with.
+//
 // See requireOperatorInto/handle in rpc/http.go for how this table is
 // enforced: any request naming one of these methods must authenticate with
 // a credential carrying the 'operator' role (see jwtClaims.Role and
@@ -100,6 +104,7 @@ var OperatorOnlyMethods = map[string]struct{}{
 	"nhb_swapMint":                {}, // stable-engine reservation for a caller-supplied account
 	"nhb_swapBurn":                {}, // stable-engine cash-out
 	"mint_with_sig":               {}, // NHB mint via signed voucher; exempt from the gate below, see isSelfAuthenticatedMintMethod
+	"mint_getInvoiceStatus":       {}, // whether a mint invoice identifier is settled in committed state; NOT exempt from the gate
 
 	// --- oracle / reference-price submission
 	"buyback_submitRefPrice": {}, // M-of-N signed ref price; exempt from the gate below, see isSignatureThresholdAuthorizedMethod

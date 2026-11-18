@@ -146,17 +146,28 @@ validator candidate when it is registered, is not delegating its own stake to a
 different validator, and its total `Stake` (which includes ZNHB delegated in by
 other wallets, see `validatorEligibilityBasis`) is at least the threshold.
 
-## Allowed by default but not settable
-
-These keys are in `defaultAllowedGovernanceParams` but `validatorForParam` has
-no case for them, so a proposal that names one fails at submission with
-`missing validation rule`:
+## Not governable, and governable but not read
 
 `swap.VelocityWindowSeconds`, `swap.VelocityMaxMints`,
 `swap.cashOut.assetMonthlyCapWei`, `lending.MaxLTVBps`,
 `lending.LiquidationThresholdBps`, `lending.ReserveFactorBps`,
 `lending.ProtocolFeeBps`, `lending.breaker.MaxTotalSupplyWei`,
-`lending.breaker.MaxTotalBorrowWei`, `lending.breaker.MaxTotalCollateralWei`.
+`lending.breaker.MaxTotalBorrowWei` and `lending.breaker.MaxTotalCollateralWei`
+used to be in `defaultAllowedGovernanceParams` although `validatorForParam` has no
+case for them, so a proposal that named one always failed at submission with
+`missing validation rule`. They are no longer in the default list (a test,
+`TestEveryDefaultGovernableParameterHasAValidator`, fails if a key without a validator
+is added again). Their values come from each node's `config.toml`.
+
+Keys that ARE accepted and stored, but that no code reads when a transaction
+executes, so a passed proposal for one changes nothing today: `fees.baseFee`,
+`potso.abuse.MinStakeToEarnWei`, `potso.abuse.QuadraticTxDampenAfter`,
+`potso.abuse.QuadraticTxDampenPower`, `potso.rewards.EmissionPerEpochWei`,
+`potso.weights.AlphaStakeBps` and `network.seeds` (read once at start-up).
+`potso.abuse.MaxUserShareBps` is read when a node builds its reward configuration
+from `config.toml` at start-up, not from the stored value. Treat all of these as
+not live until a reader is added behind an activation height
+(`docs/consensus/activation-policy.md`).
 
 ## Keys written by dedicated proposal kinds
 
@@ -165,6 +176,7 @@ These do not use `AllowedParams` (see [proposal types](../gov/proposal-types.md)
 | Kind | Param-store keys written | Value when never set | Read by |
 | --- | --- | --- | --- |
 | `policy.buybackParams` | `buyback.feeShareBps`, `buyback.discountBps`, `buyback.safetyMarginBps` | Genesis defaults `2000`, `500`, `500` (`core/node.go`, only when a genesis buyback signer quorum exists) | `core/buyback_settlement.go` (`effectiveBuybackConfig`), `core/state_transition.go` (`applyTransactionFee`) |
+| `policy.feeParams` | `fees.transferSchedule` (one JSON record: the schedule in force and at most one pending, each with its effective block height) | The `[global.Fees]` values `TransferFeeBps`, `TransferFeeBpsZNHB`, `TransferFreeTierSpendWei`; the kind is accepted only from `TransferFeeGovernanceActivationHeight` | `core/transfer_fee_schedule.go` (`effectiveTransferGasPolicy`) |
 | `policy.swapRiskParams` | `swap.risk.redeem.perTxMinWei`, `.perTxMaxWei`, `.perAddressDailyCapWei`, `.perAddressMonthlyCapWei` | `5e18`, `1e21`, `2e21`, `2e22` wei (`native/swap/redeem_risk.go`) | `core/swap_risk_params.go` |
 | `policy.redemptionFeeParams` | `swap.redemption.feeBps`, `.feeFloorWei`, `.feeCapWei` | `100` bps, `1e18`, `1e21` wei (`native/swap/redemption_fee.go`) | `core/swap_risk_params.go` |
 | `policy.lendingRateSchedule` | `lending.fixedTerm.rateSchedule` (one JSON blob) | `{30 days: 1200 bps, 90 days: 1600 bps}` (`native/lending/fixed_term.go`) | `core/lending_rate_schedule.go` |

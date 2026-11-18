@@ -231,6 +231,11 @@ func TestRiskEngineVelocityLimit(t *testing.T) {
 	if violation == nil || violation.Code != RiskCodeVelocity {
 		t.Fatalf("expected velocity violation")
 	}
+	// The violation carries the configured limit so the alert built from it
+	// can say how many mints were allowed (PL-DC-34).
+	if violation.Limit == nil || violation.Limit.Cmp(big.NewInt(int64(params.VelocityMaxMints))) != 0 {
+		t.Fatalf("expected velocity violation to carry the limit %d, got %v", params.VelocityMaxMints, violation.Limit)
+	}
 	engine.SetClock(func() time.Time { return base.Add(time.Minute * 15) })
 	violation, err = engine.CheckLimits(addr, big.NewInt(1), params)
 	if err != nil {

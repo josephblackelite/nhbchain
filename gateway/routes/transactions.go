@@ -128,15 +128,7 @@ func (tr *transactionsRoutes) send(w http.ResponseWriter, r *http.Request) {
 	if chainID := strings.TrimSpace(r.Header.Get("X-Chain-Id")); chainID != "" {
 		forwardReq.Header.Set("X-Chain-Id", chainID)
 	}
-	forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if remote := clientIP(r.RemoteAddr); remote != "" {
-		if forwarded != "" {
-			forwarded = fmt.Sprintf("%s, %s", forwarded, remote)
-		} else {
-			forwarded = remote
-		}
-	}
-	if forwarded != "" {
+	if forwarded := forwardedForValue(r); forwarded != "" {
 		forwardReq.Header.Set("X-Forwarded-For", forwarded)
 	}
 
@@ -171,6 +163,22 @@ func copyHeaders(dst, src http.Header) {
 			dst.Add(key, value)
 		}
 	}
+}
+
+// forwardedForValue builds the X-Forwarded-For value the gateway sends to the
+// node for r: any value the caller supplied, followed by the address the
+// gateway itself observed for the connection, so the last entry is always one
+// the caller could not choose. When the observed address cannot be read, no
+// value is returned and the caller's own header is not passed on.
+func forwardedForValue(r *http.Request) string {
+	remote := clientIP(r.RemoteAddr)
+	if remote == "" {
+		return ""
+	}
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		return fmt.Sprintf("%s, %s", forwarded, remote)
+	}
+	return remote
 }
 
 func clientIP(addr string) string {

@@ -20,6 +20,8 @@ const (
 	TypePotsoStakeWithdrawn = "potso.stake.withdrawn"
 	// TypePotsoRewardEpoch summarises a processed POTSO reward epoch.
 	TypePotsoRewardEpoch = "potso.reward.epoch"
+	// TypePotsoRewardShortfall reports a reward epoch the treasury could not cover, whose payout was skipped.
+	TypePotsoRewardShortfall = "potso.reward.shortfall"
 	// TypePotsoRewardReady notifies downstream systems that a claimable reward is prepared for settlement.
 	TypePotsoRewardReady = "potso.reward.ready"
 	// TypePotsoRewardPaid captures individual reward payouts.
@@ -138,6 +140,32 @@ func (e PotsoRewardEpoch) Event() *types.Event {
 		attrs["remainder"] = amountString(e.Remainder)
 	}
 	return &types.Event{Type: TypePotsoRewardEpoch, Attributes: attrs}
+}
+
+// PotsoRewardShortfall reports a reward epoch whose payout was skipped because the reward
+// treasury could not cover it (PL-DC-29).
+type PotsoRewardShortfall struct {
+	Epoch     uint64
+	Required  *big.Int
+	Available *big.Int
+	Budget    *big.Int
+	Emission  *big.Int
+}
+
+// Event converts the shortfall into a generic event representation.
+func (e PotsoRewardShortfall) Event() *types.Event {
+	attrs := map[string]string{
+		"epoch":     fmt.Sprintf("%d", e.Epoch),
+		"required":  amountString(e.Required),
+		"available": amountString(e.Available),
+	}
+	if e.Budget != nil {
+		attrs["budget"] = amountString(e.Budget)
+	}
+	if e.Emission != nil {
+		attrs["emission"] = amountString(e.Emission)
+	}
+	return &types.Event{Type: TypePotsoRewardShortfall, Attributes: attrs}
 }
 
 // PotsoRewardReady captures a claimable payout becoming available for settlement.

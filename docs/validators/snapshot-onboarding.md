@@ -38,8 +38,17 @@ named where it is used. What could not be tested is listed in
   and the archive it names) and **a bootnode** (`host:port` of a peer) from
   whoever operates the network. Neither is built into the script: which
   snapshots you trust is your decision, and the script has no default host.
-- Optionally the RPC URL of a node you trust (`--tip-rpc`), used only to decide
-  when your node has caught up.
+- **The RPC URL of a node you trust (`--tip-rpc`)**, which neither the snapshot
+  host nor the bootnode runs. A snapshot is not signed by anyone, so the script
+  needs a check on it from outside both. The reference node is that check: your
+  node is judged at the tip only when it holds the same newest blocks as that
+  node, and is refused when it does not. Instead you can pin the block the
+  snapshot must end at (`--tip-hash` together with `--state-root`, read from
+  nodes you trust). That checks the snapshot only: it does not check the blocks
+  your node applies after it, which come from the bootnode alone, so a run with the
+  pins and no reference node is warned about that, up front and at the end. A run
+  that installs a snapshot and has neither stops before it downloads or installs
+  anything, unless you pass `--allow-unanchored`.
 - The source commit the snapshot was taken with. The manifest names it in its
   `producer.binaryCommit` field. On a clean machine `nhb-snapshot` does not exist
   yet (the script builds it), so read the field from the manifest's JSON with
@@ -79,11 +88,20 @@ bash scripts/validator-only-bootstrap.sh \
   --bootnode BOOTNODE-HOST.example:6001 \
   --max-snapshot-age 72h \
   --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT \
-  --tip-rpc https://TRUSTED-RPC-HOST.example      # optional
+  --tip-rpc https://TRUSTED-RPC-HOST.example
 ```
 
 `SNAPSHOT-HOST.example`, `BOOTNODE-HOST.example` and `TRUSTED-RPC-HOST.example`
-are placeholders, and so is the release commit. `--max-snapshot-age 72h` is here
+are placeholders, and so is the release commit. `--tip-rpc` is not optional: a run
+that installs a snapshot needs a check on it from outside the snapshot host and the
+bootnode, and stops before it downloads anything when it has none (see
+[What a snapshot proves, and what it does not](#what-a-snapshot-proves-and-what-it-does-not)).
+The reference node has to be reached over https and has to be on another host than
+the snapshot and the bootnode. `--tip-hash` together with `--state-root` is also
+accepted, but it pins only where the snapshot ends: without `--tip-rpc` nothing
+checks the blocks the node applies after it, and the run warns about that, up front
+and again in its closing message. `--allow-unanchored` goes on with no check at all,
+with the same warnings. `--max-snapshot-age 72h` is here
 because without it a snapshot of any age is accepted and a stale one fails only
 later, with a stall. `scripts/validator-only-bootstrap.sh` is a five-line wrapper
 around `scripts/deployvalidator.sh`; both take the same flags. Run it again at
@@ -103,16 +121,17 @@ The flags:
 | `--snapshot-url` | Required (or `NHB_SNAPSHOT_URL`). Directory URL holding `manifest.json` and the archive. `https` only unless `--allow-insecure-http`. |
 | `--bootnode` | Required (or `NHB_BOOTNODE`). Plain `host:port`, never an `enode://` URI. |
 | `--min-release-commit` | Optional (or `NHB_MIN_RELEASE_COMMIT`), advised. The full commit id of the oldest release you accept. A manifest whose commit is neither that commit nor a descendant of it is refused, and so is one that names no commit or one your checkout does not have (`git fetch` first). The manifest is not signed, so this is what keeps a snapshot host from steering you to old consensus code. |
-| `--tip-rpc` | Optional (or `NHB_TIP_RPC_URL`). A node you trust. Used to decide when you have caught up, and to refuse a node whose newest blocks are not that node's. |
+| `--tip-rpc` | Required for a run that installs a snapshot, unless `--tip-hash` and `--state-root` are both given or `--allow-unanchored` is (or `NHB_TIP_RPC_URL`). A node you trust, which neither the snapshot host nor the bootnode runs: `https` unless `--allow-insecure-http`, and a host other than theirs. Used to decide when you have caught up, and to refuse a node whose newest blocks are not that node's. It is the only check on the blocks the node applies after the snapshot; the pins check the snapshot alone. A run that finds an earlier run's snapshot not yet seen past its height needs it too. |
 | `--max-lag-blocks` | How far from that node (either side) still counts as caught up. Default 3, at most 15. |
 | `--sync-timeout` | Seconds to wait for the catch-up. Default 7200. |
 | `--rpc-timeout` | Seconds the node's RPC may stay silent after the service starts. Default 180, which is far above what was measured (see [How long the node takes to start](#how-long-the-node-takes-to-start)). A node that never answers is not running or is crash-looping; the script says so after this long, with the commands that show why, instead of waiting out `--sync-timeout`. (`nhb-snapshot wait-synced` also gives up on a silent node after its `--stall-timeout`, when that is shorter.) |
 | `--max-snapshot-age` | Refuse a snapshot whose newest block is older than this; use `72h`. The limit rests on the date of the newest block, which `extract` checks against the database it unpacked; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. Without it a snapshot of any age is accepted. |
-| `--tip-hash`, `--state-root` | Optional. The tip hash and state root the snapshot must have, 32 bytes of hex each, as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
+| `--tip-hash`, `--state-root` | The tip hash and state root the snapshot must have, 32 bytes of hex each, as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. Both together let a run that installs a snapshot go on without `--tip-rpc`, but they pin only where the snapshot ends: nothing then checks the blocks the node applies after it, so the node's place at the tip rests on the bootnode, and the run warns about that when it starts and in its closing message. |
 | `--max-snapshot-gib` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. Default 16. |
 | `--listen-addr`, `--rpc-addr`, `--external-address` | As before. |
 | `--reset-state` | Replace the data directory with a snapshot: the snapshot is downloaded, verified and unpacked first, and only then is the node stopped and the old directory moved aside (never deleted). Keeps the node's p2p identity and vote state. Works on a node that is already a validator. |
-| `--allow-insecure-http` | Accept an `http://` or `file://` snapshot URL. |
+| `--allow-insecure-http` | Accept an `http://` or `file://` snapshot URL, and an `http://` `--tip-rpc`. |
+| `--allow-unanchored` | Go on without any check from outside on the snapshot (no usable `--tip-rpc`, and not both `--tip-hash` and `--state-root`). The script warns, and the closing message says so again: the node is then reported at the network tip on the word of the snapshot host and the bootnode alone. Compare its newest blocks with nodes you trust before you stake to it. |
 | `--allow-existing-key` | Use a key that was already in `/etc/nhbchain/validator.key` but was not made by this script. |
 | `--allow-binary-mismatch` | Continue although the node built here is not the one the snapshot was taken with. |
 
@@ -162,6 +181,19 @@ Also required, and checked by the script:
 - `NHB_MASTER_TREASURY` must not be set. A node that points it at any other
   address than the genesis `adminWallet` computes different state
   (`core/node.go`, `NewNode`).
+- A node records the treasury configuration it starts with (the admin wallet it
+  will use, `NHB_MASTER_TREASURY` included, and the buyback signers and
+  threshold) in its own database and refuses to start when a later start
+  differs. A snapshot carries the record of the node it was taken from (when
+  that node has one), so a follower with another genesis file or environment
+  stops at its first start instead of at the first block it computes
+  differently. The start-up log shows
+  `Treasury configuration ... digest=...`; validators on one network show the
+  same digest. A database with no record (made before this check) records its
+  first start. A change made on purpose, on every validator, is recorded by
+  starting once with `NHB_RERECORD_TREASURY_CONFIG=1` and then removing it.
+  `nhb-recovery` starts the node the same way, so run it with the service's
+  genesis file and environment.
 - The node binary must be the one the snapshot was taken with: the same binary
   hash, or the same source commit.
 - `QuorumCertActivationHeight = 1380200` turns quorum-certificate verification of
@@ -233,15 +265,24 @@ quietly, and no secret is printed.
    genesis hash. At the tip means all of these, on two polls in a row:
    - the node is connected to at least one peer;
    - when this run installed a snapshot, the node has applied a block **above the
-     snapshot's height**. A snapshot that is not part of the network's chain can
-     never be followed past, so this is what a forged snapshot cannot fake, and a
-     node that never reached a peer (a wrong `--bootnode`) cannot either;
+     snapshot's height**. An honest peer never gives a node on a snapshot that is
+     not part of the network's chain a block it can apply, so against an honest
+     peer this is what a forged snapshot cannot fake, and a node that never
+     reached a peer (a wrong `--bootnode`) cannot either. It is not enough when
+     the peer is not honest (see
+     [What a snapshot proves](#what-a-snapshot-proves-and-what-it-does-not)),
+     which is what the next item is for;
    - with `--tip-rpc`, its height is within `--max-lag-blocks` of that node's on
      either side, and the newest blocks the two nodes hold are **the same
      blocks** (a different block hash at a height both hold ends the run: the
      node is on another chain);
-   - without `--tip-rpc`, its newest block is dated within a minute of this
-     host's clock, on either side (a block dated in the future says nothing).
+   - without `--tip-rpc` (a run that pinned `--tip-hash` and `--state-root`
+     instead, installed no snapshot, or went ahead with `--allow-unanchored`), its
+     newest block is dated within a minute of this host's clock, on either side
+     (a block dated in the future says nothing). That does not show that the node
+     is on the network's chain: the pins show where the snapshot ends and nothing
+     after it, so such a run is judged at the tip on the bootnode's word, and the
+     script warns about that when it starts and at the end.
 
    It stops with a diagnosis when the RPC does not answer within 180 seconds,
    when the node makes no progress (or answers nothing) for 15 minutes, or when
@@ -398,8 +439,11 @@ host can ask for:
   (`TestDeployRestoreIdentityRefusesALink`, `TestDeployKeyIsNeverHandledThroughALink`,
   `TestDeployRootTouchesNothingTheServiceUserCanReplace`)
 - Root and the operator run, install and build with nothing the service user can
-  replace. `/opt/nhbchain`, `/var/lib/nhbchain` and `/etc/nhbchain` are that user's
-  (`nhb.service` runs as it, and it is the network-facing part of the host), so
+  replace. `/opt/nhbchain` and `/var/lib/nhbchain` are that user's (`nhb.service` runs
+  as it, and it is the network-facing part of the host); `/etc/nhbchain` is root's
+  (mode 0750, group `nhb`, so the node can read `config.toml` and its key but cannot
+  create, replace or remove a file in it, in particular `node.env`, which systemd
+  reads as root), so
   the script takes nothing from them that it then runs as root or as you. It builds
   from the checkout it runs from, with its Go caches and its own copy of the tools
   in `/var/cache/nhbchain-build`, a directory only root can write (a cache under
@@ -452,8 +496,26 @@ host can ask for:
   snapshot's height, and, with `--tip-rpc`, to hold the same newest blocks as that
   node. A forged snapshot (the live genesis, valid links, a new state and no
   signatures of anyone: there is nothing in a snapshot to check a signature of) is
-  accepted by `extract`, and then never gets there.
+  accepted by `extract`, and a node that follows an honest peer then never gets
+  past it.
   (`TestAForgedSnapshotIsRefusedAndAnUnconnectedNodeOnItIsNeverAtTheTip`)
+  That holds only while the node's peers are honest. Its first peer is the
+  bootnode you name, and with the shipped configuration a peer's blocks are
+  applied without a quorum certificate (see below), so the node's own view of the
+  tip is not proof that it is on the network's chain. That is why a run that
+  installs a snapshot needs a check from outside the snapshot host and the
+  bootnode: a reference node (`--tip-rpc`: the run ends with exit 6, before any
+  registration, when the node's newest blocks differ from that node's), or the
+  block the snapshot must end at (`--tip-hash` with `--state-root`), or an
+  explicit `--allow-unanchored`. Only the reference node checks the blocks the node
+  applies after the snapshot. The pins show where the snapshot ends and nothing
+  after it, so a run that has only them is judged at the tip on the bootnode's word
+  for everything above the pinned block, and the script says so when it starts and
+  in its closing message; so does a run with `--allow-unanchored`, which has no
+  check at all. Checking quorum certificates would not replace a reference node,
+  because the validator set such a check uses comes from the snapshot's own state.
+  (`TestDeployRefusesARunWithNoCheckFromOutsideBeforeInstallingAnything`,
+  `TestWaitSyncedWithAReferenceRefusesANodeFollowingAChainOfItsOwn`)
 - **History below the tip is trusted.** Old blocks and old state are checked for
   consistency (headers link and hash and the transactions match the header for
   the newest 256 blocks, the whole height index is present), not against the
@@ -809,7 +871,7 @@ replaced them.
 #    of the tools in /var/cache/nhbchain-build, and /opt/nhbchain gets copies.
 SRC=$PWD; B=/var/cache/nhbchain-build
 sudo useradd --system --home /opt/nhbchain --shell /usr/sbin/nologin nhb
-sudo install -d -m 0700 -o nhb -g nhb /etc/nhbchain
+sudo install -d -m 0750 -o root -g nhb /etc/nhbchain
 sudo install -d -o nhb -g nhb /var/lib/nhbchain
 sudo mkdir -p /opt/nhbchain
 sudo rsync -a --delete ./ /opt/nhbchain/
@@ -865,8 +927,8 @@ sudo -u nhb chmod 0700 /var/lib/nhbchain/nhb-data
 #    ExternalAddress = "<this server's public IP>:6001".
 #    Root copies the file from your checkout and not from /opt/nhbchain: that tree
 #    is the service user's, and install reads its source through a link.
-sudo install -m 0600 -o nhb -g nhb $SRC/config.toml /etc/nhbchain/config.toml
-sudo -u nhb nano /etc/nhbchain/config.toml
+sudo install -m 0640 -o root -g nhb $SRC/config.toml /etc/nhbchain/config.toml
+sudo nano /etc/nhbchain/config.toml
 sudo $B/bin/nhb-snapshot check-config --config /etc/nhbchain/config.toml --genesis /opt/nhbchain/config/genesis.relaunch.json
 
 # 5. The node's environment: the RPC secret and the key, readable by root only
@@ -935,7 +997,8 @@ finish with the same guard) and the exact stop-and-swap of `--reset-state`.
 | `This checkout's commit could not be read: git said: ...` | git refused the checkout (typically `detected dubious ownership`, when it belongs to another user) or is not installed. The script names the checkout as safe for its own git calls; if git still refuses, fix what it says (`git config --global --add safe.directory <the checkout>`), or check the commit out from a git that can read it. |
 | `the Go 1.24.3 tarball has sha256 ..., not the ... go.dev publishes` | A damaged or replaced download of the toolchain. It was not unpacked. Run the script again; if it happens again, do not go on. |
 | `could not download ...` and `the host has to send at least 10240 bytes a second` | The host was too slow (under 10 KiB a second for a minute) and was given up on, after the retries. Try again later or use another snapshot host. |
-| `an earlier run installed a snapshot at height N and did not finish waiting for the node` | Not an error: the run that installed the snapshot was interrupted before it saw the node at the tip, so this run requires the node to get past height N as well. `/var/lib/nhbchain/.snapshot-height` holds N. |
+| `this run has no check from outside on the snapshot: ...` | Nothing outside the snapshot host and the bootnode would check the node, so the script stopped before it downloaded or installed anything. Give `--tip-rpc` (https, a node you trust that neither of them runs), or `--tip-hash` together with `--state-root` (which checks the snapshot only, and the run then warns that nothing checks the blocks after it), or `--allow-unanchored` if you accept the risk. The text after the colon says what was wrong with a `--tip-rpc` you gave (not https, or the same host as the snapshot or the bootnode). |
+| `an earlier run installed a snapshot at height N and did not finish waiting for the node` | Not an error: the run that installed the snapshot was interrupted before it saw the node at the tip, so this run requires the node to get past height N as well, and, as the first run did, a reference node (`--tip-rpc`) or `--allow-unanchored` (the script stops with the message above when it has neither: `--tip-hash` and `--state-root` are checked against a snapshot as it is installed, which this run does not do). `/var/lib/nhbchain/.snapshot-height` holds N. |
 | `... does not hold a block height` (naming `.snapshot-height`) | That record was changed by hand or damaged. Remove it only if you know the node is at the network tip, or run again with `--reset-state`. |
 | `another run of this script (pid ...) is in progress` | The lock in `~/.local/state/nhbchain/deploy.lock.d` (or `$XDG_STATE_HOME/nhbchain`) is held by a live process of yours. A lock left by a process that is gone is taken over. |
 | `<path> is a symbolic link, not a key file` (or `... is a symbolic link, not the file the node wrote`) | Something replaced `/etc/nhbchain/validator.key`, or a file of the node's identity or vote state, by a link. The script never follows one. Find out who made it (the service user owns those directories), and remove it. |
@@ -952,7 +1015,7 @@ finish with the same guard) and the exact stop-and-swap of `--reset-state`.
 | `the node did not reach the network tip within ...` | Still catching up: raise `--sync-timeout`, or the snapshot is too old (see the measured gap above). |
 | `the node has stopped making progress` | No new block for 15 minutes while behind. Check `journalctl -u nhb.service`, the bootnode, and that this host's clock is right. |
 | `the node has not answered a request for its newest block` | The node's RPC answered, then stopped answering what the wait asks, for 15 minutes. Check `systemctl status nhb.service` and its journal. |
-| `connected to no peer` or `no block above the snapshot's height N has been applied yet` in the wait output | The node has not heard from the network, or has not applied one block past its snapshot. Check the `--bootnode` address and the firewall (6001 TCP and UDP), and that the snapshot is one of the network's. |
+| `connected to no peer` or `no block above the snapshot's height N has been applied yet` in the wait output | The node has not heard from the network, or has not applied one block past its snapshot. Check the `--bootnode` address and the firewall (6001 TCP), and that the snapshot is one of the network's. |
 | `the node's newest blocks are not the ones the --tip-rpc node has` | The node's chain and the reference node's differ: the snapshot is not part of the network's chain, or one of the two nodes is on a fork. Do not register. Get a snapshot from a source you trust. |
 | `the snapshot archive is ... more than the ... GiB this run accepts`, or `the snapshot unpacks to ...` | The manifest asks for more than `--max-snapshot-gib` allows. Nothing was downloaded. If the network's snapshot has really grown that large, raise the flag; otherwise do not use that host. |
 | `not enough free disk space in ...` | The disk cannot hold the archive, what it unpacks to and 1 GiB. Nothing was downloaded. |
@@ -960,6 +1023,7 @@ finish with the same guard) and the exact stop-and-swap of `--reset-state`.
 | `... a decompression bomb` | The manifest says the archive unpacks to more than 64 times its size. It is not a snapshot. |
 | `the snapshot's tip hash is ..., not the ... pinned with --tip-hash` (or `--state-root`) | The snapshot is not the block you pinned. Nothing was downloaded. |
 | `the snapshot could not be installed; nothing was changed` | The unpacked database did not open or match its manifest (or, on a first run, the key is already a validator). The data directory and `nhb.service` are exactly as they were. |
+| `treasury configuration differs from the one recorded for this database` when the node starts | This start's genesis file or environment (admin wallet, `NHB_MASTER_TREASURY`, buyback signers or threshold) is not the one the database was started with, or the snapshot's source node. The message says which part differs. Correct the file or environment. Only a change made on purpose on every validator is recorded, once, with `NHB_RERECORD_TREASURY_CONFIG=1`. |
 | `state root mismatch` in the node's log | The node computes different state than the network: a config that differs in a consensus-relevant value, a different build, or `NHB_MASTER_TREASURY`. Run `nhb-snapshot check-config`. |
 | `Dropping chain data requests from a peer over its budget` in the serving node's log, and your follower stops after a few thousand blocks | The serving node's request budget (see the gap section). Expected. The follower goes on with the next block the chain produces; a halted network produces none. |
 | The node is at height 0 and the log shows no progress after an earlier attempt to sync from genesis | That attempt could not sync (see below). Run the script again with `--reset-state`. |
@@ -1101,7 +1165,7 @@ Not tested here, and the exact commands to run on Linux:
   `rsync` to `/opt/nhbchain`, the Go install, the swap file, `systemctl` start and
   restart, `sudo -u nhb`). On a clean Ubuntu 22.04 VM, serve a snapshot directory
   with `python3 -m http.server 8000 --directory SNAPSHOTS` and run
-  `bash scripts/deployvalidator.sh --beneficiary nhb1... --snapshot-url http://127.0.0.1:8000 --allow-insecure-http --bootnode BOOTNODE:6001`.
+  `bash scripts/deployvalidator.sh --beneficiary nhb1... --snapshot-url http://127.0.0.1:8000 --allow-insecure-http --bootnode BOOTNODE:6001 --tip-rpc https://TRUSTED-RPC-HOST.example`.
 - The tests that need a real symbolic link (Windows needs a privilege to make one, so
   they skip with a message there): `TestPackRefusesASymlinkedFile`, the symlink
   target case of `TestExtractRefusesBadTargets`,
@@ -1175,7 +1239,7 @@ nhb-snapshot verify       --manifest FILE --archive FILE --chain-id N --genesis-
 nhb-snapshot extract      --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX [--reject-validator ADDR] [--max-bytes N] [--tip-hash HEX] [--state-root HEX]
 nhb-snapshot manifest show --manifest FILE [--field NAME]
 nhb-snapshot check-config --config FILE --genesis FILE
-NHB_RPC_TOKEN=OPERATOR-TOKEN nhb-snapshot wait-synced  --rpc URL [--tip-rpc URL] [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--rpc-timeout D] [--stall-timeout D]
+NHB_RPC_TOKEN=OPERATOR-TOKEN nhb-snapshot wait-synced  --rpc URL (--tip-rpc URL | --no-reference) [--min-height N] [--max-lag-blocks N] [--max-lag-seconds N] [--timeout D] [--rpc-timeout D] [--stall-timeout D]
 ```
 
 `refs` prints the files the MANIFEST of a database refers to (`manifest NAME`,
@@ -1199,8 +1263,10 @@ answered, answers nothing for `--stall-timeout`), 5 when the node or the referen
 RPC is on another chain, 6 when the node's blocks differ from the reference node's,
 and 7 when the node's RPC never answered within `--rpc-timeout` (default 3
 minutes: a service that is not running, or that crash-loops, so that the wait does
-not run for the whole `--timeout`). Without `--tip-rpc` it compares the date of the newest block with
+not run for the whole `--timeout`). It needs `--tip-rpc` or, to go without a
+reference node on purpose, `--no-reference` (it exits 2 with neither); with
+`--no-reference` it compares the date of the newest block with
 this host's clock (`--max-lag-seconds`, default 60, either side), so keep the clock
-synchronised. `verify` and `extract` refuse a manifest announcing more than
+synchronised, which does not show that the node is on the network's chain. `verify` and `extract` refuse a manifest announcing more than
 `--max-bytes` uncompressed bytes (default 64 GiB; the script passes its own, lower,
 bound).

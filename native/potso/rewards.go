@@ -51,6 +51,8 @@ var (
 	ErrInsufficientTreasury = errors.New("potso: insufficient treasury balance")
 	// ErrClaimingDisabled denotes that manual claiming is not enabled for the current configuration.
 	ErrClaimingDisabled = errors.New("potso: reward claiming disabled")
+	// ErrClaimModeUnavailable is returned when a configuration selects the claim payout mode.
+	ErrClaimModeUnavailable = errors.New(`potso: payout mode "claim" is not available because nothing settles the claim records it creates; set PayoutMode to "auto"`)
 )
 
 // RewardConfig controls the epoch reward distribution behaviour for POTSO participants.
@@ -111,6 +113,10 @@ type RewardEpochMeta struct {
 	TotalPaid       *big.Int
 	Remainder       *big.Int
 	Winners         uint64
+	// Shortfall records that the reward treasury could not cover the epoch and the
+	// payout was skipped (PL-DC-29). Optional and trailing: a meta without it is stored
+	// byte for byte as before.
+	Shortfall bool `rlp:"optional"`
 }
 
 // Clone produces a deep copy of the metadata to protect internal references.
@@ -123,6 +129,8 @@ func (m *RewardEpochMeta) Clone() RewardEpochMeta {
 		Day:      m.Day,
 		AlphaBps: m.AlphaBps,
 		Winners:  m.Winners,
+
+		Shortfall: m.Shortfall,
 	}
 	clone.StakeTotal = copyBigInt(m.StakeTotal)
 	clone.EngagementTotal = copyBigInt(m.EngagementTotal)
@@ -178,6 +186,19 @@ func (c RewardConfig) Validate() error {
 		if c.TreasuryAddress == ([20]byte{}) {
 			return errors.New("treasury address must be configured when rewards are enabled")
 		}
+	}
+	return nil
+}
+
+// CheckPayoutModeAvailable reports whether the configured payout mode can be
+// selected on a running node. Claim mode is not available: it takes the epoch
+// payout out of the treasury at epoch close, but no block transaction credits
+// the recorded claims afterwards. It is a separate check from Validate so that
+// ComputeRewards, which runs for every epoch during block execution, keeps its
+// behaviour; it is applied where a configuration is accepted instead.
+func (c RewardConfig) CheckPayoutModeAvailable() error {
+	if c.PayoutMode.Normalise() == RewardPayoutModeClaim {
+		return ErrClaimModeUnavailable
 	}
 	return nil
 }

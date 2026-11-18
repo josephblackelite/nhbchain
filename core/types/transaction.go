@@ -460,7 +460,38 @@ const (
 	// re-checking for newly added types above this comment.
 	TxTypeSubmitEvidence TxType = 0x4C
 
-	// Next free TxType byte is 0x4D.
+	// TxTypeLendingWithdrawProtocolFees pays out part of a lending pool's protocol-fee
+	// counter (the reserve share of the interest) to a recipient the sender names
+	// (ledger PL-DC-19). An ordinary signed transaction: the sender must hold
+	// ROLE_LENDING_PROTOCOL_ADMIN, replay is the sender's nonce. Valid only from
+	// core's LendingFeeWithdrawActivationHeight; before it the byte is an unknown
+	// transaction type. Data is JSON {poolId, recipient, amountWei}.
+	//
+	// 0x4D is the next free byte after TxTypeSubmitEvidence (0x4C) -- verified against
+	// this file's real, current tip; do not reuse without re-checking.
+	TxTypeLendingWithdrawProtocolFees TxType = 0x4D
+
+	// TxTypeBridgeLock locks ZNHB in the bridge's module escrow so the same amount can be
+	// minted as a wrapped token on another chain (ledger PL-BC-C). tx.Value is the ZNHB
+	// amount; Data is RLP([destChain, destAddress]). Valid only from core's
+	// BridgeActivationHeight; before it the byte is an unknown transaction type.
+	TxTypeBridgeLock TxType = 0x4E
+
+	// TxTypeBridgeRelease pays ZNHB out of the bridge escrow to a recipient, once, for a burn on
+	// the other chain (ledger PL-BC-C). Signed by the configured bridge authority only; tx.Value is
+	// the amount; Data is RLP([burnId, recipient]) and burnId can be used once. Valid only from
+	// BridgeActivationHeight.
+	TxTypeBridgeRelease TxType = 0x4F
+
+	// TxTypeAmmAddLiquidity, TxTypeAmmRemoveLiquidity and TxTypeAmmSwap are the native ZNHB/NHB
+	// constant-product pool (ledger PL-BC-B). Add and remove are signed by the configured
+	// liquidity provider only; anyone may swap, once swaps are opened. Valid only from
+	// AmmActivationHeight; before it the bytes are unknown transaction types.
+	TxTypeAmmAddLiquidity    TxType = 0x50
+	TxTypeAmmRemoveLiquidity TxType = 0x51
+	TxTypeAmmSwap            TxType = 0x52
+
+	// Next free TxType byte is 0x53.
 )
 
 // RequiresSignature reports whether the transaction type must carry an
@@ -790,6 +821,12 @@ func (tx *Transaction) From() ([]byte, error) {
 // PaymasterSponsor recovers the sponsoring paymaster address from the
 // associated signature. A nil result with no error indicates the transaction
 // does not request sponsorship.
+//
+// The signature it checks is over tx.Hash(), the digest the sender's own
+// envelope signature is over too, and tx.Hash() names no sender: the same
+// sponsor signature validates for every sender that signs the same fields, and it
+// is also a valid envelope signature (PL-R5T-22). PaymasterSponsorBound is the
+// check that closes both; the state processor uses it from the configured height.
 func (tx *Transaction) PaymasterSponsor() ([]byte, error) {
 	if len(tx.Paymaster) == 0 {
 		return nil, nil
@@ -797,18 +834,81 @@ func (tx *Transaction) PaymasterSponsor() ([]byte, error) {
 	if tx.PaymasterR == nil || tx.PaymasterS == nil || tx.PaymasterV == nil {
 		return nil, ErrPaymasterSignatureMissing
 	}
-	if tx.PaymasterS.Cmp(secp256k1HalfN) > 0 {
-		return nil, ErrPaymasterSignatureInvalid
+	hash, err := tx.Hash()
+	if err != nil {
+		return nil, err
+	}
+	return tx.recoverPaymasterSponsor(hash)
+}
+
+// paymasterSponsorDomain tags the digest a sponsor signs once the signature is
+// bound to the sender, so a signature over it can never be mistaken for an
+// envelope signature (which is over tx.Hash() alone).
+var paymasterSponsorDomain = []byte("NHB/paymaster-sponsor/v2")
+
+// PaymasterSponsorDigest is what a sponsor signs when the signature is bound to
+// one sender: sha256(domain tag || tx.Hash() || sender). Hash() is not changed, so
+// transaction ids and the sender's own signature are the same under both rules.
+func (tx *Transaction) PaymasterSponsorDigest(sender []byte) ([]byte, error) {
+	if len(sender) != 20 {
+		return nil, errors.New("sponsor digest needs the 20-byte sender address")
 	}
 	hash, err := tx.Hash()
 	if err != nil {
 		return nil, err
 	}
+	h := sha256.New()
+	h.Write(paymasterSponsorDomain)
+	h.Write(hash)
+	h.Write(sender)
+	return h.Sum(nil), nil
+}
+
+// SignPaymasterBound signs the sponsor digest of PaymasterSponsorDigest for
+// sender with the sponsor's key and stores it in the PaymasterR/S/V fields. The
+// sponsor's address must already be in tx.Paymaster.
+func (tx *Transaction) SignPaymasterBound(privKey *ecdsa.PrivateKey, sender []byte) error {
+	digest, err := tx.PaymasterSponsorDigest(sender)
+	if err != nil {
+		return err
+	}
+	sig, err := crypto.Sign(digest, privKey)
+	if err != nil {
+		return err
+	}
+	tx.PaymasterR = new(big.Int).SetBytes(sig[:32])
+	tx.PaymasterS = new(big.Int).SetBytes(sig[32:64])
+	tx.PaymasterV = new(big.Int).SetUint64(uint64(sig[64]) + 27)
+	return nil
+}
+
+// PaymasterSponsorBound recovers the sponsor from a signature over the digest
+// bound to sender (PaymasterSponsorDigest). It fails for a signature made for any
+// other sender, for the older signature over tx.Hash() alone, and for a copy of
+// the fields whose sender differs.
+func (tx *Transaction) PaymasterSponsorBound(sender []byte) ([]byte, error) {
+	if len(tx.Paymaster) == 0 {
+		return nil, nil
+	}
+	if tx.PaymasterR == nil || tx.PaymasterS == nil || tx.PaymasterV == nil {
+		return nil, ErrPaymasterSignatureMissing
+	}
+	digest, err := tx.PaymasterSponsorDigest(sender)
+	if err != nil {
+		return nil, ErrPaymasterSignatureInvalid
+	}
+	return tx.recoverPaymasterSponsor(digest)
+}
+
+func (tx *Transaction) recoverPaymasterSponsor(digest []byte) ([]byte, error) {
+	if tx.PaymasterS.Cmp(secp256k1HalfN) > 0 {
+		return nil, ErrPaymasterSignatureInvalid
+	}
 	sig := make([]byte, 65)
 	copy(sig[32-len(tx.PaymasterR.Bytes()):32], tx.PaymasterR.Bytes())
 	copy(sig[64-len(tx.PaymasterS.Bytes()):64], tx.PaymasterS.Bytes())
 	sig[64] = byte(tx.PaymasterV.Uint64() - 27)
-	pubKey, err := crypto.SigToPub(hash, sig)
+	pubKey, err := crypto.SigToPub(digest, sig)
 	if err != nil {
 		return nil, ErrPaymasterSignatureInvalid
 	}

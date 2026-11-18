@@ -12,6 +12,15 @@ ingress:
     - secretName: api-prod-tls
       hosts:
         - api.nhbcoin.com
+# Deploy precondition: list here the address range of the ingress controller
+# pods, plus the range of any load balancer in front of the controller that
+# adds its own X-Forwarded-For entry. The gateway keys its rate limits on the
+# connecting address, so while this list is empty every client behind the
+# ingress is counted in one bucket per ingress pod. The chart refuses to render
+# until the list is filled in. Use the narrowest range that covers those
+# proxies, never a range that covers every address, and supply the real value
+# for this cluster (the chart does not know it).
+trustedProxies: []
 config:
   content: |
     listen: ":8080"
@@ -32,6 +41,7 @@ config:
       - id: consensus
         requestsPerMinute: 1200
         burst: 200
+    trustedProxies: {{ toJson .Values.trustedProxies }}
     auth:
       # Keep authentication enabled for production traffic.
       enabled: true

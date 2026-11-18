@@ -70,43 +70,301 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 		},
 		"epoch rewards paid by stake from another epoch than the live validators": {
 			func(s string) string {
-				return strings.Replace(s, "RewardsByStakeFromEpoch = 0", "RewardsByStakeFromEpoch = 16700", 1)
+				return strings.Replace(s, "RewardsByStakeFromEpoch = 17280", "RewardsByStakeFromEpoch = 16700", 1)
 			},
 			"RewardsByStakeFromEpoch",
 		},
 		"POS expiry sweep skip switched on": {
 			func(s string) string {
-				return strings.Replace(s, "POSSweepSkipActivationHeight = 0", "POSSweepSkipActivationHeight = 1800000", 1)
+				return strings.Replace(s, "POSSweepSkipActivationHeight = 1718500", "POSSweepSkipActivationHeight = 1800000", 1)
 			},
 			"POSSweepSkipActivationHeight",
 		},
 		"POS hold unstake guard switched on": {
 			func(s string) string {
-				return strings.Replace(s, "POSHoldUnstakeGuardActivationHeight = 0", "POSHoldUnstakeGuardActivationHeight = 1800000", 1)
+				return strings.Replace(s, "POSHoldUnstakeGuardActivationHeight = 1718500", "POSHoldUnstakeGuardActivationHeight = 1800000", 1)
 			},
 			"POSHoldUnstakeGuardActivationHeight",
 		},
 		"governance credit preservation switched on": {
 			func(s string) string {
-				return strings.Replace(s, "GovCreditPreservationActivationHeight = 0", "GovCreditPreservationActivationHeight = 1800000", 1)
+				return strings.Replace(s, "GovCreditPreservationActivationHeight = 1719700", "GovCreditPreservationActivationHeight = 1800000", 1)
 			},
 			"GovCreditPreservationActivationHeight",
 		},
 		"NHB fee route aliasing fix switched on": {
 			func(s string) string {
-				return strings.Replace(s, "FeeRouteAliasActivationHeight = 0", "FeeRouteAliasActivationHeight = 1800000", 1)
+				return strings.Replace(s, "FeeRouteAliasActivationHeight = 1720900", "FeeRouteAliasActivationHeight = 1800000", 1)
 			},
 			"FeeRouteAliasActivationHeight",
 		},
 		"owner-scoped fixed-term lending IDs switched on": {
 			func(s string) string {
-				return strings.Replace(s, "LendingFixedTermIDActivationHeight = 0", "LendingFixedTermIDActivationHeight = 1800000", 1)
+				return strings.Replace(s, "LendingFixedTermIDActivationHeight = 1723300", "LendingFixedTermIDActivationHeight = 1800000", 1)
 			},
 			"LendingFixedTermIDActivationHeight",
 		},
+		"NHB supply genesis correction switched on": {
+			func(s string) string {
+				return strings.Replace(s, "NHBSupplyGenesisCorrectionActivationHeight = 0", "NHBSupplyGenesisCorrectionActivationHeight = 1800000", 1)
+			},
+			"NHBSupplyGenesisCorrectionActivationHeight",
+		},
+		"monthly free tier for plain transfers switched on": {
+			func(s string) string {
+				return strings.Replace(s, "TransferMonthlyFreeTierActivationHeight = 0", "TransferMonthlyFreeTierActivationHeight = 1800000", 1)
+			},
+			"TransferMonthlyFreeTierActivationHeight",
+		},
+		"base-reward budget floor switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LoyaltyBudgetFloorActivationHeight = 0", "LoyaltyBudgetFloorActivationHeight = 1800000", 1)
+			},
+			"LoyaltyBudgetFloorActivationHeight",
+		},
+		"governance weight snapshot for delegators and engaged accounts switched on": {
+			func(s string) string {
+				return strings.Replace(s, "PotsoGovernanceWeightActivationHeight = 0", "PotsoGovernanceWeightActivationHeight = 1800000", 1)
+			},
+			"PotsoGovernanceWeightActivationHeight",
+		},
+		"zero-value validator register and deregister consume the nonce": {
+			func(s string) string {
+				return strings.Replace(s, "ValidatorFlagNonceActivationHeight = 2726000", "ValidatorFlagNonceActivationHeight = 1732000", 1)
+			},
+			"ValidatorFlagNonceActivationHeight",
+		},
+		"mint vouchers naming the running chain id accepted": {
+			func(s string) string {
+				return strings.Replace(s, "MintRunningChainIDActivationHeight = 0", "MintRunningChainIDActivationHeight = 1733000", 1)
+			},
+			"MintRunningChainIDActivationHeight",
+		},
+		"mint vouchers naming the retired Phase E chain id refused": {
+			func(s string) string {
+				return strings.Replace(s, "MintPhaseEChainIDRetireHeight = 0", "MintPhaseEChainIDRetireHeight = 1734000", 1)
+			},
+			"MintPhaseEChainIDRetireHeight",
+		},
+		"transactions must carry the network chain id": {
+			func(s string) string {
+				return strings.Replace(s, "TxNetworkChainIDActivationHeight = 0", "TxNetworkChainIDActivationHeight = 1735000", 1)
+			},
+			"TxNetworkChainIDActivationHeight",
+		},
+		"consensus votes bound to the genesis hash": {
+			func(s string) string {
+				return strings.Replace(s, "VoteChainBindingActivationHeight = 2726000", "VoteChainBindingActivationHeight = 1736000", 1)
+			},
+			"VoteChainBindingActivationHeight",
+		},
+		"slashed validators re-evaluated in the slashing block": {
+			func(s string) string {
+				return strings.Replace(s, "SlashEligibilityRefreshActivationHeight = 2726000", "SlashEligibilityRefreshActivationHeight = 1800000", 1)
+			},
+			"SlashEligibilityRefreshActivationHeight",
+		},
+		"slash reaching pending unbonds switched on": {
+			func(s string) string {
+				return strings.Replace(s, "SlashPendingUnbondsActivationHeight = 2726000", "SlashPendingUnbondsActivationHeight = 1800000", 1)
+			},
+			"SlashPendingUnbondsActivationHeight",
+		},
+		"evidence intake guard switched on": {
+			func(s string) string {
+				return strings.Replace(s, "EvidenceIntakeGuardActivationHeight = 2726000", "EvidenceIntakeGuardActivationHeight = 1800000", 1)
+			},
+			"EvidenceIntakeGuardActivationHeight",
+		},
+		"stake reward rate read from the chain switched on": {
+			func(s string) string {
+				return strings.Replace(s, "StakeAPRFromStateActivationHeight = 0", "StakeAPRFromStateActivationHeight = 1800000", 1)
+			},
+			"StakeAPRFromStateActivationHeight",
+		},
+		"validator admission guard switched on": {
+			func(s string) string {
+				return strings.Replace(s, "ValidatorAdmissionGuardActivationHeight = 0", "ValidatorAdmissionGuardActivationHeight = 1800000", 1)
+			},
+			"ValidatorAdmissionGuardActivationHeight",
+		},
+		"validator admission probation set": {
+			func(s string) string {
+				return strings.Replace(s, "ValidatorAdmissionProbationSeconds = 0", "ValidatorAdmissionProbationSeconds = 1800000", 1)
+			},
+			"ValidatorAdmissionProbationSeconds",
+		},
+		"treasury shortfall detection switched on": {
+			func(s string) string {
+				return strings.Replace(s, "PotsoTreasuryShortfallActivationHeight = 0", "PotsoTreasuryShortfallActivationHeight = 1800000", 1)
+			},
+			"PotsoTreasuryShortfallActivationHeight",
+		},
+		"lending accounting fixes switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LendingAccountingFixesActivationHeight = 0", "LendingAccountingFixesActivationHeight = 1800000", 1)
+			},
+			"LendingAccountingFixesActivationHeight",
+		},
+		"lending pool limits switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LendingPoolLimitsActivationHeight = 0", "LendingPoolLimitsActivationHeight = 1800000", 1)
+			},
+			"LendingPoolLimitsActivationHeight",
+		},
+		"lending pool count limit set": {
+			func(s string) string {
+				return strings.Replace(s, "LendingMaxPools = 0", "LendingMaxPools = 1800000", 1)
+			},
+			"LendingMaxPools",
+		},
+		"lending pool id length limit set": {
+			func(s string) string {
+				return strings.Replace(s, "LendingPoolIDMaxLength = 0", "LendingPoolIDMaxLength = 1800000", 1)
+			},
+			"LendingPoolIDMaxLength",
+		},
+		"lending reference-price guards switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LendingRefPriceGuardsActivationHeight = 0", "LendingRefPriceGuardsActivationHeight = 1800000", 1)
+			},
+			"LendingRefPriceGuardsActivationHeight",
+		},
+		"lending reference-price future bound set": {
+			func(s string) string {
+				return strings.Replace(s, "LendingRefPriceMaxAheadSeconds = 0", "LendingRefPriceMaxAheadSeconds = 1800000", 1)
+			},
+			"LendingRefPriceMaxAheadSeconds",
+		},
+		"lending reference-price age bound set": {
+			func(s string) string {
+				return strings.Replace(s, "LendingRefPriceMaxAgeSeconds = 0", "LendingRefPriceMaxAgeSeconds = 1800000", 1)
+			},
+			"LendingRefPriceMaxAgeSeconds",
+		},
+		"lending risk limits switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LendingRiskActivationHeight = 0", "LendingRiskActivationHeight = 1800000", 1)
+			},
+			"LendingRiskActivationHeight",
+		},
+		"lending protocol fee withdrawal switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LendingFeeWithdrawActivationHeight = 0", "LendingFeeWithdrawActivationHeight = 1800000", 1)
+			},
+			"LendingFeeWithdrawActivationHeight",
+		},
+		"sponsor signature bound to the sender switched on": {
+			func(s string) string {
+				return strings.Replace(s, "PaymasterSponsorBindingActivationHeight = 0", "PaymasterSponsorBindingActivationHeight = 1800000", 1)
+			},
+			"PaymasterSponsorBindingActivationHeight",
+		},
+		"loyalty reward-time paymaster consent switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LoyaltyPaymasterConsentActivationHeight = 0", "LoyaltyPaymasterConsentActivationHeight = 1800000", 1)
+			},
+			"LoyaltyPaymasterConsentActivationHeight",
+		},
+		"loyalty per-counterparty reward cap switched on": {
+			func(s string) string {
+				return strings.Replace(s, "LoyaltyCounterpartyCapActivationHeight = 0", "LoyaltyCounterpartyCapActivationHeight = 1800000", 1)
+			},
+			"LoyaltyCounterpartyCapActivationHeight",
+		},
+		"buyback minimum ask raised": {
+			func(s string) string {
+				return strings.Replace(s, "BuybackMinAskActivationHeight = 0", "BuybackMinAskActivationHeight = 1800000", 1)
+			},
+			"BuybackMinAskActivationHeight",
+		},
+		"subscription billing stops while the module is paused": {
+			func(s string) string {
+				return strings.Replace(s, "SubscriptionsPauseSettlementActivationHeight = 0", "SubscriptionsPauseSettlementActivationHeight = 1800000", 1)
+			},
+			"SubscriptionsPauseSettlementActivationHeight",
+		},
+		"subscription charge history read through from the old key": {
+			func(s string) string {
+				return strings.Replace(s, "SubscriptionsChargeHistoryMigrationActivationHeight = 0", "SubscriptionsChargeHistoryMigrationActivationHeight = 1800000", 1)
+			},
+			"SubscriptionsChargeHistoryMigrationActivationHeight",
+		},
+		"sponsored NHB transfer fee credited to the collector": {
+			func(s string) string {
+				return strings.Replace(s, "SponsoredTransferFeeCreditActivationHeight = 2674600", "SponsoredTransferFeeCreditActivationHeight = 1800000", 1)
+			},
+			"SponsoredTransferFeeCreditActivationHeight",
+		},
+		"voucher mint budget read only from signed fields": {
+			func(s string) string {
+				return strings.Replace(s, "SwapVoucherSignedBudgetActivationHeight = 2674600", "SwapVoucherSignedBudgetActivationHeight = 1800000", 1)
+			},
+			"SwapVoucherSignedBudgetActivationHeight",
+		},
+		"buyback epoch with no computable price refunds its asks": {
+			func(s string) string {
+				return strings.Replace(s, "BuybackUnpriceableEpochRefundActivationHeight = 2674600", "BuybackUnpriceableEpochRefundActivationHeight = 1800000", 1)
+			},
+			"BuybackUnpriceableEpochRefundActivationHeight",
+		},
+		"uniform transfer fee for fee-domain transfers": {
+			func(s string) string {
+				return strings.Replace(s, "UniformTransferFeeActivationHeight = 2770000", "UniformTransferFeeActivationHeight = 1800000", 1)
+			},
+			"UniformTransferFeeActivationHeight",
+		},
+		"transfer fee schedule under governance": {
+			func(s string) string {
+				return strings.Replace(s, "TransferFeeGovernanceActivationHeight = 2770000", "TransferFeeGovernanceActivationHeight = 1800000", 1)
+			},
+			"TransferFeeGovernanceActivationHeight",
+		},
+		"transfer fee schedule delay": {
+			func(s string) string {
+				return strings.Replace(s, "TransferFeeGovernanceDelayBlocks = 41760", "TransferFeeGovernanceDelayBlocks = 5000", 1)
+			},
+			"TransferFeeGovernanceDelayBlocks",
+		},
+		"buyback price guard switched on": {
+			func(s string) string {
+				return strings.Replace(s, "BuybackPriceGuardActivationHeight = 2770000", "BuybackPriceGuardActivationHeight = 1800000", 1)
+			},
+			"BuybackPriceGuardActivationHeight",
+		},
+		"epoch settlement failsafe switched on": {
+			func(s string) string {
+				return strings.Replace(s, "EpochSettlementFailsafeActivationHeight = 2770000", "EpochSettlementFailsafeActivationHeight = 1800000", 1)
+			},
+			"EpochSettlementFailsafeActivationHeight",
+		},
+		"transfer fee strict allowance": {
+			func(s string) string {
+				return strings.Replace(s, "TransferFeeStrictAllowanceActivationHeight = 2770000", "TransferFeeStrictAllowanceActivationHeight = 1800000", 1)
+			},
+			"TransferFeeStrictAllowanceActivationHeight",
+		},
+		"sale reference switched on": {
+			func(s string) string {
+				return strings.Replace(s, "SaleReferenceActivationHeight = 0", "SaleReferenceActivationHeight = 1800000", 1)
+			},
+			"SaleReferenceActivationHeight",
+		},
+		"sale reference maximum age": {
+			func(s string) string {
+				return strings.Replace(s, "SaleReferenceMaxAgeSeconds = 0", "SaleReferenceMaxAgeSeconds = 3600", 1)
+			},
+			"SaleReferenceMaxAgeSeconds",
+		},
+		"sale reference step bound": {
+			func(s string) string {
+				return strings.Replace(s, "SaleReferenceMaxStepBps = 0", "SaleReferenceMaxStepBps = 500", 1)
+			},
+			"SaleReferenceMaxStepBps",
+		},
 		"duplicate parameter keys refused from a time": {
 			func(s string) string {
-				return strings.Replace(s, "RejectAmbiguousParamKeysFromUnix = 0", "RejectAmbiguousParamKeysFromUnix = 1900000000", 1)
+				return strings.Replace(s, "RejectAmbiguousParamKeysFromUnix = 1792936800", "RejectAmbiguousParamKeysFromUnix = 1900000000", 1)
 			},
 			"[governance] RejectAmbiguousParamKeysFromUnix",
 		},
@@ -115,6 +373,24 @@ func TestConfigWithADriftedValueIsRefused(t *testing.T) {
 				return strings.Replace(s, "PayoutReceiptActivationHeight = 0", "PayoutReceiptActivationHeight = 1800000", 1)
 			},
 			"[swap] PayoutReceiptActivationHeight",
+		},
+		"bridge escrow switched on": {
+			func(s string) string {
+				return strings.Replace(s, "BridgeActivationHeight = 0", "BridgeActivationHeight = 1800000", 1)
+			},
+			"[bridge] BridgeActivationHeight",
+		},
+		"native pool switched on": {
+			func(s string) string {
+				return strings.Replace(s, "AmmActivationHeight = 0", "AmmActivationHeight = 1800000", 1)
+			},
+			"[amm] AmmActivationHeight",
+		},
+		"native pool swaps opened": {
+			func(s string) string {
+				return strings.Replace(s, "SwapStartHeight = 0", "SwapStartHeight = 1800000", 1)
+			},
+			"[amm] SwapStartHeight",
 		},
 		"potso treasury": {
 			func(s string) string {

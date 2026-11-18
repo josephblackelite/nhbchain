@@ -1,6 +1,6 @@
 # POTSO Reward Payout Modes
 
-The reward module has two settlement modes, chosen by `[potso.rewards].PayoutMode` (`auto` or `claim`). Both use the same budget, weights and winner selection ([potso_rewards.md](../potso_rewards.md)). They differ in when ZNHB leaves the treasury account. Only auto mode works end to end on a running node. Code: `processPotsoRewardEpoch` (`core/state_transition.go`), `Node.PotsoRewardClaim` (`core/node.go`).
+The reward module has two settlement modes, chosen by `[potso.rewards].PayoutMode` (`auto` or `claim`). Both use the same budget, weights and winner selection ([potso_rewards.md](../potso_rewards.md)). They differ in when ZNHB leaves the treasury account. Only auto mode works end to end on a running node, and it is the only one a node accepts: a configuration that selects `claim` is refused at start-up (see [Configuration](#configuration)). Code: `processPotsoRewardEpoch` (`core/state_transition.go`), `Node.PotsoRewardClaim` (`core/node.go`).
 
 ## Comparison
 
@@ -17,7 +17,7 @@ The treasury is debited and winners are credited during block execution. If the 
 
 ## Claim mode
 
-At epoch processing the node records, for each winner, the amount and `claimed = false`, and emits `potso.reward.ready`. Nothing then pays these records on a running node:
+At epoch processing the node records, for each winner, the amount and `claimed = false`, and emits `potso.reward.ready`. A node refuses to select this mode, so this is the behaviour of code kept in the tree for a future settlement transaction, not of any reachable configuration. Nothing then pays these records on a running node:
 
 - The only RPC that settled them, `potso_reward_claim`, is retired and answers HTTP 410 (code `-32060`) ([rewards-api.md](rewards-api.md)). `nhb-cli potso reward claim` is retired too.
 - `Node.PotsoRewardClaim` (`core/node.go`) still exists and is exercised by tests, but no RPC or CLI calls it. Its comment says it must not be exposed again, because it writes to the validator's live state outside block execution.
@@ -31,13 +31,13 @@ What `Node.PotsoRewardClaim` does when called in-process, for reference: it fail
 
 ```toml
 [potso.rewards]
-PayoutMode = "auto"        # or "claim"
+PayoutMode = "auto"        # "claim" is refused and the node does not start
 TreasuryAddress = "znhb1..."
 EmissionPerEpoch = "1000000000000000000"
 MinPayoutWei = "1000000000000000"
 ```
 
-`Config.PotsoRewardConfig()` normalises the mode: `claim` (any case) selects claim mode and every other value, including an empty one, selects `auto`. Both `config.toml` and `config/prod.toml` in the repository set `auto`. The mode is read at start-up; a restart with a different mode applies to epochs processed afterwards, and each stored claim keeps the mode it was created with. Key names, other keys and defaults: [config.md](config.md).
+`Config.PotsoRewardConfig()` normalises the mode: `claim` (any case) is recognised and then refused with `ErrClaimModeUnavailable`, and every other value, including an empty one, selects `auto`. `cmd/nhb` and `cmd/consensusd` stop at start-up on that error, and `StateProcessor.SetPotsoRewardConfig` returns the same error and keeps the configuration already in force. Both `config.toml` and `config/prod.toml` in the repository set `auto`. The mode is read at start-up; a restart with a different mode applies to epochs processed afterwards, and each stored claim keeps the mode it was created with. Key names, other keys and defaults: [config.md](config.md).
 
 ## Failure handling
 

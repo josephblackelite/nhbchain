@@ -6,8 +6,6 @@ We operate a coordinated vulnerability disclosure program to keep NHBChain parti
 - **Responsible disclosure:** Reporting instructions, SLAs, and embargo expectations are documented in [`docs/security/disclosure.md`](docs/security/disclosure.md).
 - **Audit readiness:** External assessors can access frozen commits, build steps, and fixtures via [`docs/security/audit-readiness.md`](docs/security/audit-readiness.md).
 - **PGP key:** Our repository key and fingerprint live in [`docs/security/repository-pgp-key.asc`](docs/security/repository-pgp-key.asc).
-- **Reports and their status:** Every researcher who has reported to us, and where each report stands, is listed in [`docs/security/bounty-status.md`](docs/security/bounty-status.md).
-- **Acknowledgments:** We credit researchers who report real issues in [`docs/security/acknowledgments.md`](docs/security/acknowledgments.md).
 
 To report a vulnerability, encrypt your findings with the repository PGP key and email `security@nhbcoin.com`. For urgent issues, escalate via Signal at `+13234559568`.
 

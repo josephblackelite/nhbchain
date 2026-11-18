@@ -15,9 +15,9 @@ The repository's `config.toml` carries a full example (`EmissionPerEpoch = "5000
 | `TreasuryAddress` | bech32 (`nhb1...` or `znhb1...`) | Account that funds payouts. Required when rewards are enabled. | zero address |
 | `MaxWinnersPerEpoch` | uint | Cap on winners per epoch. `0` means no cap. | `0` |
 | `CarryRemainder` | bool | Parsed and stored in the config struct, but nothing reads it. | `true` |
-| `PayoutMode` | string | `auto` or `claim` (case-insensitive; any other non-empty value is normalised to `auto` by `Normalise`). The node has no working way to collect a `claim`-mode reward, see [payout modes](rewards-modes.md). | `auto` |
+| `PayoutMode` | string | `auto`. `claim` (case-insensitive) is refused: `Config.PotsoRewardConfig` and `SetPotsoRewardConfig` return `ErrClaimModeUnavailable` and the node does not start, because nothing credits the claim records that mode creates, see [payout modes](rewards-modes.md). Any other non-empty value is normalised to `auto` by `Normalise`. | `auto` |
 
-Rewards are enabled only when `EpochLengthBlocks > 0` and `EmissionPerEpoch > 0` (`RewardConfig.Enabled`, `maybeProcessPotsoRewards`). `RewardConfig.Validate` also rejects: alpha or `MaxUserShareBps` above 10000, negative amounts, `EpochLengthBlocks > 0` with a non-positive emission, and an enabled config with a zero `TreasuryAddress`.
+Rewards are enabled only when `EpochLengthBlocks > 0` and `EmissionPerEpoch > 0` (`RewardConfig.Enabled`, `maybeProcessPotsoRewards`). `RewardConfig.Validate` also rejects: alpha or `MaxUserShareBps` above 10000, negative amounts, `EpochLengthBlocks > 0` with a non-positive emission, and an enabled config with a zero `TreasuryAddress`. The claim payout mode is refused by a separate check (`RewardConfig.CheckPayoutModeAvailable`), applied where a configuration is accepted.
 
 The TOML key is `EmissionPerEpoch`. The governance parameter name `potso.rewards.EmissionPerEpochWei` (see below) does not match it.
 

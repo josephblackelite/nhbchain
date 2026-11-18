@@ -119,6 +119,11 @@ type Engine struct {
 	// lock (lockedRound/lockedBlockHash) is durably mirrored on every
 	// change; see lock_snapshot.go.
 	lockSnapshotPath string
+
+	// voteBinding says from which height a vote is signed and checked over the network's
+	// genesis hash (PL-R5T-31). The zero value keeps the legacy digest at every height. Set
+	// once, before the engine starts, by WithVoteBinding.
+	voteBinding types.VoteBinding
 	// polkaHistory records, for each round within the CURRENT height, the
 	// block and the actual signed prevotes that constituted that round's
 	// Polka (if any) -- this validator's own bookkeeping, consulted only
@@ -218,6 +223,19 @@ type Engine struct {
 	dropNotes     map[string]*dropNote
 	proposerCache map[proposerKey][]byte
 	proposerEpoch uint64
+	// weakJumpHeight and weakJumpRounds bound the last rule of supportedRoundLocked --
+	// the one that follows a validator ahead without the more-than-a-third bar,
+	// when otherwise no quorum can be made at all (see admitWeakRoundJumpLocked):
+	// at most maxFutureRounds distinct rounds are granted that way per height,
+	// however many times the shortfall it acts on comes and goes while the height
+	// runs. weakJumpRounds is for weakJumpHeight only.
+	weakJumpHeight uint64
+	weakJumpRounds map[int]bool
+	// weakJumpSnapshotPath, when set via WithWeakJumpSnapshotPath, is where
+	// weakJumpHeight/weakJumpRounds are durably mirrored on every grant; see
+	// weak_jump_snapshot.go. A blank path (the default) keeps the bound in memory
+	// only, which still protects a running process but resets it on a restart.
+	weakJumpSnapshotPath string
 	// earlyVotes holds the votes of the current round that arrived before a
 	// proposal was accepted, keyed by validator and vote type (guarded by mu).
 	earlyVotes map[string]*SignedVote
@@ -396,6 +414,20 @@ func WithLockSnapshotPath(path string) Option {
 	}
 }
 
+// WithVoteBinding makes the engine sign, and check, every vote at or above fromHeight over
+// the network's genesis hash as well as the vote payload (ledger PL-R5T-31): the votes it
+// receives and the polka proofs it learns are held to the same rule. A zero fromHeight (the
+// default when this option is never applied) keeps the legacy digest at every height. A
+// chain rule: the same value on every validator, restarted together.
+func WithVoteBinding(genesis []byte, fromHeight uint64) Option {
+	return func(e *Engine) {
+		if e == nil {
+			return
+		}
+		e.voteBinding = types.VoteBinding{Genesis: append([]byte(nil), genesis...), FromHeight: fromHeight}
+	}
+}
+
 func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broadcaster, opts ...Option) *Engine {
 	validatorSet := node.GetValidatorSet()
 	totalPower := big.NewInt(0)
@@ -514,6 +546,13 @@ func NewEngine(node NodeInterface, key *crypto.PrivateKey, broadcaster p2p.Broad
 	// and can sign a different block for a round it already voted in.
 	engine.restoreSignState()
 
+	// Restore the weak-round-jump bound: the rounds admitWeakRoundJumpLocked has
+	// already granted at this height. Without it a restart resets the bound to
+	// zero while the height itself has not changed, and a validator under a
+	// third of the power can win a fresh maxFutureRounds every time this one
+	// restarts (see round_sync.go's admitWeakRoundJumpLocked doc comment).
+	engine.restoreWeakJumpState()
+
 	return engine
 }
 
@@ -572,6 +611,9 @@ func (e *Engine) runRound() {
 		stopTimer(commitTimer)
 	}()
 
+	// The proposals this round has validated; a local, so it starts empty in every round.
+	var validations proposalValidations
+
 	for {
 		select {
 		case <-proposalTimer.C:
@@ -615,6 +657,17 @@ func (e *Engine) runRound() {
 			// the same choice this validator makes to decide whether to propose.
 			if len(proposer) > 0 && !bytes.Equal(sp.Proposer, proposer) {
 				fmt.Printf("ignoring a proposal for height %d round %d from %x: this round's proposer is %x\n", height, round, sp.Proposer, proposer)
+				continue
+			}
+			// The same proposal may be queued more than once (it is public, and
+			// the buffer replays what arrived early). Validating it again cannot
+			// change the answer and executes the whole block with the node's state
+			// locked, so each is validated once, and only a few different ones from
+			// a signer in a round (round_sync.go, proposalValidations).
+			if reason := validations.admit(sp); reason != "" {
+				e.mu.Lock()
+				e.noteDropLocked(reason, "proposal", sp.Proposer, height, round)
+				e.mu.Unlock()
 				continue
 			}
 			if err := e.node.ValidateBlock(sp.Proposal.Block); err != nil {
@@ -838,6 +891,9 @@ func (e *Engine) HandleProposal(p *SignedProposal) error {
 	if !isValidator {
 		return fmt.Errorf("proposal from non-validator %x", p.Proposer)
 	}
+	if p.Proposal.Block.Header.Height == height && p.Proposal.Round <= round {
+		e.noteHeard(p.Proposer, height, p.Proposal.Round)
+	}
 
 	// A proposal that proves a polka teaches this validator the block and the
 	// polka whoever sent it and whichever round it is for (round_sync.go).
@@ -895,6 +951,9 @@ func (e *Engine) HandleVote(v *SignedVote) error {
 	e.mu.RUnlock()
 	if !isValidator {
 		return fmt.Errorf("vote from non-validator %x", v.Validator)
+	}
+	if v.Vote.Height == height && v.Vote.Round <= round {
+		e.noteHeard(v.Validator, height, v.Vote.Round)
 	}
 
 	if v.Vote.Height != height || v.Vote.Round < round {
@@ -1135,7 +1194,7 @@ func (e *Engine) lockCompliesLocked(proposal *Proposal, blockHash []byte, height
 // past vr (see the Engine struct's lockedBlockHash doc comment for why that
 // distinction matters). Must be called with e.mu held.
 func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash []byte, height uint64) bool {
-	return verifyPolkaProof(proof, vr, blockHash, height, e.validatorSet, e.totalVotingPower)
+	return verifyPolkaProofBound(proof, vr, blockHash, height, e.validatorSet, e.totalVotingPower, e.voteBinding)
 }
 
 // verifyPolkaProof is verifyPolkaProofLocked over a validator set and a total
@@ -1143,10 +1202,21 @@ func (e *Engine) verifyPolkaProofLocked(proof []*SignedVote, vr int, blockHash [
 // copy of them can check a proof with no lock held: a proof costs a signature
 // check for each vote in it.
 func verifyPolkaProof(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int, total *big.Int) bool {
+	return verifyPolkaProofBound(proof, vr, blockHash, height, validators, total, types.VoteBinding{})
+}
+
+// verifyPolkaProofBound is verifyPolkaProof under a vote binding (PL-R5T-31).
+func verifyPolkaProofBound(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int, total *big.Int, binding types.VoteBinding) bool {
 	if len(proof) == 0 || total == nil || total.Sign() <= 0 {
 		return false
 	}
-	_, signedPower := countedPolkaVotes(proof, vr, blockHash, height, validators)
+	// A proof holds one vote per validator at most (it is built from a map of the
+	// votes by validator); a longer one is refused before any signature is checked,
+	// as learnValidBlock does, since only the checking of the extra entries costs.
+	if len(proof) > len(validators) {
+		return false
+	}
+	_, signedPower := countedPolkaVotesBound(proof, vr, blockHash, height, validators, binding)
 	return types.HasQuorum(signedPower, total)
 }
 
@@ -1154,6 +1224,11 @@ func verifyPolkaProof(proof []*SignedVote, vr int, blockHash []byte, height uint
 // round vr for blockHash at height -- one for each validator of the set, and only
 // if its signature verifies -- and the voting power they hold.
 func countedPolkaVotes(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int) ([]*SignedVote, *big.Int) {
+	return countedPolkaVotesBound(proof, vr, blockHash, height, validators, types.VoteBinding{})
+}
+
+// countedPolkaVotesBound is countedPolkaVotes under a vote binding (PL-R5T-31).
+func countedPolkaVotesBound(proof []*SignedVote, vr int, blockHash []byte, height uint64, validators map[string]*big.Int, binding types.VoteBinding) ([]*SignedVote, *big.Int) {
 	seen := make(map[string]struct{}, len(proof))
 	signedPower := big.NewInt(0)
 	var counted []*SignedVote
@@ -1174,7 +1249,7 @@ func countedPolkaVotes(proof []*SignedVote, vr int, blockHash []byte, height uin
 		if !isValidator || weight == nil || weight.Sign() <= 0 {
 			continue
 		}
-		if err := verifyVoteSignature(sv); err != nil {
+		if err := verifyVoteSignatureBound(sv, binding); err != nil {
 			continue
 		}
 		seen[key] = struct{}{}
@@ -1268,7 +1343,7 @@ func (e *Engine) commit() bool {
 	if err := e.node.CommitBlock(block); err != nil {
 		fmt.Printf("failed to commit block: %v\n", err)
 		e.broadcastPrevoteNilLocked(fmt.Sprintf("execution failure: %v", err)) // assumes lock is held
-		e.resetProposalStateLocked()                                          // reset for next round; lock/valid state deliberately untouched, see resetLockStateLocked
+		e.resetProposalStateLocked()                                           // reset for next round; lock/valid state deliberately untouched, see resetLockStateLocked
 		return false
 	}
 	e.noteCommitSeen()
@@ -1461,11 +1536,16 @@ func (e *Engine) broadcastVote(vote *SignedVote) {
 // already signed for a later round -- gets errConflictingVote and no signature,
 // whichever path asked. See sign_state.go.
 func (e *Engine) createVote(t VoteType, blockHash []byte, round int, height uint64) (*SignedVote, error) {
+	vote := &Vote{BlockHash: blockHash, Round: round, Type: t, Height: height}
+	// The digest comes first: a vote that cannot be signed (the vote binding is active and the
+	// genesis hash is unknown) must not claim the slot either.
+	voteHash, err := e.voteBinding.Digest(vote.Height, vote.bytes())
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign vote: %w", err)
+	}
 	if err := e.claimVote(t, blockHash, round, height); err != nil {
 		return nil, err
 	}
-	vote := &Vote{BlockHash: blockHash, Round: round, Type: t, Height: height}
-	voteHash := sha256.Sum256(vote.bytes())
 	sig, err := ethcrypto.Sign(voteHash[:], e.privKey.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign vote: %w", err)
@@ -1981,16 +2061,26 @@ func (e *Engine) verifySignedProposal(p *SignedProposal) error {
 }
 
 func (e *Engine) verifySignedVote(v *SignedVote) error {
-	return verifyVoteSignature(v)
+	return verifyVoteSignatureBound(v, e.voteBinding)
 }
 
 // verifyVoteSignature checks that v is signed by the validator it names. It reads
 // nothing of the engine's state.
 func verifyVoteSignature(v *SignedVote) error {
+	return verifyVoteSignatureBound(v, types.VoteBinding{})
+}
+
+// verifyVoteSignatureBound is verifyVoteSignature under a vote binding (PL-R5T-31): a vote at
+// or above the binding height must be signed over the genesis hash, one below it over the
+// legacy digest only.
+func verifyVoteSignatureBound(v *SignedVote, binding types.VoteBinding) error {
 	if v == nil || v.Vote == nil || v.Signature == nil {
 		return fmt.Errorf("invalid signed vote")
 	}
-	hash := sha256.Sum256(v.Vote.bytes())
+	hash, err := binding.Digest(v.Vote.Height, v.Vote.bytes())
+	if err != nil {
+		return err
+	}
 	return verifySignature(hash[:], v.Signature, v.Validator)
 }
 

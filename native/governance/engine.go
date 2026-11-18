@@ -128,6 +128,16 @@ type Engine struct {
 	// rejectAmbiguousParamKeysFromUnix mirrors the policy field of the same
 	// name; zero means the check is off.
 	rejectAmbiguousParamKeysFromUnix uint64
+
+	// feeSchedule is the block context of ProposalKindFeeParams (see
+	// SetFeeSchedule); the zero value leaves that kind unavailable.
+	feeSchedule FeeScheduleHost
+	// buybackPriceGuardFromHeight is the first block height at which a buyback
+	// discount or safety margin that makes the highest buyback price zero is
+	// refused; zero means the check is off. blockHeightFn reports the height of
+	// the block being executed. See SetBuybackPriceGuard.
+	buybackPriceGuardFromHeight uint64
+	blockHeightFn               func() uint64
 }
 
 // NewEngine constructs a governance engine with default no-op dependencies.
@@ -294,6 +304,82 @@ func (e *Engine) SetNowFunc(now func() time.Time) {
 		return
 	}
 	e.nowFn = now
+}
+
+// SetBuybackPriceGuard sets the first block height from which the engine refuses
+// a buyback discount or safety margin that would make the highest buyback price
+// zero (see paramStoreSet and checkBuybackPriceBps), and the function that reports
+// the height of the block being executed. A zero fromHeight, or a nil function,
+// leaves the engine as it was at every height. A chain rule: the same value on
+// every validator.
+func (e *Engine) SetBuybackPriceGuard(fromHeight uint64, blockHeight func() uint64) {
+	if e == nil {
+		return
+	}
+	e.buybackPriceGuardFromHeight = fromHeight
+	e.blockHeightFn = blockHeight
+}
+
+// buybackPriceGuardActive reports whether, in the block being executed, a buyback
+// discount or safety margin of 10000 basis points is refused (PL-EXT-28).
+func (e *Engine) buybackPriceGuardActive() bool {
+	if e == nil || e.buybackPriceGuardFromHeight == 0 || e.blockHeightFn == nil {
+		return false
+	}
+	return e.blockHeightFn() >= e.buybackPriceGuardFromHeight
+}
+
+// checkBuybackPriceBps refuses a discount or safety margin that makes the highest
+// price the buyback may pay exactly zero: that price is the lower of the curve
+// price after the discount and the signed reference price after the margin, so
+// either value at 10000 basis points zeroes it (core/tokenomics/buyback,
+// MaxBuybackPrice), and the epoch settlement then cannot use it.
+func checkBuybackPriceBps(discountBps, safetyMarginBps uint64) error {
+	if discountBps >= maxBasisPoints {
+		return fmt.Errorf("governance: discountBps %d would make the highest buyback price zero; it must be < %d", discountBps, maxBasisPoints)
+	}
+	if safetyMarginBps >= maxBasisPoints {
+		return fmt.Errorf("governance: safetyMarginBps %d would make the highest buyback price zero; it must be < %d", safetyMarginBps, maxBasisPoints)
+	}
+	return nil
+}
+
+// guardBuybackParams applies checkBuybackPriceBps to a parsed buyback parameters
+// payload when the guard is in force.
+func (e *Engine) guardBuybackParams(payload *BuybackParamsPayload) error {
+	if payload == nil || !e.buybackPriceGuardActive() {
+		return nil
+	}
+	return checkBuybackPriceBps(uint64(payload.DiscountBps), uint64(payload.SafetyMarginBps))
+}
+
+// paramStoreSet is the one function every write of the engine to the parameter
+// store goes through. With the buyback price guard in force it refuses a value of
+// either buyback price parameter that the reader of the stored value (a base-10
+// unsigned 32-bit number; anything else is ignored by it) would take as 10000 or
+// more, whatever route the write comes by.
+func (e *Engine) paramStoreSet(name string, value []byte) error {
+	if err := e.checkParamStoreWrite(name, value); err != nil {
+		return err
+	}
+	return e.state.ParamStoreSet(name, value)
+}
+
+// checkParamStoreWrite is the refusal paramStoreSet makes, separate so a caller
+// that writes several keys can check them all before it writes any.
+func (e *Engine) checkParamStoreWrite(name string, value []byte) error {
+	if !e.buybackPriceGuardActive() {
+		return nil
+	}
+	switch strings.TrimSpace(name) {
+	case ParamKeyBuybackDiscountBps, ParamKeyBuybackSafetyMarginBps:
+		if parsed, err := strconv.ParseUint(string(value), 10, 32); err == nil {
+			if err := checkBuybackPriceBps(parsed, 0); err != nil {
+				return fmt.Errorf("%w (parameter %s)", err, strings.TrimSpace(name))
+			}
+		}
+	}
+	return nil
 }
 
 // SetPolicy updates the runtime policy governing proposal admission.
@@ -1485,13 +1571,22 @@ func (e *Engine) applyParamUpdates(payloadJSON string) ([]string, error) {
 		return nil, err
 	}
 	keys := make([]string, 0, len(payload))
-	for key, raw := range payload {
-		if err := e.state.ParamStoreSet(key, append([]byte(nil), raw...)); err != nil {
-			return nil, err
-		}
+	for key := range payload {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	// Every key is checked before any is written, in a fixed order, so a refusal
+	// leaves the store as it was and reads the same on every validator.
+	for _, key := range keys {
+		if err := e.checkParamStoreWrite(key, payload[key]); err != nil {
+			return nil, err
+		}
+	}
+	for _, key := range keys {
+		if err := e.paramStoreSet(key, append([]byte(nil), payload[key]...)); err != nil {
+			return nil, err
+		}
+	}
 	return keys, nil
 }
 
@@ -1500,19 +1595,19 @@ func (e *Engine) applySlashingPolicy(parsed *parsedSlashingPolicy) (map[string]i
 		return nil, fmt.Errorf("governance: nil slashing policy payload")
 	}
 	policy := parsed.payload
-	if err := e.state.ParamStoreSet(paramKeySlashingEnabled, []byte(strconv.FormatBool(policy.Enabled))); err != nil {
+	if err := e.paramStoreSet(paramKeySlashingEnabled, []byte(strconv.FormatBool(policy.Enabled))); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(paramKeySlashingMaxPenaltyBps, []byte(strconv.FormatUint(uint64(policy.MaxPenaltyBps), 10))); err != nil {
+	if err := e.paramStoreSet(paramKeySlashingMaxPenaltyBps, []byte(strconv.FormatUint(uint64(policy.MaxPenaltyBps), 10))); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(paramKeySlashingWindow, []byte(strconv.FormatUint(policy.WindowSeconds, 10))); err != nil {
+	if err := e.paramStoreSet(paramKeySlashingWindow, []byte(strconv.FormatUint(policy.WindowSeconds, 10))); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(paramKeySlashingEvidenceTTL, []byte(strconv.FormatUint(policy.EvidenceTTL, 10))); err != nil {
+	if err := e.paramStoreSet(paramKeySlashingEvidenceTTL, []byte(strconv.FormatUint(policy.EvidenceTTL, 10))); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(paramKeySlashingMaxSlashWei, []byte(parsed.maxSlash.String())); err != nil {
+	if err := e.paramStoreSet(paramKeySlashingMaxSlashWei, []byte(parsed.maxSlash.String())); err != nil {
 		return nil, err
 	}
 	detail := map[string]interface{}{
@@ -1536,13 +1631,18 @@ func (e *Engine) applyBuybackParams(payload *BuybackParamsPayload) (map[string]i
 	if payload == nil {
 		return nil, fmt.Errorf("governance: nil buyback params payload")
 	}
-	if err := e.state.ParamStoreSet(ParamKeyBuybackFeeShareBps, []byte(strconv.FormatUint(uint64(payload.FeeShareBps), 10))); err != nil {
+	// All three fields are written, or none: a proposal stored before the guard
+	// came into force is refused here, as a whole, when it is executed.
+	if err := e.guardBuybackParams(payload); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(ParamKeyBuybackDiscountBps, []byte(strconv.FormatUint(uint64(payload.DiscountBps), 10))); err != nil {
+	if err := e.paramStoreSet(ParamKeyBuybackFeeShareBps, []byte(strconv.FormatUint(uint64(payload.FeeShareBps), 10))); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(ParamKeyBuybackSafetyMarginBps, []byte(strconv.FormatUint(uint64(payload.SafetyMarginBps), 10))); err != nil {
+	if err := e.paramStoreSet(ParamKeyBuybackDiscountBps, []byte(strconv.FormatUint(uint64(payload.DiscountBps), 10))); err != nil {
+		return nil, err
+	}
+	if err := e.paramStoreSet(ParamKeyBuybackSafetyMarginBps, []byte(strconv.FormatUint(uint64(payload.SafetyMarginBps), 10))); err != nil {
 		return nil, err
 	}
 	detail := map[string]interface{}{
@@ -1576,7 +1676,7 @@ func (e *Engine) applySwapRiskParams(parsed *parsedSwapRiskParams) (map[string]i
 		{ParamKeySwapRiskRedeemPerAddressMonthlyCapWei, parsed.redeemPerAddressMonthlyCapWei},
 	}
 	for _, set := range sets {
-		if err := e.state.ParamStoreSet(set.key, []byte(set.value.String())); err != nil {
+		if err := e.paramStoreSet(set.key, []byte(set.value.String())); err != nil {
 			return nil, err
 		}
 	}
@@ -1601,13 +1701,13 @@ func (e *Engine) applyRedemptionFeeParams(parsed *parsedRedemptionFeeParams) (ma
 	if parsed == nil {
 		return nil, fmt.Errorf("governance: nil redemption fee params payload")
 	}
-	if err := e.state.ParamStoreSet(ParamKeyRedemptionFeeBps, []byte(strconv.FormatUint(uint64(parsed.payload.FeeBps), 10))); err != nil {
+	if err := e.paramStoreSet(ParamKeyRedemptionFeeBps, []byte(strconv.FormatUint(uint64(parsed.payload.FeeBps), 10))); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(ParamKeyRedemptionFeeFloorWei, []byte(parsed.feeFloorWei.String())); err != nil {
+	if err := e.paramStoreSet(ParamKeyRedemptionFeeFloorWei, []byte(parsed.feeFloorWei.String())); err != nil {
 		return nil, err
 	}
-	if err := e.state.ParamStoreSet(ParamKeyRedemptionFeeCapWei, []byte(parsed.feeCapWei.String())); err != nil {
+	if err := e.paramStoreSet(ParamKeyRedemptionFeeCapWei, []byte(parsed.feeCapWei.String())); err != nil {
 		return nil, err
 	}
 	detail := map[string]interface{}{
@@ -1633,7 +1733,7 @@ func (e *Engine) applyLendingRateSchedule(parsed *parsedLendingRateSchedule) (ma
 	if parsed == nil {
 		return nil, fmt.Errorf("governance: nil lending rate schedule payload")
 	}
-	if err := e.state.ParamStoreSet(ParamKeyLendingFixedTermRateSchedule, parsed.canonicalJSON); err != nil {
+	if err := e.paramStoreSet(ParamKeyLendingFixedTermRateSchedule, parsed.canonicalJSON); err != nil {
 		return nil, err
 	}
 	entries := make([]map[string]interface{}, 0, len(parsed.payload.Schedule))
@@ -1661,7 +1761,7 @@ func (e *Engine) applyLendingDepositRateSchedule(parsed *parsedLendingRateSchedu
 	if parsed == nil {
 		return nil, fmt.Errorf("governance: nil lending deposit rate schedule payload")
 	}
-	if err := e.state.ParamStoreSet(ParamKeyLendingFixedTermDepositRateSchedule, parsed.canonicalJSON); err != nil {
+	if err := e.paramStoreSet(ParamKeyLendingFixedTermDepositRateSchedule, parsed.canonicalJSON); err != nil {
 		return nil, err
 	}
 	entries := make([]map[string]interface{}, 0, len(parsed.payload.Schedule))
@@ -1969,7 +2069,11 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 			return 0, err
 		}
 	case ProposalKindBuybackParams:
-		if _, err := parseBuybackParamsPayload(payloadJSON); err != nil {
+		parsed, err := parseBuybackParamsPayload(payloadJSON)
+		if err != nil {
+			return 0, err
+		}
+		if err := e.guardBuybackParams(parsed); err != nil {
 			return 0, err
 		}
 	case ProposalKindSwapRiskParams:
@@ -1986,6 +2090,15 @@ func (e *Engine) SubmitProposal(proposer [20]byte, kind string, payloadJSON stri
 		}
 	case ProposalKindLendingDepositRateSchedule:
 		if _, err := parseLendingDepositRateSchedulePayload(payloadJSON); err != nil {
+			return 0, err
+		}
+	case ProposalKindFeeParams:
+		// Unavailable below TransferFeeGovernanceActivationHeight, refused as an
+		// unknown kind is.
+		if !e.feeSchedule.Enabled {
+			return 0, fmt.Errorf("governance: unsupported proposal kind %q", kind)
+		}
+		if _, err := parseFeeParamsPayload(payloadJSON); err != nil {
 			return 0, err
 		}
 	default:
@@ -2556,6 +2669,21 @@ func (e *Engine) Execute(proposalID uint64) error {
 		for k, v := range lendingDepositRateDetail {
 			detail[k] = v
 		}
+	case ProposalKindFeeParams:
+		if !e.feeSchedule.Enabled {
+			return fmt.Errorf("governance: proposal %d has unsupported target %q", proposalID, proposal.Target)
+		}
+		parsed, err := parseFeeParamsPayload(proposal.ProposedChange)
+		if err != nil {
+			return err
+		}
+		feeDetail, err := e.applyFeeParams(proposalID, parsed)
+		if err != nil {
+			return err
+		}
+		for k, v := range feeDetail {
+			detail[k] = v
+		}
 	default:
 		return fmt.Errorf("governance: proposal %d has unsupported target %q", proposalID, proposal.Target)
 	}
@@ -2679,4 +2807,12 @@ func newPolicyInvalidEvent(err error) *types.Event {
 		attrs["reason"] = err.Error()
 	}
 	return &types.Event{Type: EventTypePolicyInvalid, Attributes: attrs}
+}
+
+// ParamHasValidator reports whether the engine can validate a proposal for the
+// parameter key. A key with no validator is always rejected ("missing validation
+// rule"), so listing it as governable promises voters a change the network cannot make
+// (PL-DC-10).
+func ParamHasValidator(key string) bool {
+	return validatorForParam(strings.TrimSpace(key)) != nil
 }

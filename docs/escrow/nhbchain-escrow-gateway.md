@@ -33,6 +33,7 @@ All values come from environment variables (`LoadConfigFromEnv`, `services/escro
 | `ESCROW_GATEWAY_QUEUE_CAP` | no | `1024` | Webhook queue capacity. |
 | `ESCROW_GATEWAY_QUEUE_HISTORY` | no | `256` | Webhook history size. |
 | `ESCROW_GATEWAY_QUEUE_TTL` | no | `15m` | Webhook queue entry lifetime. |
+| `ESCROW_GATEWAY_AUDIT_UNAUTHENTICATED_RETENTION` | no | `720h` | How long audit rows of failed authentications (no API key) are kept; Go duration, `0` keeps them for good, negative values fail startup. Pruned at startup and then hourly. Rows of authenticated requests are never pruned. The file does not shrink; freed space is reused. |
 | `NHB_ENV`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_INSECURE` | no | | Logging environment label and OpenTelemetry export (`main.go`); insecure defaults to true. |
 
 Merchant settings (optional `merchant` object on an API key entry, `sanitizeMerchantConfig`):

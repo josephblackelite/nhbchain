@@ -18,6 +18,11 @@ const (
 	// TypeBuybackEpochSettled is emitted once per epoch after the treasury
 	// buyback engine's settlement runs (core/buyback_settlement.go).
 	TypeBuybackEpochSettled = "buyback.epoch.settled"
+	// TypeBuybackEpochRefunded is emitted, after the settled event, when an epoch's
+	// settlement bought nothing because the highest buyback price was zero or could
+	// not be computed, and every ask was refunded in full (from the configured
+	// height only; see core/settlement_failsafe.go).
+	TypeBuybackEpochRefunded = "buyback.epoch.refunded"
 )
 
 // BuybackAskSubmitted records a seller's pending market ask for the epoch it
@@ -113,4 +118,37 @@ func (e BuybackEpochSettled) Event() *types.Event {
 		attrs["clearingPrice"] = e.ClearingPrice
 	}
 	return &types.Event{Type: TypeBuybackEpochSettled, Attributes: attrs}
+}
+
+// BuybackEpochRefunded records an epoch whose asks were all refunded in full
+// because the highest buyback price was zero or could not be computed. Reason is
+// "zero_price" or "unusable_price"; the two basis-point values are the ones the
+// price was computed from.
+type BuybackEpochRefunded struct {
+	Epoch             uint64
+	AsksRefunded      uint64
+	TotalZNHBRefunded *big.Int
+	Reason            string
+	DiscountBps       uint32
+	SafetyMarginBps   uint32
+}
+
+// EventType returns the canonical event identifier.
+func (BuybackEpochRefunded) EventType() string { return TypeBuybackEpochRefunded }
+
+// Event renders the epoch refund event payload.
+func (e BuybackEpochRefunded) Event() *types.Event {
+	refunded := big.NewInt(0)
+	if e.TotalZNHBRefunded != nil {
+		refunded = new(big.Int).Set(e.TotalZNHBRefunded)
+	}
+	attrs := map[string]string{
+		"epoch":                strconv.FormatUint(e.Epoch, 10),
+		"asksRefunded":         strconv.FormatUint(e.AsksRefunded, 10),
+		"totalZNHBRefundedWei": refunded.String(),
+		"reason":               e.Reason,
+		"discountBps":          strconv.FormatUint(uint64(e.DiscountBps), 10),
+		"safetyMarginBps":      strconv.FormatUint(uint64(e.SafetyMarginBps), 10),
+	}
+	return &types.Event{Type: TypeBuybackEpochRefunded, Attributes: attrs}
 }

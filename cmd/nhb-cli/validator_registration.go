@@ -71,8 +71,13 @@ func registerValidator(amountStr string, keyFile string) int {
 		return 1
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeStake,
 		Nonce:    account.Nonce,
 		Value:    amount,
@@ -126,8 +131,13 @@ func deregisterValidator(keyFile string) int {
 		return 1
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeUnstake,
 		Nonce:    account.Nonce,
 		Value:    big.NewInt(0),

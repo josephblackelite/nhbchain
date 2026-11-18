@@ -115,7 +115,7 @@ RPCTLSClientCAFile = "/etc/nhb/rpc/clients-ca.pem"
 		},
 		{
 			name:    "a paused module",
-			content: mutate(t, prod, "\nSwap = false\n", "\nSwap = true\n"),
+			content: mutate(t, prod, "\n    Swap = false\n", "\n    Swap = true\n"),
 			want:    "global.Pauses disables critical modules: Swap",
 		},
 	}

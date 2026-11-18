@@ -103,7 +103,7 @@ var ErrMessageTooLarge = errors.New("p2p: message larger than the frame limit")
 
 // ServerConfig encapsulates runtime settings for the p2p server.
 type ServerConfig struct {
-	ListenAddress    string
+	ListenAddress string
 	// ExternalAddress is this node's own publicly-dialable host:port, used
 	// to self-report a usable ListenAddrs entry in the handshake when
 	// ListenAddress is bound to an unspecified address (0.0.0.0) that
@@ -138,6 +138,17 @@ type ServerConfig struct {
 	DialBackoff      time.Duration
 	MaxDialBackoff   time.Duration
 	EnablePEX        bool
+	// HandshakeChallenge sets how this node treats the challenge-response extension of the
+	// handshake (PL-R5T-20, PL-DC-25): "auto" (the default, also an empty value) offers it and
+	// proves its key to a peer that offers it too, treating any other peer as a v1 peer; "off"
+	// behaves exactly like a v1 node; "require" refuses a peer that does not offer it, for use
+	// once every peer has upgraded.
+	HandshakeChallenge string
+
+	// ConsensusConfigDigest is the root of this node's consensus-settings digest
+	// (config.ConsensusDigest.Root), sent in the handshake so that two nodes can
+	// tell, from their logs, that they run different settings. Empty sends nothing.
+	ConsensusConfigDigest string
 }
 
 // SeedOrigin captures the provenance metadata for a seed entry supplied via
@@ -244,6 +255,7 @@ type Server struct {
 	handshakeTimeout time.Duration
 	pingTimeout      time.Duration
 	nonceGuard       *nonceGuard
+	challengeMode    challengeMode
 
 	peerstore *Peerstore
 
@@ -657,6 +669,7 @@ func NewServer(handler MessageHandler, privKey *crypto.PrivateKey, cfg ServerCon
 		handshakeTimeout:  cfg.HandshakeTimeout,
 		pingTimeout:       cfg.PingTimeout,
 		nonceGuard:        newNonceGuard(handshakeReplayWindow),
+		challengeMode:     challengeModeOrAuto(cfg.HandshakeChallenge, baseLogger),
 		listenAddrs:       []string{},
 		seedResolver:      cfg.SeedResolver,
 		seedRegistry:      cfg.SeedRegistry,
@@ -849,7 +862,7 @@ func (s *Server) handleInbound(conn net.Conn) {
 		}
 		return
 	}
-	err := s.initPeer(conn, true, false, "")
+	err := s.initPeer(conn, true, false, "", "")
 	release()
 	if err != nil {
 		if s.allowLog("inbound_rejected", inboundLogInterval) {
@@ -1029,7 +1042,9 @@ func (s *Server) noteOutgoingPexRequest(peerID string, msg *Message) {
 	s.pex.noteRequestSent(peerID, payload.Token)
 }
 
-func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr string) (err error) {
+// initPeer completes the handshake on conn and registers the peer. expectedID, when set, is the node ID the
+// dial was meant to reach (a seed's configured ID): a node that proves another ID is refused (PL-R5T-60).
+func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr string, expectedID string) (err error) {
 	if s.metricsCollector != nil {
 		start := s.now()
 		defer func() {
@@ -1045,7 +1060,11 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	ctx, cancel := context.WithTimeout(context.Background(), s.handshakeTimeout)
 	defer cancel()
 
-	remote, err := s.performHandshake(ctx, conn, reader)
+	role := roleDialer
+	if inbound {
+		role = roleListener
+	}
+	remote, err := s.handshakeAs(ctx, conn, reader, role)
 	if err != nil {
 		return err
 	}
@@ -1055,9 +1074,15 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	if remote.nodeID == s.nodeID {
 		return fmt.Errorf("self connection not allowed")
 	}
+	if want := normalizeHex(expectedID); want != "" && remote.nodeID != want {
+		// Neither ID is held against: the node that answered did nothing wrong, and the ID in the seed
+		// list is only a string somebody configured.
+		return fmt.Errorf("%w: expected %s, the handshake proved %s", ErrPeerIDMismatch, want, remote.nodeID)
+	}
 	if s.isBanned(remote.nodeID) {
 		return fmt.Errorf("peer %s is currently banned", remote.nodeID)
 	}
+	s.checkPeerConfigDigest(remote.nodeID, remote.ConfigDigest)
 
 	trimmedDial := strings.TrimSpace(dialAddr)
 	// The addresses a peer advertises are its own claim and the handshake
@@ -1086,6 +1111,7 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 	persistent = persistent || s.isPersistentRemote(remote.nodeID)
 
 	peer := newPeer(remote.nodeID, remote.ClientVersion, conn, reader, s, inbound, persistent, trimmedDial)
+	peer.challenged = remote.challenged
 	if err := s.registerPeer(peer); err != nil {
 		return err
 	}
@@ -1130,7 +1156,8 @@ func (s *Server) initPeer(conn net.Conn, inbound bool, persistent bool, dialAddr
 		logging.MaskField("peer_id", peer.id),
 		logging.MaskField("peer_address", peer.remoteAddr),
 		slog.String("client_version", remote.ClientVersion),
-		slog.Bool("inbound", inbound))
+		slog.Bool("inbound", inbound),
+		slog.Bool("handshake_challenge", remote.challenged))
 	peer.start()
 	return nil
 }
@@ -1412,6 +1439,13 @@ func (s *Server) removePeer(peer *Peer, ban bool, reason error) {
 
 // Connect dials a remote peer and establishes a secure session.
 func (s *Server) Connect(addr string) error {
+	return s.ConnectExpecting(addr, "")
+}
+
+// ConnectExpecting is Connect for a peer whose node ID is known beforehand (a seed): when the node
+// that answers proves another ID in its handshake the connection is refused with ErrPeerIDMismatch
+// and nothing is held against either ID. An empty expectedID is no pin.
+func (s *Server) ConnectExpecting(addr, expectedID string) error {
 	addr = strings.TrimSpace(addr)
 	if addr == "" {
 		return fmt.Errorf("empty address")
@@ -1429,7 +1463,7 @@ func (s *Server) Connect(addr string) error {
 	}
 
 	persistent := s.isPersistent(addr)
-	if err := s.initPeer(conn, false, persistent, addr); err != nil {
+	if err := s.initPeer(conn, false, persistent, addr, expectedID); err != nil {
 		conn.Close()
 		if errors.Is(err, ErrPeerAlreadyConnected) {
 			return nil
@@ -1490,6 +1524,32 @@ func (s *Server) Broadcast(msg *Message) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// SendTo sends a message to one connected peer and to nobody else. A peer that
+// is not connected gets ErrPeerUnknown and the message is dropped, never sent
+// to the others instead. Like Broadcast it does not block: a peer whose queue has
+// no room for the message misses it and keeps its connection.
+func (s *Server) SendTo(peerID string, msg *Message) error {
+	s.mu.RLock()
+	peer := s.peers[peerID]
+	s.mu.RUnlock()
+	if peer == nil {
+		return fmt.Errorf("%w: %s", ErrPeerUnknown, peerID)
+	}
+	if err := peer.Enqueue(msg); err != nil {
+		if errors.Is(err, errQueueFull) {
+			if dropped, logNow := peer.noteDrop(); logNow {
+				s.log().Warn("Peer send queue full; dropping messages for this peer",
+					logging.MaskField("peer_id", peer.id),
+					slog.Uint64("dropped", dropped))
+			}
+			return nil
+		}
+		peer.terminate(false, err)
+		return fmt.Errorf("peer %s: %w", peer.id, err)
+	}
+	return nil
 }
 
 func (s *Server) allowGlobal(now time.Time) bool {

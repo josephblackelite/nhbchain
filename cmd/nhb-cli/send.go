@@ -127,8 +127,12 @@ func sendNHB(recipient, amountStr, keyFile string, gasLimit, gasPrice uint64) er
 		return fmt.Errorf("fetching account details: %w", err)
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		return fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeTransfer,
 		Nonce:    account.Nonce,
 		To:       dest.Bytes(),
@@ -171,8 +175,12 @@ func sendZNHB(recipient, amountStr, keyFile string, gasLimit, gasPrice uint64) e
 		return fmt.Errorf("fetching account details: %w", err)
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		return fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeTransferZNHB,
 		Nonce:    account.Nonce,
 		To:       dest.Bytes(),

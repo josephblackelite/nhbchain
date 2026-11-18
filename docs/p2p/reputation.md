@@ -20,7 +20,7 @@ minutes.
 | Event | Delta | Where |
 | --- | --- | --- |
 | Any message processed (including Ping and Pong) | +1 | `recordValidMessage` |
-| Protocol violation (malformed frame or payload, oversize frame, handler reports an invalid payload, a `PexAddresses` frame this node did not ask for or one over 64 KiB) | -5 | `handleProtocolViolation` |
+| Protocol violation (malformed frame or payload, oversize frame, handler reports an invalid payload (including a synced block the node rejects for its content), a `PexAddresses` frame this node did not ask for or one over 64 KiB) | -5 | `handleProtocolViolation` |
 | Per-peer or per-IP rate limit hit | -10 | `handleRateLimit` |
 | A write error or write timeout | -5 | `writeLoop` |
 | Disconnect with the ban flag | `-BanScore` | `applyBan` |

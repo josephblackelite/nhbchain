@@ -1,14 +1,40 @@
 import { bech32 } from '@scure/base';
-import { sha256 } from '@noble/hashes/sha256';
 import { keccak_256 } from '@noble/hashes/sha3';
 import { getPublicKey, signAsync } from '@noble/secp256k1';
+
+import { hashTransactionV3 } from './txhash.js';
 
 export const TRANSFER_TYPE_NHB = 0x01;
 export const TRANSFER_TYPE_ZNHB = 0x10;
 
-const DEFAULT_CHAIN_ID = 0x4e4842n;
 const DEFAULT_GAS_LIMIT = 25_000n;
 const DEFAULT_GAS_PRICE = 1n;
+// How long an id read from the node is reused. The node reports one id until the chain's activation height and
+// another from it, so the answer must not be kept for long (ledger PL-R5T-29).
+export const CHAIN_ID_REUSE_MS = 15_000;
+const MAX_UINT64 = (1n << 64n) - 1n;
+
+/**
+ * Reads the chain id out of the `txChainId` field of an `nhb_getNetworkStats` result. The node serves a decimal
+ * string; a bigint or a safe integer is also accepted. Anything else (missing, empty, zero, negative, hex, a
+ * fraction, a number past 2^53 that a JSON parser has already rounded, more than a uint64) is refused.
+ */
+function parseTxChainId(value: unknown): bigint {
+  let id: bigint;
+  if (typeof value === 'bigint') {
+    id = value;
+  } else if (typeof value === 'number' && Number.isSafeInteger(value)) {
+    id = BigInt(value);
+  } else if (typeof value === 'string' && /^[0-9]+$/.test(value.trim())) {
+    id = BigInt(value.trim());
+  } else {
+    throw new Error('the node reported no usable txChainId');
+  }
+  if (id <= 0n || id > MAX_UINT64) {
+    throw new Error(`the node reported a txChainId that is not a positive uint64 (${String(id)})`);
+  }
+  return id;
+}
 
 function assertFetch(fetchImpl: typeof fetch | undefined): asserts fetchImpl {
   if (typeof fetchImpl !== 'function') {
@@ -127,7 +153,16 @@ export interface WalletClientOptions {
   baseUrl: string;
   authToken?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * An explicit chain id: every transfer carries it and the node is not asked. Without it the client reads the id the
+   * node reports (`nhb_getNetworkStats`, field `txChainId`) and refuses to sign when the node reports none. There is no
+   * built-in default.
+   */
   chainId?: bigint | string | number;
+  /** How long an id read from the node is reused, in milliseconds (default 15000). */
+  chainIdTtlMs?: number;
+  /** Clock used for that expiry, in milliseconds (default `Date.now`); for tests. */
+  now?: () => number;
   gasLimit?: bigint | string | number;
   gasPrice?: bigint | string | number;
 }
@@ -164,7 +199,11 @@ export class WalletClient {
   private readonly baseUrl: string;
   private readonly authToken?: string;
   private readonly fetchImpl: typeof fetch;
-  private readonly chainId: bigint;
+  private readonly explicitChainId?: bigint;
+  private readonly chainIdTtlMs: number;
+  private readonly now: () => number;
+  private cachedChainId?: { value: bigint; at: number };
+  private inflightChainId?: Promise<bigint>;
   private readonly defaultGasLimit: bigint;
   private readonly defaultGasPrice: bigint;
 
@@ -176,7 +215,13 @@ export class WalletClient {
     this.authToken = options.authToken?.trim();
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
     assertFetch(this.fetchImpl);
-    this.chainId = normalizeBigInt(options.chainId ?? DEFAULT_CHAIN_ID, 'chain id');
+    this.explicitChainId =
+      options.chainId === undefined ? undefined : normalizeBigInt(options.chainId, 'chain id');
+    this.chainIdTtlMs = options.chainIdTtlMs ?? CHAIN_ID_REUSE_MS;
+    if (!Number.isFinite(this.chainIdTtlMs) || this.chainIdTtlMs <= 0) {
+      throw new Error('The chain id expiry must be a positive number of milliseconds.');
+    }
+    this.now = options.now ?? (() => Date.now());
     this.defaultGasLimit = normalizeBigInt(options.gasLimit ?? DEFAULT_GAS_LIMIT, 'gas limit');
     this.defaultGasPrice = normalizeBigInt(options.gasPrice ?? DEFAULT_GAS_PRICE, 'gas price');
     if (this.defaultGasLimit <= 0n) {
@@ -185,6 +230,40 @@ export class WalletClient {
     if (this.defaultGasPrice <= 0n) {
       throw new Error('Gas price must be greater than zero.');
     }
+  }
+
+  /**
+   * The chain id a transaction signed now must carry: the explicit `chainId` option, or else the id the node reports
+   * in `nhb_getNetworkStats` (public; `net_info` is operator-only), reused for a short time. It rejects, never
+   * defaults, when the node cannot be asked or reports no usable id.
+   */
+  async txChainId(): Promise<bigint> {
+    if (this.explicitChainId !== undefined) {
+      return this.explicitChainId;
+    }
+    const started = this.now();
+    if (this.cachedChainId && started - this.cachedChainId.at < this.chainIdTtlMs) {
+      return this.cachedChainId.value;
+    }
+    if (this.inflightChainId) {
+      return this.inflightChainId;
+    }
+    const read = (async () => {
+      try {
+        const stats = await this.rpc<{ txChainId?: unknown } | null>('nhb_getNetworkStats', [], false);
+        const value = parseTxChainId(stats?.txChainId);
+        this.cachedChainId = { value, at: started };
+        return value;
+      } catch (error) {
+        this.cachedChainId = undefined;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Cannot read the transaction chain id from the node (nhb_getNetworkStats): ${reason}`);
+      } finally {
+        this.inflightChainId = undefined;
+      }
+    })();
+    this.inflightChainId = read;
+    return read;
   }
 
   async sendTransfer(options: SendTransferOptions): Promise<SendTransferResult> {
@@ -197,6 +276,7 @@ export class WalletClient {
     const privateKey = normalizePrivateKey(options.privateKey);
     const recipientBytes = fromBech32(options.recipient);
     const senderAddress = toBech32('nhb', deriveAddress(privateKey));
+    const chainId = await this.txChainId();
     const nonceInfo = await this.rpc<BalanceResponse>('nhb_getBalance', [senderAddress], false);
     const nonce = BigInt(nonceInfo?.nonce ?? 0);
     const gasLimit = normalizeBigInt(options.gasLimit ?? this.defaultGasLimit, 'gas limit');
@@ -208,8 +288,11 @@ export class WalletClient {
       throw new Error('Gas price must be greater than zero.');
     }
 
-    const txForHash = serializeTxForHash({
-      chainId: this.chainId,
+    // The digest is the node's own binary encoding of the transaction (Transaction.Hash
+    // in core/types), not a JSON text: a signature over any other digest is attributed
+    // by the node to a different, unfunded address (PL-DC-11).
+    const digest = hashTransactionV3({
+      chainId,
       type,
       nonce,
       to: recipientBytes,
@@ -218,7 +301,6 @@ export class WalletClient {
       gasLimit,
       gasPrice,
     });
-    const digest = sha256(new TextEncoder().encode(txForHash));
     const signature = await signAsync(digest, privateKey);
     const r = signature.r;
     const s = signature.s;
@@ -226,7 +308,7 @@ export class WalletClient {
     const v = BigInt(recovery + 27);
 
     const signed: SignedTransaction = {
-      chainId: toDecimal(this.chainId),
+      chainId: toDecimal(chainId),
       type,
       nonce: toDecimal(nonce),
       to: toBase64(recipientBytes),
@@ -276,31 +358,6 @@ export class WalletClient {
     }
     return json.result;
   }
-}
-
-interface HashTxFields {
-  chainId: bigint;
-  type: number;
-  nonce: bigint;
-  to: Uint8Array;
-  value: bigint;
-  data: Uint8Array;
-  gasLimit: bigint;
-  gasPrice: bigint;
-}
-
-function serializeTxForHash(fields: HashTxFields): string {
-  const parts = [
-    `"ChainID":${fields.chainId}`,
-    `"Type":${fields.type}`,
-    `"Nonce":${fields.nonce}`,
-    `"To":${JSON.stringify(toBase64(fields.to))}`,
-    `"Value":${fields.value}`,
-    `"Data":${JSON.stringify(toBase64(fields.data))}`,
-    `"GasLimit":${fields.gasLimit}`,
-    `"GasPrice":${fields.gasPrice}`,
-  ];
-  return `{${parts.join(',')}}`;
 }
 
 function buildSendPayload(tx: SignedTransaction): string {

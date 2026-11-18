@@ -319,7 +319,7 @@ func TestWaitSyncedTimesOut(t *testing.T) {
 // bound.
 func waitBounded(t *testing.T, rpc string, extra ...string) (code int, output string, took time.Duration) {
 	t.Helper()
-	args := append([]string{"wait-synced", "--rpc", rpc, "--interval", "10ms", "--stall-timeout", "30s"}, extra...)
+	args := append([]string{"wait-synced", "--rpc", rpc, "--no-reference", "--interval", "10ms", "--stall-timeout", "30s"}, extra...)
 	var out, errOut bytes.Buffer
 	started := time.Now()
 	code = run(args, &out, &errOut)

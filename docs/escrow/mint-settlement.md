@@ -18,10 +18,10 @@ Code: `core/mint.go`, `core/node.go` (`MintWithSignature`), `core/state_transiti
 | `recipient` | string | An NHB bech32 address, or an identity alias. The address is tried first; if it does not decode, the value is resolved through the identity registry (`IdentityResolve`, primary address). |
 | `token` | string | Trimmed and upper-cased. Only `NHB` is accepted. |
 | `amount` | string | Base-unit integer, strictly positive. |
-| `chainId` | number | Must equal the constant `core.MintChainID` (`430060579445266314`, `core/mint.go`), checked in `Node.MintWithSignature` and again in `applyMintTransaction`. It is a fixed number in the source, not read from the running chain: the shipped configuration's network id is `18346390202490284624` (`config.toml`, `NetworkId`), so a voucher that carries the running chain's id is refused with `ErrMintInvalidChainID`. |
+| `chainId` | number | Must equal the constant `core.MintChainID` (`430060579445266314`, `core/mint.go`), checked in `Node.MintWithSignature` and again in `applyMintTransaction`. It is a fixed number in the source, not read from the running chain: the shipped configuration's network id is `18346390202490284624` (`config.toml`, `NetworkId`), so a voucher that carries the running chain's id is refused with `ErrMintInvalidChainID` unless `MintRunningChainIDActivationHeight` is set and the block is at or past it (`StateProcessor.mintVoucherChainIDAccepted`; both settings are `0` = off in the shipped configuration, see `docs/consensus/invariants.md`). From that height the running chain's id is accepted next to `core.MintChainID`; from `MintPhaseEChainIDRetireHeight` only the running chain's id is accepted. |
 | `expiry` | number | Unix seconds. Must be later than the current time (node time when submitting, block time when executing). |
 
-The mint transaction itself uses chain ID `types.NHBChainID()` (`0x4e4842`), gas limit 0 and gas price 0, and has no sender signature; the voucher signature is the authorization (`RequiresSignature(TxTypeMint)` is false).
+The mint transaction itself uses the transaction chain ID the node requires now (`types.NHBChainID()`, `0x4e4842`, until `TxNetworkChainIDActivationHeight`, then the network's own id; `nhb_getNetworkStats` reports it as `txChainId`), gas limit 0 and gas price 0, and has no sender signature; the voucher signature is the authorization (`RequiresSignature(TxTypeMint)` is false).
 
 ## Canonical signing payload
 

@@ -11,6 +11,18 @@
 {{- end -}}
 {{- end -}}
 
+{{/*
+Refuses to render an ingress-fronted gateway that has no trusted proxy range.
+The gateway counts requests per connecting address, so behind an ingress an
+empty trustedProxies list puts every client in one rate-limit bucket per
+ingress pod.
+*/}}
+{{- define "gateway.validate" -}}
+{{- if and .Values.ingress.enabled (not .Values.trustedProxies) -}}
+{{- fail "trustedProxies must list the address range of the ingress controller (and of any load balancer in front of it) when ingress.enabled is true: with an empty list every client behind the ingress shares one rate-limit bucket per ingress pod. Set it in the values file or with --set; see docs/ops/security.md, Gateway rate limits behind a proxy." -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "gateway.labels" -}}
 app.kubernetes.io/name: {{ include "gateway.name" . }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}

@@ -80,6 +80,15 @@ func newLendingTx(txType types.TxType, chainID *big.Int, nonce uint64, amount *b
 	return tx
 }
 
+// checkChainID refuses a missing or unusable chain id. Builders take the id from the caller (sdk/go/client's TxChainID reads
+// it from the node, nhb_getNetworkStats); none of them supplies a default (PL-R5T-29).
+func checkChainID(chainID *big.Int) error {
+	if chainID == nil || chainID.Sign() <= 0 || !chainID.IsUint64() {
+		return fmt.Errorf("lending: a chain id is required (read it from the node with the SDK client's TxChainID)")
+	}
+	return nil
+}
+
 func parseAmount(amount string) (*big.Int, error) {
 	trimmed := strings.TrimSpace(amount)
 	if trimmed == "" {
@@ -94,6 +103,9 @@ func parseAmount(amount string) (*big.Int, error) {
 
 // NewSupplyTx builds an unsigned TxTypeLendingSupplyNHB transaction.
 func NewSupplyTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	value, err := parseAmount(amount)
 	if err != nil {
 		return nil, err
@@ -103,6 +115,9 @@ func NewSupplyTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...
 
 // NewWithdrawTx builds an unsigned TxTypeLendingWithdrawNHB transaction.
 func NewWithdrawTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	value, err := parseAmount(amount)
 	if err != nil {
 		return nil, err
@@ -112,6 +127,9 @@ func NewWithdrawTx(chainID *big.Int, nonce uint64, poolID, amount string, opts .
 
 // NewBorrowTx builds an unsigned TxTypeLendingBorrowNHB transaction.
 func NewBorrowTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	value, err := parseAmount(amount)
 	if err != nil {
 		return nil, err
@@ -121,6 +139,9 @@ func NewBorrowTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...
 
 // NewRepayTx builds an unsigned TxTypeLendingRepayNHB transaction.
 func NewRepayTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	value, err := parseAmount(amount)
 	if err != nil {
 		return nil, err
@@ -130,6 +151,9 @@ func NewRepayTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...T
 
 // NewDepositCollateralTx builds an unsigned TxTypeLendingDepositZNHB transaction.
 func NewDepositCollateralTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	value, err := parseAmount(amount)
 	if err != nil {
 		return nil, err
@@ -139,6 +163,9 @@ func NewDepositCollateralTx(chainID *big.Int, nonce uint64, poolID, amount strin
 
 // NewWithdrawCollateralTx builds an unsigned TxTypeLendingWithdrawZNHB transaction.
 func NewWithdrawCollateralTx(chainID *big.Int, nonce uint64, poolID, amount string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	value, err := parseAmount(amount)
 	if err != nil {
 		return nil, err
@@ -150,6 +177,9 @@ func NewWithdrawCollateralTx(chainID *big.Int, nonce uint64, poolID, amount stri
 // signed by the liquidator, not the borrower -- see
 // core/lending_native.go's applyLendingLiquidate.
 func NewLiquidateTx(chainID *big.Int, nonce uint64, poolID, borrower string, opts ...TxOption) (*types.Transaction, error) {
+	if err := checkChainID(chainID); err != nil {
+		return nil, err
+	}
 	trimmedBorrower := strings.TrimSpace(borrower)
 	if trimmedBorrower == "" {
 		return nil, fmt.Errorf("lending: borrower address required")

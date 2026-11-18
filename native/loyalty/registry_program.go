@@ -11,6 +11,7 @@ var (
 	businessCounterKeyBytes   = []byte("loyalty/business/counter")
 	ownerPaymasterPrefix      = []byte("loyalty/owner-paymaster/")
 	paymasterConsentPrefix    = []byte("loyalty/paymaster-consent/")
+	paymasterAssignedPrefix   = []byte("loyalty/paymaster-assigned/")
 )
 
 func programKey(id ProgramID) []byte {
@@ -74,6 +75,18 @@ func ownerPaymasterKey(owner [20]byte) []byte {
 func paymasterConsentKey(id BusinessID, paymaster [20]byte) []byte {
 	key := make([]byte, 0, len(paymasterConsentPrefix)+len(id)+len(paymaster))
 	key = append(key, paymasterConsentPrefix...)
+	key = append(key, id[:]...)
+	key = append(key, paymaster[:]...)
+	return key
+}
+
+// paymasterAssignedKey addresses the standing record that a wallet other than the
+// business owner was assigned as that business's paymaster with its consent
+// (PL-R5T-15). Unlike the one-shot opt-in above it is not consumed by the
+// assignment: it is what the reward path checks each time it debits the wallet.
+func paymasterAssignedKey(id BusinessID, paymaster [20]byte) []byte {
+	key := make([]byte, 0, len(paymasterAssignedPrefix)+len(id)+len(paymaster))
+	key = append(key, paymasterAssignedPrefix...)
 	key = append(key, id[:]...)
 	key = append(key, paymaster[:]...)
 	return key

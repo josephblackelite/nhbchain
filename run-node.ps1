@@ -50,6 +50,9 @@ if (Test-Path -Path "nhb-data-local") {
     Remove-Item -Recurse -Force nhb-data-local
 }
 
+# config-local.toml is not shipped with the repository: if it does not exist the
+# node writes a default one on its first start (NHB_ALLOW_AUTOGENESIS above), and
+# reads it back on later starts. Put your own file there to change the settings.
 Write-Host "Starting node with config-local.toml on port 8081..." -ForegroundColor Green
 Write-Host "Keep this window open. Do not close it unless you want to stop the node." -ForegroundColor Yellow
 Write-Host "------------------------------------------------------------------"

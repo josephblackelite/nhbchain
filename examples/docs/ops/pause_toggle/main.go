@@ -21,7 +21,7 @@ func main() {
 	consensusEndpoint := flag.String("consensus", "localhost:9090", "consensus gRPC endpoint")
 	govEndpoint := flag.String("governance", "localhost:50061", "governd gRPC endpoint")
 	authority := flag.String("authority", "", "governance authority address")
-	module := flag.String("module", "", "module to toggle (lending|swap|escrow|trade|loyalty|potso|transfer_nhb|transfer_znhb)")
+	module := flag.String("module", "", "module to toggle (lending|swap|escrow|trade|loyalty|potso); the SetPauses message carries these six only")
 	state := flag.String("state", "pause", "target state: pause or resume")
 	flag.Parse()
 
@@ -54,13 +54,9 @@ func main() {
 		log.Fatal(err)
 	}
 
-	payload := &govv1.Pauses{
-		Lending: pauses.Lending,
-		Swap:    pauses.Swap,
-		Escrow:  pauses.Escrow,
-		Trade:   pauses.Trade,
-		Loyalty: pauses.Loyalty,
-		Potso:   pauses.POTSO,
+	payload, err := buildPausesPayload(pauses)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -129,14 +125,29 @@ func setModulePause(pauses *config.Pauses, module string, paused bool) error {
 		pauses.Loyalty = paused
 	case "potso":
 		pauses.POTSO = paused
-	case "transfer_nhb":
-		pauses.TransferNHB = paused
-	case "transfer_znhb":
-		pauses.TransferZNHB = paused
-	case "staking":
-		pauses.Staking = paused
+	case "transfer_nhb", "transfer_znhb", "staking":
+		return fmt.Errorf("module %q cannot be toggled with this sample: the SetPauses message carries lending, swap, escrow, trade, loyalty and potso only", module)
 	default:
 		return fmt.Errorf("unknown module %q", module)
 	}
 	return nil
+}
+
+// buildPausesPayload turns the stored configuration into the six-module message.
+// The message replaces the whole configuration, so a stored transfer or staking
+// pause would be silently cleared by it; the sample stops instead.
+func buildPausesPayload(pauses config.Pauses) (*govv1.Pauses, error) {
+	for name, set := range map[string]bool{"transfer_nhb": pauses.TransferNHB, "transfer_znhb": pauses.TransferZNHB, "staking": pauses.Staking} {
+		if set {
+			return nil, fmt.Errorf("the stored configuration pauses %s, which the six-module SetPauses message cannot carry: sending it would clear that pause, so this sample will not send it", name)
+		}
+	}
+	return &govv1.Pauses{
+		Lending: pauses.Lending,
+		Swap:    pauses.Swap,
+		Escrow:  pauses.Escrow,
+		Trade:   pauses.Trade,
+		Loyalty: pauses.Loyalty,
+		Potso:   pauses.POTSO,
+	}, nil
 }

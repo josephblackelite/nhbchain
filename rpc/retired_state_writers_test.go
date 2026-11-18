@@ -124,11 +124,6 @@ func TestStateWritingRPCsAreRetired(t *testing.T) {
 // the RPC out of the treasury on the live trie. It is not paid any more.
 func TestRetiredRewardClaimMovesNoFunds(t *testing.T) {
 	env := newTestEnv(t)
-	cfg := env.node.PotsoRewardConfig()
-	cfg.PayoutMode = potso.RewardPayoutModeClaim
-	if err := env.node.SetPotsoRewardConfig(cfg); err != nil {
-		t.Fatalf("switch to claim mode: %v", err)
-	}
 
 	key, err := crypto.GeneratePrivateKey()
 	if err != nil {

@@ -75,6 +75,11 @@ func (sp *StateProcessor) settleLendingDepositPayoutsDueOnDay(manager *nhbstate.
 			return err
 		}
 	}
+	if sp.lendingAccountingFixesActive() {
+		// Take out only what this pass handled: a payout that was scheduled onto this
+		// same day during the pass stays (ledger PL-EXT-42).
+		return manager.LendingDepositPayoutRemoveDue(day, due)
+	}
 	return manager.LendingDepositPayoutClearDue(day)
 }
 

@@ -206,7 +206,7 @@ func (wr *walletRoutes) callRPC(ctx context.Context, method string, params inter
 	if chain := strings.TrimSpace(r.Header.Get("X-Chain-Id")); chain != "" {
 		req.Header.Set("X-Chain-Id", chain)
 	}
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+	if forwarded := forwardedForValue(r); forwarded != "" {
 		req.Header.Set("X-Forwarded-For", forwarded)
 	}
 

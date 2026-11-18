@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,14 +122,14 @@ func (s *Server) handleGetValidatorInfo(w http.ResponseWriter, _ *http.Request, 
 		delegatedValidator = crypto.MustNewAddress(crypto.NHBPrefix, acc.DelegatedValidator).String()
 	}
 	writeResult(w, req.ID, map[string]any{
-		"address":               addr.Hex(),
-		"stake":                 acc.Stake.String(),
-		"engagementScore":       acc.EngagementScore,
-		"validatorRegistered":   acc.ValidatorRegistered,
-		"validatorRegisteredAt": acc.ValidatorRegisteredAt,
+		"address":                 addr.Hex(),
+		"stake":                   acc.Stake.String(),
+		"engagementScore":         acc.EngagementScore,
+		"validatorRegistered":     acc.ValidatorRegistered,
+		"validatorRegisteredAt":   acc.ValidatorRegisteredAt,
 		"engagementLastHeartbeat": acc.EngagementLastHeartbeat,
-		"delegatedValidator":    delegatedValidator,
-		"nonce":                 acc.Nonce,
+		"delegatedValidator":      delegatedValidator,
+		"nonce":                   acc.Nonce,
 	})
 }
 
@@ -161,12 +162,27 @@ func (s *Server) handleGetNetworkStats(w http.ResponseWriter, r *http.Request, r
 		s.writeQueryFailure(w, req.ID, req.Method, err)
 		return
 	}
+	// A server with no node behind it answers this public read like every other field here (nil-safe); it has no chain id to report, so 0,
+	// which a signer refuses.
+	var networkChainID uint64
+	if s.node != nil {
+		networkChainID = s.node.ChainID()
+	}
 	writeResult(w, req.ID, map[string]any{
 		"activeValidators": len(s.node.GetValidatorSet()),
 		"currentEpoch":     currentEpoch,
 		"currentTime":      time.Now().Unix(),
 		"mempoolSize":      s.node.MempoolSize(),
 		"tps":              tps,
+		// The chain id a transaction submitted now must carry to be valid in the next block (decimal): the
+		// legacy shared constant until the chain reaches TxNetworkChainIDActivationHeight, the network's own
+		// id from it. Signers read it instead of hard-coding either (PL-R5T-29). net_info is operator-only,
+		// so the id is served here.
+		"txChainId": s.node.TxChainIDForNextBlock().String(),
+		// The running chain's own id, derived from its genesis (decimal string): the value net_info reports as chainId, which is
+		// operator-only. Unlike txChainId it does not change at the activation height. A signer that has to name the running
+		// chain (a mint voucher) reads it here; a transaction signer reads txChainId.
+		"networkChainId": strconv.FormatUint(networkChainID, 10),
 	})
 }
 
@@ -308,30 +324,25 @@ func (s *Server) handleGetOwnerWalletStats(w http.ResponseWriter, _ *http.Reques
 	}
 
 	if ownerHex != "" {
-		perAsset := make(map[string]*big.Int)
-		for _, evt := range s.node.Events() {
-			if evt.Type != events.TypeFeeApplied {
-				continue
-			}
-			if normalizeOwnerWallet(evt.Attributes["ownerWallet"]) != ownerHex {
-				continue
-			}
-			fee, ok := new(big.Int).SetString(strings.TrimSpace(evt.Attributes["feeWei"]), 10)
-			if !ok {
-				continue
-			}
-			asset := strings.ToUpper(strings.TrimSpace(evt.Attributes["asset"]))
-			if asset == "" {
-				asset = "UNKNOWN"
-			}
-			if perAsset[asset] == nil {
-				perAsset[asset] = big.NewInt(0)
-			}
-			perAsset[asset].Add(perAsset[asset], fee)
-			totalFeeAccrual.Add(totalFeeAccrual, fee)
+		// Read from the durable per-domain fee totals, not from the retained fee
+		// events: those are a bounded, node-local log that wraps and starts empty after
+		// a restart, so the sum fell as old events dropped out (PL-R5T-42).
+		var domains []string
+		for name := range s.node.FeePolicy().Domains {
+			domains = append(domains, name)
+		}
+		var ownerAddr [20]byte
+		if addr, err := crypto.DecodeAddress(ownerWallet); err == nil {
+			copy(ownerAddr[:], addr.Bytes())
+		}
+		perAsset, err := s.node.OwnerWalletFeeAccrual(ownerAddr, domains)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load fee totals", err.Error())
+			return
 		}
 		for asset, amount := range perAsset {
 			feeAccrualByAsset[asset] = amount.String()
+			totalFeeAccrual.Add(totalFeeAccrual, amount)
 		}
 	}
 

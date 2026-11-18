@@ -115,11 +115,21 @@ var poisonMatrixRows = map[types.TxType]poisonMatrixRow{
 	types.TxTypeSwapVoucherReverse:     {Senderless: true, Note: "voucher reversal"},
 	types.TxTypeSwapMarkReconciled:     {Senderless: true, Note: "voucher reconciliation"},
 	types.TxTypeSubmitEvidence:         {Family: "h", Note: "signed report from a bonded reporter; bounded index and expiry"},
+
+	// Valid only from LendingFeeWithdrawActivationHeight; an unknown type before it.
+	types.TxTypeLendingWithdrawProtocolFees: {Family: "f", Note: "role-gated fee withdrawal; bounded by the pool's free liquidity"},
+
+	// Valid only from BridgeActivationHeight and AmmActivationHeight; unknown types before them.
+	types.TxTypeBridgeLock:         {Family: "i", Note: "balance drift between admission and build; escrow credit"},
+	types.TxTypeBridgeRelease:      {Family: "i", Note: "signed by a quorum of signers or the guardian; escrow may be short until a lock lands"},
+	types.TxTypeAmmAddLiquidity:    {Family: "i", Note: "provider only; balance drift"},
+	types.TxTypeAmmRemoveLiquidity: {Family: "i", Note: "provider only; reserve floors"},
+	types.TxTypeAmmSwap:            {Family: "i", Note: "reserves move every block; slippage bound"},
 }
 
 // unknownTypeRows are type bytes that are NOT defined transaction types: the
-// zero byte, the gap at 0x1F, the first free byte, and the maximum.
-var unknownTypeRows = []types.TxType{0x00, 0x1F, 0x4D, 0xFF}
+// zero byte, the gap at 0x1F, the first free byte (0x53), and the maximum.
+var unknownTypeRows = []types.TxType{0x00, 0x1F, 0x53, 0xFF}
 
 // TestPoisonMatrixHasRowForEveryTxType is the registry check: it iterates the
 // full set of defined types and fails, naming the type, if any lacks a row.

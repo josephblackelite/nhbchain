@@ -2,7 +2,7 @@ import { credentials } from "@grpc/grpc-js";
 import {
   ConsensusServiceClient,
   SubmitTransactionRequest,
-} from "../../clients/ts/consensus/v1/consensus";
+} from "../../../clients/ts/consensus/v1/consensus";
 
 async function main() {
   const client = new ConsensusServiceClient(

@@ -47,6 +47,14 @@ rm -f validator.keystore
 # Prepare Hot Validator Architecture
 export NHB_ENV="prod"
 
+# The shipped configuration enables JWT authentication on the RPC and reads its
+# secret from NHB_RPC_JWT_SECRET; the node refuses to start without one. Use the
+# caller's value or make a fresh one. It is never printed.
+if [ -z "${NHB_RPC_JWT_SECRET:-}" ]; then
+    NHB_RPC_JWT_SECRET=$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+fi
+export NHB_RPC_JWT_SECRET
+
 echo "Generating new Hot Validator Key..."
 # --force: a wallet.key left by an earlier run is copied to wallet.key.bak-<time>
 # before it is replaced (generate-key refuses to overwrite a key otherwise).
@@ -104,8 +112,12 @@ cat node.log
 
 # Confirm the node came up on the live chain identity.
 NODE_CHAIN_ID=""
+# net_info is an operator-only method: it needs a token with the operator role,
+# signed with the node's own secret. The secret reaches the CLI on stdin.
+RPC_TOKEN=$(printf '%s' "$NHB_RPC_JWT_SECRET" | ./bin/nhb-cli rpc-token --secret-stdin --role operator --ttl 30m)
 for _ in $(seq 1 30); do
     NODE_CHAIN_ID=$(curl -fsS -m 5 http://127.0.0.1:8545/ -X POST -H 'Content-Type: application/json' \
+      -H "Authorization: Bearer ${RPC_TOKEN}" \
       -d '{"jsonrpc":"2.0","id":1,"method":"net_info","params":[]}' 2>/dev/null | grep -o '"chainId":[0-9]*' | head -1 | cut -d: -f2)
     [ -n "$NODE_CHAIN_ID" ] && break
     sleep 2

@@ -47,6 +47,11 @@ type Config struct {
 	WebhookHistorySize   int
 	WebhookQueueTTL      time.Duration
 
+	// UnauthenticatedAuditRetention is how long the audit rows of failed
+	// authentications (the ones with no API key) are kept; zero keeps them
+	// for good. Rows of authenticated requests are never pruned.
+	UnauthenticatedAuditRetention time.Duration
+
 	// RelayerKMSEnv names another environment variable holding the
 	// gateway's own raw hex-encoded secp256k1 private key -- an extra
 	// level of indirection so the actual secret value can live in a
@@ -94,6 +99,8 @@ func LoadConfigFromEnv() (Config, error) {
 		WebhookQueueCapacity: defaultTaskCapacity,
 		WebhookHistorySize:   defaultHistoryCapacity,
 		WebhookQueueTTL:      defaultQueueTTL,
+
+		UnauthenticatedAuditRetention: defaultUnauthenticatedAuditRetention,
 	}
 
 	if skew := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_TIMESTAMP_SKEW")); skew != "" {
@@ -199,6 +206,17 @@ func LoadConfigFromEnv() (Config, error) {
 			return Config{}, errors.New("ESCROW_GATEWAY_QUEUE_TTL must be positive")
 		}
 		cfg.WebhookQueueTTL = dur
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_AUDIT_UNAUTHENTICATED_RETENTION")); raw != "" {
+		dur, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse ESCROW_GATEWAY_AUDIT_UNAUTHENTICATED_RETENTION: %w", err)
+		}
+		if dur < 0 {
+			return Config{}, errors.New("ESCROW_GATEWAY_AUDIT_UNAUTHENTICATED_RETENTION must not be negative")
+		}
+		cfg.UnauthenticatedAuditRetention = dur
 	}
 
 	// Parse API keys from JSON array: [{"key":"...","secret":"..."}, ...]

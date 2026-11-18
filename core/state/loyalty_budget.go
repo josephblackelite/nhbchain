@@ -66,6 +66,35 @@ func CalcDailyBudgetZNHB(now time.Time, rolling7dFeesNHB, rolling7dFeesZNHB *big
 	return new(big.Int).Set(min)
 }
 
+// applyLoyaltyBudgetFloor raises budget to at least floor, limited to the daily
+// USD cap when one is set (see GetRemainingDailyBudgetZNHBWithFloor). With a cap
+// set and no usable price the cap cannot be expressed in ZNHB, so the floor is
+// not applied and budget is returned as it was.
+func applyLoyaltyBudgetFloor(budget, floor *big.Int, price *big.Rat, cfg *loyalty.DynamicConfig) *big.Int {
+	if budget == nil {
+		budget = big.NewInt(0)
+	}
+	if floor == nil || floor.Sign() <= 0 || cfg == nil {
+		return budget
+	}
+	effective := new(big.Int).Set(floor)
+	if cfg.DailyCapUsd > 0 {
+		if price == nil || price.Sign() <= 0 {
+			return budget
+		}
+		usdCap := new(big.Rat).SetUint64(cfg.DailyCapUsd)
+		usdCap.Quo(usdCap, price)
+		capWei := ratToWei(usdCap)
+		if effective.Cmp(capWei) > 0 {
+			effective = capWei
+		}
+	}
+	if budget.Cmp(effective) < 0 {
+		return effective
+	}
+	return budget
+}
+
 func ratFromWei(amount *big.Int) *big.Rat {
 	if amount == nil || amount.Sign() <= 0 {
 		return new(big.Rat)

@@ -29,14 +29,11 @@ const READ_ONLY_METHODS = new Set([
   'loyalty_listPrograms',
   'loyalty_paymasterBalance',
   'loyalty_programStats',
-  'loyalty_getCreatorRewardsPool',
-  'loyalty_creatorRewardsStats',
 ]);
 const MUTATING_METHODS = new Set([
   'loyalty_setPaymaster',
   'loyalty_addMerchant',
   'loyalty_removeMerchant',
-  'loyalty_setCreatorRewardsPool',
   'loyalty_createProgram',
   'loyalty_updateProgram',
   'loyalty_createBusiness',

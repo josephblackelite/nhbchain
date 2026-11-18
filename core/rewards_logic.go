@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"sort"
 	"strconv"
@@ -51,6 +52,10 @@ func (sp *StateProcessor) accrueEpochRewards(height uint64) error {
 	sp.rewardAccrual.AccrueBlock()
 	return nil
 }
+
+// rewardShortAdminLiquid is the short_reason of an epoch whose payout the admin
+// wallet's liquid ZNHB limited (see core/settlement_failsafe.go).
+const rewardShortAdminLiquid = "admin_liquid_balance"
 
 // scaleRewardToBudget proportionally reduces amount so that, summed across
 // every reward category, an epoch's total payout never exceeds budget.
@@ -117,6 +122,9 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 	// treasury).
 	var rewardManager *nhbstate.Manager
 	rewardPoolBalance := big.NewInt(0)
+	// shortReason is set only by the epoch settlement failsafe, when the admin
+	// wallet's liquid balance limited the payout.
+	shortReason := ""
 	if sp.hasAdminWallet {
 		rewardManager = nhbstate.NewManager(sp.Trie)
 		balance, err := rewardManager.ZNHBRewardPoolBalance()
@@ -127,15 +135,44 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 
 		plannedTotal := new(big.Int).Add(validatorsPlan, stakersPlan)
 		plannedTotal.Add(plannedTotal, engagementPlan)
-		if plannedTotal.Cmp(rewardPoolBalance) > 0 {
+		payoutBudget := rewardPoolBalance
+		if sp.epochSettlementFailsafeActive(snapshot.Height) {
+			// From the configured height the payout is also limited to what the
+			// admin wallet holds liquid: the Reward Pool figure is a label on the
+			// wallet's whole balance, and staking moves ZNHB out of the liquid
+			// part, so a payout the liquid part cannot cover is paid short instead
+			// of failing the block that closes the epoch (PL-EXT-29 item E-1b).
+			// The balance read here is the one before the epoch's own credits; the
+			// admin wallet's share of its own payout comes back to it, so this
+			// limits at least as much as the debit below needs.
+			adminAccount, err := sp.getAccount(sp.adminWallet[:])
+			if err != nil {
+				return fmt.Errorf("settleEpochRewards: load admin wallet: %w", err)
+			}
+			liquid := big.NewInt(0)
+			if adminAccount.BalanceZNHB != nil {
+				liquid = adminAccount.BalanceZNHB
+			}
+			if liquid.Cmp(payoutBudget) < 0 {
+				payoutBudget = liquid
+				if plannedTotal.Cmp(liquid) > 0 {
+					shortReason = rewardShortAdminLiquid
+					slog.Warn("rewards: the admin wallet's liquid ZNHB is below the epoch's payout, the epoch is recorded short",
+						slog.Uint64("epoch", snapshot.Epoch),
+						slog.String("planned", plannedTotal.String()),
+						slog.String("liquid", liquid.String()))
+				}
+			}
+		}
+		if plannedTotal.Cmp(payoutBudget) > 0 {
 			// The schedule wants to pay out more than the pool has left --
 			// scale every category down proportionally (never round up) so
 			// the epoch's total payout can never exceed what the pool can
 			// actually back, instead of paying some categories in full
 			// while silently starving others.
-			validatorsPlan = scaleRewardToBudget(validatorsPlan, plannedTotal, rewardPoolBalance)
-			stakersPlan = scaleRewardToBudget(stakersPlan, plannedTotal, rewardPoolBalance)
-			engagementPlan = scaleRewardToBudget(engagementPlan, plannedTotal, rewardPoolBalance)
+			validatorsPlan = scaleRewardToBudget(validatorsPlan, plannedTotal, payoutBudget)
+			stakersPlan = scaleRewardToBudget(stakersPlan, plannedTotal, payoutBudget)
+			engagementPlan = scaleRewardToBudget(engagementPlan, plannedTotal, payoutBudget)
 		}
 	}
 
@@ -264,6 +301,9 @@ func (sp *StateProcessor) settleEpochRewards(snapshot epoch.Snapshot) error {
 		"stakers_paid":       stakerPaid.String(),
 		"engagement_planned": engagementPlan.String(),
 		"engagement_paid":    engagementPaid.String(),
+	}
+	if shortReason != "" {
+		attrs["short_reason"] = shortReason
 	}
 	sp.AppendEvent(&types.Event{Type: "rewards.epoch_closed", Attributes: attrs})
 	sp.rewardAccrual = nil

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/ethereum/go-ethereum/rlp"
 
@@ -38,6 +39,17 @@ var (
 	// minimum validator stake bonded. The reporter can bond more later, so
 	// classifyProposalError skips rather than prunes it.
 	ErrEvidenceReporterNotBonded = errors.New("potsoSubmitEvidence: reporter must have at least the minimum validator stake bonded")
+	// ErrEvidenceTypeNotAccepted means the report is of a kind the intake no longer
+	// takes (DOWNTIME, INVALID_BLOCK_PROPOSAL: nothing proves them and processing them
+	// does nothing). Decided by the report alone, so classifyProposalError prunes it.
+	// Only from EvidenceIntakeGuardActivationHeight (PL-R5T-09).
+	ErrEvidenceTypeNotAccepted = errors.New("potsoSubmitEvidence: only equivocation reports are accepted")
+	// ErrEvidenceOffenderNotBonded means the offender of an equivocation report holds
+	// less than the minimum validator stake in staking stake (plus its own pending
+	// unbonds), so a proof made against a throwaway key is refused. The offender can
+	// bond more later, so classifyProposalError skips rather than prunes it. Only from
+	// EvidenceIntakeGuardActivationHeight (PL-R5T-09).
+	ErrEvidenceOffenderNotBonded = errors.New("potsoSubmitEvidence: offender must hold at least the minimum validator stake")
 )
 
 // encodeSubmitEvidenceTransaction serialises ev into the canonical Data
@@ -123,6 +135,13 @@ func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, 
 	if !bytes.Equal(ev.Reporter[:], sender) {
 		return ErrEvidenceReporterMismatch
 	}
+	// From the activation height only an equivocation report is taken: the other kinds
+	// carry no proof and do nothing when processed, yet each fills one of the 256 slots
+	// (PL-R5T-09). Decided by the report alone.
+	guard := ruleActiveAt(sp.validatorRules.EvidenceIntakeGuardActivationHeight, sp.blockHeight())
+	if guard && ev.Type != evidence.TypeEquivocation {
+		return ErrEvidenceTypeNotAccepted
+	}
 
 	// heightLookup is intentionally nil here: evidence.ValidateEvidence's
 	// future-height and max-age checks already bound Heights deterministically
@@ -140,11 +159,16 @@ func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, 
 	// makes the window checks apply to the offense itself: a proof for an old
 	// double-sign cannot be carried by a report that lists a recent height.
 	currentHeight := sp.blockHeight()
-	if verr := evidence.ValidateEvidence(&ev, hash, currentHeight, evidence.DefaultMaxAgeBlocks, nil); verr != nil {
+	if verr := evidence.ValidateEvidenceBound(&ev, hash, currentHeight, evidence.DefaultMaxAgeBlocks, nil, sp.voteBinding()); verr != nil {
 		return verr
 	}
 
-	if err := sp.requireEvidenceReporterBond(sender); err != nil {
+	if guard {
+		if err := sp.requireEvidenceOffenderBond(ev.Offender); err != nil {
+			return err
+		}
+	}
+	if err := sp.requireEvidenceReporterBond(sender, guard); err != nil {
 		return err
 	}
 
@@ -205,7 +229,11 @@ func (sp *StateProcessor) applySubmitEvidenceTransaction(tx *types.Transaction, 
 // requireEvidenceReporterBond refuses a reporter that does not have at least
 // the governed minimum validator stake of its own ZNHB bonded (LockedZNHB: the
 // reporter's own locked stake, not stake other accounts delegated to it).
-func (sp *StateProcessor) requireEvidenceReporterBond(reporter []byte) error {
+//
+// With stakeBond (from EvidenceIntakeGuardActivationHeight, PL-R5T-09) the bond is the
+// reporter's staking Stake instead: LockedZNHB is also raised by a point-of-sale hold,
+// which can be voided at once, so one balance could bond many reporters in turn.
+func (sp *StateProcessor) requireEvidenceReporterBond(reporter []byte, stakeBond bool) error {
 	minStake, err := sp.minimumValidatorStake()
 	if err != nil {
 		return fmt.Errorf("potsoSubmitEvidence: load minimum stake: %w", err)
@@ -214,8 +242,37 @@ func (sp *StateProcessor) requireEvidenceReporterBond(reporter []byte) error {
 	if err != nil {
 		return fmt.Errorf("potsoSubmitEvidence: load reporter account: %w", err)
 	}
-	if account.LockedZNHB == nil || account.LockedZNHB.Cmp(minStake) < 0 {
+	bond := account.LockedZNHB
+	if stakeBond {
+		bond = account.Stake
+	}
+	if bond == nil || bond.Cmp(minStake) < 0 {
 		return ErrEvidenceReporterNotBonded
+	}
+	return nil
+}
+
+// requireEvidenceOffenderBond refuses an equivocation report whose offender holds less
+// than the governed minimum validator stake as staking Stake plus its own pending
+// unbonds (the part of its bond a slash can still reach, see
+// SlashPendingUnbondsActivationHeight). The proof is only a signature check, so without
+// this a throwaway key can be "caught" as often as anyone likes.
+func (sp *StateProcessor) requireEvidenceOffenderBond(offender [20]byte) error {
+	minStake, err := sp.minimumValidatorStake()
+	if err != nil {
+		return fmt.Errorf("potsoSubmitEvidence: load minimum stake: %w", err)
+	}
+	account, err := sp.getAccount(offender[:])
+	if err != nil {
+		return fmt.Errorf("potsoSubmitEvidence: load offender account: %w", err)
+	}
+	bond := new(big.Int)
+	if account.Stake != nil {
+		bond.Set(account.Stake)
+	}
+	bond.Add(bond, ownPendingUnbonds(account, offender))
+	if bond.Cmp(minStake) < 0 {
+		return ErrEvidenceOffenderNotBonded
 	}
 	return nil
 }
@@ -268,7 +325,15 @@ func (sp *StateProcessor) processPendingEvidence(currentHeight uint64) error {
 	// within the wallet's own total. Before the pools are bootstrapped there is
 	// nothing to mirror into: EnsureZNHBPoolsBootstrapped splits whatever the
 	// wallet holds at that point.
-	slasher := sp.bookedSlasher(statebank.NewValidatorSlasher(manager, sp.evidenceSlashTreasury()))
+	validatorSlasher := statebank.NewValidatorSlasher(manager, sp.evidenceSlashTreasury())
+	// From the activation height the slash continues into the offender's own pending
+	// unbonds after its locked balance (PL-R5T-26), and is sized on the stake plus
+	// those unbonds (below).
+	reachUnbonds := ruleActiveAt(sp.validatorRules.SlashPendingUnbondsActivationHeight, currentHeight)
+	if reachUnbonds {
+		validatorSlasher = validatorSlasher.ReachingPendingUnbonds()
+	}
+	slasher := sp.bookedSlasher(validatorSlasher)
 	engine := penalty.NewEngine(catalog, ledger, slasher).WithRecords(manager)
 
 	for _, entry := range entries {
@@ -300,7 +365,11 @@ func (sp *StateProcessor) processPendingEvidence(currentHeight uint64) error {
 		// is not fatal here -- it just leaves this offender's weight
 		// untouched for this pass, same as before this fix existed.
 		if account, acctErr := manager.GetAccount(rec.Evidence.Offender[:]); acctErr == nil && account != nil && account.Stake != nil {
-			if _, err := ledger.EnsureBaseline(rec.Evidence.Offender, account.Stake); err != nil {
+			base := account.Stake
+			if reachUnbonds {
+				base = new(big.Int).Add(account.Stake, ownPendingUnbonds(account, rec.Evidence.Offender))
+			}
+			if _, err := ledger.EnsureBaseline(rec.Evidence.Offender, base); err != nil {
 				return fmt.Errorf("potso: ensure baseline weight for %x: %w", rec.Evidence.Offender, err)
 			}
 		}
@@ -314,6 +383,15 @@ func (sp *StateProcessor) processPendingEvidence(currentHeight uint64) error {
 		}
 		if !res.Idempotent && res.Event != nil {
 			sp.AppendEvent(res.Event)
+		}
+		// The slasher debited the offender's stake without going through setAccount,
+		// the one place the eligible-validator map and the validator set are
+		// recomputed, so both still hold the stake it had before (PL-R5T-25). From the
+		// activation height they are re-evaluated here, in the block that slashes.
+		if !res.Idempotent && ruleActiveAt(sp.validatorRules.SlashEligibilityRefreshActivationHeight, currentHeight) {
+			if err := sp.refreshValidatorEligibility(rec.Evidence.Offender[:]); err != nil {
+				return fmt.Errorf("refresh eligibility of slashed validator %x: %w", rec.Evidence.Offender, err)
+			}
 		}
 	}
 	return nil

@@ -125,7 +125,25 @@ func NewAuthenticator(secrets map[string]string, skew time.Duration, nonceTTL ti
 }
 
 // Authenticate validates headers and signature, returning the caller principal.
+// A request is accepted only if its timestamp is later than the last one this
+// key had accepted, so a key can make at most one request per second.
 func (a *Authenticator) Authenticate(r *http.Request, body []byte) (*Principal, error) {
+	return a.authenticate(r, body, false)
+}
+
+// AuthenticateRead validates a read the way Authenticate validates a write, with
+// one difference in the timestamp rule: any number of reads may share a second.
+// The API key, the skew, the signature and the nonce are checked as before, but
+// the timestamp only has to be no older than the last one a write (Authenticate)
+// accepted for the key, and a read never moves that mark, so reads neither fail
+// each other nor make a later write fail. The nonce still refuses an exact
+// replay; what a read no longer refuses is a replay of one older than the
+// nonce cache remembers, inside the skew window and before a newer write.
+func (a *Authenticator) AuthenticateRead(r *http.Request) (*Principal, error) {
+	return a.authenticate(r, nil, true)
+}
+
+func (a *Authenticator) authenticate(r *http.Request, body []byte, read bool) (*Principal, error) {
 	if len(body) > MaxBodyForSignature {
 		return nil, fmt.Errorf("request body exceeds %d bytes", MaxBodyForSignature)
 	}
@@ -176,7 +194,11 @@ func (a *Authenticator) Authenticate(r *http.Request, body []byte) (*Principal, 
 	if duplicate {
 		return nil, errors.New("nonce already used")
 	}
-	if a.isTimestampReplay(apiKey, ts, now) {
+	if read {
+		if a.isTimestampBehindWrites(apiKey, ts, now) {
+			return nil, errors.New("timestamp older than the last accepted write")
+		}
+	} else if a.isTimestampReplay(apiKey, ts, now) {
 		return nil, errors.New("timestamp not increasing")
 	}
 	return &Principal{APIKey: apiKey}, nil
@@ -274,6 +296,25 @@ func (a *Authenticator) isTimestampReplay(apiKey string, ts time.Time, now time.
 		a.lastSeen[apiKey] = current
 	}
 	return false
+}
+
+// isTimestampBehindWrites reports whether ts is older than the last timestamp a
+// write was accepted at for the key, while that mark is still inside the skew
+// window. An equal timestamp is not behind. It only reads the mark.
+func (a *Authenticator) isTimestampBehindWrites(apiKey string, ts time.Time, now time.Time) bool {
+	if a.allowedTimestampSkew <= 0 {
+		return false
+	}
+	cutoff := now.Add(-a.allowedTimestampSkew)
+
+	a.lastSeenMu.Lock()
+	defer a.lastSeenMu.Unlock()
+
+	last, ok := a.lastSeen[apiKey]
+	if !ok || !time.Unix(last, 0).UTC().After(cutoff) {
+		return false
+	}
+	return ts.Unix() < last
 }
 
 func (a *Authenticator) nonceStore(apiKey string) *nonceStore {

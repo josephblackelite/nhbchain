@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log/slog"
 	"math/big"
 	"strconv"
 
@@ -136,14 +137,18 @@ func (sp *StateProcessor) settleBuybackEpoch(snapshot epoch.Snapshot) error {
 
 	var fills []buyback.Fill
 	var clearingPrice *big.Rat
+	// priced is whether the reference price took part in this epoch's settlement.
+	priced := hasRef
+	// refundReason is set only by the epoch settlement failsafe (see
+	// core/settlement_failsafe.go): the highest price was zero or could not be
+	// computed, and no purchase is made.
+	var refundReason string
+	var refundCfg buyback.Config
 	if !hasRef {
 		// No verified reference price was signed for this epoch -- the
 		// treasury cannot safely compute a max price, so no purchase
 		// happens and every seller gets their escrowed ZNHB back in full.
-		fills = make([]buyback.Fill, 0, len(buybackAsks))
-		for _, a := range buybackAsks {
-			fills = append(fills, buyback.Fill{Seller: a.Seller, ZNHBFilled: big.NewInt(0), NHBPaid: big.NewInt(0), ZNHBRefunded: new(big.Int).Set(a.AmountWei)})
-		}
+		fills = refundEveryAsk(buybackAsks)
 	} else {
 		curvePrice, err := sp.currentZNHBCurvePrice(manager)
 		if err != nil {
@@ -152,14 +157,41 @@ func (sp *StateProcessor) settleBuybackEpoch(snapshot epoch.Snapshot) error {
 		refPriceRat := new(big.Rat).SetFrac(refRecord.RateNum, refRecord.RateDenom)
 		cfg := sp.effectiveBuybackConfig(manager)
 		maxPrice, err := buyback.MaxBuybackPrice(curvePrice, refPriceRat, cfg.DiscountBps, cfg.SafetyMarginBps)
-		if err != nil {
+		// A governed discount or safety margin of 10,000 basis points makes the highest
+		// price zero without an error here; the fill step then refuses it.
+		unpriceable := err != nil || maxPrice == nil || maxPrice.Sign() <= 0
+		switch {
+		case unpriceable && sp.epochSettlementFailsafeActive(snapshot.Height):
+			// From the settlement failsafe's height a price that is zero (a governed
+			// discount or safety margin of 10000 basis points) or cannot be computed
+			// means no purchase this epoch, never an error that stops the block that
+			// closes it. The failsafe also reports why, in its own event (below); it
+			// takes precedence over the plainer refund of the next case when both
+			// heights have been reached.
+			if err != nil {
+				refundReason = buybackRefundUnusablePrice
+			} else {
+				refundReason = buybackRefundZeroPrice
+			}
+			refundCfg = cfg
+			fills = refundEveryAsk(buybackAsks)
+			priced = false
+		case unpriceable && sp.buybackUnpriceableEpochRefunds():
+			// The governed discount or safety margin leaves no positive price. Failing
+			// would reject the block that closes the epoch on every validator and stop
+			// the chain (PL-EXT-28): settle the epoch like one with no reference price
+			// instead.
+			fills = refundEveryAsk(buybackAsks)
+			priced = false
+		case err != nil:
 			return fmt.Errorf("buyback: compute max price: %w", err)
-		}
-		clearingPrice = maxPrice
-		budget := new(big.Int).Set(accrualAcc.BalanceNHB)
-		fills, err = buyback.FillAsksProRata(buybackAsks, budget, maxPrice)
-		if err != nil {
-			return fmt.Errorf("buyback: fill asks: %w", err)
+		default:
+			clearingPrice = maxPrice
+			budget := new(big.Int).Set(accrualAcc.BalanceNHB)
+			fills, err = buyback.FillAsksProRata(buybackAsks, budget, maxPrice)
+			if err != nil {
+				return fmt.Errorf("buyback: fill asks: %w", err)
+			}
 		}
 	}
 
@@ -267,7 +299,7 @@ func (sp *StateProcessor) settleBuybackEpoch(snapshot epoch.Snapshot) error {
 		AsksFilled:         uint64(len(fills)),
 		TotalZNHBFilled:    new(big.Int).Set(totalFilledZNHB),
 		TotalNHBPaid:       new(big.Int).Set(totalPaidNHB),
-		ReferencePriceUsed: hasRef,
+		ReferencePriceUsed: priced,
 	}
 	if clearingPrice != nil {
 		settled.ClearingPrice = clearingPrice.FloatString(curve.Decimals)
@@ -275,5 +307,40 @@ func (sp *StateProcessor) settleBuybackEpoch(snapshot epoch.Snapshot) error {
 	if evt := settled.Event(); evt != nil {
 		sp.AppendEvent(evt)
 	}
+	if refundReason != "" {
+		refunded := events.BuybackEpochRefunded{
+			Epoch:             epochNumber,
+			AsksRefunded:      uint64(len(fills)),
+			TotalZNHBRefunded: new(big.Int).Set(totalAskedZNHB),
+			Reason:            refundReason,
+			DiscountBps:       refundCfg.DiscountBps,
+			SafetyMarginBps:   refundCfg.SafetyMarginBps,
+		}
+		if evt := refunded.Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+		slog.Warn("buyback: no purchase this epoch, every ask refunded in full",
+			slog.Uint64("epoch", epochNumber),
+			slog.String("reason", refundReason),
+			slog.Int("asks", len(fills)),
+			slog.Uint64("discountBps", uint64(refundCfg.DiscountBps)),
+			slog.Uint64("safetyMarginBps", uint64(refundCfg.SafetyMarginBps)))
+	}
 	return nil
+}
+
+// The reasons an epoch's asks were all refunded by the settlement failsafe.
+const (
+	buybackRefundZeroPrice     = "zero_price"
+	buybackRefundUnusablePrice = "unusable_price"
+)
+
+// refundEveryAsk returns the fills of an epoch that buys nothing: every seller
+// gets the whole escrowed amount back.
+func refundEveryAsk(asks []buyback.Ask) []buyback.Fill {
+	fills := make([]buyback.Fill, 0, len(asks))
+	for _, a := range asks {
+		fills = append(fills, buyback.Fill{Seller: a.Seller, ZNHBFilled: big.NewInt(0), NHBPaid: big.NewInt(0), ZNHBRefunded: new(big.Int).Set(a.AmountWei)})
+	}
+	return fills
 }

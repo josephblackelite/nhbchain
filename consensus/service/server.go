@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"nhbchain/consensus/codec"
 	"nhbchain/core"
@@ -17,6 +19,11 @@ type Server struct {
 	consensusv1.UnimplementedQueryServiceServer
 	node core.ConsensusAPI
 	auth Authorizer
+	// allowBlockWrites lets a caller build and commit a block over this service. Off unless WithBlockWrites
+	// is passed, because a block committed this way is not checked for the quorum certificate that a block
+	// arriving from a peer must carry (and the message cannot carry one): whoever holds the service's one
+	// credential could fork the node from the network (ledger PL-EXT-47).
+	allowBlockWrites bool
 }
 
 // Authorizer evaluates whether an incoming request should be allowed.
@@ -35,6 +42,21 @@ func WithAuthorizer(authorizer Authorizer) ServerOption {
 		}
 	}
 }
+
+// WithBlockWrites turns on CreateBlock and CommitBlock. They are off by default: a node that runs the BFT engine
+// commits blocks only from its own rounds and from peers' blocks that carry a verified quorum certificate, and a
+// block committed through this service skips that check. Turn it on only for a node that does not run the engine
+// (a development harness that produces blocks from outside).
+func WithBlockWrites() ServerOption {
+	return func(s *Server) {
+		if s != nil {
+			s.allowBlockWrites = true
+		}
+	}
+}
+
+// errBlockWritesDisabled is what CreateBlock and CommitBlock answer while block writes are off.
+var errBlockWritesDisabled = status.Error(codes.PermissionDenied, "consensus service: building and committing blocks over this service is disabled (a block committed here would skip the quorum certificate check)")
 
 // NewServer constructs a gRPC consensus server backed by the provided node API.
 func NewServer(node core.ConsensusAPI, opts ...ServerOption) *Server {
@@ -157,6 +179,9 @@ func (s *Server) CreateBlock(ctx context.Context, req *consensusv1.CreateBlockRe
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
 	}
+	if !s.allowBlockWrites {
+		return nil, errBlockWritesDisabled
+	}
 	txs, err := codec.TransactionsFromProto(req.GetTransactions())
 	if err != nil {
 		return nil, err
@@ -179,6 +204,9 @@ func (s *Server) CommitBlock(ctx context.Context, req *consensusv1.CommitBlockRe
 	}
 	if err := s.authorize(ctx); err != nil {
 		return nil, err
+	}
+	if !s.allowBlockWrites {
+		return nil, errBlockWritesDisabled
 	}
 	block, err := codec.BlockFromProto(req.GetBlock())
 	if err != nil {

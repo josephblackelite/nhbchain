@@ -128,7 +128,9 @@ func TestProcessNetworkMessageGetStatusBroadcastsStatus(t *testing.T) {
 	}
 }
 
-func TestProcessNetworkMessageGetBlocksBroadcastsChunk(t *testing.T) {
+// PL-EXT-43: a block request with no peer to answer is refused; it is not broadcast to every peer. The peer-aware
+// path (HandlePeerMessage) answers the requester alone and is pinned in node_network_peer_test.go.
+func TestProcessNetworkMessageGetBlocksIsRefusedWithoutASender(t *testing.T) {
 	node := newTestNode(t)
 	broadcaster := &testBroadcaster{}
 	node.SetNetworkBroadcaster(broadcaster)
@@ -147,14 +149,22 @@ func TestProcessNetworkMessageGetBlocksBroadcastsChunk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	if err := node.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeGetBlocks, Payload: payload}); err != nil {
-		t.Fatalf("process get blocks: %v", err)
+	err = node.ProcessNetworkMessage(&p2p.Message{Type: p2p.MsgTypeGetBlocks, Payload: payload})
+	if !errors.Is(err, ErrBlockRequestWithoutSender) {
+		t.Fatalf("process get blocks with no sender: %v, want ErrBlockRequestWithoutSender", err)
 	}
-	if len(broadcaster.messages) != 1 {
-		t.Fatalf("expected 1 blocks broadcast, got %d", len(broadcaster.messages))
+	if len(broadcaster.messages) != 0 {
+		t.Fatalf("a block request with no sender was broadcast: %d messages sent", len(broadcaster.messages))
 	}
-	if broadcaster.messages[0].Type != p2p.MsgTypeBlocks {
-		t.Fatalf("expected blocks message, got %d", broadcaster.messages[0].Type)
+	// the same refusal through the senderless entry point and through a peer-aware call that names no peer
+	if err := node.HandleMessage(&p2p.Message{Type: p2p.MsgTypeGetBlocks, Payload: payload}); !errors.Is(err, ErrBlockRequestWithoutSender) {
+		t.Fatalf("HandleMessage: %v, want ErrBlockRequestWithoutSender", err)
+	}
+	if err := node.HandlePeerMessage(nil, &p2p.Message{Type: p2p.MsgTypeGetBlocks, Payload: payload}); !errors.Is(err, ErrBlockRequestWithoutSender) {
+		t.Fatalf("HandlePeerMessage with no peer: %v, want ErrBlockRequestWithoutSender", err)
+	}
+	if len(broadcaster.messages) != 0 {
+		t.Fatalf("a refused block request was broadcast: %d messages sent", len(broadcaster.messages))
 	}
 }
 

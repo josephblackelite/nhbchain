@@ -42,6 +42,32 @@ it again, and a ban would let anybody lock that node out of its peers.
   digest binds it to a time or to the receiving node.
 - Metrics: `nhb_p2p_nonce_guard_size`, `nhb_p2p_nonce_guard_evicted_total`.
 
+## Challenge-response extension
+
+The hello above is a bearer token: it is signed before anything is read from the other side, so a
+recording of it can be shown again to impersonate the node ID it names. A node that has the
+extension (`handshakeExtVersion` = 2) adds an optional `ext` block to its hello, `{"v": 2, "n":
+<fresh 32 bytes>}`. The block is outside the signed v1 digest, which is unchanged, so a node that
+does not know the extension ignores the field and verifies the hello as before.
+
+When both hellos carry the block, each side then sends one more frame, `{"hs2auth": <signature>}`,
+signed by the key behind its node ID over `keccak256("nhb-handshake-auth-v2" | chain id | genesis |
+role | signer node ID | peer node ID | signer challenge | peer challenge | sha256(listen addresses)
+| sha256(client version))`. The role is the side the signer is on (dialer or listener). A recorded
+hello cannot be answered, because the proof has to cover the challenge the other node chose for this
+connection; a proof made on one connection is of no use on another; a proof made as one role is
+refused by a node that expects the other; and the listen addresses and client version, which the v1
+signature does not cover, can no longer be changed on the way. The stream is still plaintext after
+the handshake, so this closes impersonation by replay, not an attacker who relays a whole
+connection.
+
+`[p2p] HandshakeChallenge` sets how a node treats it: `auto` (the default) offers the block and
+proves its key to a peer that offers it too, and handles any other peer as a v1 peer, sending it
+nothing it does not expect; `off` behaves exactly like a v1 node; `require` refuses a peer that
+does not offer it. In `auto` a link observer can still strip the block from a recorded hello and
+have it taken for a v1 hello, so the replay is closed only between nodes that all run `require`,
+which is the setting to move to once every peer has upgraded.
+
 ## Ban reasons and default actions
 
 Ban length is `PeerBanDuration` (`[p2p] BanDurationSeconds`; 3600 in the repo
@@ -51,8 +77,8 @@ Ban length is `PeerBanDuration` (`[p2p] BanDurationSeconds`; 3600 in the repo
 | Event | Trigger | Action |
 | --- | --- | --- |
 | Handshake violation | Chain ID or genesis mismatch in a handshake that is signed by the node it names | Ban for `PeerBanDuration` (reputation ban plus peerstore `SetBan` and `RecordViolation`). Never applied to a configured persistent peer. |
-| Handshake refused | Signature that does not match the claimed node ID, or a replayed nonce | The connection is closed. Nothing is held against the node ID in the packet. |
-| Protocol violation | Malformed frame or payload, oversize frame, an unsolicited or oversized `PexAddresses`, a payload the node handler reports as invalid | Score -5, peer disconnected; banned if the score crosses `-BanScore`. |
+| Handshake refused | Signature that does not match the claimed node ID, a replayed nonce, a proof (`hs2auth`) that does not verify, or no offer of the challenge extension when `HandshakeChallenge = "require"` | The connection is closed. Nothing is held against the node ID in the packet. |
+| Protocol violation | Malformed frame or payload, oversize frame, an unsolicited or oversized `PexAddresses`, a payload the node handler reports as invalid (a transaction that fails validation, or a block that the node rejects for its content when it syncs from a peer; a failure of the node's own storage is not one) | Score -5, peer disconnected; banned if the score crosses `-BanScore`. |
 | Invalid message rate | At least 50% invalid messages among at least 5 messages within one minute (`invalidRateThresholdPerc`, `invalidRateSampleSize`, `invalidRateWindow`) | Disconnect and ban. |
 | Per-peer or per-IP rate limit | Token bucket empty (see [rate limits](../p2p/ratelimits.md)) | Score -10, disconnect; banned if the score crosses `-BanScore`. Not applied to persistent peers. |
 | Global rate cap | Aggregate bucket empty | Disconnect, no penalty. |

@@ -249,30 +249,10 @@ func (l *Ledger) List(startTs, endTs int64, cursor string, limit int) ([]*Vouche
 	if l == nil {
 		return nil, "", fmt.Errorf("ledger not initialised")
 	}
-	entries, err := l.loadIndex()
+	filtered, err := l.indexInRange(startTs, endTs)
 	if err != nil {
 		return nil, "", err
 	}
-	filtered := make([]voucherIndexEntry, 0, len(entries))
-	for _, entry := range entries {
-		createdAt, err := uint64ToInt64(entry.CreatedAt)
-		if err != nil {
-			return nil, "", fmt.Errorf("ledger: index entry overflow: %w", err)
-		}
-		if startTs != 0 && createdAt < startTs {
-			continue
-		}
-		if endTs != 0 && createdAt > endTs {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	sort.SliceStable(filtered, func(i, j int) bool {
-		if filtered[i].CreatedAt == filtered[j].CreatedAt {
-			return filtered[i].ProviderTxID < filtered[j].ProviderTxID
-		}
-		return filtered[i].CreatedAt < filtered[j].CreatedAt
-	})
 	startIdx := 0
 	cursorID := strings.TrimSpace(cursor)
 	if cursorID != "" {
@@ -307,14 +287,135 @@ func (l *Ledger) List(startTs, endTs int64, cursor string, limit int) ([]*Vouche
 	return records, nextCursor, nil
 }
 
+// indexInRange returns the index entries created inside the inclusive window
+// (a zero bound is open), oldest first and by provider transaction id within one
+// second. It is the ordering every page of List and ListWhere is cut from.
+func (l *Ledger) indexInRange(startTs, endTs int64) ([]voucherIndexEntry, error) {
+	entries, err := l.loadIndex()
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]voucherIndexEntry, 0, len(entries))
+	for _, entry := range entries {
+		createdAt, err := uint64ToInt64(entry.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("ledger: index entry overflow: %w", err)
+		}
+		if startTs != 0 && createdAt < startTs {
+			continue
+		}
+		if endTs != 0 && createdAt > endTs {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if filtered[i].CreatedAt == filtered[j].CreatedAt {
+			return filtered[i].ProviderTxID < filtered[j].ProviderTxID
+		}
+		return filtered[i].CreatedAt < filtered[j].CreatedAt
+	})
+	return filtered, nil
+}
+
+// ProviderKey is the form in which a provider name is compared: trimmed and in
+// lower case, the same as ProviderConfig.IsAllowed compares it, so that the
+// providers a node lets mint and the providers a partner may read back are
+// spelled the same way.
+func ProviderKey(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+// ListWhere is List for a caller who may see only some of the records: keep is
+// asked about each record and only those it accepts are returned. A nil keep is
+// List, record for record.
+//
+// The page is filled with kept records only, so limit counts what the caller
+// receives. Nothing of a record that is not kept reaches the caller through the
+// page or the cursor:
+//   - the returned cursor is the id of the last record returned, which is kept;
+//   - it is empty unless a further kept record exists, where List would point at
+//     any entry left behind (which would tell the caller that someone else has
+//     records after theirs);
+//   - a cursor that names a record that is not kept (or does not exist) is
+//     ignored, and the list starts from the beginning, so a caller cannot use
+//     the cursor to ask whether another provider's id exists or where it sits.
+//
+// Finding a caller's records among many others reads the records in between
+// one by one, the way ExportCSV reads the whole range.
+func (l *Ledger) ListWhere(startTs, endTs int64, cursor string, limit int, keep func(*VoucherRecord) bool) ([]*VoucherRecord, string, error) {
+	if keep == nil {
+		return l.List(startTs, endTs, cursor, limit)
+	}
+	if l == nil {
+		return nil, "", fmt.Errorf("ledger not initialised")
+	}
+	filtered, err := l.indexInRange(startTs, endTs)
+	if err != nil {
+		return nil, "", err
+	}
+	startIdx := 0
+	if cursorID := strings.TrimSpace(cursor); cursorID != "" {
+		for i, entry := range filtered {
+			if entry.ProviderTxID != cursorID {
+				continue
+			}
+			record, ok, err := l.Get(cursorID)
+			if err != nil {
+				return nil, "", err
+			}
+			if ok && keep(record) {
+				startIdx = i + 1
+			}
+			break
+		}
+	}
+	records := make([]*VoucherRecord, 0)
+	i := startIdx
+	for ; i < len(filtered); i++ {
+		if limit > 0 && len(records) >= limit {
+			break
+		}
+		record, ok, err := l.Get(filtered[i].ProviderTxID)
+		if err != nil {
+			return nil, "", err
+		}
+		if !ok || !keep(record) {
+			continue
+		}
+		records = append(records, record)
+	}
+	nextCursor := ""
+	if limit > 0 && len(records) >= limit {
+		for j := i; j < len(filtered); j++ {
+			record, ok, err := l.Get(filtered[j].ProviderTxID)
+			if err != nil {
+				return nil, "", err
+			}
+			if ok && keep(record) {
+				nextCursor = records[len(records)-1].ProviderTxID
+				break
+			}
+		}
+	}
+	return records, nextCursor, nil
+}
+
 // ExportCSV generates a deterministic CSV export covering the provided timestamp
 // window. The CSV is returned as a base64 encoded string alongside the entry count
 // and total minted amount in wei.
 func (l *Ledger) ExportCSV(startTs, endTs int64) (string, int, *big.Int, error) {
+	return l.ExportCSVWhere(startTs, endTs, nil)
+}
+
+// ExportCSVWhere is ExportCSV for a caller who may see only some of the records:
+// the rows, the count and the total cover the records keep accepts and nothing
+// else. A nil keep exports everything, byte for byte as ExportCSV always has.
+func (l *Ledger) ExportCSVWhere(startTs, endTs int64, keep func(*VoucherRecord) bool) (string, int, *big.Int, error) {
 	if l == nil {
 		return "", 0, nil, fmt.Errorf("ledger not initialised")
 	}
-	entries, _, err := l.List(startTs, endTs, "", 0)
+	entries, _, err := l.ListWhere(startTs, endTs, "", 0, keep)
 	if err != nil {
 		return "", 0, nil, err
 	}

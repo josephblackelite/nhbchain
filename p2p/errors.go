@@ -12,3 +12,7 @@ var ErrPeerAlreadyConnected = errors.New("p2p: peer already connected")
 func IsInvalidPayload(err error) bool {
 	return errors.Is(err, ErrInvalidPayload)
 }
+
+// ErrPeerIDMismatch indicates that the node reached at an address proved, in its handshake, an ID other
+// than the one the dial expected (a seed whose address is now answered by somebody else).
+var ErrPeerIDMismatch = errors.New("p2p: peer ID does not match the expected ID")

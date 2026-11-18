@@ -6,11 +6,19 @@ import (
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+
+	"nhbchain/core/types"
 )
 
 type HeightLookup func(height uint64) bool
 
 func ValidateEvidence(e *Evidence, hash [32]byte, currentHeight uint64, maxAge uint64, heightLookup HeightLookup) *ValidationError {
+	return ValidateEvidenceBound(e, hash, currentHeight, maxAge, heightLookup, types.VoteBinding{})
+}
+
+// ValidateEvidenceBound is ValidateEvidence with a vote binding (PL-R5T-31): the votes of an
+// equivocation proof are checked against the digest the binding names for the proof's height.
+func ValidateEvidenceBound(e *Evidence, hash [32]byte, currentHeight uint64, maxAge uint64, heightLookup HeightLookup, binding types.VoteBinding) *ValidationError {
 	if e == nil {
 		return &ValidationError{Reason: RejectReasonUnknown, Message: "evidence payload required"}
 	}
@@ -94,7 +102,7 @@ func ValidateEvidence(e *Evidence, hash [32]byte, currentHeight uint64, maxAge u
 	// concrete proof (two conflicting votes signed by the offender's own
 	// key) before this evidence can ever result in a real slash.
 	if proof != nil {
-		if err := verifyEquivocationVotes(proof, e.Offender); err != nil {
+		if err := verifyEquivocationVotes(proof, e.Offender, binding); err != nil {
 			return &ValidationError{Reason: RejectReasonInvalidEquivocationProof, Message: err.Error()}
 		}
 	}

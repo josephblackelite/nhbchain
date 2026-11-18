@@ -7,6 +7,11 @@ option go_package = "nhbchain/proto/network/v1;networkv1";
 message GossipMessage {
   uint32 type = 1;
   bytes payload = 2;
+  // peer_id names the one connected peer a message concerns. On a frame sent by
+  // p2pd it is the peer a chain data request came from; on a frame sent to
+  // p2pd it is the only peer the message is to be delivered to. Empty means
+  // every peer, which is also what a sender that does not know the field sends.
+  string peer_id = 3;
 }
 
 message Heartbeat {

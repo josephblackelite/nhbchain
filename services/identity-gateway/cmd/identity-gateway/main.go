@@ -105,6 +105,7 @@ func run() error {
 	defer store.Close()
 
 	emailer := &identitygateway.LogEmailer{}
+	log.Printf("identity-gateway: WARNING: the built-in emailer delivers nothing (it logs the address only), so no user receives a verification code; supply a real Emailer before using this service for sign-ups")
 	chainClient := identitygateway.NewRPCAliasOwnerLookup(nodeRPCURL)
 	server, err := identitygateway.NewServer(store, emailer, chainClient, identitygateway.Config{
 		APIKeys:          apiKeys,

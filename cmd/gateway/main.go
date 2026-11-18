@@ -219,6 +219,14 @@ func main() {
 		rateLimits[routes.CompatRateLimitKey] = middleware.RateLimit{RatePerSecond: 2, Burst: 20}
 	}
 
+	trustedProxies, err := middleware.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		logger.Fatalf("parse trustedProxies: %v", err)
+	}
+	if len(trustedProxies) == 0 {
+		logger.Println("trustedProxies is empty: rate limits are keyed on the connecting peer address and forwarded client addresses are ignored, so clients behind a proxy share one bucket per proxy address until the proxy is listed")
+	}
+
 	router, err := routes.New(routes.Config{
 		Routes: []routes.ServiceRoute{
 			{
@@ -284,7 +292,7 @@ func main() {
 		},
 		CompatHandler: compatHandler,
 		Authenticator: auth,
-		RateLimiter:   middleware.NewRateLimiter(rateLimits, logger),
+		RateLimiter:   middleware.NewRateLimiter(rateLimits, logger, middleware.WithTrustedProxies(trustedProxies)),
 		Observability: obs,
 		CORS: middleware.CORSConfig{
 			AllowedOrigins:   []string{"*"},

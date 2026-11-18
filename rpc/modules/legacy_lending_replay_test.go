@@ -1,8 +1,9 @@
 package modules
 
 // The replay as it was at release/hardening-r1: a walk over every height from 1
-// to the tip. The tests compare the current replay, which visits only the blocks
-// that hold a lending transaction, against it. Kept verbatim (comments aside).
+// to the tip. The tests compare the current replay, which is made from the
+// index of decoded lending transactions, against it. Kept verbatim (comments
+// aside).
 
 import (
 	"fmt"

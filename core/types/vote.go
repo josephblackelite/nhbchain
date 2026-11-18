@@ -52,6 +52,12 @@ func (v *PrecommitVote) Digest() [32]byte {
 	return sha256.Sum256(v.Bytes())
 }
 
+// DigestBound returns the digest this vote is signed over under binding (PL-R5T-31): the
+// legacy digest below the binding height, the genesis-bound one from it.
+func (v *PrecommitVote) DigestBound(binding VoteBinding) ([32]byte, error) {
+	return binding.Digest(v.Height, v.Bytes())
+}
+
 // Sign produces a QuorumSignature over this vote using the given
 // secp256k1 private key, via the same go-ethereum recoverable-signature
 // convention used throughout this codebase (core/types/transaction.go's
@@ -117,6 +123,13 @@ type QuorumCert struct {
 // remains fully readable). This function itself is agnostic to how the
 // caller sourced the map; it just verifies against whatever it's given.
 func (qc *QuorumCert) Verify(headerHash []byte, validatorPower map[string]*big.Int) error {
+	return qc.VerifyBound(headerHash, validatorPower, VoteBinding{})
+}
+
+// VerifyBound is Verify with a vote binding (PL-R5T-31): a certificate for a height at or
+// above binding.FromHeight must have been signed over the genesis hash binding names, one
+// for an earlier height over the legacy digest.
+func (qc *QuorumCert) VerifyBound(headerHash []byte, validatorPower map[string]*big.Int, binding VoteBinding) error {
 	if qc == nil {
 		return fmt.Errorf("quorum certificate missing")
 	}
@@ -134,7 +147,10 @@ func (qc *QuorumCert) Verify(headerHash []byte, validatorPower map[string]*big.I
 	}
 
 	vote := &PrecommitVote{BlockHash: headerHash, Round: qc.Round, Type: VoteTypePrecommit, Height: qc.Height}
-	digest := vote.Digest()
+	digest, err := binding.Digest(qc.Height, vote.Bytes())
+	if err != nil {
+		return fmt.Errorf("quorum certificate: %w", err)
+	}
 
 	totalPower := big.NewInt(0)
 	for _, power := range validatorPower {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"nhbchain/crypto"
+	"nhbchain/native/potso"
 	"nhbchain/native/subscriptions"
 
 	"github.com/BurntSushi/toml"
@@ -919,6 +921,64 @@ ValidatorKeystorePath = %s
 	}
 }
 
+// A config that sets the four timers and leaves the minimum block interval out gets
+// the one-second default. With a commit timeout under 2s that default is longer than
+// half of it, which the engine lowers; the settings must still validate, or a
+// consensusd config that started before the interval existed would stop starting.
+// The advisory is still reported, and a timer that is not positive is still refused.
+func TestLoadedConsensusWithShortCommitTimeoutValidatesAndIsAdvised(t *testing.T) {
+	for _, tc := range []struct {
+		commit   string
+		advisory bool
+	}{
+		{"1s", true},
+		{"1500ms", true},
+		{"2s", false},
+		{"4s", false},
+	} {
+		tc := tc
+		t.Run(tc.commit, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			keystorePath := filepath.Join(dir, "validator.keystore")
+			contents := fmt.Sprintf(`ListenAddress = "0.0.0.0:6001"
+ValidatorKeystorePath = %s
+
+[consensus]
+ProposalTimeout = "500ms"
+PrevoteTimeout = "500ms"
+PrecommitTimeout = "500ms"
+CommitTimeout = %q
+`, tomlQuoted(keystorePath), tc.commit)
+			if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			if got := cfg.Consensus.MinBlockInterval; got != defaultMinBlockInterval {
+				t.Fatalf("MinBlockInterval %v, want the default %v", got, defaultMinBlockInterval)
+			}
+			if err := ValidateConsensus(cfg.Consensus); err != nil {
+				t.Fatalf("ValidateConsensus with the default interval and a %s commit timeout: %v", tc.commit, err)
+			}
+			if got := len(ConsensusAdvisories(cfg.Consensus)); (got != 0) != tc.advisory {
+				t.Fatalf("%d advisories with a %s commit timeout, want advisory=%t", got, tc.commit, tc.advisory)
+			}
+			if got, want := len(ConsensusProblems(cfg.Consensus)), len(ConsensusAdvisories(cfg.Consensus)); got != want {
+				t.Fatalf("ConsensusProblems reports %d, want the %d advisories and no error", got, want)
+			}
+
+			broken := cfg.Consensus
+			broken.PrevoteTimeout = 0
+			if err := ValidateConsensus(broken); err == nil {
+				t.Fatalf("ValidateConsensus accepted a prevote timeout of zero")
+			}
+		})
+	}
+}
+
 func TestLoadWithoutPassphraseFailsToCreateDefault(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -1107,5 +1167,40 @@ CommitTimeout = "0s"
 				t.Fatalf("MinBlockInterval %v after the second load, want the default", got)
 			}
 		})
+	}
+}
+
+// Claim payout mode takes the epoch payout out of the treasury but nothing
+// credits the recorded claims, so the loader refuses it and the node does not
+// start with it. Auto mode, unset and unrecognised values are unchanged.
+func TestPotsoRewardConfigRefusesClaimPayoutMode(t *testing.T) {
+	load := func(t *testing.T, mode string) *Config {
+		t.Helper()
+		var cfg Config
+		doc := "[potso.rewards]\nMinPayoutWei = \"0\"\nEmissionPerEpoch = \"0\"\nCarryRemainder = true\n"
+		if mode != "" {
+			doc += "PayoutMode = " + strconv.Quote(mode) + "\n"
+		}
+		if _, err := toml.Decode(doc, &cfg); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return &cfg
+	}
+
+	for _, mode := range []string{"claim", "Claim", "CLAIM", " claim "} {
+		cfg := load(t, mode)
+		if _, err := cfg.PotsoRewardConfig(); !errors.Is(err, potso.ErrClaimModeUnavailable) {
+			t.Fatalf("PayoutMode %q: expected ErrClaimModeUnavailable, got %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"", "auto", "AUTO", "no-such-mode"} {
+		cfg := load(t, mode)
+		got, err := cfg.PotsoRewardConfig()
+		if err != nil {
+			t.Fatalf("PayoutMode %q: %v", mode, err)
+		}
+		if got.EffectivePayoutMode() != potso.RewardPayoutModeAuto {
+			t.Fatalf("PayoutMode %q: effective mode %q, want auto", mode, got.EffectivePayoutMode())
+		}
 	}
 }

@@ -49,10 +49,12 @@ Read this section before planning a pause. What the code in this repository prov
 * `examples/docs/ops/pause_toggle` reads the current map, flips one module and sends a
   `gov.v1.MsgSetPauses` message to `governd` (`--governance`, default `localhost:50061`;
   `--authority` is required; `--module` is one of `lending`, `swap`, `escrow`, `trade`,
-  `loyalty`, `potso`, `transfer_nhb`, `transfer_znhb`, `staking`; `--state` is `pause` or
-  `resume`). Two limits apply. The `gov.v1.Pauses` message defined in `proto/gov/v1/tx.proto`
-  has only `lending`, `swap`, `escrow`, `trade`, `loyalty` and `potso`, and the helper copies
-  only those six into it, so the transfer and staking flags are never sent. And `governd`
+  `loyalty` or `potso`; `--state` is `pause` or `resume`). Two limits apply. The
+  `gov.v1.Pauses` message defined in `proto/gov/v1/tx.proto` has only `lending`, `swap`,
+  `escrow`, `trade`, `loyalty` and `potso`, so the helper refuses `transfer_nhb`,
+  `transfer_znhb` and `staking` as `--module`, and it stops if the stored configuration
+  already pauses one of those three (the message replaces the whole configuration, so
+  sending it would clear that pause). And `governd`
   wraps the message in a signed consensus envelope that the node cannot decode:
   `TransactionFromEnvelope` (`consensus/codec/codec.go`) accepts `consensus.v1.Transaction`,
   the swap payout receipt and the POS messages, and returns `envelope: unsupported module

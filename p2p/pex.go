@@ -38,6 +38,12 @@ const (
 	pexRequestRate         = 0.2
 	pexRequestBurst        = 3
 	pexMaxProbes           = 4
+
+	// A request is answered per host, not per connection: a host that disconnects and connects again,
+	// under as many identities as it likes, does not get a fresh allowance (PL-R5T-65).
+	pexHostRate  = 1.0 / 60.0
+	pexHostBurst = 2
+	pexHostsMax  = 4096
 )
 
 var errUnsolicitedPex = errors.New("unsolicited pex addresses")
@@ -72,6 +78,19 @@ type pexOutstanding struct {
 type pexPeerState struct {
 	bucket *tokenBucket
 	seen   time.Time
+	// answered is set once the connection has had its answer: a connection is answered once.
+	answered bool
+}
+
+// pexHostState is the allowance of one remote host. It outlives the connections that used it.
+type pexHostState struct {
+	bucket *tokenBucket
+	seen   time.Time
+}
+
+// pexHosted is implemented by a peer that knows the host it is connected to.
+type pexHosted interface {
+	RemoteHost() string
 }
 
 type pexManager struct {
@@ -84,6 +103,7 @@ type pexManager struct {
 
 	requests map[string][]pexOutstanding
 	peers    map[string]*pexPeerState
+	hosts    map[string]*pexHostState
 	probes   chan struct{}
 
 	logger *slog.Logger
@@ -101,6 +121,7 @@ func newPexManager(server *Server) *pexManager {
 		book:     make(map[string]*pexEntry),
 		requests: make(map[string][]pexOutstanding),
 		peers:    make(map[string]*pexPeerState),
+		hosts:    make(map[string]*pexHostState),
 		probes:   make(chan struct{}, pexMaxProbes),
 		logger:   logger,
 	}
@@ -158,6 +179,11 @@ func (m *pexManager) pruneLocked(now time.Time) {
 	for peerID, state := range m.peers {
 		if now.Sub(state.seen) > ttl {
 			delete(m.peers, peerID)
+		}
+	}
+	for host, state := range m.hosts {
+		if now.Sub(state.seen) > ttl {
+			delete(m.hosts, host)
 		}
 	}
 }
@@ -301,6 +327,35 @@ func (m *pexManager) takeRequestLocked(peerID, token string, now time.Time) bool
 	return false
 }
 
+// remoteHostOf is the host a peer is connected from, or empty when the peer does not know it.
+func remoteHostOf(peer pexPeer) string {
+	if hosted, ok := peer.(pexHosted); ok {
+		return strings.TrimSpace(hosted.RemoteHost())
+	}
+	return ""
+}
+
+// hostAllowLocked spends one token of the host's allowance. m.mu is held.
+func (m *pexManager) hostAllowLocked(host string, now time.Time) bool {
+	state := m.hosts[host]
+	if state == nil {
+		if len(m.hosts) >= pexHostsMax {
+			// Forget the host that has been quiet the longest.
+			oldest, oldestSeen := "", now
+			for h, s := range m.hosts {
+				if oldest == "" || s.seen.Before(oldestSeen) {
+					oldest, oldestSeen = h, s.seen
+				}
+			}
+			delete(m.hosts, oldest)
+		}
+		state = &pexHostState{bucket: newTokenBucket(pexHostRate, pexHostBurst)}
+		m.hosts[host] = state
+	}
+	state.seen = now
+	return state.bucket.allow(now)
+}
+
 func (m *pexManager) handleRequest(peer pexPeer, req PexRequestPayload) error {
 	if m == nil || peer == nil {
 		return nil
@@ -331,11 +386,23 @@ func (m *pexManager) handleRequest(peer pexPeer, req PexRequestPayload) error {
 		m.peers[peerID] = state
 	}
 	state.seen = now
-	if !state.bucket.allow(now) {
+	if state.answered {
+		// A connection is answered once.
+		m.mu.Unlock()
+		return nil
+	}
+	allowed := false
+	if host := remoteHostOf(peer); host != "" {
+		allowed = m.hostAllowLocked(host, now)
+	} else {
+		allowed = state.bucket.allow(now)
+	}
+	if !allowed {
 		// Asking again this soon is not answered.
 		m.mu.Unlock()
 		return nil
 	}
+	state.answered = true
 	addrs := make([]PexAddress, 0, limit)
 	for _, entry := range m.book {
 		if entry == nil || !entry.verified {
@@ -348,6 +415,10 @@ func (m *pexManager) handleRequest(peer pexPeer, req PexRequestPayload) error {
 			continue
 		}
 		if m.server != nil && m.server.isBanned(entry.NodeID) {
+			continue
+		}
+		if m.server != nil && m.server.isConfiguredPersistentPeer(entry.NodeID) {
+			// The peers an operator configured are the ones to keep out of strangers' hands.
 			continue
 		}
 		if now.Sub(entry.LastSeen) > m.ttl {

@@ -1,3 +1,13 @@
-# Example configuration for the lending daemon.
-# listen specifies the address the gRPC server should bind to.
-listen: ":50053"
+# Default configuration for the lending daemon (PL-DC-42).
+#
+# This file is what `lendingd` reads when it is started without flags. It is a
+# DEVELOPMENT configuration: plaintext gRPC on the loopback address only, with a
+# placeholder API token. Do not expose it. For anything reachable from another
+# host, set tls.cert and tls.key (and tls.client_ca for mutual TLS), remove
+# allow_insecure, and replace the token with a secret that only your callers hold.
+listen: "127.0.0.1:50053"
+tls:
+  allow_insecure: true
+auth:
+  api_tokens:
+    - "dev-only-loopback-token"

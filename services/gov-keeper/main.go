@@ -20,6 +20,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/rpc/txchainid"
 )
 
 // govProposalIDPayload mirrors cmd/nhb-cli/gov.go's identical type and
@@ -116,7 +118,7 @@ func tick(cfg config, privKey *crypto.PrivateKey) {
 		log.Printf("gov-keeper: mint RPC token: %v", err)
 		return
 	}
-	client := &rpcClient{endpoint: cfg.rpcEndpoint, authToken: token}
+	client := newRPCClient(cfg.rpcEndpoint, token)
 	runOnce(client, privKey, cfg)
 }
 
@@ -261,6 +263,19 @@ func determineAction(p govProposal, now time.Time) (types.TxType, string, bool) 
 type rpcClient struct {
 	endpoint  string
 	authToken string
+	// chainIDs reads the chain id a transaction signed now must carry (see sendLifecycleTx). A client without one
+	// signs nothing.
+	chainIDs *txchainid.Reader
+}
+
+// newRPCClient returns a client for the validator's JSON-RPC endpoint. The chain id call is public, so it is made
+// without the bearer token.
+func newRPCClient(endpoint, authToken string) *rpcClient {
+	return &rpcClient{
+		endpoint:  endpoint,
+		authToken: authToken,
+		chainIDs:  txchainid.NewReader(txchainid.HTTPFetcher(http.DefaultClient, endpoint, ""), 0),
+	}
 }
 
 func (c *rpcClient) listProposals(limit int) ([]govProposal, error) {
@@ -290,8 +305,14 @@ func (c *rpcClient) sendLifecycleTx(privKey *crypto.PrivateKey, nonce uint64, tx
 	if err != nil {
 		return "", fmt.Errorf("encode payload: %w", err)
 	}
+	// The chain id is the one the node reports now (nhb_getNetworkStats, txChainId): the id it accepts changes once,
+	// at the chain's activation height. If the node cannot say, nothing is signed (PL-R5T-29).
+	chainID, err := c.chainIDs.ChainID(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     txType,
 		Nonce:    nonce,
 		Data:     data,

@@ -78,6 +78,11 @@ func main() {
 	}
 	// Every problem in the effective configuration is logged as a WARN; none stops the node.
 	checkConfiguration(logger, cfg)
+	// The one exception: a setting the operator turned on to make a problem fatal.
+	if err := enforceStartupConfiguration(cfg); err != nil {
+		logger.Error("Refusing to start: invalid configuration", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
 	if err != nil {
@@ -96,6 +101,15 @@ func main() {
 		panic(fmt.Sprintf("Failed to open database: %v", err))
 	}
 	defer db.Close()
+
+	// A hash of every setting two validators must hold alike: logged here, left in
+	// the data directory and sent to peers in the handshake, so a difference shows
+	// before the first block that would split them (PL-R5T-16, PL-R5T-30). It never
+	// stops the node.
+	consensusDigest, digestErr := cfg.PublishConsensusDigest(logger, os.Getenv, cfg.DataDir)
+	if digestErr != nil {
+		logger.Warn("Could not compute the consensus settings digest", slog.Any("error", digestErr))
+	}
 
 	privKey, err := loadValidatorKey(cfg, passSource.Get)
 	if err != nil {
@@ -202,6 +216,126 @@ func main() {
 	// deposit ID; see config.Config.LendingFixedTermIDActivationHeight. A chain
 	// rule, so the value is set identically on every validator in config.toml.
 	node.SetLendingFixedTermIDActivationHeight(cfg.LendingFixedTermIDActivationHeight)
+	// Zero (the default) leaves the NHB supply counter as it is; see
+	// config.Config.NHBSupplyGenesisCorrectionActivationHeight. A chain rule, so
+	// the value is set identically on every validator in config.toml.
+	node.SetNHBSupplyGenesisCorrectionActivationHeight(cfg.NHBSupplyGenesisCorrectionActivationHeight)
+	// Both default to off (zero); see config.Config.TransferMonthlyFreeTierActivationHeight
+	// and config.Config.LoyaltyBudgetFloorActivationHeight. Chain rules, so the
+	// values are set identically on every validator in config.toml.
+	node.SetTransferMonthlyFreeTier(cfg.TransferMonthlyFreeTierActivationHeight, cfg.TransferMonthlyFreeTierTxPerMonth)
+	loyaltyFloor, floorErr := config.ParseAmount(cfg.LoyaltyBudgetFloorZNHBWei)
+	if floorErr != nil {
+		logger.Error("Invalid LoyaltyBudgetFloorZNHBWei", slog.Any("error", floorErr))
+		os.Exit(1)
+	}
+	node.SetLoyaltyBudgetFloor(cfg.LoyaltyBudgetFloorActivationHeight, loyaltyFloor)
+	// Off (zero) by default; see config.Config.PotsoGovernanceWeightActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetPotsoGovernanceWeights(cfg.PotsoGovernanceWeightActivationHeight)
+	// Off (zero) by default; see config.Config.ValidatorFlagNonceActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetValidatorFlagNonceActivationHeight(cfg.ValidatorFlagNonceActivationHeight)
+	// Off (zero) by default; see config.Config.MintRunningChainIDActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetMintRunningChainIDActivationHeight(cfg.MintRunningChainIDActivationHeight)
+	// Off (zero) by default; see config.Config.MintPhaseEChainIDRetireHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetMintPhaseEChainIDRetireHeight(cfg.MintPhaseEChainIDRetireHeight)
+	// Off (zero) by default; see config.Config.TxNetworkChainIDActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetTxNetworkChainIDActivationHeight(cfg.TxNetworkChainIDActivationHeight)
+	// Off (zero) by default; see config.Config.VoteChainBindingActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetVoteChainBindingActivationHeight(cfg.VoteChainBindingActivationHeight)
+	// The validator-set, slashing and staking chain rules; every one is off (zero) by
+	// default and set identically on every validator (core.ValidatorRules).
+	node.SetValidatorRules(core.ValidatorRulesFromConfig(cfg))
+	// Off (zero) by default; see config.Config.LendingFeeWithdrawActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingFeeWithdrawActivationHeight(cfg.LendingFeeWithdrawActivationHeight)
+	// Off (zero) by default; see config.Config.LendingRiskActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRiskActivationHeight(cfg.LendingRiskActivationHeight)
+	// Off (zero) by default; see config.Config.LendingRefPriceMaxAgeSeconds.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRefPriceMaxAgeSeconds(cfg.LendingRefPriceMaxAgeSeconds)
+	// Off (zero) by default; see config.Config.LendingRefPriceMaxAheadSeconds.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRefPriceMaxAheadSeconds(cfg.LendingRefPriceMaxAheadSeconds)
+	// Off (zero) by default; see config.Config.LendingRefPriceGuardsActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRefPriceGuardsActivationHeight(cfg.LendingRefPriceGuardsActivationHeight)
+	// Off (zero) by default; see config.Config.LendingPoolIDMaxLength.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingPoolIDMaxLength(cfg.LendingPoolIDMaxLength)
+	// Off (zero) by default; see config.Config.LendingMaxPools.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingMaxPools(cfg.LendingMaxPools)
+	// Off (zero) by default; see config.Config.LendingPoolLimitsActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingPoolLimitsActivationHeight(cfg.LendingPoolLimitsActivationHeight)
+	// Off (zero) by default; see config.Config.LendingAccountingFixesActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingAccountingFixesActivationHeight(cfg.LendingAccountingFixesActivationHeight)
+	// Off (zero) by default; see config.Config.PaymasterSponsorBindingActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetPaymasterSponsorBinding(cfg.PaymasterSponsorBindingActivationHeight)
+	// Off (zero) by default; see config.Config.LoyaltyPaymasterConsentActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLoyaltyPaymasterConsent(cfg.LoyaltyPaymasterConsentActivationHeight)
+	// Off (zero) by default; see config.Config.LoyaltyCounterpartyCapActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	counterpartyCap, counterpartyCapErr := config.ParseAmount(cfg.LoyaltyCounterpartyCapZNHBWei)
+	if counterpartyCapErr != nil {
+		logger.Error("Invalid LoyaltyCounterpartyCapZNHBWei", slog.Any("error", counterpartyCapErr))
+		os.Exit(1)
+	}
+	node.SetLoyaltyCounterpartyCap(cfg.LoyaltyCounterpartyCapActivationHeight, counterpartyCap)
+	// Off (zero) by default; see config.Config.BuybackMinAskActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	buybackMinAsk, buybackMinAskErr := config.ParseAmount(cfg.BuybackMinAskZNHBWei)
+	if buybackMinAskErr != nil {
+		logger.Error("Invalid BuybackMinAskZNHBWei", slog.Any("error", buybackMinAskErr))
+		os.Exit(1)
+	}
+	node.SetBuybackMinAsk(cfg.BuybackMinAskActivationHeight, buybackMinAsk)
+	// Off (zero) by default; see config.Config.SubscriptionsPauseSettlementActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSubscriptionsPauseSettlement(cfg.SubscriptionsPauseSettlementActivationHeight)
+	// Off (zero) by default; see config.Config.SubscriptionsChargeHistoryMigrationActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSubscriptionsChargeHistoryMigration(cfg.SubscriptionsChargeHistoryMigrationActivationHeight)
+	// Off (zero) by default; see config.Config.BuybackUnpriceableEpochRefundActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetBuybackUnpriceableEpochRefund(cfg.BuybackUnpriceableEpochRefundActivationHeight)
+	// The ZNHB bridge escrow and the native pool: off (activation height zero) by default; chain rules, so the
+	// values are set identically on every validator. A block that is activated with a bad value stops the node.
+	bridgeSettings, ammSettings, bridgeAmmErr := core.BridgeAmmSettingsFromConfig(cfg)
+	if bridgeAmmErr != nil {
+		logger.Error("Refusing to start: invalid [bridge] or [amm] settings", slog.Any("error", bridgeAmmErr))
+		os.Exit(1)
+	}
+	node.SetBridgeAndAmm(bridgeSettings, ammSettings)
+	// Off (zero) by default; see config.Config.SwapVoucherSignedBudgetActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSwapVoucherSignedBudget(cfg.SwapVoucherSignedBudgetActivationHeight)
+	// Off (zero) by default; see config.Config.SponsoredTransferFeeCreditActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSponsoredTransferFeeCredit(cfg.SponsoredTransferFeeCreditActivationHeight)
+	// All off (zero) by default; see config.Config.UniformTransferFeeActivationHeight and
+	// config.Config.TransferFeeGovernanceActivationHeight. Chain rules, so the values are set
+	// identically on every validator.
+	node.SetUniformTransferFee(cfg.UniformTransferFeeActivationHeight)
+	node.SetTransferFeeGovernance(cfg.TransferFeeGovernanceActivationHeight, cfg.TransferFeeGovernanceDelayBlocks)
+	// Off (zero) by default; see config.Config.BuybackPriceGuardActivationHeight and
+	// config.Config.EpochSettlementFailsafeActivationHeight. Chain rules, so the
+	// values are set identically on every validator.
+	node.SetBuybackPriceGuard(cfg.BuybackPriceGuardActivationHeight)
+	node.SetEpochSettlementFailsafe(cfg.EpochSettlementFailsafeActivationHeight)
+	// Off (zero) by default; see config.Config.TransferFeeStrictAllowanceActivationHeight. A chain rule, so the value is
+	// set identically on every validator.
+	node.SetTransferFeeStrictAllowance(cfg.TransferFeeStrictAllowanceActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {
@@ -259,6 +393,10 @@ func main() {
 		Approver:       autoTopUpCfg.Approver,
 		ApproverRole:   autoTopUpCfg.ApproverRole,
 		MinterRole:     autoTopUpCfg.MinterRole,
+		SponsorRole:    autoTopUpCfg.SponsorRole,
+	}
+	if autoTopUpCfg.AggregateDailyCapWei != nil {
+		autoPolicy.AggregateDailyCapWei = new(big.Int).Set(autoTopUpCfg.AggregateDailyCapWei)
 	}
 	if autoTopUpCfg.MinBalanceWei != nil {
 		autoPolicy.MinBalanceWei = new(big.Int).Set(autoTopUpCfg.MinBalanceWei)
@@ -292,15 +430,15 @@ func main() {
 		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
 	}
 
-	node.SetLendingRiskParameters(lending.RiskParameters{
-		MaxLTV:               cfg.Lending.MaxLTVBps,
-		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
-		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
-		Oracle: lending.OracleConfig{
-			MaxAgeBlocks:    cfg.Lending.OracleMaxAgeBlocks,
-			MaxDeviationBps: cfg.Lending.OracleMaxDeviationBps,
-		},
-	})
+	// Both entry points build the engine's limits from the one mapping, so they cannot
+	// disagree; the limits that the engine applies only from
+	// LendingRiskActivationHeight are included here and cleared by core before it
+	// (ledger PL-DC-19).
+	lendingRisk, riskErr := cfg.Lending.RiskParameters()
+	if riskErr != nil {
+		panic(fmt.Sprintf("Invalid [lending] risk limits: %v", riskErr))
+	}
+	node.SetLendingRiskParameters(lendingRisk)
 
 	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)
 
@@ -480,35 +618,38 @@ func main() {
 		pexEnabled = *cfg.P2P.PEX
 	}
 	p2pCfg := p2p.ServerConfig{
-		ListenAddress:    cfg.ListenAddress,
-		ExternalAddress:  cfg.P2P.ExternalAddress,
-		ChainID:          node.ChainID(),
-		GenesisHash:      node.GenesisHash(),
-		ClientVersion:    cfg.ClientVersion,
-		MaxPeers:         cfg.MaxPeers,
-		MaxInbound:       cfg.MaxInbound,
-		MaxOutbound:      cfg.MaxOutbound,
-		MinPeers:         cfg.MinPeers,
-		OutboundPeers:    cfg.OutboundPeers,
-		Bootnodes:        append([]string{}, cfg.Bootnodes...),
-		PersistentPeers:  append([]string{}, cfg.PersistentPeers...),
-		Seeds:            append([]string{}, seedStrings...),
-		SeedOrigins:      append([]p2p.SeedOrigin{}, seedOrigins...),
-		SeedRegistry:     seedRegistry,
-		SeedResolver:     seeds.DefaultResolver(),
-		PeerBanDuration:  time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
-		ReadTimeout:      time.Duration(cfg.ReadTimeout) * time.Second,
-		WriteTimeout:     time.Duration(cfg.WriteTimeout) * time.Second,
-		MaxMessageBytes:  cfg.MaxMsgBytes,
-		RateMsgsPerSec:   cfg.P2P.RateMsgsPerSec,
-		RateBurst:        cfg.P2P.Burst,
-		BanScore:         cfg.P2P.BanScore,
-		GreyScore:        cfg.P2P.GreyScore,
-		HandshakeTimeout: time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
-		PingInterval:     time.Duration(cfg.P2P.PingIntervalSeconds) * time.Second,
-		PingTimeout:      time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
-		DialBackoff:      time.Duration(cfg.P2P.DialBackoffSeconds) * time.Second,
-		EnablePEX:        pexEnabled,
+		ListenAddress:      cfg.ListenAddress,
+		ExternalAddress:    cfg.P2P.ExternalAddress,
+		ChainID:            node.ChainID(),
+		GenesisHash:        node.GenesisHash(),
+		ClientVersion:      cfg.ClientVersion,
+		MaxPeers:           cfg.MaxPeers,
+		MaxInbound:         cfg.MaxInbound,
+		MaxOutbound:        cfg.MaxOutbound,
+		MinPeers:           cfg.MinPeers,
+		OutboundPeers:      cfg.OutboundPeers,
+		Bootnodes:          append([]string{}, cfg.Bootnodes...),
+		PersistentPeers:    append([]string{}, cfg.PersistentPeers...),
+		Seeds:              append([]string{}, seedStrings...),
+		SeedOrigins:        append([]p2p.SeedOrigin{}, seedOrigins...),
+		SeedRegistry:       seedRegistry,
+		SeedResolver:       seeds.DefaultResolver(),
+		PeerBanDuration:    time.Duration(cfg.P2P.BanDurationSeconds) * time.Second,
+		ReadTimeout:        time.Duration(cfg.ReadTimeout) * time.Second,
+		WriteTimeout:       time.Duration(cfg.WriteTimeout) * time.Second,
+		MaxMessageBytes:    cfg.MaxMsgBytes,
+		RateMsgsPerSec:     cfg.P2P.RateMsgsPerSec,
+		RateBurst:          cfg.P2P.Burst,
+		BanScore:           cfg.P2P.BanScore,
+		GreyScore:          cfg.P2P.GreyScore,
+		HandshakeTimeout:   time.Duration(cfg.P2P.HandshakeTimeoutMs) * time.Millisecond,
+		HandshakeChallenge: cfg.P2P.HandshakeChallenge,
+		PingInterval:       time.Duration(cfg.P2P.PingIntervalSeconds) * time.Second,
+		PingTimeout:        time.Duration(cfg.P2P.PingTimeoutSeconds) * time.Second,
+		DialBackoff:        time.Duration(cfg.P2P.DialBackoffSeconds) * time.Second,
+		EnablePEX:          pexEnabled,
+
+		ConsensusConfigDigest: consensusDigest.Root,
 	}
 	p2pServer := p2p.NewServer(node, identity.PrivateKey, p2pCfg)
 	p2pServer.SetPeerstore(peerstore)
@@ -521,11 +662,20 @@ func main() {
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
 	}), bft.WithMinBlockInterval(cfg.Consensus.MinBlockInterval),
+		// Votes at or above the configured height are signed, and checked, over the genesis hash
+		// (PL-R5T-31); 0, the shipped value, keeps the legacy digest. A chain rule: the same value
+		// on every validator.
+		bft.WithVoteBinding(node.GenesisHash(), cfg.VoteChainBindingActivationHeight),
 		bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
 		// What this validator has voted, so a restart cannot make it sign a
 		// different vote for a round it already voted in (a double-sign that
 		// anyone can turn into a slashing report).
-		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")))
+		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")),
+		// How many weak (no-quorum-otherwise) round jumps this validator has
+		// already granted at its current height, so a restart of THIS validator
+		// cannot hand a fresh maxFutureRounds allowance to a validator it was
+		// already following (see round_sync.go's admitWeakRoundJumpLocked).
+		bft.WithWeakJumpSnapshotPath(filepath.Join(cfg.DataDir, "bft_weak_jump.json")))
 
 	// The pace of block production: the wait between seeing a block commit and starting
 	// the next round (config [consensus] MinBlockInterval), which every quantity counted
@@ -558,25 +708,9 @@ func main() {
 			MaxTxPerIdentityChain: limit.MaxTxPerIdentityChain,
 		}
 	}
-	swapSecrets := make(map[string]string, len(cfg.RPCSwapAuth.Secrets))
-	for key, secret := range cfg.RPCSwapAuth.Secrets {
-		trimmedKey := strings.TrimSpace(key)
-		trimmedSecret := strings.TrimSpace(secret)
-		if trimmedKey == "" || trimmedSecret == "" {
-			continue
-		}
-		swapSecrets[trimmedKey] = trimmedSecret
-	}
-	partnerLimits := make(map[string]int, len(cfg.RPCSwapAuth.PartnerRateLimits))
-	for key, limit := range cfg.RPCSwapAuth.PartnerRateLimits {
-		trimmedKey := strings.TrimSpace(key)
-		if trimmedKey == "" || limit <= 0 {
-			continue
-		}
-		partnerLimits[trimmedKey] = limit
-	}
+	swapAuthCfg := swapAuthConfigFrom(cfg.RPCSwapAuth)
 	var swapPersistence gatewayauth.NoncePersistence
-	if len(swapSecrets) > 0 {
+	if len(swapAuthCfg.Secrets) > 0 {
 		backend := strings.ToLower(strings.TrimSpace(cfg.RPCSwapAuth.Persistence.Backend))
 		switch backend {
 		case "leveldb":
@@ -605,15 +739,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	swapAuthCfg := rpc.SwapAuthConfig{
-		Secrets:              swapSecrets,
-		AllowedTimestampSkew: time.Duration(cfg.RPCSwapAuth.AllowedTimestampSkewSecs) * time.Second,
-		NonceTTL:             time.Duration(cfg.RPCSwapAuth.NonceTTLSeconds) * time.Second,
-		NonceCapacity:        cfg.RPCSwapAuth.NonceCapacity,
-		RateLimitWindow:      time.Duration(cfg.RPCSwapAuth.RateLimitWindowSeconds) * time.Second,
-		PartnerRateLimits:    partnerLimits,
-		Persistence:          swapPersistence,
-	}
+	swapAuthCfg.Persistence = swapPersistence
 	rpcServer, err := rpc.NewServer(node, networkAdapter, rpc.ServerConfig{
 		TrustProxyHeaders: cfg.RPCTrustProxyHeaders,
 		TrustedProxies:    append([]string{}, cfg.RPCTrustedProxies...),
@@ -642,6 +768,7 @@ func main() {
 		MaxTxPerChain:            cfg.RPCMaxTxPerChain,
 		MaxTxPerIdentityChain:    cfg.RPCMaxTxPerIdentityChain,
 		RouteRateLimits:          routeLimits,
+		MethodCosts:              cfg.RPCMethodCosts,
 		RateLimitWindow:          time.Duration(cfg.RPCRateLimitWindow) * time.Second,
 		CallerMetadataMaxTTL:     time.Duration(cfg.RPCCallerMetadataMaxTTL) * time.Second,
 		TLSCertFile:              cfg.RPCTLSCertFile,
@@ -658,6 +785,7 @@ func main() {
 		QueryTimeout:             time.Duration(cfg.RPCQueryTimeoutSeconds) * time.Second,
 		DisableExplorerLoop:      cfg.RPCDisableExplorerLoop,
 		SwapAuth:                 swapAuthCfg,
+		SwapOperatorNoHMAC:       cfg.RPCSwapOperatorNoHMAC,
 	})
 	if err != nil {
 		logger.Error("failed to initialise RPC server", slog.Any("error", err))

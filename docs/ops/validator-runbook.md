@@ -88,11 +88,19 @@ still agree on every block.
    merely lost a same-block race is never evicted. A contained panic is quarantined at
    its first strike.
 3. If waves or the budget run out, the clean prefix of the last wave is re-verified
-   and used; failing that the proposer builds an **empty block**, which depends on no
+   and used, trimmed to the leading run that cost at most 70% of the 300 ms
+   verification budget the first time it ran, or just the first transaction when that
+   alone cost more but still fit the budget (the rest stays in the mempool for later
+   blocks); failing that the proposer builds an **empty block**, which depends on no
    transaction and which validators already accept on every idle round.
 4. If a build fails twice in a row, an asynchronous isolation pass applies each
-   candidate alone and, if the set still fails in the epoch lifecycle, bisects out the
-   transaction responsible.
+   candidate alone and evicts the ones that fail (a transaction refused alone only for
+   a *Skip* reason, such as a module pause, a rolling cap or a nonce that is not
+   reached yet, is not evicted for that) and then tries the rest together, the way a
+   build does: a transaction that does not apply even together is left out of the
+   trial but stays in the mempool, and if the set that applies still fails in the epoch
+   lifecycle or evidence processing, the transaction responsible is bisected out. A
+   transaction queued behind another of the same sender is judged in that company.
 5. If two of a validator's own proposals at one height fail to commit, it proposes an
    empty block for that height (`NHB_BFT_EMPTY_AFTER_FAILURES`, default 2, `0` disables).
 

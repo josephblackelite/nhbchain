@@ -41,6 +41,11 @@ const (
 
 var errPeerstoreFull = errors.New("peerstore full")
 
+// errPeerstoreClosed is what a write returns once Close has run. Close drops the in-memory maps, so a handshake
+// that finishes after the node began shutting down used to write into a nil map and crash the process instead of
+// being refused.
+var errPeerstoreClosed = errors.New("peerstore closed")
+
 // PeerstoreEntry captures the dial metadata we persist for each peer.
 type PeerstoreEntry struct {
 	Addr          string    `json:"addr"`
@@ -272,6 +277,9 @@ func (ps *Peerstore) RecordViolation(nodeID string, now time.Time) (PeerstoreEnt
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	if ps.db == nil {
+		return PeerstoreEntry{}, errPeerstoreClosed
+	}
 
 	rec := ps.byNode[nodeID]
 	if rec == nil {
@@ -387,6 +395,9 @@ func (ps *Peerstore) Snapshot() []PeerstoreEntry {
 }
 
 func (ps *Peerstore) putLocked(rec *PeerstoreEntry) error {
+	if ps.db == nil {
+		return errPeerstoreClosed
+	}
 	existing := ps.byNode[rec.NodeID]
 	if existing != nil {
 		if rec.Addr == "" {

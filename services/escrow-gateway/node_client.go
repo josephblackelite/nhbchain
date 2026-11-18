@@ -21,6 +21,7 @@ import (
 
 	"nhbchain/core/types"
 	nhbcrypto "nhbchain/crypto"
+	"nhbchain/rpc/txchainid"
 )
 
 // NodeClient is a thin JSON-RPC client used by the gateway.
@@ -118,16 +119,32 @@ type RPCNodeClient struct {
 	relayerAddress string
 	relayerNonce   uint64
 	relayerReady   bool
+
+	// chainIDs reads the chain id a transaction signed now must carry: the id the node reports in nhb_getNetworkStats
+	// (txChainId), reused for a short time because it changes once, at the chain's activation height. A client
+	// without one signs nothing (PL-R5T-29).
+	chainIDs *txchainid.Reader
 }
 
 func NewRPCNodeClient(baseURL, authToken string) *RPCNodeClient {
-	return &RPCNodeClient{
+	c := &RPCNodeClient{
 		baseURL:   baseURL,
 		authToken: authToken,
 		http: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
+	c.chainIDs = txchainid.NewReader(c.fetchTxChainID, 0)
+	return c
+}
+
+// fetchTxChainID is the node read behind chainIDs.
+func (c *RPCNodeClient) fetchTxChainID(ctx context.Context) (*big.Int, error) {
+	var result json.RawMessage
+	if err := c.call(ctx, txchainid.Method, []interface{}{}, &result); err != nil {
+		return nil, err
+	}
+	return txchainid.Parse(result)
 }
 
 // InitRelayer configures the gateway's own signing key and fetches its
@@ -199,8 +216,12 @@ func (c *RPCNodeClient) submitEscrowTx(ctx context.Context, txType types.TxType,
 	if !c.relayerReady || c.relayerKey == nil {
 		return "", ErrRelayerNotConfigured
 	}
+	chainID, err := c.chainIDs.ChainID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     txType,
 		Nonce:    c.relayerNonce,
 		GasLimit: escrowRelayerGasLimit,

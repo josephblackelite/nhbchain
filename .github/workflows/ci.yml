@@ -3,7 +3,19 @@ on:
   push:
   pull_request:
 
+# The token this workflow runs with can read the repository and do nothing else.
+permissions:
+  contents: read
+
 jobs:
+  history-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No commit may change nothing
+        run: bash scripts/check_empty_commits.sh
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
@@ -72,10 +84,16 @@ jobs:
           docker compose version
       - name: Install npm dependencies
         run: npm ci
+      - name: TypeScript SDK tests (digest and signature vectors written by the node's Go code)
+        run: npm run test:sdk:ts
       - name: Verify production config safety rails
         run: |
           bash scripts/verify_prod_config.sh -c config/prod.toml
           bash scripts/verify_prod_config.sh -c config.toml
+      - name: Check the production template against the genesis
+        run: |
+          go run ./cmd/nhb-snapshot check-config --config config/prod.toml --genesis config/genesis.relaunch.json
+          go run ./cmd/nhb-snapshot check-config --config config.toml --genesis config/genesis.relaunch.json
       - name: Run bugcheck pipeline
         env:
           GOFLAGS: -buildvcs=false

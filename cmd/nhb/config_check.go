@@ -1,10 +1,25 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 
 	"nhbchain/config"
 )
+
+// enforceStartupConfiguration returns the error that must stop the node, nil for
+// every configuration that may run. It is nil unless the operator opted in: today
+// the only setting is [governance] EnforceWindowFloors, which makes a voting
+// period or timelock below its floor a refusal to start instead of a warning.
+// checkConfiguration has already logged the same problems.
+func enforceStartupConfiguration(cfg *config.Config) error {
+	if err := config.EnforceGovernanceWindowFloors(cfg.Governance); err != nil {
+		return err
+	}
+	return config.EnforceFeeScheduleFloors(cfg)
+}
 
 // checkConfiguration logs a structured WARN for every problem in the
 // configuration the node is about to run with, and returns how many it found.
@@ -31,6 +46,43 @@ func checkConfiguration(logger *slog.Logger, cfg *config.Config) int {
 	for _, problem := range config.ConfigProblems(cfg.Global) {
 		found++
 		logger.Warn("configuration problem", slog.String("section", "global"), slog.String("problem", problem.Error()))
+	}
+	// The [governance] block is a different block from [global.Governance] above:
+	// it is the one the proposal engine reads. Its voting period and timelock get
+	// the same floor as the global one; see enforceStartupConfiguration for the
+	// setting that turns the warning into a refusal to start.
+	for _, problem := range config.GovernancePolicyProblems(cfg.Governance) {
+		found++
+		logger.Warn("configuration problem", slog.String("section", "governance"), slog.String("problem", problem.Error()))
+	}
+	// The transfer fee schedule under governance (reports nothing while it is off).
+	for _, problem := range config.FeeScheduleProblems(cfg) {
+		found++
+		logger.Warn("configuration problem", slog.String("section", "fees"), slog.String("problem", problem.Error()))
+	}
+	// A partner key with no PartnerProviders entry reads no swap voucher: say so,
+	// or an operator who has just added the key sees an empty ledger and no why.
+	// The keys are compared trimmed, the way the node matches them; the warning
+	// names a key, never a secret.
+	mapped := make(map[string]struct{}, len(cfg.RPCSwapAuth.PartnerProviders))
+	for key := range cfg.RPCSwapAuth.PartnerProviders {
+		mapped[strings.TrimSpace(key)] = struct{}{}
+	}
+	unmapped := make([]string, 0)
+	for key, secret := range cfg.RPCSwapAuth.Secrets {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" || strings.TrimSpace(secret) == "" {
+			continue
+		}
+		if _, ok := mapped[trimmed]; !ok {
+			unmapped = append(unmapped, trimmed)
+		}
+	}
+	sort.Strings(unmapped)
+	for _, key := range unmapped {
+		found++
+		logger.Warn("configuration problem", slog.String("section", "swap-auth"),
+			slog.String("problem", fmt.Sprintf("the swap partner key %q has no entry in RPCSwapAuth.PartnerProviders, so it reads no swap voucher (swap_voucher_get, _list and _export return nothing for it); list the providers it may read, or \"*\" for all", key)))
 	}
 	effective := config.EffectiveConsensus(cfg.Consensus)
 	for _, problem := range config.ConsensusProblems(effective) {

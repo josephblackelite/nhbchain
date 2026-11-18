@@ -134,6 +134,16 @@ func (ctx *ProgramRewardContext) programEventAttributes(program *Program, busine
 	return attrs
 }
 
+// paymasterConsentGate is implemented by a program state that carries the
+// standing paymaster-consent rule (PL-R5T-15). A state that does not implement it
+// behaves as it always did. LoyaltyPaymasterConsentRequired reports whether the
+// rule is active for the block being executed; LoyaltyPaymasterAssigned whether the
+// standing record of a wallet assigned to a business exists.
+type paymasterConsentGate interface {
+	LoyaltyPaymasterConsentRequired() bool
+	LoyaltyPaymasterAssigned(id BusinessID, paymaster [20]byte) (bool, error)
+}
+
 // ApplyProgramReward evaluates and applies a loyalty program reward when a
 // matching program and funded paymaster are available.
 func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardContext) string {
@@ -323,6 +333,21 @@ func (e *Engine) ApplyProgramReward(st ProgramRewardState, ctx *ProgramRewardCon
 	if isZeroAddress(business.Paymaster) {
 		emitProgramSkip(st, ctx, program, business, "paymaster_missing", nil)
 		return "paymaster_missing"
+	}
+	// PL-R5T-15: once the standing-consent rule is active the wallet that funds the
+	// reward must be the owner's own or have a standing record that it was assigned
+	// with its consent. An assignment made before the rule, naming a wallet that
+	// never consented (the treasury wallet included), stops paying.
+	if gate, ok := st.(paymasterConsentGate); ok && gate.LoyaltyPaymasterConsentRequired() && business.Paymaster != business.Owner {
+		assigned, err := gate.LoyaltyPaymasterAssigned(business.ID, business.Paymaster)
+		if err != nil {
+			emitProgramSkip(st, ctx, program, business, "paymaster_error", map[string]string{"error": err.Error()})
+			return "paymaster_error"
+		}
+		if !assigned {
+			emitProgramSkip(st, ctx, program, business, "paymaster_not_consented", nil)
+			return "paymaster_not_consented"
+		}
 	}
 	paymasterAcc, err := st.GetAccount(business.Paymaster[:])
 	if err != nil {

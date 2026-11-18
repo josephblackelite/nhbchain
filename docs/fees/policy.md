@@ -20,7 +20,12 @@ Applies to `TxTypeTransfer` (NHB) and `TxTypeTransferZNHB` (ZNHB).
   (default 1,000 tokens, `1000000000000000000000` wei). The transfer that takes
   the tracked spend past the limit is still free; afterwards every transfer is
   charged. The spend is recorded after each transfer
-  (`TransferGasSpendAdd`, `core/state/transfer_gas.go`).
+  (`TransferGasSpendAdd`, `core/state/transfer_gas.go`). From
+  `TransferFeeStrictAllowanceActivationHeight` (0 = off, the live value) the
+  allowance is strict instead: only the part of a transfer above what is left of
+  the allowance is charged, so a first transfer of 1,100 tokens against 1,000 pays
+  the fee on 100 (see
+  [the strict free allowance](../governance/fee-params.md#the-strict-free-allowance-transferfeestrictallowanceactivationheight)).
 - **Fee.** Once the free tier is used up the fee is
   `floor(value * bps / 10000)` in the transferred asset, with `bps` =
   `TransferFeeBps` for NHB (default `20`, 0.20%) and `TransferFeeBpsZNHB` for

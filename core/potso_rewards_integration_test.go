@@ -361,9 +361,9 @@ func TestPotsoRewardClaimFlow(t *testing.T) {
 		CarryRemainder:     true,
 		PayoutMode:         potso.RewardPayoutModeClaim,
 	}
-	if err := node.SetPotsoRewardConfig(cfg); err != nil {
-		t.Fatalf("set config: %v", err)
-	}
+	// Claim mode is refused by SetPotsoRewardConfig; this test pins the claim
+	// code that remains in the tree, so it installs the config directly.
+	forcePotsoRewardConfigForTest(node.state, cfg)
 
 	manager := nhbstate.NewManager(node.state.Trie)
 	treasuryAcc, err := manager.GetAccount(treasury[:])
@@ -647,9 +647,9 @@ func TestPotsoRewardHistoryPagination(t *testing.T) {
 
 	// Switch to claim mode for epoch 1
 	cfg.PayoutMode = potso.RewardPayoutModeClaim
-	if err := node.SetPotsoRewardConfig(cfg); err != nil {
-		t.Fatalf("switch to claim mode: %v", err)
-	}
+	// Claim mode is refused by SetPotsoRewardConfig; install it directly so the
+	// history keeps one entry written by the retained claim path.
+	forcePotsoRewardConfigForTest(node.state, cfg)
 	processEpoch(1, base.Add(24*time.Hour))
 	payoutEpoch1, _, err := manager.PotsoRewardsGetPayout(1, participant)
 	if err != nil {

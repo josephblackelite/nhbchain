@@ -24,11 +24,19 @@ type fakeRPCServer struct {
 	nonce      uint64
 	txHash     string
 	sendErr    *jsonRPCErrorObj
+	// stats is what nhb_getNetworkStats answers (the raw JSON result); empty serves the network's own chain id.
+	// A transaction the client signs must carry the id reported here (ledger PL-R5T-29).
+	stats      string
+	statsCalls int
+	chainID    string
 }
+
+// fakeNetworkChainID is the id the fake node reports by default: the network's own, not the shared constant.
+const fakeNetworkChainID = "18346390202490284624"
 
 func newFakeRPCServer(t *testing.T) *fakeRPCServer {
 	t.Helper()
-	f := &fakeRPCServer{txHash: "0xdeadbeef"}
+	f := &fakeRPCServer{txHash: "0xdeadbeef", chainID: fakeNetworkChainID}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Decode Params as raw JSON, not interface{} -- a generic
 		// interface{} decode turns large integers (ChainID, GasPrice) into
@@ -50,6 +58,13 @@ func newFakeRPCServer(t *testing.T) *fakeRPCServer {
 		f.lastMethod = req.Method
 		resp := jsonRPCResponse{JSONRPC: "2.0", ID: req.ID}
 		switch req.Method {
+		case "nhb_getNetworkStats":
+			f.statsCalls++
+			if f.stats != "" {
+				resp.Result = json.RawMessage(f.stats)
+				break
+			}
+			resp.Result, _ = json.Marshal(map[string]interface{}{"activeValidators": 2, "txChainId": f.chainID})
 		case "nhb_getBalance":
 			resp.Result, _ = json.Marshal(map[string]interface{}{"nonce": f.nonce})
 		case "nhb_sendTransaction":
@@ -144,6 +159,9 @@ func TestEscrowReleaseSubmitsDelegatedTransaction(t *testing.T) {
 	}
 	if fake.lastTx.Nonce != 3 {
 		t.Fatalf("expected relayer nonce 3, got %d", fake.lastTx.Nonce)
+	}
+	if fake.lastTx.ChainID == nil || fake.lastTx.ChainID.String() != fakeNetworkChainID {
+		t.Fatalf("the transaction must carry the id the node reports, got %v", fake.lastTx.ChainID)
 	}
 	var decoded delegatedEscrowActionPayload
 	if err := rlp.DecodeBytes(fake.lastTx.Data, &decoded); err != nil {

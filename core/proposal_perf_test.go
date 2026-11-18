@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -262,7 +263,10 @@ func TestPerfBudgetIsEnforcedBetweenTransactions(t *testing.T) {
 		node.setLocalClock(func() time.Time { return clock })
 		// Wave 1: every apply "takes" 100ms of the 1s budget, so the budget runs
 		// out after 10 transactions with no failure yet. The verification wave
-		// over that prefix is quick.
+		// is quick, but the prefix is still cut to what its first-pass cost says
+		// fits the prefix budget: with a 300ms prefix budget and a 70 percent
+		// share, the transactions finishing at 100ms and 200ms fit and the one
+		// finishing at 300ms does not.
 		node.setProposalApplyHook(func(wave, index int, tx *types.Transaction) error {
 			if wave == 1 {
 				clock = clock.Add(100 * time.Millisecond)
@@ -275,19 +279,25 @@ func TestPerfBudgetIsEnforcedBetweenTransactions(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("CreateBlock: %v", res.err)
 		}
-		if got := len(res.block.Transactions); got != 10 {
-			t.Fatalf("expected the 10 transactions applied before the budget ran out, got %d", got)
+		included := len(res.block.Transactions)
+		if included != 2 {
+			t.Fatalf("expected the 2 leading transactions whose first-pass cost fits the prefix budget, got %d", included)
+		}
+		for i := 0; i < included; i++ {
+			if res.block.Transactions[i] != txs[i] {
+				t.Fatalf("the prefix must keep the original order; position %d differs", i)
+			}
 		}
 		if err := node.ValidateBlock(res.block); err != nil {
 			t.Fatalf("the prefix block must validate: %v", err)
 		}
-		// None of the 20 was at fault: all stay resident, and only the 10
-		// included ones are leased.
+		// None of the 20 was at fault: all stay resident, and only the included
+		// ones are leased.
 		if node.MempoolSize() != len(txs) {
 			t.Fatalf("no transaction may be lost to a budget cut, mempool has %d of %d", node.MempoolSize(), len(txs))
 		}
-		if got := livenessInFlight(node); got != 10 {
-			t.Fatalf("expected 10 leases, got %d", got)
+		if got := livenessInFlight(node); got != included {
+			t.Fatalf("expected %d leases, got %d", included, got)
 		}
 		if _, ok := livenessStrikes(t, node, txs[15]); ok {
 			t.Fatalf("running out of budget is not a transaction's fault: no strike")
@@ -312,6 +322,230 @@ func TestPerfBudgetIsEnforcedBetweenTransactions(t *testing.T) {
 			t.Fatalf("with no budget the block is empty, got %d transactions", len(res.block.Transactions))
 		}
 	})
+}
+
+// A window whose total apply time is longer than the build budget, with every
+// transaction costing the same in every wave (so re-running a prefix costs what
+// it cost the first time), must still produce a non-empty block every round and
+// must drain, rather than collapse to the empty block round after round. The
+// cases include transactions that cost more than the share of the prefix budget
+// the trim allows but less than the per-transaction slow limit: those are never
+// struck, so the build has to keep at least one of them to make progress.
+func TestPerfUniformlySlowWindowStillYieldsABlockEveryRound(t *testing.T) {
+	every := func(d time.Duration) func(int) time.Duration {
+		return func(int) time.Duration { return d }
+	}
+	cases := []struct {
+		name  string
+		count int
+		// costOf is the apply cost of the transaction at position i of the first
+		// window; the same transaction costs the same in every wave and round.
+		costOf func(i int) time.Duration
+	}{
+		{"20 transactions at 100ms", 20, every(100 * time.Millisecond)},
+		{"60 transactions at 30ms", 60, every(30 * time.Millisecond)},
+		{"500 transactions at 3ms", 500, every(3 * time.Millisecond)},
+		{"10 transactions at 230ms", 10, every(230 * time.Millisecond)},
+		{"a 220ms head transaction then 400 at 3ms", 401, func(i int) time.Duration {
+			if i == 0 {
+				return 220 * time.Millisecond
+			}
+			return 3 * time.Millisecond
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			node := newTestNode(t)
+			livenessFundedTransfers(t, node, tc.count)
+			budget := node.buildConfigSnapshot().Budget
+			window := node.GetMempool()
+			if len(window) != tc.count {
+				t.Fatalf("expected %d candidates, got %d", tc.count, len(window))
+			}
+			costs := make(map[*types.Transaction]time.Duration, len(window))
+			var total time.Duration
+			for i, tx := range window {
+				costs[tx] = tc.costOf(i)
+				total += costs[tx]
+			}
+			if total <= budget {
+				t.Fatalf("the window must be slower than the %s budget to exercise the fallback", budget)
+			}
+			clock := time.Unix(1_800_000_000, 0)
+			node.setLocalClock(func() time.Time { return clock })
+			node.setProposalApplyHook(func(wave, index int, tx *types.Transaction) error {
+				clock = clock.Add(costs[tx])
+				return nil
+			})
+
+			resident := node.MempoolSize()
+			for round := 1; round <= 3; round++ {
+				if round > 1 {
+					window = node.GetMempool()
+				}
+				res := createBlockBounded(t, node, window, 10*time.Second)
+				if res.err != nil {
+					t.Fatalf("round %d: CreateBlock: %v", round, res.err)
+				}
+				included := len(res.block.Transactions)
+				if included == 0 {
+					t.Fatalf("round %d: the block is empty although %d transactions are resident", round, resident)
+				}
+				if err := node.ValidateBlock(res.block); err != nil {
+					t.Fatalf("round %d: the block must validate: %v", round, err)
+				}
+				if err := node.CommitBlock(res.block); err != nil {
+					t.Fatalf("round %d: CommitBlock: %v", round, err)
+				}
+				if left := node.MempoolSize(); left != resident-included {
+					t.Fatalf("round %d: mempool holds %d, expected %d after including %d of %d", round, left, resident-included, included, resident)
+				}
+				resident -= included
+				snap := node.LivenessSnapshot()
+				if snap.EmptyBlockFallbacks != 0 || snap.ConsecutiveBuildFailures != 0 {
+					t.Fatalf("round %d: build fell back to an empty block (fallbacks=%d consecutive failures=%d last error=%q)",
+						round, snap.EmptyBlockFallbacks, snap.ConsecutiveBuildFailures, snap.LastBuildError)
+				}
+				if resident == 0 {
+					break
+				}
+			}
+		})
+	}
+}
+
+// The wave that ran out of budget also had a failing transaction. Only the run
+// before that failure is a candidate prefix, and it is trimmed on the timings of
+// exactly those transactions; the failing one is still struck.
+func TestPerfBudgetCutWaveWithAFailureUsesTheTrimmedCleanPrefix(t *testing.T) {
+	node := newTestNode(t)
+	txs := livenessFundedTransfers(t, node, 20)
+	clock := time.Unix(1_800_000_000, 0)
+	node.setLocalClock(func() time.Time { return clock })
+	node.setProposalApplyHook(func(wave, index int, tx *types.Transaction) error {
+		clock = clock.Add(100 * time.Millisecond)
+		if wave == 1 && tx == txs[3] {
+			return errors.New("injected failure in the exploratory wave")
+		}
+		return nil
+	})
+	res := createBlockBounded(t, node, node.GetMempool(), 10*time.Second)
+	if res.err != nil {
+		t.Fatalf("CreateBlock: %v", res.err)
+	}
+	if len(res.block.Transactions) != 2 || res.block.Transactions[0] != txs[0] || res.block.Transactions[1] != txs[1] {
+		t.Fatalf("expected the first two transactions of the clean run before the failure, got %d transactions", len(res.block.Transactions))
+	}
+	if err := node.ValidateBlock(res.block); err != nil {
+		t.Fatalf("the prefix block must validate: %v", err)
+	}
+	if rec, ok := livenessStrikes(t, node, txs[3]); !ok || rec.strikes != 1 {
+		t.Fatalf("the failing transaction carries a strike, got %+v ok=%v", rec, ok)
+	}
+	if _, ok := livenessStrikes(t, node, txs[2]); ok {
+		t.Fatalf("a transaction left out only by the prefix trim is not at fault: no strike")
+	}
+}
+
+// The finish offsets that the prefix trim relies on are measured from the start
+// of the wave, so work done before a transaction (state set-up, scheduling and
+// the budget check) is counted, not only the apply time itself. A clock that
+// advances on every read makes each transaction's own apply time exactly one
+// step, so any offset larger than the running sum of those steps comes from the
+// time before the transaction started.
+func TestPerfWaveRecordsFinishOffsetsFromTheStartOfTheWave(t *testing.T) {
+	node := newTestNode(t)
+	txs := livenessFundedTransfers(t, node, 3)
+	const step = 10 * time.Millisecond
+	var (
+		mu    sync.Mutex
+		clock = time.Unix(1_800_000_000, 0)
+	)
+	node.setLocalClock(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		clock = clock.Add(step)
+		return clock
+	})
+	ctx := node.newBuildCtx(txs)
+	res, err := node.executeWave(ctx, 1, txs)
+	if err != nil {
+		t.Fatalf("executeWave: %v", err)
+	}
+	if res.State != nil {
+		defer res.State.EndBlock()
+	}
+	if len(res.Failures) != 0 || len(res.Kept) != len(txs) || len(res.KeptAt) != len(txs) {
+		t.Fatalf("expected %d kept transactions with an offset each, got kept=%d offsets=%d failures=%d",
+			len(txs), len(res.Kept), len(res.KeptAt), len(res.Failures))
+	}
+	for i, at := range res.KeptAt {
+		own := time.Duration(i+1) * step
+		if at <= own {
+			t.Fatalf("offset %d is %s, which does not count anything beyond the apply time (%s so far)", i, at, own)
+		}
+		if i > 0 && at <= res.KeptAt[i-1] {
+			t.Fatalf("offsets must increase: %s then %s", res.KeptAt[i-1], at)
+		}
+	}
+}
+
+func TestFitPrefixToBudget(t *testing.T) {
+	txs := make([]*types.Transaction, 5)
+	for i := range txs {
+		txs[i] = &types.Transaction{Nonce: uint64(i)}
+	}
+	ms := func(vals ...int) []time.Duration {
+		out := make([]time.Duration, len(vals))
+		for i, v := range vals {
+			out[i] = time.Duration(v) * time.Millisecond
+		}
+		return out
+	}
+	// The limit for a 300ms budget is 210ms.
+	budget := 300 * time.Millisecond
+
+	cases := []struct {
+		name    string
+		prefix  []*types.Transaction
+		keptAt  []time.Duration
+		budget  time.Duration
+		wantLen int
+	}{
+		{"empty prefix", nil, nil, budget, 0},
+		{"every transaction fits", txs, ms(10, 20, 30, 40, 50), budget, 5},
+		{"cut where the cumulative cost passes the limit", txs, ms(100, 200, 300, 400, 500), budget, 2},
+		{"a transaction finishing exactly at the limit is kept", txs, ms(70, 140, 210, 280, 350), budget, 3},
+		{"one nanosecond over the limit is cut", txs, []time.Duration{70 * time.Millisecond, 140 * time.Millisecond, 210*time.Millisecond + 1, 280 * time.Millisecond, 350 * time.Millisecond}, budget, 2},
+		// The limit is 210ms, but a transaction is only struck above the
+		// per-transaction slow limit, so a first transaction between the two is
+		// kept alone: the re-check of a single transaction is never cut short.
+		{"a first transaction just over the limit is kept alone", txs, ms(211, 220, 230, 240, 250), budget, 1},
+		{"a first transaction near the slow limit is kept alone", txs, ms(260, 270, 280, 290, 300), budget, 1},
+		{"a first transaction finishing exactly at the budget is kept alone", txs, ms(300, 310, 320, 330, 340), budget, 1},
+		{"a first transaction beyond the whole budget leaves nothing", txs, []time.Duration{300*time.Millisecond + 1, 310 * time.Millisecond, 320 * time.Millisecond, 330 * time.Millisecond, 340 * time.Millisecond}, budget, 0},
+		{"timing missing leaves the prefix unchanged", txs, nil, budget, 5},
+		{"timing shorter than the prefix leaves it unchanged", txs, ms(100, 200), budget, 5},
+		{"extra timing beyond the prefix is ignored", txs[:2], ms(100, 200, 300, 400), budget, 2},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := fitPrefixToBudget(tc.prefix, tc.keptAt, tc.budget)
+			if len(got) != tc.wantLen {
+				t.Fatalf("kept %d transactions, want %d", len(got), tc.wantLen)
+			}
+			for i := range got {
+				if got[i] != tc.prefix[i] {
+					t.Fatalf("position %d is not the original leading run", i)
+				}
+			}
+			if cap(got) != len(got) {
+				t.Fatalf("the trimmed prefix must not expose the cut tail (len %d, cap %d)", len(got), cap(got))
+			}
+		})
+	}
 }
 
 // A transaction that applies but takes longer than SlowTx is excluded like any

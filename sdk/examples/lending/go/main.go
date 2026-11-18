@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"strings"
 	"time"
 
@@ -117,18 +118,34 @@ func main() {
 	fmt.Printf("  Health factor: %s\n", position.GetHealthFactor())
 }
 
-func signAndSupply(ctx context.Context, node *goclient.Client, client *lending.Client, key *crypto.PrivateKey, account, market, amount string, timeout time.Duration) (string, error) {
+// txBuilder is the shape of lending.NewSupplyTx, NewBorrowTx and NewRepayTx.
+type txBuilder func(chainID *big.Int, nonce uint64, poolID, amount string, opts ...lending.TxOption) (*types.Transaction, error)
+
+// signedLendingTx builds one lending transaction and signs it locally. The chain id it carries is the one the node
+// reports in nhb_getNetworkStats (field txChainId): the id a node accepts changes once, at the chain's activation
+// height, so it is asked for instead of being written into the program. If the node cannot say, nothing is signed.
+func signedLendingTx(ctx context.Context, node *goclient.Client, key *crypto.PrivateKey, account, market, amount string, timeout time.Duration, build txBuilder) (string, error) {
+	chainCtx, cancelChain := context.WithTimeout(ctx, timeout)
+	chainID, err := node.TxChainID(chainCtx)
+	cancelChain()
+	if err != nil {
+		return "", fmt.Errorf("fetch chain id: %w", err)
+	}
 	nonceCtx, cancel := context.WithTimeout(ctx, timeout)
 	nonce, err := node.AccountNonce(nonceCtx, account)
 	cancel()
 	if err != nil {
 		return "", fmt.Errorf("fetch nonce: %w", err)
 	}
-	tx, err := lending.NewSupplyTx(types.NHBChainID(), nonce, market, amount)
+	tx, err := build(chainID, nonce, market, amount)
 	if err != nil {
 		return "", err
 	}
-	signed, err := lending.SignAndEncode(tx, key.PrivateKey)
+	return lending.SignAndEncode(tx, key.PrivateKey)
+}
+
+func signAndSupply(ctx context.Context, node *goclient.Client, client *lending.Client, key *crypto.PrivateKey, account, market, amount string, timeout time.Duration) (string, error) {
+	signed, err := signedLendingTx(ctx, node, key, account, market, amount, timeout, lending.NewSupplyTx)
 	if err != nil {
 		return "", err
 	}
@@ -138,17 +155,7 @@ func signAndSupply(ctx context.Context, node *goclient.Client, client *lending.C
 }
 
 func signAndBorrow(ctx context.Context, node *goclient.Client, client *lending.Client, key *crypto.PrivateKey, account, market, amount string, timeout time.Duration) (string, error) {
-	nonceCtx, cancel := context.WithTimeout(ctx, timeout)
-	nonce, err := node.AccountNonce(nonceCtx, account)
-	cancel()
-	if err != nil {
-		return "", fmt.Errorf("fetch nonce: %w", err)
-	}
-	tx, err := lending.NewBorrowTx(types.NHBChainID(), nonce, market, amount)
-	if err != nil {
-		return "", err
-	}
-	signed, err := lending.SignAndEncode(tx, key.PrivateKey)
+	signed, err := signedLendingTx(ctx, node, key, account, market, amount, timeout, lending.NewBorrowTx)
 	if err != nil {
 		return "", err
 	}
@@ -158,17 +165,7 @@ func signAndBorrow(ctx context.Context, node *goclient.Client, client *lending.C
 }
 
 func signAndRepay(ctx context.Context, node *goclient.Client, client *lending.Client, key *crypto.PrivateKey, account, market, amount string, timeout time.Duration) (string, error) {
-	nonceCtx, cancel := context.WithTimeout(ctx, timeout)
-	nonce, err := node.AccountNonce(nonceCtx, account)
-	cancel()
-	if err != nil {
-		return "", fmt.Errorf("fetch nonce: %w", err)
-	}
-	tx, err := lending.NewRepayTx(types.NHBChainID(), nonce, market, amount)
-	if err != nil {
-		return "", err
-	}
-	signed, err := lending.SignAndEncode(tx, key.PrivateKey)
+	signed, err := signedLendingTx(ctx, node, key, account, market, amount, timeout, lending.NewRepayTx)
 	if err != nil {
 		return "", err
 	}

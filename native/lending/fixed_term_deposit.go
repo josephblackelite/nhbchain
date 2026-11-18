@@ -46,6 +46,10 @@ func (e *Engine) SupplyFixedTerm(depositor crypto.Address, depositID [32]byte, t
 		return nil, err
 	}
 
+	if err := e.checkSupplyCap(market, amount); err != nil {
+		return nil, err
+	}
+
 	newDepositInterest := computeFixedTermInterest(amount, rateBps, tenureDays)
 
 	depositOwed := market.TotalFixedTermDepositInterestOwedWei

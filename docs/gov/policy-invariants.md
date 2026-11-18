@@ -29,8 +29,30 @@ config file (see [params](../governance/params.md)).
 
 `[governance] QuorumBps` and `PassThresholdBps` are not checked against each
 other or against a floor when the engine is configured
-(`Engine.SetPolicy`, `GovConfig.Policy`), and `VotingPeriodSeconds` has no
-minimum there either.
+(`Engine.SetPolicy`, `GovConfig.Policy`). The engine itself still accepts any
+`VotingPeriodSeconds` and `TimelockSeconds`.
+
+## Floor on the `[governance]` windows, checked when the node starts
+
+`[governance] VotingPeriodSeconds` and `TimelockSeconds` are the windows the
+engine gives every new proposal. They are read from each validator's own
+configuration file; they are not chain state. Two checks sit on them, both at
+start-up and neither in the path that applies a transaction:
+
+- Each below `3600` seconds (`config.MinVotingPeriodSeconds`,
+  `config.MinTimelockSeconds`) is reported by `config.GovernancePolicyProblems`.
+  `cmd/nhb` and `cmd/consensusd` log it as a `configuration problem` warning with
+  `section=governance` and keep starting.
+- With `[governance] EnforceWindowFloors = true` both binaries refuse to start
+  instead (`config.EnforceGovernanceWindowFloors`). The setting is off unless the
+  operator sets it; the shipped `config.toml` documents it as `false`.
+
+This is a check on the file in front of the node, so it decides nothing about any
+block and needs no coordination between validators. It does not make validators
+agree: a validator whose file holds a different window, or whose
+`EnforceWindowFloors` is off, keeps timing proposals by its own file. The
+voting-period and timelock values a node applies are readable, per node, through
+`gov_params` ([API](../governance/api.md#gov_params)).
 
 ## Preflight cross-check that is not wired into transaction execution
 

@@ -59,7 +59,14 @@ from typing import Sequence
 try:
     import tomllib
 except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore
+    try:
+        import tomli as tomllib  # type: ignore
+    except ModuleNotFoundError:
+        sys.stderr.write(
+            "verify_prod_config: cannot read TOML: this needs Python 3.11 or newer "
+            "(tomllib), or the tomli module on an older Python (pip install tomli)\n"
+        )
+        sys.exit(2)
 
 config_path = os.environ["CONFIG_PATH"]
 

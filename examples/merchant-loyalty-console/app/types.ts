@@ -28,18 +28,3 @@ export interface ProgramStats {
   capUsage?: string;
   skips?: string;
 }
-
-export interface FanRewardsConfig {
-  pool: string;
-  creatorShareBps: number;
-  fanShareBps: number;
-  treasuryShareBps: number;
-  enabled: boolean;
-}
-
-export interface FanRewardsStats {
-  distributed: string;
-  pending: string;
-  supporters: number;
-  lastPayoutAt?: number;
-}

@@ -3,6 +3,7 @@ package modules
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -20,8 +21,8 @@ import (
 
 type LendingModule struct {
 	node *core.Node
-	// replayHeights remembers which blocks hold a committed lending
-	// transaction (see lending_replay_index.go).
+	// replayHeights holds the committed lending transactions, decoded once, that
+	// the rebuild of a pool's state is made from (see lending_replay_index.go).
 	replayHeights lendingHeightIndex
 }
 
@@ -39,6 +40,13 @@ type lendingReplayPayload struct {
 
 func (m *LendingModule) moduleUnavailable() *ModuleError {
 	return &ModuleError{HTTPStatus: http.StatusInternalServerError, Code: codeServerError, Message: "lending module not available"}
+}
+
+// indexBehind is the answer to a read that needs a rebuild from the committed
+// lending transactions while the index of them has not caught up with the chain
+// (see lending_replay_index.go); asking again in a moment succeeds.
+func (m *LendingModule) indexBehind() *ModuleError {
+	return &ModuleError{HTTPStatus: http.StatusServiceUnavailable, Code: codeServerError, Message: "lending index is catching up with the chain; retry shortly"}
 }
 
 // GetMarket, GetPools, and GetUserAccount are unauthenticated, read-only RPC
@@ -61,7 +69,10 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 		id = defaultLendingPoolID
 	}
 	params := m.node.LendingRiskParameters()
-	m.warmReplayIndex()
+	// The sum of the pool's committed lending transactions comes from the index,
+	// before the state lock is taken (see lending_replay_index.go); an index that
+	// is behind the chain matters only if the read goes on to need it.
+	replay, indexErr := m.replayPool(id)
 	var market *lending.Market
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetMarket(id)
@@ -72,7 +83,10 @@ func (m *LendingModule) GetMarket(poolID string) (*lending.Market, lending.RiskP
 			market = stored
 		}
 		if marketNeedsRebuild(market) {
-			if err := m.rebuildPoolStateInto(manager, id); err != nil {
+			if indexErr != nil {
+				return indexErr
+			}
+			if err := m.rebuildPoolStateInto(manager, id, replay); err != nil {
 				return err
 			}
 			stored, ok, err := manager.LendingGetMarket(id)
@@ -137,7 +151,7 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 		return nil, lending.RiskParameters{}, m.moduleUnavailable()
 	}
 	params := m.node.LendingRiskParameters()
-	m.warmReplayIndex()
+	replay, indexErr := m.replayPool(defaultLendingPoolID)
 	var markets []*lending.Market
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		list, err := manager.LendingListMarkets()
@@ -146,7 +160,10 @@ func (m *LendingModule) GetPools() ([]*lending.Market, lending.RiskParameters, *
 		}
 		markets = list
 		if len(markets) == 0 || allMarketsNeedRebuild(markets) {
-			if err := m.rebuildPoolStateInto(manager, defaultLendingPoolID); err != nil {
+			if indexErr != nil {
+				return indexErr
+			}
+			if err := m.rebuildPoolStateInto(manager, defaultLendingPoolID, replay); err != nil {
 				return err
 			}
 			list, err := manager.LendingListMarkets()
@@ -306,7 +323,9 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 		id = defaultLendingPoolID
 	}
 	var account *lending.UserAccount
-	m.warmReplayIndex()
+	// Only the account asked for is taken from the sum, so the work done under the
+	// state lock does not grow with the number of accounts in the pool.
+	replay, indexErr := m.replayPool(id, addr)
 	err := m.node.WithStateView(func(manager *nhbstate.Manager) error {
 		stored, ok, err := manager.LendingGetUserAccount(id, addr)
 		if err != nil {
@@ -324,7 +343,10 @@ func (m *LendingModule) GetUserAccount(poolID string, addr [20]byte) (*lending.U
 		if account != nil {
 			return nil
 		}
-		if err := m.rebuildPoolStateInto(manager, id); err != nil {
+		if indexErr != nil {
+			return indexErr
+		}
+		if err := m.rebuildPoolStateInto(manager, id, replay); err != nil {
 			return err
 		}
 		stored, ok, err = manager.LendingGetUserAccount(id, addr)
@@ -429,10 +451,11 @@ func allMarketsNeedRebuild(markets []*lending.Market) bool {
 	return true
 }
 
-// rebuildPoolStateInto replays committed lending transactions for poolID and
-// writes the result through manager -- the caller controls whether that
+// rebuildPoolStateInto writes the state that replay -- what the committed lending
+// transactions of poolID add up to, see replayPool -- describes through manager:
+// the market, and the accounts replay carries. The caller controls whether that
 // manager is backed by live state or a disposable WithStateView copy.
-func (m *LendingModule) rebuildPoolStateInto(manager *nhbstate.Manager, poolID string) error {
+func (m *LendingModule) rebuildPoolStateInto(manager *nhbstate.Manager, poolID string, replay *lendingPoolReplay) error {
 	if m == nil || m.node == nil {
 		return fmt.Errorf("lending module unavailable")
 	}
@@ -440,17 +463,13 @@ func (m *LendingModule) rebuildPoolStateInto(manager *nhbstate.Manager, poolID s
 	if id == "" {
 		id = defaultLendingPoolID
 	}
-	market, users, err := m.replayCommittedPoolState(id)
-	if err != nil {
-		return err
-	}
-	if market == nil {
+	if replay == nil {
 		return nil
 	}
-	if err := manager.LendingPutMarket(id, market); err != nil {
+	if err := manager.LendingPutMarket(id, m.replayedMarket(id, replay)); err != nil {
 		return err
 	}
-	for _, user := range users {
+	for _, user := range replay.users {
 		if err := manager.LendingPutUserAccount(id, user); err != nil {
 			return err
 		}
@@ -458,117 +477,21 @@ func (m *LendingModule) rebuildPoolStateInto(manager *nhbstate.Manager, poolID s
 	return nil
 }
 
-func (m *LendingModule) replayCommittedPoolState(poolID string) (*lending.Market, map[[20]byte]*lending.UserAccount, error) {
-	if m == nil || m.node == nil {
-		return nil, nil, fmt.Errorf("lending module unavailable")
-	}
-	id := strings.TrimSpace(poolID)
-	if id == "" {
-		id = defaultLendingPoolID
-	}
+// replayedMarket is the market that replay describes: the node's default market
+// for the pool, as it is configured now, with the totals the committed lending
+// transactions add up to and the indexes at their starting value.
+func (m *LendingModule) replayedMarket(id string, replay *lendingPoolReplay) *lending.Market {
 	market := m.defaultMarket(id)
 	market.SupplyIndex = new(big.Int).Set(lendingRay)
 	market.BorrowIndex = new(big.Int).Set(lendingRay)
 	market.BorrowedThisBlock = big.NewInt(0)
 	market.OracleMedianWei = big.NewInt(0)
 	market.OraclePrevMedianWei = big.NewInt(0)
-	users := make(map[[20]byte]*lending.UserAccount)
-	var sawLendingTx bool
-	height := m.node.GetHeight()
-	// Only blocks that hold a committed lending transaction change anything here,
-	// so only those are visited, in the same ascending order as a walk over every
-	// height would reach them.
-	for _, blockHeight := range m.replayHeights.through(m.node, height) {
-		block, err := m.node.GetBlockByHeight(blockHeight)
-		if err != nil || block == nil {
-			continue
-		}
-		for _, tx := range block.Transactions {
-			if tx == nil || !isCommittedLendingTxType(tx.Type) {
-				continue
-			}
-			txPoolID, err := lendingPoolIDFromTxData(tx.Data)
-			if err != nil || txPoolID != id {
-				continue
-			}
-			from, err := tx.From()
-			if err != nil || len(from) == 0 {
-				continue
-			}
-			var addr [20]byte
-			copy(addr[:], from)
-			user := users[addr]
-			if user == nil {
-				user = &lending.UserAccount{
-					Address:        toCryptoAddress(addr),
-					CollateralZNHB: big.NewInt(0),
-					SupplyShares:   big.NewInt(0),
-					DebtNHB:        big.NewInt(0),
-					ScaledDebt:     big.NewInt(0),
-				}
-				users[addr] = user
-			}
-			amount := cloneBigInt(tx.Value)
-			switch tx.Type {
-			case types.TxTypeLendingSupplyNHB:
-				user.SupplyShares = sumBigInt(user.SupplyShares, amount)
-				market.TotalSupplyShares = sumBigInt(market.TotalSupplyShares, amount)
-				market.TotalNHBSupplied = sumBigInt(market.TotalNHBSupplied, amount)
-			case types.TxTypeLendingWithdrawNHB:
-				if user.SupplyShares.Cmp(amount) < 0 {
-					user.SupplyShares = big.NewInt(0)
-				} else {
-					user.SupplyShares = new(big.Int).Sub(user.SupplyShares, amount)
-				}
-				if market.TotalSupplyShares.Cmp(amount) < 0 {
-					market.TotalSupplyShares = big.NewInt(0)
-				} else {
-					market.TotalSupplyShares = new(big.Int).Sub(market.TotalSupplyShares, amount)
-				}
-				if market.TotalNHBSupplied.Cmp(amount) < 0 {
-					market.TotalNHBSupplied = big.NewInt(0)
-				} else {
-					market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, amount)
-				}
-			case types.TxTypeLendingDepositZNHB:
-				user.CollateralZNHB = sumBigInt(user.CollateralZNHB, amount)
-			case types.TxTypeLendingWithdrawZNHB:
-				if user.CollateralZNHB.Cmp(amount) < 0 {
-					user.CollateralZNHB = big.NewInt(0)
-				} else {
-					user.CollateralZNHB = new(big.Int).Sub(user.CollateralZNHB, amount)
-				}
-			case types.TxTypeLendingBorrowNHB:
-				user.DebtNHB = sumBigInt(user.DebtNHB, amount)
-				user.ScaledDebt = sumBigInt(user.ScaledDebt, amount)
-				market.TotalNHBBorrowed = sumBigInt(market.TotalNHBBorrowed, amount)
-			case types.TxTypeLendingRepayNHB:
-				repayAmount := amount
-				if user.DebtNHB.Cmp(repayAmount) < 0 {
-					repayAmount = new(big.Int).Set(user.DebtNHB)
-				}
-				if repayAmount.Sign() > 0 {
-					user.DebtNHB = new(big.Int).Sub(user.DebtNHB, repayAmount)
-					if user.ScaledDebt.Cmp(repayAmount) < 0 {
-						user.ScaledDebt = big.NewInt(0)
-					} else {
-						user.ScaledDebt = new(big.Int).Sub(user.ScaledDebt, repayAmount)
-					}
-					if market.TotalNHBBorrowed.Cmp(repayAmount) < 0 {
-						market.TotalNHBBorrowed = big.NewInt(0)
-					} else {
-						market.TotalNHBBorrowed = new(big.Int).Sub(market.TotalNHBBorrowed, repayAmount)
-					}
-				}
-			}
-			market.LastUpdateBlock = blockHeight
-			sawLendingTx = true
-		}
-	}
-	if !sawLendingTx {
-		return nil, nil, nil
-	}
-	return market, users, nil
+	market.TotalSupplyShares = replay.supplyShares
+	market.TotalNHBSupplied = replay.supplied
+	market.TotalNHBBorrowed = replay.borrowed
+	market.LastUpdateBlock = replay.lastUpdateBlock
+	return market
 }
 
 func isCommittedLendingTxType(txType types.TxType) bool {
@@ -1005,6 +928,10 @@ func (m *LendingModule) makeTxHash(kind, primary string, amount *big.Int, extras
 func (m *LendingModule) wrapError(err error) *ModuleError {
 	if err == nil {
 		return nil
+	}
+	var moduleErr *ModuleError
+	if errors.As(err, &moduleErr) {
+		return moduleErr
 	}
 	status := http.StatusInternalServerError
 	code := codeServerError

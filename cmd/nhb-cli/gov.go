@@ -83,8 +83,12 @@ func sendGovTx(keyFile string, txType types.TxType, payload interface{}) (string
 	if err != nil {
 		return "", fmt.Errorf("encoding payload: %w", err)
 	}
+	chainID, err := txChainID()
+	if err != nil {
+		return "", fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     txType,
 		Nonce:    account.Nonce,
 		Data:     data,

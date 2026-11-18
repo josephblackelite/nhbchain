@@ -39,6 +39,8 @@ var (
 	errMaxLTVExceeded            = errors.New("lending engine: borrow would exceed maximum loan-to-value ratio")
 	errWithdrawSameBlockAsSupply = errors.New("lending engine: cannot withdraw in the same block as a supply")
 	errSelfLiquidation           = errors.New("lending engine: a borrower cannot liquidate their own position")
+	errSupplyCapExceeded         = errors.New("lending engine: supply would exceed the pool's supply cap")
+	errCollateralCapExceeded     = errors.New("lending engine: collateral deposit would exceed the collateral cap")
 
 	errFixedTermDepositTenureNotAllowed = errors.New("lending engine: tenure not in the fixed-term deposit rate schedule")
 	errFixedTermDepositInvalidPayout    = errors.New("lending engine: invalid fixed-term deposit payout preference")
@@ -102,6 +104,22 @@ var (
 	// storage error.
 	ErrFixedTermDepositReserveInsufficient = errFixedTermDepositReserveInsufficient
 	ErrInsufficientLiquidity               = errInsufficientLiquidity
+
+	// The pause, cap and oracle outcomes below were unreachable while the node never
+	// handed the engine its risk limits (ledger PL-DC-19). Each depends on state or
+	// configuration that can change (a repayment frees borrow room, an oracle update
+	// refreshes the price, an operator lifts a pause), so core/node.go's
+	// classifyProposalError skips them instead of leaving them to the default.
+	ErrSupplyPaused          = errSupplyPaused
+	ErrBorrowPaused          = errBorrowPaused
+	ErrLiquidationsPaused    = errLiquidationsPaused
+	ErrBorrowCapPerBlock     = errBorrowCapPerBlock
+	ErrBorrowCapGlobal       = errBorrowCapGlobal
+	ErrBorrowCapUtilisation  = errBorrowCapUtilisation
+	ErrSupplyCapExceeded     = errSupplyCapExceeded
+	ErrCollateralCapExceeded = errCollateralCapExceeded
+	ErrOracleStale           = errOracleStale
+	ErrOracleDeviation       = errOracleDeviation
 )
 
 // secondsPerYear is the length of a year the annual rates are quoted over
@@ -159,6 +177,10 @@ type Engine struct {
 	developerFeeAddr      crypto.Address
 	collateralRouting     CollateralRouting
 	pauses                nativecommon.PauseView
+	// accountingFixes switches on the corrected accounting rules that ship behind
+	// core's LendingAccountingFixesActivationHeight (ledger PL-R5T-50, PL-R5T-52,
+	// PL-EXT-16). False, the zero value, is the behaviour of every earlier release.
+	accountingFixes bool
 }
 
 // NewEngine constructs a lending engine configured with the module treasury
@@ -173,6 +195,18 @@ func NewEngine(moduleAddr, collateralAddr crypto.Address, params RiskParameters)
 
 // SetState wires the engine to the external persistence layer.
 func (e *Engine) SetState(state engineState) { e.state = state }
+
+// SetAccountingFixes turns the corrected accounting rules on or off for the
+// transaction this engine is built for. core sets it from the block height
+// against LendingAccountingFixesActivationHeight, never from anything a
+// transaction carries; false (the default) is the behaviour of every earlier
+// release.
+func (e *Engine) SetAccountingFixes(active bool) {
+	if e == nil {
+		return
+	}
+	e.accountingFixes = active
+}
 
 func (e *Engine) SetPauses(p nativecommon.PauseView) {
 	if e == nil {
@@ -321,6 +355,10 @@ func (e *Engine) Supply(supplier crypto.Address, amount *big.Int) (*big.Int, err
 
 	fees, feesChanged, err := e.accrueInterest(market)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := e.checkSupplyCap(market, amount); err != nil {
 		return nil, err
 	}
 
@@ -500,6 +538,11 @@ func (e *Engine) DepositCollateral(userAddr crypto.Address, amount *big.Int) err
 	if err != nil {
 		return err
 	}
+	if cap := e.params.MaxTotalCollateral; cap != nil && cap.Sign() > 0 {
+		if new(big.Int).Add(moduleAcc.BalanceZNHB, amount).Cmp(cap) > 0 {
+			return errCollateralCapExceeded
+		}
+	}
 
 	userAcc.BalanceZNHB = new(big.Int).Sub(userAcc.BalanceZNHB, amount)
 	moduleAcc.BalanceZNHB = new(big.Int).Add(moduleAcc.BalanceZNHB, amount)
@@ -669,28 +712,8 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 
 	totalOut := new(big.Int).Add(amount, feeAmount)
 
-	if cap := e.params.BorrowCaps.PerBlock; cap != nil && cap.Sign() > 0 {
-		if market.LastBorrowBlock != e.blockHeight {
-			market.LastBorrowBlock = e.blockHeight
-			market.BorrowedThisBlock = big.NewInt(0)
-		}
-		projected := new(big.Int).Add(market.BorrowedThisBlock, totalOut)
-		if projected.Cmp(cap) > 0 {
-			return nil, errBorrowCapPerBlock
-		}
-	}
-
-	projectedTotalBorrowed := new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
-	if cap := e.params.BorrowCaps.Total; cap != nil && cap.Sign() > 0 {
-		if projectedTotalBorrowed.Cmp(cap) > 0 {
-			return nil, errBorrowCapGlobal
-		}
-	}
-	if utilCap := e.params.BorrowCaps.UtilisationBps; utilCap > 0 {
-		util := utilisation(projectedTotalBorrowed, market.TotalNHBSupplied)
-		if util > utilCap {
-			return nil, errBorrowCapUtilisation
-		}
+	if err := e.checkBorrowCaps(market, totalOut); err != nil {
+		return nil, err
 	}
 
 	liquidity := e.AvailableLiquidity(market)
@@ -766,11 +789,14 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	borrowerUser.DebtNHB = debtFromScaled(borrowerUser.ScaledDebt, market.BorrowIndex)
 
 	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
-	if e.params.BorrowCaps.PerBlock != nil && e.params.BorrowCaps.PerBlock.Sign() > 0 {
-		market.BorrowedThisBlock = new(big.Int).Add(market.BorrowedThisBlock, totalOut)
-	}
+	e.recordBorrowedThisBlock(market, totalOut)
 
-	if feeAmount.Sign() > 0 {
+	// The fee was paid to its recipient above and is part of the borrower's debt, so
+	// the borrower funds it and nothing is owed to the recipient afterwards. Before
+	// the accounting-fixes height it was also added to the withdrawable counter,
+	// which WithdrawDeveloperFees would pay a second time out of the shared module
+	// balance and the suppliers' total (ledger PL-R5T-52).
+	if feeAmount.Sign() > 0 && !e.accountingFixes {
 		fees.DeveloperFeesWei = new(big.Int).Add(fees.DeveloperFeesWei, feeAmount)
 		feesChanged = true
 	}
@@ -789,6 +815,73 @@ func (e *Engine) Borrow(borrower crypto.Address, amount *big.Int, feeRecipient c
 	}
 
 	return feeAmount, nil
+}
+
+// checkBorrowCaps applies the per-block, total and utilisation borrow caps to a
+// borrow of totalOut (fee included), against the market as it stands. With no cap set
+// it checks nothing. It starts the per-block counter afresh when the block is a new
+// one, as Borrow always has; every path that lends the pool's money calls it, the
+// flexible and the fixed-term borrow alike (ledger PL-DC-19).
+func (e *Engine) checkBorrowCaps(market *Market, totalOut *big.Int) error {
+	if cap := e.params.BorrowCaps.PerBlock; cap != nil && cap.Sign() > 0 {
+		if market.LastBorrowBlock != e.blockHeight {
+			market.LastBorrowBlock = e.blockHeight
+			market.BorrowedThisBlock = big.NewInt(0)
+		}
+		projected := new(big.Int).Add(market.BorrowedThisBlock, totalOut)
+		if projected.Cmp(cap) > 0 {
+			return errBorrowCapPerBlock
+		}
+	}
+
+	projectedTotalBorrowed := new(big.Int).Add(market.TotalNHBBorrowed, totalOut)
+	if cap := e.params.BorrowCaps.Total; cap != nil && cap.Sign() > 0 {
+		if projectedTotalBorrowed.Cmp(cap) > 0 {
+			return errBorrowCapGlobal
+		}
+	}
+	if utilCap := e.params.BorrowCaps.UtilisationBps; utilCap > 0 {
+		// The cash a borrow draws on is the flexible supply plus the principal of
+		// fixed-term deposits (AvailableLiquidity counts both), so the cap measures
+		// borrowing against both; against the flexible supply alone a pool funded
+		// by deposits showed 0 percent in use and a 1 percent cap never bound
+		// (ledger PL-EXT-45). Caps are off at every height the chain has run, so
+		// this changes no recorded state.
+		util := capUtilisation(projectedTotalBorrowed, market.TotalNHBSupplied, market.TotalFixedTermDepositPrincipalWei)
+		if util > utilCap {
+			return errBorrowCapUtilisation
+		}
+	}
+	return nil
+}
+
+// recordBorrowedThisBlock adds a completed borrow to the per-block counter, when a
+// per-block cap is set.
+func (e *Engine) recordBorrowedThisBlock(market *Market, totalOut *big.Int) {
+	if e.params.BorrowCaps.PerBlock != nil && e.params.BorrowCaps.PerBlock.Sign() > 0 {
+		market.BorrowedThisBlock = new(big.Int).Add(market.BorrowedThisBlock, totalOut)
+	}
+}
+
+// checkSupplyCap refuses a supply of amount that would take what lenders hold in the
+// pool, the flexible total and the principal of fixed-term deposits, over
+// RiskParameters.MaxTotalSupply. With no cap set it checks nothing.
+func (e *Engine) checkSupplyCap(market *Market, amount *big.Int) error {
+	cap := e.params.MaxTotalSupply
+	if cap == nil || cap.Sign() <= 0 {
+		return nil
+	}
+	held := new(big.Int)
+	if market.TotalNHBSupplied != nil {
+		held.Add(held, market.TotalNHBSupplied)
+	}
+	if market.TotalFixedTermDepositPrincipalWei != nil {
+		held.Add(held, market.TotalFixedTermDepositPrincipalWei)
+	}
+	if held.Add(held, amount).Cmp(cap) > 0 {
+		return errSupplyCapExceeded
+	}
+	return nil
 }
 
 // Repay transfers NHB from the borrower back to the module and reduces their
@@ -1370,15 +1463,26 @@ func (e *Engine) withinMaxLTV(market *Market, collateral, debt *big.Int) bool {
 	return num.Cmp(den) >= 0
 }
 
-func utilisation(borrowed, supplied *big.Int) uint64 {
+// capUtilisation is borrowed as basis points of what lenders hold in the pool: the
+// flexible total plus the principal of fixed-term deposits. With debt and nothing
+// held it is the largest value, so a utilisation cap refuses the borrow instead of
+// reading an empty denominator as an idle pool (ledger PL-EXT-45).
+func capUtilisation(borrowed, supplied, depositPrincipal *big.Int) uint64 {
 	if borrowed == nil || borrowed.Sign() <= 0 {
 		return 0
 	}
-	if supplied == nil || supplied.Sign() <= 0 {
-		return 0
+	held := new(big.Int)
+	if supplied != nil && supplied.Sign() > 0 {
+		held.Add(held, supplied)
+	}
+	if depositPrincipal != nil && depositPrincipal.Sign() > 0 {
+		held.Add(held, depositPrincipal)
+	}
+	if held.Sign() <= 0 {
+		return math.MaxUint64
 	}
 	ratio := new(big.Int).Mul(borrowed, basisPoints)
-	ratio.Quo(ratio, supplied)
+	ratio.Quo(ratio, held)
 	if ratio.Sign() < 0 {
 		return 0
 	}
@@ -1428,6 +1532,12 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 	if available == nil || available.Cmp(amount) < 0 {
 		return nil, errInsufficientLiquidity
 	}
+	// The module balance is shared by every pool, so it says nothing about this pool's
+	// cash: a fee is paid only out of what this pool itself holds free of loans and of
+	// fixed-term deposits (PL-DC-19).
+	if e.AvailableLiquidity(market).Cmp(amount) < 0 {
+		return nil, errInsufficientLiquidity
+	}
 
 	accounts := e.newAccountSet()
 	moduleAcc, err := accounts.load(e.moduleAddress)
@@ -1456,7 +1566,15 @@ func (e *Engine) withdrawFees(recipient crypto.Address, amount *big.Int, protoco
 		fees.DeveloperFeesWei = new(big.Int).Sub(fees.DeveloperFeesWei, amount)
 	}
 
-	market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, amount)
+	if e.accountingFixes && market.TotalNHBSupplied.Cmp(amount) < 0 {
+		// A fee that was paid into the pool's cash without being counted in the
+		// suppliers' total (the older fixed-term fallback) must not take the total
+		// below zero: a negative total makes the borrow rate negative and the
+		// indexes shrink (ledger PL-EXT-44).
+		market.TotalNHBSupplied = big.NewInt(0)
+	} else {
+		market.TotalNHBSupplied = new(big.Int).Sub(market.TotalNHBSupplied, amount)
+	}
 
 	if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
 		return nil, err

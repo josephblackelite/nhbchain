@@ -20,6 +20,10 @@ import (
 )
 
 type Peer struct {
+	// challenged records that the peer proved its key in the challenge-response round of the
+	// handshake (PL-R5T-20, PL-DC-25); false for a peer that did not offer it.
+	challenged bool
+
 	id            string
 	conn          net.Conn
 	reader        *bufio.Reader
@@ -149,6 +153,14 @@ func maxFloat(a, b float64) float64 {
 }
 
 // ID returns the peer identifier.
+// RemoteHost is the host the peer is connected from.
+func (p *Peer) RemoteHost() string {
+	if p == nil || p.conn == nil || p.conn.RemoteAddr() == nil {
+		return ""
+	}
+	return remoteHost(p.conn.RemoteAddr().String())
+}
+
 func (p *Peer) ID() string {
 	if p == nil {
 		return ""
@@ -259,7 +271,32 @@ func (p *Peer) keepaliveLoop() {
 	}
 }
 
+// maxConsecutiveEmptyLines is how many blank lines in a row a peer may send before
+// it is treated as violating the protocol. An honest peer never sends one (every
+// frame is a JSON message); the allowance only absorbs a stray blank line.
+const maxConsecutiveEmptyLines = 16
+
+// allowInbound applies the per-address, per-peer and network-wide rate limits to one
+// inbound line and reports whether it may proceed. When a limit is hit it has already
+// handed the peer to handleRateLimit, and the read loop must stop.
+func (p *Peer) allowInbound(now time.Time) bool {
+	if !p.server.allowIP(p.remoteAddr, now) {
+		p.server.handleRateLimit(p, false)
+		return false
+	}
+	if !p.limiter.allow(now) {
+		p.server.handleRateLimit(p, false)
+		return false
+	}
+	if !p.server.allowGlobal(now) {
+		p.server.handleRateLimit(p, true)
+		return false
+	}
+	return true
+}
+
 func (p *Peer) readLoop() {
+	emptyLines := 0
 	for {
 		select {
 		case <-p.ctx.Done():
@@ -336,27 +373,29 @@ func (p *Peer) readLoop() {
 
 		trimmed := bytes.TrimSpace(line)
 		if len(trimmed) == 0 {
+			// A blank line carries no message, but each one restarts the read
+			// deadline, so a peer that sent one every few seconds held its slot
+			// with no protocol traffic and without ever touching a rate limit.
+			// It now counts against the same limits as a message, and a run of
+			// them is a protocol violation (ledger PL-EXT-46).
+			emptyLines++
+			if emptyLines > maxConsecutiveEmptyLines {
+				p.server.handleProtocolViolation(p, fmt.Errorf("peer %s sent %d empty lines in a row", p.id, emptyLines))
+				return
+			}
+			if !p.persistent && !p.allowInbound(time.Now()) {
+				return
+			}
 			continue
 		}
+		emptyLines = 0
 		if len(trimmed) > maxBytes {
 			p.server.handleProtocolViolation(p, fmt.Errorf("message exceeds max size (%d bytes)", len(trimmed)))
 			return
 		}
 
-		if !p.persistent {
-			now := time.Now()
-			if !p.server.allowIP(p.remoteAddr, now) {
-				p.server.handleRateLimit(p, false)
-				return
-			}
-			if !p.limiter.allow(now) {
-				p.server.handleRateLimit(p, false)
-				return
-			}
-			if !p.server.allowGlobal(now) {
-				p.server.handleRateLimit(p, true)
-				return
-			}
+		if !p.persistent && !p.allowInbound(time.Now()) {
+			return
 		}
 
 		var msg Message

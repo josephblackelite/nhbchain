@@ -115,8 +115,8 @@ func (sp *StateProcessor) applyBuybackAsk(tx *types.Transaction, sender []byte, 
 	if payload.ZNHBAmount == nil || payload.ZNHBAmount.Sign() <= 0 {
 		return fmt.Errorf("buybackAsk: znhbAmount must be positive")
 	}
-	if payload.ZNHBAmount.Cmp(minBuybackAskWei) < 0 {
-		return fmt.Errorf("%w: %s < %s", ErrBuybackAskTooSmall, payload.ZNHBAmount, minBuybackAskWei)
+	if minAsk := sp.minBuybackAsk(); payload.ZNHBAmount.Cmp(minAsk) < 0 {
+		return fmt.Errorf("%w: %s < %s", ErrBuybackAskTooSmall, payload.ZNHBAmount, minAsk)
 	}
 
 	epochNumber, ok := sp.currentBuybackEpoch()
@@ -237,6 +237,13 @@ func (sp *StateProcessor) applyBuybackRefPrice(tx *types.Transaction) error {
 	}
 	signers, err := buyback.VerifyReferencePrice(sp.buybackConfig, rp, payload.Signatures)
 	if err != nil {
+		return fmt.Errorf("buybackRefPrice: %w", err)
+	}
+
+	// PL-BC-D: from SaleReferenceActivationHeight the accepted reference is also the price
+	// the treasury sale follows. Checked and recorded before anything else is written, so a
+	// refusal leaves no trace.
+	if err := sp.recordSaleReference(manager, epochNumber, payload.RateNum, payload.RateDenom, payload.Timestamp); err != nil {
 		return fmt.Errorf("buybackRefPrice: %w", err)
 	}
 

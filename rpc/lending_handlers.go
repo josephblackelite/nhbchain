@@ -253,6 +253,17 @@ func newLendingAccountResult(poolID string, addr [20]byte, account *lending.User
 	return result
 }
 
+// writeLendingReadError answers a lending read that failed. A 503 means the
+// index of lending transactions has not caught up with the chain yet (see
+// rpc/modules/lending_replay_index.go); it carries a Retry-After hint, as the
+// query pool's own refusals do.
+func writeLendingReadError(w http.ResponseWriter, id interface{}, status, code int, message string, data interface{}) {
+	if status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "1")
+	}
+	writeError(w, status, id, code, message, data)
+}
+
 func (s *Server) handleLendingGetMarket(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
 	var poolID string
 	if len(req.Params) == 1 {
@@ -276,14 +287,14 @@ func (s *Server) handleLendingGetMarket(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "too many parameters", nil)
 		return
 	}
-	// The read below holds the node's exclusive state lock while it works, so it
-	// takes a slot in the query pool first (see query_gate.go).
+	// The read below can walk the lending history of the pool, so it takes a slot
+	// in the query pool first (see query_gate.go).
 	if !s.admitHeavy(w, r, req) {
 		return
 	}
 	market, params, moduleErr := s.lending.GetMarket(poolID)
 	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
+		writeLendingReadError(w, req.ID, moduleErr.HTTPStatus, moduleErr.Code, moduleErr.Message, moduleErr.Data)
 		return
 	}
 	result := lendingMarketResult{RiskParameters: params}
@@ -303,7 +314,7 @@ func (s *Server) handleLendGetPools(w http.ResponseWriter, r *http.Request, req 
 	}
 	pools, params, moduleErr := s.lending.GetPools()
 	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
+		writeLendingReadError(w, req.ID, moduleErr.HTTPStatus, moduleErr.Code, moduleErr.Message, moduleErr.Data)
 		return
 	}
 	if pools == nil {
@@ -357,7 +368,7 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, r *http.Requ
 	}
 	account, moduleErr := s.lending.GetUserAccount(poolID, addr)
 	if moduleErr != nil {
-		writeError(w, moduleErr.HTTPStatus, req.ID, moduleErr.Code, moduleErr.Message, moduleErr.Data)
+		writeLendingReadError(w, req.ID, moduleErr.HTTPStatus, moduleErr.Code, moduleErr.Message, moduleErr.Data)
 		return
 	}
 	if account == nil {
@@ -376,7 +387,7 @@ func (s *Server) handleLendingGetUserAccount(w http.ResponseWriter, r *http.Requ
 	// means there is nothing to redeem yet.
 	market, _, marketErr := s.lending.GetMarket(resolvedPoolID)
 	if marketErr != nil {
-		writeError(w, marketErr.HTTPStatus, req.ID, marketErr.Code, marketErr.Message, marketErr.Data)
+		writeLendingReadError(w, req.ID, marketErr.HTTPStatus, marketErr.Code, marketErr.Message, marketErr.Data)
 		return
 	}
 	var supplyIndex *big.Int

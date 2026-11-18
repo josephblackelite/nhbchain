@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-import { startEmailVerification } from '../../../../../lib/identity-gateway';
+import { startEmailVerification } from '../../../../lib/identity-gateway';
 
 export async function POST(request: NextRequest) {
   try {

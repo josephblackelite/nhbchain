@@ -5,14 +5,30 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"nhbchain/crypto"
+	"nhbchain/rpc/txchainid"
 	cons "nhbchain/sdk/consensus"
 	lendtx "nhbchain/sdk/lending"
 )
+
+// envelopeChainID returns the decimal chain id for the envelope: the one the node reports as txChainId in the public
+// nhb_getNetworkStats call (NHB_CHAIN_ID, when set, is an explicit choice). If the node cannot say, nothing is signed.
+func envelopeChainID(ctx context.Context, explicit, rpcURL string) (string, error) {
+	if v := strings.TrimSpace(explicit); v != "" {
+		return v, nil
+	}
+	id, err := txchainid.NewReader(txchainid.HTTPFetcher(nil, rpcURL, ""), 0).ChainID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read the chain id from %s: %w", rpcURL, err)
+	}
+	return id.String(), nil
+}
 
 func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -42,8 +58,17 @@ func main() {
 		log.Fatalf("build borrow msg: %v", err)
 	}
 
+	rpcURL := os.Getenv("NHB_RPC_URL")
+	if rpcURL == "" {
+		rpcURL = "http://localhost:8545"
+	}
+	chainID, err := envelopeChainID(ctx, os.Getenv("NHB_CHAIN_ID"), rpcURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	// Wrap the payload in an envelope carrying replay protection metadata.
-	envelope, err := cons.NewTx(borrowMsg, 1, "localnet", "", "", "", "sdk borrow example")
+	envelope, err := cons.NewTx(borrowMsg, 1, chainID, "", "", "", "sdk borrow example")
 	if err != nil {
 		log.Fatalf("build envelope: %v", err)
 	}

@@ -167,6 +167,18 @@ func (s *SQLiteStore) InsertAuditLog(ctx context.Context, entry AuditEntry) erro
 	return err
 }
 
+// PruneUnauthenticatedAudit deletes the audit rows of failed authentications,
+// the ones with no API key, recorded before cutoff, and returns how many. Rows
+// of authenticated requests are never touched.
+func (s *SQLiteStore) PruneUnauthenticatedAudit(ctx context.Context, cutoff time.Time) (int64, error) {
+	const stmt = `DELETE FROM audit_log WHERE (api_key IS NULL OR api_key = '') AND occurred_at < ?`
+	res, err := s.db.ExecContext(ctx, stmt, cutoff.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // P2POffer represents a stored marketplace offer.
 type P2POffer struct {
 	ID          string    `json:"offerId"`

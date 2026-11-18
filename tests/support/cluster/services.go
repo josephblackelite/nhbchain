@@ -1,3 +1,8 @@
+// Package cluster is a TEST DOUBLE, not a cluster: it starts small HTTP handlers
+// over an in-memory state on loopback ports, named after the real services
+// (consensus, p2p, lending, swap, governance, gateway), and imports no node code.
+// A test that passes against it says nothing about the real node's consensus,
+// lending, swap or governance logic (PL-DC-27; docs/audit/e2e-flows.md).
 package cluster
 
 import (

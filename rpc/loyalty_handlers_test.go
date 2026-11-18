@@ -60,6 +60,9 @@ func newTestEnv(t *testing.T) *testEnv {
 			NonceCapacity:        1024,
 			RateLimitWindow:      time.Minute,
 			PartnerRateLimits:    map[string]int{env.swapKey: 100},
+			// The test partner reads every provider's vouchers; a partner key with
+			// no entry reads no voucher (PL-EXT-32).
+			PartnerProviders: map[string][]string{env.swapKey: {"*"}},
 			Now: func() time.Time {
 				return env.now
 			},

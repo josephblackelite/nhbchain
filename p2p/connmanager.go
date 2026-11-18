@@ -172,7 +172,9 @@ func (m *connManager) runSeedLoop(seed seedEndpoint) {
 			}
 			continue
 		}
-		if err := m.server.Connect(seed.Address); err != nil {
+		// The seed's configured node ID is passed on: whoever answers at its address must prove it
+		// (PL-R5T-60).
+		if err := m.server.ConnectExpecting(seed.Address, seed.NodeID); err != nil {
 			// m.log().Warn("Seed dial failed",
 			// 	logging.MaskField("seed_address", seed.Address),
 			// 	logging.MaskField("seed_id", seed.NodeID),

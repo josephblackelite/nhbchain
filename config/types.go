@@ -39,13 +39,18 @@ type RPCSwapAuthPersistence struct {
 
 // RPCSwapAuth configures HMAC authentication for swap RPC methods.
 type RPCSwapAuth struct {
-	Secrets                  map[string]string      `toml:"Secrets"`
-	AllowedTimestampSkewSecs int                    `toml:"AllowedTimestampSkewSeconds"`
-	NonceTTLSeconds          int                    `toml:"NonceTTLSeconds"`
-	NonceCapacity            int                    `toml:"NonceCapacity"`
-	RateLimitWindowSeconds   int                    `toml:"RateLimitWindowSeconds"`
-	PartnerRateLimits        map[string]int         `toml:"PartnerRateLimits"`
-	Persistence              RPCSwapAuthPersistence `toml:"Persistence"`
+	Secrets                  map[string]string `toml:"Secrets"`
+	AllowedTimestampSkewSecs int               `toml:"AllowedTimestampSkewSeconds"`
+	NonceTTLSeconds          int               `toml:"NonceTTLSeconds"`
+	NonceCapacity            int               `toml:"NonceCapacity"`
+	RateLimitWindowSeconds   int               `toml:"RateLimitWindowSeconds"`
+	PartnerRateLimits        map[string]int    `toml:"PartnerRateLimits"`
+	// PartnerProviders names, for each partner key in Secrets, the providers whose
+	// vouchers that partner may read back with swap_voucher_get, swap_voucher_list
+	// and swap_voucher_export. Names are compared trimmed and in lower case, and
+	// "*" lets a key read every provider. A key with no entry reads no voucher.
+	PartnerProviders map[string][]string    `toml:"PartnerProviders"`
+	Persistence      RPCSwapAuthPersistence `toml:"Persistence"`
 }
 
 // Governance captures global governance policy knobs that must be validated
@@ -89,7 +94,15 @@ type PaymasterAutoTopUp struct {
 	TopUpAmountWei  string
 	DailyCapWei     string
 	CooldownSeconds uint64
-	Governance      PaymasterAutoTopUpGovernance
+	// SponsorRole is the on-chain role an address must hold before the policy
+	// tops it up. Required when Enabled: without it any address that signs a
+	// sponsored transfer draws a full allowance (PL-R5T-64).
+	SponsorRole string
+	// AggregateDailyCapWei caps what the funding account pays out per UTC day over
+	// all sponsors together. Required (positive) when Enabled; DailyCapWei is per
+	// sponsor address, so by itself a new address is a new allowance.
+	AggregateDailyCapWei string
+	Governance           PaymasterAutoTopUpGovernance
 }
 
 // PaymasterAutoTopUpGovernance captures the role based guardrails required to

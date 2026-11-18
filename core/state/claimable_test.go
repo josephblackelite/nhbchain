@@ -35,7 +35,7 @@ func TestClaimableCreateAndClaim(t *testing.T) {
 	copy(hashLock[:], hash)
 
 	deadline := int64(500)
-	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, 100)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestClaimableClaimRejectsAfterDeadline(t *testing.T) {
 	copy(hashLock[:], hash)
 
 	deadline := int64(1000)
-	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	claim, err := manager.CreateClaimable(payer, "NHB", big.NewInt(100), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, 100)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 
 	var hashLock [32]byte
 	deadline := int64(100)
-	claim, err := manager.CreateClaimable(payer, "ZNHB", big.NewInt(200), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	claim, err := manager.CreateClaimable(payer, "ZNHB", big.NewInt(200), hashLock, deadline, [32]byte{}, "test-chain", claimable.RecipientKindNone, 100)
 	if err != nil {
 		t.Fatalf("create claimable: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestClaimableCancelAndExpire(t *testing.T) {
 	// Expire path
 	fundAccount(t, manager, payer, 500, 1000) // replenish NHB for second claimable
 	deadlineExpire := int64(50)
-	second, err := manager.CreateClaimable(payer, "NHB", big.NewInt(300), hashLock, deadlineExpire, [32]byte{}, "test-chain", claimable.RecipientKindNone)
+	second, err := manager.CreateClaimable(payer, "NHB", big.NewInt(300), hashLock, deadlineExpire, [32]byte{}, "test-chain", claimable.RecipientKindNone, 100)
 	if err != nil {
 		t.Fatalf("create second claimable: %v", err)
 	}

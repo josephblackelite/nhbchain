@@ -37,11 +37,13 @@ The entry point is `services/lendingd/main.go`:
 go run ./services/lendingd -config services/lending/config.yaml
 ```
 
-`-config` defaults to `services/lending/config.yaml`. That file currently
-contains only `listen: ":50053"`, which is **not sufficient to start the
-service**: `Load` (`services/lendingd/config/config.go`) requires TLS
-material or `allow_insecure: true`, and at least one API token or mTLS common
-name.
+`-config` defaults to `services/lending/config.yaml`. That file is a
+development configuration: plaintext gRPC on `127.0.0.1:50053`
+(`tls.allow_insecure: true`, accepted because the listener is a loopback
+address) and one placeholder API token. It starts as it is. For any listener
+that other hosts can reach, `Load` (`services/lendingd/config/config.go`)
+requires TLS material (`tls.cert` and `tls.key`), and at least one API token or
+mTLS common name; replace the placeholder token with a secret of your own.
 
 ### Configuration keys (YAML)
 

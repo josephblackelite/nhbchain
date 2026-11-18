@@ -167,8 +167,8 @@ func (s *Server) handleMarketListOpenListings(w http.ResponseWriter, r *http.Req
 		limit = clampMarketListLimit(params.Limit)
 	}
 
-	// Reading the whole book holds the node's exclusive state lock for as long as
-	// the book is long, so it takes a slot in the query pool first.
+	// Reading the whole book decodes every open listing however short the page, so
+	// it takes a slot in the query pool first.
 	if !s.admitHeavy(w, r, req) {
 		return
 	}

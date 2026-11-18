@@ -148,6 +148,11 @@ render_unit() {
 
 need_cmd go
 need_cmd python3
+# step 4/7 (verify_prod_config.sh) reads the TOML with tomllib (Python 3.11+) or tomli
+if ! python3 -c 'import tomllib' >/dev/null 2>&1 && ! python3 -c 'import tomli' >/dev/null 2>&1; then
+  echo "python3 cannot read TOML: install Python 3.11 or newer, or the tomli module (pip install tomli)" >&2
+  exit 1
+fi
 need_cmd rsync
 need_cmd systemctl
 need_cmd install

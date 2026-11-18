@@ -39,6 +39,8 @@ type Server struct {
 	intents       *PayIntentBuilder
 	nowFn         func() time.Time
 	merchants     map[string]MerchantConfig
+	// anonymousAudit limits the audit rows written for failed authentications.
+	anonymousAudit *auditLimiter
 }
 
 func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *WebhookQueue, intents *PayIntentBuilder, merchants map[string]MerchantConfig) *Server {
@@ -69,6 +71,8 @@ func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *
 		intents:       intents,
 		nowFn:         time.Now,
 		merchants:     clonedMerchants,
+
+		anonymousAudit: newAuditLimiter(unauthenticatedAuditPerSecond, unauthenticatedAuditBurst),
 	}
 }
 
@@ -456,9 +460,11 @@ func (s *Server) handleEscrowResolve(w http.ResponseWriter, r *http.Request) {
 // writes do. The three reads (an escrow, the open offers, a trade) used to
 // answer anyone who could reach the port, with the parties and amounts of every
 // escrow and trade the gateway had created. It reports whether the handler may
-// go on; when it may not, the response has been written.
+// go on; when it may not, the response has been written. A read is held to the
+// same key, skew, signature and nonce rules as a write, but not to the one-
+// request-per-second timestamp rule (see Authenticator.AuthenticateRead).
 func (s *Server) authenticateRead(w http.ResponseWriter, r *http.Request) bool {
-	principal, err := s.authenticator.Authenticate(r, nil)
+	principal, err := s.authenticator.AuthenticateRead(r)
 	if err != nil {
 		s.writeAuthError(w, err)
 		s.audit(r.Context(), principal, r, nil, http.StatusUnauthorized, []byte(fmt.Sprintf(`{"error":"%s"}`, err.Error())))
@@ -739,19 +745,33 @@ func (s *Server) verifyEscrowCreateSignature(r *http.Request, req *EscrowCreateR
 	return payload, signature, nil
 }
 
+// audit records a request. One that did not authenticate (no principal) is the
+// sender's own content, so only its method, a capped path and a capped response
+// are kept, no request body, and the rows are rate limited; one that did is kept
+// in full.
 func (s *Server) audit(ctx context.Context, principal *Principal, r *http.Request, requestBody []byte, status int, responseBody []byte) {
-	apiKey := ""
-	if principal != nil {
-		apiKey = principal.APIKey
+	now := s.nowFn().UTC()
+	if principal == nil {
+		if s.anonymousAudit != nil && !s.anonymousAudit.allow(now) {
+			return
+		}
+		_ = s.store.InsertAuditLog(ctx, AuditEntry{
+			Method:         r.Method,
+			Path:           truncateAudit(canonicalRequestPath(r), maxUnauthenticatedAuditBytes),
+			ResponseBody:   []byte(truncateAudit(string(responseBody), maxUnauthenticatedAuditBytes)),
+			ResponseStatus: status,
+			Timestamp:      now,
+		})
+		return
 	}
 	entry := AuditEntry{
-		APIKey:         apiKey,
+		APIKey:         principal.APIKey,
 		Method:         r.Method,
 		Path:           canonicalRequestPath(r),
 		RequestBody:    append([]byte(nil), requestBody...),
 		ResponseBody:   append([]byte(nil), responseBody...),
 		ResponseStatus: status,
-		Timestamp:      s.nowFn().UTC(),
+		Timestamp:      now,
 	}
 	_ = s.store.InsertAuditLog(ctx, entry)
 }

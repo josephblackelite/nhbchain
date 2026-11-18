@@ -51,6 +51,8 @@ type treasuryFixture struct {
 	users    map[int]*crypto.PrivateKey
 	watched  map[[20]byte]struct{}
 	now      time.Time
+	// height, when not zero, runs every transaction of apply inside a block at that height.
+	height uint64
 }
 
 const treasuryFixtureSupply = 10_000_000
@@ -256,6 +258,10 @@ func (f *treasuryFixture) apply(label string, tx *types.Transaction) error {
 	working, err := f.sp.Copy()
 	if err != nil {
 		f.t.Fatalf("copy state: %v", err)
+	}
+	if f.height != 0 {
+		working.BeginBlock(f.height, time.Unix(1_800_000_000, 0).UTC())
+		defer working.EndBlock()
 	}
 	if err := working.ApplyTransaction(tx); err != nil {
 		return err
@@ -997,6 +1003,7 @@ func TestLendingLiquidationKeepsSupplyInvariantWhenTreasuryIsPaid(t *testing.T) 
 				return role
 			}
 			f.sp.SetLendingRiskParameters(lending.RiskParameters{MaxLTV: 8_000, LiquidationThreshold: 9_000, LiquidationBonus: 1_000})
+			f.sp.SetLendingRiskActivationHeight(1)
 			f.sp.SetLendingAccrualConfig(0, 0, lending.NewInterestModel(0, 0, 0, 0.8))
 			f.fund(supplier, 0)
 			f.fund(borrower, 1_000_000)
@@ -1016,6 +1023,7 @@ func TestLendingLiquidationKeepsSupplyInvariantWhenTreasuryIsPaid(t *testing.T) 
 			// Tighten the threshold below the borrower's 80% LTV so the position
 			// is unhealthy, and route part of the seized collateral onward.
 			f.sp.SetLendingRiskParameters(lending.RiskParameters{MaxLTV: 8_000, LiquidationThreshold: 7_000, LiquidationBonus: 1_000})
+			f.sp.SetLendingRiskActivationHeight(1)
 			developerAddr, protocolAddr := f.addr(id(developer)), f.addr(id(protocol))
 			f.sp.SetLendingCollateralRouting(lending.CollateralRouting{
 				DeveloperBps:    2_000,
@@ -1029,6 +1037,9 @@ func TestLendingLiquidationKeepsSupplyInvariantWhenTreasuryIsPaid(t *testing.T) 
 				t.Fatalf("marshal liquidate payload: %v", err)
 			}
 			treasuryBefore := f.balanceZNHB(f.admin)
+			// The liquidation bonus reaches the engine only inside a block at or past
+			// LendingRiskActivationHeight (PL-DC-19), so the liquidation runs in one.
+			f.height = 5
 			f.mustApply("liquidate", f.signed(id(liquidator), &types.Transaction{
 				Type: types.TxTypeLendingLiquidate, To: make([]byte, 20), Value: big.NewInt(0), Data: payload,
 			}))

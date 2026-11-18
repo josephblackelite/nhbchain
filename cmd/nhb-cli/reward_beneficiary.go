@@ -64,8 +64,13 @@ func setRewardBeneficiary(beneficiary string, keyFile string) int {
 		return 1
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeSetRewardBeneficiary,
 		Nonce:    account.Nonce,
 		Data:     data,

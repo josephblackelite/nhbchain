@@ -55,6 +55,47 @@ func (m *Manager) LendingAutoDebitClearDue(day uint64) error {
 	return m.KVDelete(lendingAutoDebitDueListKey(day))
 }
 
+// LendingAutoDebitRemoveDue removes the entries a settlement pass has handled from a
+// day's due list and keeps every other entry, in order. One occurrence is removed per
+// processed id. An entry the pass itself appended to the day it is settling (a retry or
+// a final cycle that lands on the same UTC day) sits behind the entries the pass read,
+// so it is never the first occurrence of a processed id and survives; clearing the
+// whole bucket destroyed it and the loan was never attempted again (ledger PL-EXT-42).
+// When nothing is left the bucket is deleted, which is what LendingAutoDebitClearDue
+// leaves behind.
+func (m *Manager) LendingAutoDebitRemoveDue(day uint64, processed [][32]byte) error {
+	return m.removeDueIDs(lendingAutoDebitDueListKey(day), processed, m.LendingAutoDebitDueOnDay, day)
+}
+
+// removeDueIDs is the shared body of the lending due-list removals: read the bucket,
+// drop one occurrence of each processed id, write back what is left (or delete the
+// bucket when nothing is).
+func (m *Manager) removeDueIDs(key []byte, processed [][32]byte, load func(uint64) ([][32]byte, error), day uint64) error {
+	if len(processed) == 0 {
+		return nil
+	}
+	existing, err := load(day)
+	if err != nil {
+		return err
+	}
+	drop := make(map[[32]byte]int, len(processed))
+	for _, id := range processed {
+		drop[id]++
+	}
+	remaining := make([][32]byte, 0, len(existing))
+	for _, id := range existing {
+		if drop[id] > 0 {
+			drop[id]--
+			continue
+		}
+		remaining = append(remaining, id)
+	}
+	if len(remaining) == 0 {
+		return m.KVDelete(key)
+	}
+	return m.KVPut(key, remaining)
+}
+
 // LendingAutoDebitLastProcessedDay returns the UTC day number the settlement
 // hook last finished processing through (inclusive), and whether a
 // watermark has ever been recorded. A brand-new chain has no watermark --

@@ -150,6 +150,11 @@ func (sp *StateProcessor) governanceEngine() *governance.Engine {
 	engine.SetPolicy(sp.govPolicy)
 	engine.SetNowFunc(func() time.Time { return sp.blockTimestamp().UTC() })
 	engine.SetAdminWallet(sp.adminWallet, sp.hasAdminWallet)
+	// Unavailable (the zero host) until TransferFeeGovernanceActivationHeight; the block
+	// height is the one being executed, never a clock.
+	engine.SetFeeSchedule(sp.feeScheduleHost())
+	// Off (zero) unless configured: see SetBuybackPriceGuard.
+	engine.SetBuybackPriceGuard(sp.buybackPriceGuardFromHeight, sp.blockHeight)
 	return engine
 }
 
@@ -299,6 +304,12 @@ func (sp *StateProcessor) applyGovExecuteTransaction(tx *types.Transaction, send
 	engine := sp.governanceEngine()
 	if err := engine.Execute(payload.ProposalID); err != nil {
 		return fmt.Errorf("govExecute: %w", err)
+	}
+	// A proposal that changed staking.aprBps is settled here, in the block that
+	// executed it: the reward index is advanced to this block at the old rate and the
+	// new rate starts from it (PL-R5T-27; nothing before the activation height).
+	if err := sp.settleStakeAPRChange(); err != nil {
+		return fmt.Errorf("govExecute: settle staking reward rate: %w", err)
 	}
 
 	return sp.persistGovActorNonce(sender, senderAccount, "govExecute")

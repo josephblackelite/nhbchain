@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"nhbchain/config"
 	"nhbchain/core"
 	"nhbchain/core/genesis"
+	"nhbchain/crypto"
 	"nhbchain/storage"
 )
 
@@ -342,21 +344,72 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 	if got := all(`(?m)^QuorumCertActivationHeight\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "1380200" {
 		t.Errorf("config.toml: QuorumCertActivationHeight is %v, the live validators run with 1380200", got)
 	}
-	if got := all(`(?m)^RewardsByStakeFromEpoch\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
-		t.Errorf("config.toml: RewardsByStakeFromEpoch is %v, the live validators pay the earlier split (0)", got)
+	if got := all(`(?m)^RewardsByStakeFromEpoch\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "17280" {
+		t.Errorf("config.toml: RewardsByStakeFromEpoch is %v, the live validators pay by stake from that epoch", got)
 	}
-	for _, key := range []string{
-		"POSSweepSkipActivationHeight",
-		"POSHoldUnstakeGuardActivationHeight",
-		"GovCreditPreservationActivationHeight",
-		"FeeRouteAliasActivationHeight",
-		"LendingFixedTermIDActivationHeight",
-		"PayoutReceiptActivationHeight",
-		"RejectAmbiguousParamKeysFromUnix",
+	// The live validators' schedule (see cmd/nhb-snapshot/pins.go); every other chain rule is off (0).
+	for key, want := range map[string]string{
+		"POSSweepSkipActivationHeight":                        "1718500",
+		"POSHoldUnstakeGuardActivationHeight":                 "1718500",
+		"GovCreditPreservationActivationHeight":               "1719700",
+		"FeeRouteAliasActivationHeight":                       "1720900",
+		"LendingFixedTermIDActivationHeight":                  "1723300",
+		"NHBSupplyGenesisCorrectionActivationHeight":          "0",
+		"TransferMonthlyFreeTierActivationHeight":             "0",
+		"TransferMonthlyFreeTierTxPerMonth":                   "0",
+		"LoyaltyBudgetFloorActivationHeight":                  "0",
+		"PotsoGovernanceWeightActivationHeight":               "0",
+		"ValidatorFlagNonceActivationHeight":                  "2726000",
+		"MintRunningChainIDActivationHeight":                  "0",
+		"MintPhaseEChainIDRetireHeight":                       "0",
+		"TxNetworkChainIDActivationHeight":                    "0",
+		"VoteChainBindingActivationHeight":                    "2726000",
+		"LendingAccountingFixesActivationHeight":              "0",
+		"LendingPoolLimitsActivationHeight":                   "0",
+		"LendingMaxPools":                                     "0",
+		"LendingPoolIDMaxLength":                              "0",
+		"LendingRefPriceGuardsActivationHeight":               "0",
+		"LendingRefPriceMaxAheadSeconds":                      "0",
+		"LendingRefPriceMaxAgeSeconds":                        "0",
+		"LendingRiskActivationHeight":                         "0",
+		"LendingFeeWithdrawActivationHeight":                  "0",
+		"PaymasterSponsorBindingActivationHeight":             "0",
+		"LoyaltyPaymasterConsentActivationHeight":             "0",
+		"LoyaltyCounterpartyCapActivationHeight":              "0",
+		"BuybackMinAskActivationHeight":                       "0",
+		"SubscriptionsPauseSettlementActivationHeight":        "0",
+		"SubscriptionsChargeHistoryMigrationActivationHeight": "0",
+		"SlashEligibilityRefreshActivationHeight":             "2726000",
+		"SlashPendingUnbondsActivationHeight":                 "2726000",
+		"EvidenceIntakeGuardActivationHeight":                 "2726000",
+		"StakeAPRFromStateActivationHeight":                   "0",
+		"ValidatorAdmissionGuardActivationHeight":             "0",
+		"ValidatorAdmissionProbationSeconds":                  "0",
+		"PotsoTreasuryShortfallActivationHeight":              "0",
+		"BuybackUnpriceableEpochRefundActivationHeight":       "2674600",
+		"SwapVoucherSignedBudgetActivationHeight":             "2674600",
+		"SponsoredTransferFeeCreditActivationHeight":          "2674600",
+		"UniformTransferFeeActivationHeight":                  "2770000",
+		"TransferFeeGovernanceActivationHeight":               "2770000",
+		"TransferFeeGovernanceDelayBlocks":                    "41760",
+		"BuybackPriceGuardActivationHeight":                   "2770000",
+		"EpochSettlementFailsafeActivationHeight":             "2770000",
+		"TransferFeeStrictAllowanceActivationHeight":          "2770000",
+		"SaleReferenceActivationHeight":                       "0",
+		"SaleReferenceMaxAgeSeconds":                          "0",
+		"SaleReferenceMaxStepBps":                             "0",
+		"PayoutReceiptActivationHeight":                       "0",
+		"RejectAmbiguousParamKeysFromUnix":                    "1792936800",
 	} {
-		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != "0" {
-			t.Errorf("config.toml: %s is %v, the live validators run with it off (0)", key, got)
+		if got := all(`(?m)^\s*` + key + `\s*=\s*(\d+)\s*$`); len(got) != 1 || got[0] != want {
+			t.Errorf("config.toml: %s is %v, the live validators run with %s", key, got, want)
 		}
+	}
+	if got := all(`(?m)^BuybackMinAskZNHBWei\s*=\s*"([^"]*)"\s*$`); len(got) != 1 || got[0] != "" {
+		t.Errorf("config.toml: BuybackMinAskZNHBWei is %q, the live validators run with the fixed minimum (empty)", got)
+	}
+	if got := all(`(?m)^LoyaltyCounterpartyCapZNHBWei\s*=\s*"([^"]*)"\s*$`); len(got) != 1 || got[0] != "" {
+		t.Errorf("config.toml: LoyaltyCounterpartyCapZNHBWei is %q, the live validators run with no per-pair cap (empty)", got)
 	}
 	// No other treasury of an earlier network is left behind.
 	if bytes.Contains(cfg, []byte("10lephh6ffd79cc7lk6edc6rkxe9ha8xe")) {
@@ -372,5 +425,140 @@ func TestGeneratedDefaultConfigNamesTheLiveChain(t *testing.T) {
 	}
 	if cfg.P2P.NetworkID != liveChainID {
 		t.Fatalf("default NetworkId: got %d want %d", cfg.P2P.NetworkID, liveChainID)
+	}
+}
+
+// The genesis hash does not cover the admin wallet or the buyback signers, and a
+// node reads both from the genesis file on every start. A database that was
+// started from the live genesis file must therefore not be started from a copy
+// that differs in them (or with the treasury overridden), because the node would
+// compute different state from the network. The copies below have the live
+// chain id and genesis hash, so nothing but the stored treasury configuration
+// tells them apart from the live file.
+func TestRestartFromAGenesisFileWithOtherTreasuryValuesIsRefused(t *testing.T) {
+	var live map[string]any
+	if err := json.Unmarshal(readRepoFile(t, liveGenesisFile), &live); err != nil {
+		t.Fatalf("parse %s: %v", liveGenesisFile, err)
+	}
+	otherKey, err := crypto.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	otherAddr := otherKey.PubKey().Address().String()
+
+	variantFile := func(t *testing.T, edit func(spec map[string]any)) string {
+		t.Helper()
+		spec := map[string]any{}
+		for k, v := range live {
+			spec[k] = v
+		}
+		edit(spec)
+		data, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatalf("encode variant: %v", err)
+		}
+		path := filepath.Join(t.TempDir(), "genesis.json")
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("write variant: %v", err)
+		}
+		return path
+	}
+	signers := live["buybackSigners"].([]any)
+
+	variants := []struct {
+		name string
+		path func(t *testing.T) string
+		env  string
+		want bool // the restart is refused
+		// sameChain: the file is a copy of the live file, so it has the live
+		// chain id and genesis hash.
+		sameChain bool
+	}{
+		{name: "the live file again", path: func(t *testing.T) string { return repoPath(liveGenesisFile) }},
+		{name: "another admin wallet", want: true, sameChain: true, path: func(t *testing.T) string {
+			return variantFile(t, func(s map[string]any) { s["adminWallet"] = otherAddr })
+		}},
+		{name: "a signer replaced", want: true, sameChain: true, path: func(t *testing.T) string {
+			return variantFile(t, func(s map[string]any) { s["buybackSigners"] = []any{signers[0], signers[1], otherAddr} })
+		}},
+		{name: "a signer dropped", want: true, sameChain: true, path: func(t *testing.T) string {
+			return variantFile(t, func(s map[string]any) { s["buybackSigners"] = signers[:2] })
+		}},
+		{name: "another threshold", want: true, sameChain: true, path: func(t *testing.T) string {
+			return variantFile(t, func(s map[string]any) { s["buybackSignerThreshold"] = 3 })
+		}},
+		{name: "no buyback signers", want: true, sameChain: true, path: func(t *testing.T) string {
+			return variantFile(t, func(s map[string]any) {
+				delete(s, "buybackSigners")
+				delete(s, "buybackSignerThreshold")
+			})
+		}},
+		{name: "no admin wallet", want: true, sameChain: true, path: func(t *testing.T) string {
+			return variantFile(t, func(s map[string]any) { delete(s, "adminWallet") })
+		}},
+		{name: "a file that does not parse", want: true, path: func(t *testing.T) string {
+			path := filepath.Join(t.TempDir(), "genesis.json")
+			if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return path
+		}},
+		{name: "no genesis path", want: true, path: func(t *testing.T) string { return "" }},
+		{name: "the treasury overridden in the environment", want: true, env: otherAddr,
+			path: func(t *testing.T) string { return repoPath(liveGenesisFile) }},
+	}
+
+	for _, tc := range variants {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "db")
+			start := func(path string) error {
+				db, err := storage.NewLevelDB(dir)
+				if err != nil {
+					t.Fatalf("open leveldb: %v", err)
+				}
+				defer db.Close()
+				key, err := crypto.GeneratePrivateKey()
+				if err != nil {
+					t.Fatalf("generate key: %v", err)
+				}
+				_, err = core.NewNode(db, key, path, false, false)
+				return err
+			}
+
+			if err := start(repoPath(liveGenesisFile)); err != nil {
+				t.Fatalf("first start from the live file: %v", err)
+			}
+
+			path := tc.path(t)
+			if tc.sameChain {
+				// The copy is the live chain as far as the chain id and genesis
+				// hash can tell.
+				db := storage.NewMemDB()
+				defer db.Close()
+				id, hash := bootChain(t, db, path)
+				expectLiveIdentity(t, id, hash)
+			}
+			if tc.env != "" {
+				t.Setenv("NHB_MASTER_TREASURY", tc.env)
+			}
+
+			err := start(path)
+			switch {
+			case tc.want && err == nil:
+				t.Fatalf("the restart was not refused")
+			case tc.want && !errors.Is(err, core.ErrTreasuryConfigMismatch):
+				t.Fatalf("the restart failed, but not on the treasury configuration: %v", err)
+			case !tc.want && err != nil:
+				t.Fatalf("the restart must succeed: %v", err)
+			}
+
+			if tc.want {
+				// The live file still starts it: the refusal changed nothing.
+				t.Setenv("NHB_MASTER_TREASURY", "")
+				if err := start(repoPath(liveGenesisFile)); err != nil {
+					t.Fatalf("the live file must still start the database: %v", err)
+				}
+			}
+		})
 	}
 }

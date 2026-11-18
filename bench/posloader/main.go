@@ -20,6 +20,7 @@ import (
 
 	"nhbchain/core/types"
 	nhbcrypto "nhbchain/crypto"
+	"nhbchain/rpc/txchainid"
 
 	"nhooyr.io/websocket"
 )
@@ -168,6 +169,14 @@ func main() {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	tracker := newLatencyTracker()
 
+	// Every transaction carries the chain id the node reports (nhb_getNetworkStats, txChainId), read again every
+	// few seconds so a run that crosses the chain's activation height follows the change. If the node cannot
+	// say, the loader does not start (PL-R5T-29).
+	chainIDs, err := startChainIDReader(ctx, httpClient, parsed)
+	if err != nil {
+		log.Fatalf("read the transaction chain id from the node: %v", err)
+	}
+
 	wsURL := *parsed
 	switch strings.ToLower(parsed.Scheme) {
 	case "https":
@@ -204,7 +213,7 @@ func main() {
 			return
 		default:
 		}
-		hash, err := submitPOSTransaction(ctx, httpClient, parsed, token, signer, intentPrefix, nonce)
+		hash, err := submitPOSTransaction(ctx, httpClient, parsed, token, signer, chainIDs, intentPrefix, nonce)
 		if err != nil {
 			log.Printf("submit tx %d failed: %v", nonce, err)
 		} else {
@@ -227,9 +236,23 @@ func main() {
 	reportLoadSummary(latencies, pending, submitted)
 }
 
-func submitPOSTransaction(ctx context.Context, client *http.Client, rpcURL *url.URL, token string, signer *nhbcrypto.PrivateKey, prefix string, nonce uint64) (string, error) {
+// startChainIDReader returns the reader every transaction takes its chain id from, after proving once that the node can
+// say: a loader that cannot know the id does not start.
+func startChainIDReader(ctx context.Context, client *http.Client, rpcURL *url.URL) (*txchainid.Reader, error) {
+	reader := txchainid.NewReader(txchainid.HTTPFetcher(client, rpcURL.String(), ""), 0)
+	if _, err := reader.ChainID(ctx); err != nil {
+		return nil, err
+	}
+	return reader, nil
+}
+
+func submitPOSTransaction(ctx context.Context, client *http.Client, rpcURL *url.URL, token string, signer *nhbcrypto.PrivateKey, chainIDs *txchainid.Reader, prefix string, nonce uint64) (string, error) {
+	chainID, err := chainIDs.ChainID(ctx)
+	if err != nil {
+		return "", fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := &types.Transaction{
-		ChainID:         types.NHBChainID(),
+		ChainID:         chainID,
 		Type:            types.TxTypeTransfer,
 		Nonce:           nonce,
 		GasLimit:        53_000,

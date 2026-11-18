@@ -22,6 +22,7 @@ config:
       - name: consensusd
         endpoint: http://consensusd:9090
     rateLimits: []
+    trustedProxies: {{ toJson .Values.trustedProxies }}
     auth:
       # Authentication defaults to enabled; disable only for local development clusters.
       enabled: false

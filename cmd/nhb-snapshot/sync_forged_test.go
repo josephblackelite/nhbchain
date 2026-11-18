@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,6 +40,8 @@ func waitCLI(t *testing.T, local, ref *fakeNode, extra ...string) (int, string) 
 	args := []string{"wait-synced", "--rpc", local.serve(t), "--interval", "10ms", "--timeout", "600ms", "--stall-timeout", "10s"}
 	if ref != nil {
 		args = append(args, "--tip-rpc", ref.serve(t))
+	} else {
+		args = append(args, "--no-reference")
 	}
 	var out, errOut bytes.Buffer
 	code := run(append(args, extra...), &out, &errOut)
@@ -287,11 +290,69 @@ func TestAForgedSnapshotIsRefusedAndAnUnconnectedNodeOnItIsNeverAtTheTip(t *test
 		} {
 			var out, errOut bytes.Buffer
 			args := []string{"wait-synced", "--rpc", serveBlocks(t, []*types.Block{tip}, gexpect.ChainID, gexpect.GenesisHash, tc.peers),
-				"--interval", "10ms", "--timeout", "600ms", "--stall-timeout", "10s"}
+				"--no-reference", "--interval", "10ms", "--timeout", "600ms", "--stall-timeout", "10s"}
 			code := run(append(args, tc.extra...), &out, &errOut)
 			if code != waitTimeout {
 				t.Fatalf("a node stuck on the forged tip (%s) was reported at the tip or not checked (exit %d):\n%s%s", tc.name, code, out.String(), errOut.String())
 			}
 		}
 	})
+}
+
+// A node's own newest block, dated close to this host's clock, does not show that
+// it is on the network's chain, so wait-synced does not go without a reference
+// node unless the caller says so. Arguments that say neither, or both, are refused
+// before the node is asked anything.
+func TestWaitSyncedNeedsAReferenceUnlessTheCallerWaivesIt(t *testing.T) {
+	var hits int32
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Error(w, "not asked", http.StatusInternalServerError)
+	}))
+	t.Cleanup(node.Close)
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  string
+	}{
+		{"neither", nil, "no reference node"},
+		{"a reference that is blank", []string{"--tip-rpc", "  "}, "no reference node"},
+		{"both", []string{"--tip-rpc", node.URL, "--no-reference"}, "exclude each other"},
+	} {
+		var out, errOut bytes.Buffer
+		code := run(append([]string{"wait-synced", "--rpc", node.URL, "--timeout", "600ms"}, tc.extra...), &out, &errOut)
+		if code != 2 || !strings.Contains(errOut.String(), tc.want) {
+			t.Fatalf("%s: exit %d, expected a usage error that says %q:\n%s%s", tc.name, code, tc.want, out.String(), errOut.String())
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 0 {
+		t.Fatalf("the node was asked %d times although the arguments were refused", got)
+	}
+	// Going without a reference on purpose works as it did.
+	healthy := &fakeNode{height: 100, max: 100, chainID: 7, genesis: "aa", timestamp: nowUnix}
+	if code, out := waitCLI(t, healthy, nil); code != waitOK {
+		t.Fatalf("--no-reference: exit %d:\n%s", code, out)
+	}
+}
+
+// What the reference node is for: a node that follows a chain of its own, with a
+// peer that gives it blocks past its snapshot, has everything it can check itself,
+// and only a node outside the snapshot's host and the bootnode shows that the
+// chain is not the network's.
+func TestWaitSyncedWithAReferenceRefusesANodeFollowingAChainOfItsOwn(t *testing.T) {
+	network := func() *fakeNode {
+		return &fakeNode{height: 1005, max: 1005, chainID: 7, genesis: "aa", blockTime: sameChainTime}
+	}
+	// The node starts at its snapshot's height, 1000, and moves up to the
+	// network's 1005 with blocks of its own.
+	own := &fakeNode{height: 1000, step: 1, max: 1005, chainID: 7, genesis: "aa", blockTime: sameChainTime, salt: 9}
+	code, out := waitCLI(t, own, network(), "--min-height", "1000")
+	if code != waitFork || !strings.Contains(out, "not on the same chain") {
+		t.Fatalf("a node on a chain of its own, past its snapshot, was not refused against the reference (exit %d):\n%s", code, out)
+	}
+	// The same progress on the network's own chain is the tip.
+	honest := &fakeNode{height: 1000, step: 1, max: 1005, chainID: 7, genesis: "aa", blockTime: sameChainTime}
+	if code, out := waitCLI(t, honest, network(), "--min-height", "1000"); code != waitOK {
+		t.Fatalf("a node on the network's chain was refused (exit %d):\n%s", code, out)
+	}
 }

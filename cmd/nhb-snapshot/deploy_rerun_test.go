@@ -103,7 +103,15 @@ func (h *deployHarness) stubNodeBinaries() string {
 // mainSnippet runs the script's main() with the steps that need a real server
 // stubbed. wait_until_synced reports the snapshot height it was given, and, like
 // the real one when the node has been seen at the tip, forgets the record of it.
+// It goes ahead without a check from outside on the snapshot (--allow-unanchored),
+// which is not what is tested here: the tests of that check use anchoredMainSnippet.
 func mainSnippet(publisherURL string, extra ...string) string {
+	return anchoredMainSnippet(publisherURL, append([]string{"--allow-unanchored"}, extra...)...)
+}
+
+// anchoredMainSnippet is mainSnippet with exactly the arguments it is given, so
+// that a run has the check from outside on its snapshot only when they carry one.
+func anchoredMainSnippet(publisherURL string, extra ...string) string {
 	return `
 install_prerequisites(){ :; }
 install_tree_and_build(){ :; }

@@ -97,21 +97,47 @@ func TestValidatorOneBlockBehindItsPeerCatchesUp(t *testing.T) {
 	if len(requests) != 1 {
 		t.Fatalf("expected one block request from the laggard, got %v", requests)
 	}
+	// The peer-to-peer server hands every message to the node together with the peer it came from,
+	// and a request for blocks is answered to that peer alone (a block request that names no peer is
+	// refused, ledger PL-EXT-43), so the laggard's messages reach the peer through the laggard's link.
+	link := &catchUpLink{id: "laggard"}
 	for _, msg := range engineOut.messages {
-		if err := peer.ProcessNetworkMessage(msg); err != nil {
+		if err := peer.HandlePeerMessage(link, msg); err != nil {
 			t.Fatalf("peer handles message type %d: %v", msg.Type, err)
 		}
 	}
-	for _, reply := range peerOut.messages {
+	for _, reply := range link.messages {
 		if err := laggard.ProcessNetworkMessage(reply); err != nil {
 			t.Fatalf("laggard handles the peer's reply: %v", err)
 		}
 	}
 	if got := laggard.GetHeight(); got != peer.GetHeight() {
 		t.Fatalf("the laggard is at height %d, the peer at %d: its block request started at %d, the peer's last block is %d and it answered %d message(s)",
-			got, peer.GetHeight(), requests[0], peer.GetHeight(), len(peerOut.messages))
+			got, peer.GetHeight(), requests[0], peer.GetHeight(), len(link.messages))
 	}
-	if sentOfType(peerOut, p2p.MsgTypeBlocks) == 0 {
+	blocks := 0
+	for _, m := range link.messages {
+		if m.Type == p2p.MsgTypeBlocks {
+			blocks++
+		}
+	}
+	if blocks == 0 {
 		t.Fatalf("the peer sent no blocks")
 	}
+	if len(peerOut.messages) != 0 {
+		t.Fatalf("the peer broadcast %d message(s) to everybody; an answer to a block request goes to the requester alone", len(peerOut.messages))
+	}
+}
+
+// catchUpLink stands for the connection to one peer: what the node enqueues for that peer lands here.
+type catchUpLink struct {
+	id       string
+	messages []*p2p.Message
+}
+
+func (l *catchUpLink) ID() string { return l.id }
+
+func (l *catchUpLink) Enqueue(msg *p2p.Message) error {
+	l.messages = append(l.messages, msg)
+	return nil
 }

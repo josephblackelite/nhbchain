@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -30,6 +32,13 @@ const (
 	maxHandshakeListenAddrs    = 8
 	maxHandshakeListenAddrScan = 64
 
+	// handshakeExtVersion is the version of the challenge-response extension (PL-R5T-20,
+	// PL-DC-25). It rides in an optional field of the hello that a v1 peer ignores, so the
+	// v1 digest, and with it every v1 peer's verdict on the signature, is unchanged.
+	handshakeExtVersion    = 2
+	handshakeChallengeSize = 32
+	handshakeAuthDomain    = "nhb-handshake-auth-v2"
+
 	// The client version is chosen by whoever sends the handshake and is not
 	// covered by its signature. It is kept in the peer record and written to the
 	// log, so it is limited in size.
@@ -41,6 +50,8 @@ var (
 	errHandshakeGenesisMismatch  = errors.New("handshake genesis mismatch")
 	errHandshakeSignatureFailure = errors.New("handshake signature mismatch")
 	errHandshakeFrameTooLarge    = errors.New("handshake frame exceeds maximum size")
+	errHandshakeChallengeNeeded  = errors.New("handshake challenge required: the peer did not offer it")
+	errHandshakeAuthFailure      = errors.New("handshake challenge failure")
 )
 
 type handshakeMessage struct {
@@ -51,6 +62,26 @@ type handshakeMessage struct {
 	Nonce           string   `json:"nonce"`
 	ClientVersion   string   `json:"clientVersion"`
 	ListenAddrs     []string `json:"listenAddrs,omitempty"`
+	// Ext offers the challenge-response extension. A peer that does not know it ignores the
+	// field; it is not covered by the v1 signature, which is why the proof it leads to is a
+	// second signature over both sides' challenges (see authDigest).
+	Ext *handshakeExt `json:"ext,omitempty"`
+	// ConfigDigest is the root of a hash of the sender's consensus settings (see
+	// config.Config.ConsensusDigest): 64 lower-case hex characters, or absent. It is
+	// advisory. It sits outside the signature, builds that do not know it ignore
+	// it, and a difference is reported, never acted on (PL-R5T-16, PL-R5T-30).
+	ConfigDigest string `json:"configDigest,omitempty"`
+}
+
+// handshakeExt is the optional extension block of a hello.
+type handshakeExt struct {
+	Version   int    `json:"v"`
+	Challenge string `json:"n"`
+}
+
+// handshakeAuth is the frame each side sends after the hellos when both offered the extension.
+type handshakeAuth struct {
+	Sig string `json:"hs2auth"`
 }
 
 type handshakePacket struct {
@@ -60,10 +91,81 @@ type handshakePacket struct {
 	nodeID string
 	pubKey *ecdsa.PublicKey
 	addrs  []string
+
+	// challenge is the 32-byte challenge this node put in its own hello, and challenged is set on
+	// a remote packet whose sender proved it holds the key by signing both challenges.
+	challenge  []byte
+	challenged bool
 }
 
+// handshakeRole says which side of the connection a node is: the one that dialed or the one
+// that accepted. It is part of what the proof signs, so that one side's proof cannot be
+// presented back to it or relayed to a node that expects the other side.
+type handshakeRole byte
+
+const (
+	roleNone     handshakeRole = 0
+	roleDialer   handshakeRole = 1
+	roleListener handshakeRole = 2
+)
+
+func (r handshakeRole) opposite() handshakeRole {
+	switch r {
+	case roleDialer:
+		return roleListener
+	case roleListener:
+		return roleDialer
+	}
+	return roleNone
+}
+
+// challengeMode is how a node treats the challenge-response extension.
+type challengeMode int
+
+const (
+	// challengeAuto offers the extension and proves the key to a peer that offers it too; a
+	// peer that does not is handled as a v1 peer. The default.
+	challengeAuto challengeMode = iota
+	// challengeOff does not offer it: the node behaves exactly like a v1 node.
+	challengeOff
+	// challengeRequire refuses a peer that does not offer it. For use once every peer has
+	// upgraded: it is what closes the downgrade, since a link observer can strip the field.
+	challengeRequire
+)
+
+// challengeModeOrAuto reads the configured mode. A value that is not one of auto, off or require
+// is not guessed at: the node falls back to auto and says so.
+func challengeModeOrAuto(value string, logger *slog.Logger) challengeMode {
+	mode, ok := parseChallengeMode(value)
+	if !ok && logger != nil {
+		logger.Warn("Unknown handshake challenge mode; using auto", slog.String("value", value))
+	}
+	return mode
+}
+
+func parseChallengeMode(value string) (challengeMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return challengeAuto, true
+	case "off":
+		return challengeOff, true
+	case "require":
+		return challengeRequire, true
+	}
+	return challengeAuto, false
+}
+
+// performHandshake is the v1 handshake: no extension is offered or expected.
 func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bufio.Reader) (*handshakePacket, error) {
-	local, err := s.buildHandshake()
+	return s.handshakeAs(ctx, conn, reader, roleNone)
+}
+
+// handshakeAs performs the handshake in the given role. With a role (and unless the node is set
+// not to), it offers the challenge-response extension and, when the peer offers it too, proves
+// its key and checks the peer's (PL-R5T-20, PL-DC-25).
+func (s *Server) handshakeAs(ctx context.Context, conn net.Conn, reader *bufio.Reader, role handshakeRole) (*handshakePacket, error) {
+	offer := role != roleNone && s.challengeMode != challengeOff
+	local, err := s.buildHandshakeExt(offer)
 	if err != nil {
 		return nil, fmt.Errorf("prepare handshake: %w", err)
 	}
@@ -88,10 +190,115 @@ func (s *Server) performHandshake(ctx context.Context, conn net.Conn, reader *bu
 		return nil, err
 	}
 	remote.addrs = sanitizeListenAddrs(remote.ListenAddrs)
+	if !offer {
+		return &remote, nil
+	}
+	if remote.Ext == nil || remote.Ext.Version < handshakeExtVersion {
+		// A v1 peer, or one whose offer was stripped on the way. Handled as v1 unless this node
+		// requires the challenge.
+		if s.challengeMode == challengeRequire {
+			return nil, errHandshakeChallengeNeeded
+		}
+		return &remote, nil
+	}
+	if err := s.exchangeChallenge(ctx, conn, reader, role, local, &remote); err != nil {
+		return nil, err
+	}
+	remote.challenged = true
 	return &remote, nil
 }
 
+// exchangeChallenge runs the second round: each side signs, with the key behind its node ID, a
+// digest over both challenges, both node IDs, its role and what its hello said about its
+// addresses and version, sends the signature and checks the peer's. A hello that was recorded
+// and is played back cannot be answered: the proof has to cover the challenge this node chose
+// for this connection.
+func (s *Server) exchangeChallenge(ctx context.Context, conn net.Conn, reader *bufio.Reader, role handshakeRole, local, remote *handshakePacket) error {
+	remoteChallenge, err := decodeChallenge(remote.Ext.Challenge)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errHandshakeAuthFailure, err)
+	}
+	digest := authDigest(s.cfg.ChainID, s.genesis, role, &local.handshakeMessage, local.challenge, &remote.handshakeMessage, remoteChallenge)
+	sig, err := ethcrypto.Sign(digest, s.privKey.PrivateKey)
+	if err != nil {
+		return fmt.Errorf("sign handshake proof: %w", err)
+	}
+	if err := writeFrame(ctx, conn, handshakeAuth{Sig: encodeHex(sig)}); err != nil {
+		return fmt.Errorf("send handshake proof: %w", err)
+	}
+	payload, err := readFrame(ctx, conn, reader, s.cfg.MaxMessageBytes)
+	if err != nil {
+		return fmt.Errorf("read handshake proof: %w", err)
+	}
+	var auth handshakeAuth
+	if err := json.Unmarshal(payload, &auth); err != nil {
+		return fmt.Errorf("%w: decode: %v", errHandshakeAuthFailure, err)
+	}
+	sigBytes, err := decodeHex(auth.Sig)
+	if err != nil || len(sigBytes) != 65 {
+		return fmt.Errorf("%w: bad signature encoding", errHandshakeAuthFailure)
+	}
+	want := authDigest(s.cfg.ChainID, s.genesis, role.opposite(), &remote.handshakeMessage, remoteChallenge, &local.handshakeMessage, local.challenge)
+	recovered, err := ethcrypto.SigToPub(want, sigBytes)
+	if err != nil {
+		return fmt.Errorf("%w: recover: %v", errHandshakeAuthFailure, err)
+	}
+	if derived := normalizeHex(deriveNodeIDFromPub(recovered)); derived == "" || !strings.EqualFold(derived, remote.nodeID) {
+		// Nothing is held against the node ID: the proof does not come from it.
+		return fmt.Errorf("%w: the proof was not made by %s", errHandshakeAuthFailure, remote.nodeID)
+	}
+	return nil
+}
+
+func decodeChallenge(value string) ([]byte, error) {
+	raw, err := decodeHex(value)
+	if err != nil {
+		return nil, fmt.Errorf("challenge encoding: %w", err)
+	}
+	if len(raw) != handshakeChallengeSize {
+		return nil, fmt.Errorf("challenge length %d", len(raw))
+	}
+	return raw, nil
+}
+
+// authDigest is what a node signs to prove its key in the second round: the signer's role and
+// node ID, the peer's node ID, both challenges, the chain and genesis, and hashes of the
+// addresses and client version the signer's hello claimed. The listen addresses of a hello are
+// not covered by the v1 signature; here they are.
+func authDigest(chainID uint64, genesis []byte, role handshakeRole, signer *handshakeMessage, signerChallenge []byte, peer *handshakeMessage, peerChallenge []byte) []byte {
+	var chain [8]byte
+	binary.BigEndian.PutUint64(chain[:], chainID)
+	addrs := sha256.Sum256([]byte(strings.Join(signer.ListenAddrs, "\n")))
+	version := sha256.Sum256([]byte(signer.ClientVersion))
+	data := []byte(handshakeAuthDomain)
+	data = append(data, 0)
+	data = append(data, chain[:]...)
+	data = appendLengthPrefixed(data, genesis)
+	data = append(data, byte(role))
+	data = appendLengthPrefixed(data, []byte(normalizeHex(signer.NodeID)))
+	data = appendLengthPrefixed(data, []byte(normalizeHex(peer.NodeID)))
+	data = appendLengthPrefixed(data, signerChallenge)
+	data = appendLengthPrefixed(data, peerChallenge)
+	data = append(data, addrs[:]...)
+	data = append(data, version[:]...)
+	return ethcrypto.Keccak256(data)
+}
+
+func appendLengthPrefixed(dst, value []byte) []byte {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(value)))
+	dst = append(dst, n[:]...)
+	return append(dst, value...)
+}
+
+// buildHandshake builds this node's hello as a v1 node would: no extension is offered.
 func (s *Server) buildHandshake() (*handshakePacket, error) {
+	return s.buildHandshakeExt(false)
+}
+
+// buildHandshakeExt builds this node's hello, with the challenge-response extension offered
+// when offerChallenge is set.
+func (s *Server) buildHandshakeExt(offerChallenge bool) (*handshakePacket, error) {
 	nonce := make([]byte, handshakeNonceSize)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate handshake nonce: %w", err)
@@ -111,6 +318,15 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		Nonce:           encodeHex(nonce),
 		ClientVersion:   s.cfg.ClientVersion,
 		ListenAddrs:     listen,
+		ConfigDigest:    s.cfg.ConsensusConfigDigest,
+	}
+	var challenge []byte
+	if offerChallenge {
+		challenge = make([]byte, handshakeChallengeSize)
+		if _, err := rand.Read(challenge); err != nil {
+			return nil, fmt.Errorf("generate handshake challenge: %w", err)
+		}
+		payload.Ext = &handshakeExt{Version: handshakeExtVersion, Challenge: encodeHex(challenge)}
 	}
 
 	digest, err := handshakeDigest(payload.ChainID, s.genesis, nonce, payload.NodeID)
@@ -128,6 +344,7 @@ func (s *Server) buildHandshake() (*handshakePacket, error) {
 		nodeID:           nodeID,
 		pubKey:           &s.privKey.PrivateKey.PublicKey,
 		addrs:            listen,
+		challenge:        challenge,
 	}
 	nonceKey := hex.EncodeToString(nonce)
 	if !s.nonceGuard.Remember(nodeID, nonceKey, s.now()) {

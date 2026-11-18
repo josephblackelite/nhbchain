@@ -129,7 +129,9 @@ func rootCalls(line string) []rootCall {
 }
 
 // serviceUserPath is a name in one of the directories the service user owns.
-var serviceUserPath = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])(/etc|/var/lib|/opt)/nhbchain(/|$|["'])`)
+// /etc/nhbchain is not one of them since PL-R5T-75: it belongs to root (mode 0750,
+// group nhb), so the service user cannot leave a link in it for root to follow.
+var serviceUserPath = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])(/var/lib|/opt)/nhbchain(/|$|["'])`)
 
 func mentionsServiceUserPath(s string) bool { return serviceUserPath.MatchString(s) }
 
@@ -213,7 +215,7 @@ func TestDoingItByHandRootOnlyCreatesInTheServiceUsersDirectories(t *testing.T) 
 	// The config is copied from the checkout: /opt/nhbchain belongs to the service
 	// user, and install reads its source through a link.
 	step4 := byHandStep(t, 4)
-	if !strings.Contains(step4, "sudo install -m 0600 -o nhb -g nhb $SRC/config.toml /etc/nhbchain/config.toml") {
+	if !strings.Contains(step4, "sudo install -m 0640 -o root -g nhb $SRC/config.toml /etc/nhbchain/config.toml") {
 		t.Errorf("step 4 does not install the config from the checkout ($SRC/config.toml):\n%s", step4)
 	}
 	if strings.Contains(strings.Join(commandLines(step4), "\n"), "install -m 0600 -o nhb -g nhb /opt/nhbchain/config.toml") {

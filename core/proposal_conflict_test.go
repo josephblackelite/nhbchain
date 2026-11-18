@@ -419,6 +419,7 @@ func TestConflictLendingPerBlockBorrowCapDoesNotHalt(t *testing.T) {
 		LiquidationThreshold: 8_000,
 		BorrowCaps:           lending.BorrowCaps{PerBlock: mustBigInt(t, "300000000000000000000")},
 	})
+	node.SetLendingRiskActivationHeight(1)
 	node.SetLendingAccrualConfig(0, 0, lending.DefaultInterestModel)
 
 	supplier, borrowerA, borrowerB := livenessKey(t), livenessKey(t), livenessKey(t)
