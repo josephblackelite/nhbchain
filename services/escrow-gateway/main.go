@@ -87,6 +87,12 @@ func main() {
 	go NewWebhookWorker(store, queue).Run(workerCtx)
 	intents := NewPayIntentBuilder()
 	server := NewServer(auth, node, store, queue, intents, cfg.MerchantConfigs)
+	if err := server.SetEnvelopeChainID(cfg.EnvelopeChainID); err != nil {
+		log.Fatalf("configure envelope chain id: %v", err)
+	}
+	if cfg.EnvelopeChainID != "" {
+		log.Printf("escrow envelopes carry chainId %s", cfg.EnvelopeChainID)
+	}
 
 	shutdownAuditPruner := startAuditPruner(store, cfg.UnauthenticatedAuditRetention, unauthenticatedAuditPruneEvery, time.Now)
 	defer shutdownAuditPruner()

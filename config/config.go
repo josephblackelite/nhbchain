@@ -457,6 +457,43 @@ type Config struct {
 	// chain rule: set the same value on every validator, above the chain tip, with all of
 	// them restarted together. See core.ValidatorRules.
 	PotsoTreasuryShortfallActivationHeight uint64 `toml:"PotsoTreasuryShortfallActivationHeight"`
+	// DelegatorHoldWeightActivationHeight is the first block height from which a
+	// delegator's share of a validator's staker pool is weighed by its locked ZNHB
+	// less the ZNHB its own pending POS authorizations hold (PL-EXT-25). A pending
+	// hold moves ZNHB into the payer's locked balance, and that balance was the whole
+	// weight, so a wallet could delegate a little, lock a large amount in a hold and
+	// take a share of the epoch's emission far above what it staked. The hold is
+	// refundable, so the weight it bought cost the attacker nothing. 0 (the default)
+	// keeps the weight at the whole locked balance. A chain rule: set the same value
+	// on every validator, above the chain tip, with all of them restarted together.
+	// See core.ValidatorRules.
+	DelegatorHoldWeightActivationHeight uint64 `toml:"DelegatorHoldWeightActivationHeight"`
+	// PotsoAbuseGuardsActivationHeight is the first block height from which the five POTSO
+	// abuse-guard values of this node's file are applied as configured (PL-EXT-39, PL-PO-01):
+	// [potso.weights] MinStakeToWinWei and MinEngagementToWin, [potso.abuse]
+	// MinStakeToEarnWei, QuadraticTxDampenAfter and MaxUserShareBps. An account with no
+	// stake that makes two one-wei transfers an epoch (a transfer costs a percentage of its
+	// value, so that costs nothing) reaches the engagement cap and takes up to 30 percent of
+	// the epoch's emission and of the governance weight; these guards stop it, and all five
+	// are 0 on the live validators. They were read at start-up with no height, so turning one
+	// on would have been a chain rule at a restart. Before this height they are applied as 0
+	// whatever the file says, so the values can be set on every validator ahead of it. 0 (the
+	// default) = never. A chain rule: set the same height and the same values on every
+	// validator, above the chain tip, with all of them restarted together. See
+	// core.ValidatorRules.
+	PotsoAbuseGuardsActivationHeight uint64 `toml:"PotsoAbuseGuardsActivationHeight"`
+	// EscrowEnvelopeChainBindingActivationHeight is the first block height from which
+	// the signed payload of a delegated escrow create, release, refund or dispute, and
+	// the decision payload of an arbitration quorum, must carry the network's own chain
+	// id as "chainId" (a decimal string, the id nhb_getNetworkStats reports as
+	// networkChainId) (PL-EXT-07). Their signatures bind the escrow id and the action
+	// only, and the id is a hash of payer, payee, meta hash and nonce, so a signature
+	// made for one network released or created the mirror escrow on any other network
+	// that held it. 0 (the default) accepts the payloads as they are. A chain rule: set
+	// the same value on every validator, above the chain tip, with all of them
+	// restarted together, and only after the wallets and relayers that build these
+	// payloads include the chain id. See core.ValidatorRules.
+	EscrowEnvelopeChainBindingActivationHeight uint64 `toml:"EscrowEnvelopeChainBindingActivationHeight"`
 	// LendingAccountingFixesActivationHeight is the first block height from which the
 	// lending engine applies its corrected accounting rules. At present: a fixed-term
 	// borrow accrues the market's interest first, like every other lending entry point,

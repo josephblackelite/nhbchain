@@ -14,6 +14,7 @@ import (
 	"net/mail"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/text/unicode/norm"
@@ -39,6 +40,15 @@ const (
 	// timestamp was.
 	defaultBindTokenTTL = 15 * time.Minute
 	bindTokenBytes      = 32
+	// A six-digit code has a million values and lives ten minutes, so the number of wrong
+	// guesses it tolerates must be small (ledger PL-EXT-50).
+	defaultMaxVerifyAttempts = 5
+	// A live code is not replaced for this long, so a register call for someone else's address
+	// cannot kill the code its owner is about to type.
+	defaultRegisterCooldown = time.Minute
+	// One API key is shared by every app of a deployment: this many register calls per
+	// RegisterWindow, whatever the addresses.
+	defaultKeyRegisterAttempts = 60
 )
 
 var (
@@ -48,6 +58,10 @@ var (
 	ErrCodeExpired = errors.New("verification code expired")
 	// ErrRateLimited indicates the register endpoint has been throttled for the email hash.
 	ErrRateLimited = errors.New("rate limit exceeded")
+	// ErrTooManyGuesses indicates the live code was cancelled after too many wrong guesses.
+	ErrTooManyGuesses = errors.New("too many wrong verification codes")
+	// ErrCodeStillLive indicates a code issued inside the register cooldown is still live and was kept.
+	ErrCodeStillLive = errors.New("a verification code was issued moments ago")
 )
 
 // apiKeySecret stores secret material for authenticated clients.
@@ -72,6 +86,12 @@ type Server struct {
 	nowFn            func() time.Time
 	codeFn           func() (string, error)
 	bindTokenFn      func() (string, error)
+
+	maxVerifyAttempts   int
+	registerCooldown    time.Duration
+	keyRegisterAttempts int
+	keyMu               sync.Mutex
+	keyRegisters        map[string][]time.Time
 }
 
 // Config describes the runtime configuration for the server.
@@ -84,6 +104,13 @@ type Config struct {
 	TimestampSkew    time.Duration
 	IdempotencyTTL   time.Duration
 	BindTokenTTL     time.Duration
+	// MaxVerifyAttempts is how many wrong codes an email record accepts before its code is destroyed.
+	MaxVerifyAttempts int
+	// RegisterCooldown is how long a live code is kept untouched: a register call for the same
+	// address inside it is refused instead of replacing the code.
+	RegisterCooldown time.Duration
+	// KeyRegisterAttempts bounds the register calls one API key may make inside RegisterWindow.
+	KeyRegisterAttempts int
 }
 
 // NewServer constructs an HTTP server with the supplied dependencies.
@@ -128,6 +155,20 @@ func NewServer(store *Store, emailer Emailer, chainClient AliasOwnerLookup, cfg 
 		idempotencyTTL:   cfg.IdempotencyTTL,
 		bindTokenTTL:     cfg.BindTokenTTL,
 		nowFn:            time.Now,
+
+		maxVerifyAttempts:   cfg.MaxVerifyAttempts,
+		registerCooldown:    cfg.RegisterCooldown,
+		keyRegisterAttempts: cfg.KeyRegisterAttempts,
+		keyRegisters:        make(map[string][]time.Time),
+	}
+	if server.maxVerifyAttempts <= 0 {
+		server.maxVerifyAttempts = defaultMaxVerifyAttempts
+	}
+	if server.registerCooldown <= 0 {
+		server.registerCooldown = defaultRegisterCooldown
+	}
+	if server.keyRegisterAttempts <= 0 {
+		server.keyRegisterAttempts = defaultKeyRegisterAttempts
 	}
 	if server.codeTTL <= 0 {
 		server.codeTTL = defaultCodeTTL
@@ -184,8 +225,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "IDN-401", err.Error(), nil)
 		return
 	}
-	if resp, ok := s.tryReplay(r, apiKey.Key, body); ok {
-		s.writeCachedResponse(w, resp)
+	if s.handleReplay(w, r, apiKey.Key, body) {
 		return
 	}
 	var req struct {
@@ -201,6 +241,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "IDN-400", err.Error(), nil)
 		return
 	}
+	now := s.now()
+	// The API key is shared by every app of a deployment, so the per-address budget below is
+	// not enough on its own: one holder could send mail to any number of addresses.
+	if !s.allowKeyRegister(apiKey.Key, now) {
+		s.writeError(w, http.StatusTooManyRequests, "IDN-429", "too many register calls for this API key", map[string]any{"retryAfter": int(s.registerWindow.Seconds())})
+		return
+	}
 	emailHash := computeEmailHash(normalized, s.emailSalt)
 	code, err := s.codeFn()
 	if err != nil {
@@ -208,9 +255,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	codeDigest := hashVerificationCode(normalized, code, s.emailSalt)
-	now := s.now()
 	expiresAt := now.Add(s.codeTTL)
 	_, err = s.store.MutateEmail(emailHash, true, func(rec *EmailRecord) error {
+		// A live code that was issued moments ago is kept: replacing it would let whoever holds
+		// an API key kill the code the address's owner is about to type. Nothing is written, so
+		// the refusal does not spend the hourly budget either.
+		if rec.CodeIssuedAt != nil && now.Before(rec.CodeIssuedAt.Add(s.registerCooldown)) {
+			return ErrCodeStillLive
+		}
 		// Prune stale attempts.
 		cutoff := now.Add(-s.registerWindow)
 		pruned := rec.Attempts[:0]
@@ -225,6 +277,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		rec.Attempts = append(pruned, now)
 		rec.CodeDigest = codeDigest
 		rec.CodeExpires = &expiresAt
+		issuedAt := now
+		rec.CodeIssuedAt = &issuedAt
+		rec.FailedGuesses = 0
 		if rec.Bindings == nil {
 			rec.Bindings = make(map[string]AliasBinding)
 		}
@@ -233,6 +288,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if errors.Is(err, ErrCodeStillLive) {
+		s.writeError(w, http.StatusTooManyRequests, "IDN-429", "a verification code was just sent to this address; use it or wait before asking for another", map[string]any{"retryAfter": int(s.registerCooldown.Seconds())})
+		return
+	}
 	if errors.Is(err, ErrRateLimited) {
 		s.writeError(w, http.StatusTooManyRequests, "IDN-429", "too many verification attempts", map[string]any{"retryAfter": int(s.registerWindow.Seconds())})
 		return
@@ -255,7 +314,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"status":    "pending",
 		"expiresIn": int(s.codeTTL.Seconds()),
 	}
-	s.persistAndWrite(w, r, apiKey.Key, resp, http.StatusOK)
+	s.persistAndWrite(w, r, apiKey.Key, body, resp, http.StatusOK)
 }
 
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
@@ -269,8 +328,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "IDN-401", err.Error(), nil)
 		return
 	}
-	if resp, ok := s.tryReplay(r, apiKey.Key, body); ok {
-		s.writeCachedResponse(w, resp)
+	if s.handleReplay(w, r, apiKey.Key, body) {
 		return
 	}
 	var req struct {
@@ -300,6 +358,9 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	bindTokenDigest := hashBindToken(bindToken)
 	bindTokenExpires := now.Add(s.bindTokenTTL)
+	// guessErr carries a wrong-code outcome out of the transaction: the counter has to be
+	// written, and a transaction that returns an error is rolled back.
+	var guessErr error
 	record, err := s.store.MutateEmail(emailHash, false, func(rec *EmailRecord) error {
 		if rec.CodeDigest == "" || rec.CodeExpires == nil {
 			return ErrCodeMismatch
@@ -308,12 +369,25 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 			return ErrCodeExpired
 		}
 		if rec.CodeDigest != codeDigest {
-			return ErrCodeMismatch
+			// A six-digit code lives ten minutes: count the wrong guesses and destroy the code
+			// at the limit, so a caller cannot walk through the million values (ledger PL-EXT-50).
+			rec.FailedGuesses++
+			guessErr = ErrCodeMismatch
+			if rec.FailedGuesses >= s.maxVerifyAttempts {
+				rec.CodeDigest = ""
+				rec.CodeExpires = nil
+				rec.CodeIssuedAt = nil
+				rec.FailedGuesses = 0
+				guessErr = ErrTooManyGuesses
+			}
+			return nil
 		}
 		verifiedAt := now
 		rec.VerifiedAt = &verifiedAt
 		rec.CodeDigest = ""
 		rec.CodeExpires = nil
+		rec.CodeIssuedAt = nil
+		rec.FailedGuesses = 0
 		// NHB-AUDIT-S6: issuing a fresh bind token on every successful
 		// verification (and requiring it at bind time, see
 		// handleBindAlias) is what actually ties a bind to the party who
@@ -324,9 +398,15 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		rec.BindTokenExpires = &expires
 		return nil
 	})
+	if err == nil && guessErr != nil {
+		err = guessErr
+	}
 	switch {
 	case errors.Is(err, ErrNotFound):
 		s.writeError(w, http.StatusNotFound, "IDN-404", "verification session not found", nil)
+		return
+	case errors.Is(err, ErrTooManyGuesses):
+		s.writeError(w, http.StatusTooManyRequests, "IDN-429", "too many wrong codes; the code was cancelled, request a new one", nil)
 		return
 	case errors.Is(err, ErrCodeExpired):
 		s.writeError(w, http.StatusBadRequest, "IDN-409", "verification code expired", nil)
@@ -344,7 +424,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		"emailHash":  emailHash,
 		"bindToken":  bindToken,
 	}
-	s.persistAndWrite(w, r, apiKey.Key, resp, http.StatusOK)
+	s.persistAndWrite(w, r, apiKey.Key, body, resp, http.StatusOK)
 }
 
 func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
@@ -358,8 +438,7 @@ func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusUnauthorized, "IDN-401", err.Error(), nil)
 		return
 	}
-	if resp, ok := s.tryReplay(r, apiKey.Key, body); ok {
-		s.writeCachedResponse(w, resp)
+	if s.handleReplay(w, r, apiKey.Key, body) {
 		return
 	}
 	var req struct {
@@ -477,7 +556,7 @@ func (s *Server) handleBindAlias(w http.ResponseWriter, r *http.Request) {
 		"emailHash":    emailHash,
 		"publicLookup": binding.PublicLookup,
 	}
-	s.persistAndWrite(w, r, apiKey.Key, resp, http.StatusOK)
+	s.persistAndWrite(w, r, apiKey.Key, body, resp, http.StatusOK)
 }
 
 func (s *Server) readBody(r *http.Request) ([]byte, error) {
@@ -517,17 +596,54 @@ func (s *Server) authenticateRequest(r *http.Request, body []byte) (apiKeySecret
 	return secret, nil
 }
 
-func (s *Server) tryReplay(r *http.Request, apiKey string, body []byte) (IdempotencyRecord, bool) {
+// requestHash is the sha256 (hex) of a request body: the part of a request an idempotency key
+// must be bound to (ledger PL-EXT-50, report of 2026-11-19).
+func requestHash(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+// handleReplay answers a request that carries an Idempotency-Key already seen. It reports
+// whether it wrote a response: the cached one for the same body, or 409 when the key comes
+// back with another body (the escrow gateway does the same). A record stored before the body
+// hash existed has none and is replayed as before.
+func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request, apiKey string, body []byte) bool {
 	idemKey := strings.TrimSpace(r.Header.Get(headerIdempotency))
 	if idemKey == "" {
-		return IdempotencyRecord{}, false
+		return false
 	}
 	key := idempotencyKey(apiKey, r.Method, r.URL.Path, idemKey)
 	record, found, err := s.store.GetIdempotency(key, s.now())
-	if err != nil {
-		return IdempotencyRecord{}, false
+	if err != nil || !found {
+		return false
 	}
-	return record, found
+	if record.RequestHash != "" && record.RequestHash != requestHash(body) {
+		s.writeError(w, http.StatusConflict, "IDN-409", "this Idempotency-Key was already used with a different request", nil)
+		return true
+	}
+	s.writeCachedResponse(w, record)
+	return true
+}
+
+// allowKeyRegister is a sliding window per API key over RegisterWindow: the key is shared by
+// every app of a deployment, so the per-address budget alone does not bound the mail one
+// holder can cause.
+func (s *Server) allowKeyRegister(apiKey string, now time.Time) bool {
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
+	cutoff := now.Add(-s.registerWindow)
+	kept := s.keyRegisters[apiKey][:0]
+	for _, ts := range s.keyRegisters[apiKey] {
+		if ts.After(cutoff) {
+			kept = append(kept, ts)
+		}
+	}
+	if len(kept) >= s.keyRegisterAttempts {
+		s.keyRegisters[apiKey] = kept
+		return false
+	}
+	s.keyRegisters[apiKey] = append(kept, now)
+	return true
 }
 
 func (s *Server) writeCachedResponse(w http.ResponseWriter, record IdempotencyRecord) {
@@ -541,7 +657,7 @@ func (s *Server) writeCachedResponse(w http.ResponseWriter, record IdempotencyRe
 	_, _ = w.Write(record.Body)
 }
 
-func (s *Server) persistAndWrite(w http.ResponseWriter, r *http.Request, apiKey string, payload map[string]any, status int) {
+func (s *Server) persistAndWrite(w http.ResponseWriter, r *http.Request, apiKey string, reqBody []byte, payload map[string]any, status int) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "IDN-500", "failed to marshal response", nil)
@@ -550,10 +666,11 @@ func (s *Server) persistAndWrite(w http.ResponseWriter, r *http.Request, apiKey 
 	if idem := strings.TrimSpace(r.Header.Get(headerIdempotency)); idem != "" {
 		key := idempotencyKey(apiKey, r.Method, r.URL.Path, idem)
 		_ = s.store.PutIdempotency(key, IdempotencyRecord{
-			StatusCode: status,
-			Body:       body,
-			StoredAt:   s.now(),
-			ExpiresAt:  s.now().Add(s.idempotencyTTL),
+			StatusCode:  status,
+			Body:        body,
+			StoredAt:    s.now(),
+			ExpiresAt:   s.now().Add(s.idempotencyTTL),
+			RequestHash: requestHash(reqBody),
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

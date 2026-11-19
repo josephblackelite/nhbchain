@@ -29,7 +29,9 @@ stripped from the path before the request is proxied (`gateway/routes/proxy.go`)
 Other endpoints served by the gateway itself:
 
 - `GET /healthz` returns `200 ok`.
-- `GET /metrics` serves the gateway's Prometheus registry (see Observability).
+- `GET /metrics` serves the gateway's Prometheus registry (see Observability). With
+  authentication on it needs a bearer token whose scope claim carries
+  `metrics:read`; a token for a service route is refused with `403`.
 - `/rpc` is registered only when the compatibility dispatcher is enabled (see
   Compatibility mode).
 
@@ -237,6 +239,12 @@ Unknown methods return `-32601`.
   and `<metricsPrefix>_request_duration_seconds{route,method}`
   (`gateway/middleware/observability.go`). The request counters are recorded
   only when `observability.metrics` or `observability.tracing` is true.
+- With `auth.enabled` true, `/metrics` takes the same bearer authentication as the
+  service routes and needs the scope `metrics:read` (`routes.MetricsScope`), so a
+  scraper is given its own token with that scope and no other. A Prometheus job
+  sends it with `authorization: { credentials_file: ... }`. With authentication
+  off the endpoint is open, as every other route is; keep the listener on a
+  private network in that case.
 - The gateway wraps its handler in `otelhttp` only when `observability.tracing`
   is true, and injects trace context into proxied requests.
 - Request logging is controlled by `observability.logRequests`.

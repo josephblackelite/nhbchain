@@ -30,6 +30,7 @@ All values come from environment variables (`LoadConfigFromEnv`, `services/escro
 | `ESCROW_GATEWAY_NONCE_CAP` | no | `1024` | Nonce cache size per key; positive integer; capped at 65536 (warning logged when lowered). |
 | `ESCROW_GATEWAY_RELAYER_MIN_BALANCE_WEI` | no | `1000000000000000000` | Low-balance warning threshold (non-negative integer). |
 | `ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL` | no | `10m` | Interval of the balance check. |
+| `ESCROW_GATEWAY_ENVELOPE_CHAIN_ID` | no | empty | The network's chain id (`networkChainId` from `nhb_getNetworkStats`) as a decimal number. When set, the create and action envelopes carry it as their last key `"chainId"` (see Signing envelopes). A value that is not a canonical decimal number (no sign, no leading zero, above zero) stops the gateway at startup. |
 | `ESCROW_GATEWAY_QUEUE_CAP` | no | `1024` | Webhook queue capacity. |
 | `ESCROW_GATEWAY_QUEUE_HISTORY` | no | `256` | Webhook history size. |
 | `ESCROW_GATEWAY_QUEUE_TTL` | no | `15m` | Webhook queue entry lifetime. |
@@ -78,6 +79,8 @@ All signatures are 65-byte secp256k1 signatures over `keccak256` of the exact JS
   ```
 
   The gateway relays the decision bytes without re-encoding them. The transaction type is chosen from the decision's `outcome` (`release` selects `TxTypeArbitrateRelease`, `refund` selects `TxTypeArbitrateRefund`); the chain takes the outcome from the signed decision either way. The escrow must have been created with a `realm` (which freezes the arbitrator policy) and the number of distinct valid arbitrator signatures must reach the frozen threshold. `policyNonce` comes from the escrow (`escrow_get` returns it for realm-bound escrows).
+
+**Network chain id.** An escrow id is a hash of payer, payee, meta hash and nonce, so the same escrow held on two networks has the same id on both, and a signature that names only the escrow id and the action is valid on every network that holds it. When `ESCROW_GATEWAY_ENVELOPE_CHAIN_ID` is set, the gateway adds `"chainId":"<decimal>"` as the last key of the create envelope and of the release, refund and dispute envelopes (for example `{"escrowId":"0x...","action":"release","chainId":"99070"}`), and the signature must be made over those bytes; unset, the bytes are the ones shown above. The chain ignores the key until its `EscrowEnvelopeChainBindingActivationHeight`; from that height it refuses a create, release, refund, dispute or arbitration decision whose signed payload does not carry its own network's chain id (`docs/consensus/invariants.md`). The arbitrators' decision is relayed byte for byte, so its signers add `"chainId":"<decimal>"` to the decision object themselves. Switch the setting on together with the wallets and signers that build these payloads, before the height is set.
 
 Replay safety of these signatures comes from the chain's idempotent status transitions; envelopes contain no timestamp or nonce (except the create envelope's escrow `nonce`, which is part of the escrow's identity).
 

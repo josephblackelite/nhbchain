@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,6 +42,37 @@ type Server struct {
 	merchants     map[string]MerchantConfig
 	// anonymousAudit limits the audit rows written for failed authentications.
 	anonymousAudit *auditLimiter
+	// envelopeChainID, when set, is added as "chainId" to the create and action
+	// envelopes this gateway builds for a participant to sign (see
+	// SetEnvelopeChainID). Empty leaves the signed bytes as they always were.
+	envelopeChainID string
+}
+
+// validEnvelopeChainID reports whether id is empty (off) or a canonical decimal
+// chain id: digits only, no sign, no leading zero, above zero, within 64 bits.
+func validEnvelopeChainID(id string) bool {
+	if id == "" {
+		return true
+	}
+	value, err := strconv.ParseUint(id, 10, 64)
+	return err == nil && value != 0 && strconv.FormatUint(value, 10) == id
+}
+
+// SetEnvelopeChainID makes the gateway add the network's chain id to the escrow
+// envelopes it builds, as the last key "chainId" (a decimal string), so that what a
+// participant signs names the network (ledger PL-EXT-07). It must be the id
+// nhb_getNetworkStats reports as networkChainId. Empty, the default, leaves the
+// envelopes unchanged. The chain refuses an envelope without its chain id only from
+// EscrowEnvelopeChainBindingActivationHeight, and ignores the key before that, so
+// the setting can be switched on ahead of the height; but it changes the bytes
+// every wallet must sign, so switch it on together with the wallets.
+func (s *Server) SetEnvelopeChainID(id string) error {
+	id = strings.TrimSpace(id)
+	if !validEnvelopeChainID(id) {
+		return fmt.Errorf("envelope chain id %q must be a decimal number without leading zeros", id)
+	}
+	s.envelopeChainID = id
+	return nil
 }
 
 func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *WebhookQueue, intents *PayIntentBuilder, merchants map[string]MerchantConfig) *Server {
@@ -597,6 +629,7 @@ type escrowActionEnvelopeWire struct {
 	EscrowID string `json:"escrowId"`
 	Action   string `json:"action"`
 	Reason   string `json:"reason,omitempty"`
+	ChainID  string `json:"chainId,omitempty"`
 }
 
 // verifyEscrowActionSignature is verifyWalletSignature's counterpart for
@@ -618,7 +651,7 @@ func (s *Server) verifyEscrowActionSignature(r *http.Request, escrowID, action, 
 	if sigHex == "" {
 		return "", nil, nil, errors.New("missing X-Sig header")
 	}
-	envelope := escrowActionEnvelopeWire{EscrowID: escrowID, Action: action, Reason: reason}
+	envelope := escrowActionEnvelopeWire{EscrowID: escrowID, Action: action, Reason: reason, ChainID: s.envelopeChainID}
 	payload, err = json.Marshal(envelope)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("build action envelope: %w", err)
@@ -672,6 +705,7 @@ type escrowCreateEnvelopeWire struct {
 	Mediator string `json:"mediator,omitempty"`
 	Meta     string `json:"meta,omitempty"`
 	Realm    string `json:"realm,omitempty"`
+	ChainID  string `json:"chainId,omitempty"`
 }
 
 // verifyEscrowCreateSignature is verifyEscrowActionSignature's Create
@@ -715,6 +749,7 @@ func (s *Server) verifyEscrowCreateSignature(r *http.Request, req *EscrowCreateR
 		Nonce:    req.Nonce,
 		Meta:     req.Meta,
 		Realm:    req.Realm,
+		ChainID:  s.envelopeChainID,
 	}
 	if trimmed := strings.TrimSpace(req.Mediator); trimmed != "" {
 		mediatorAddr, err := nhbcrypto.DecodeAddress(trimmed)

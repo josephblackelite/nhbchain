@@ -778,6 +778,47 @@ func (l *Lifecycle) PendingHeld(payer [20]byte) (*big.Int, error) {
 	return held, nil
 }
 
+// PendingHeldByPayer is PendingHeld for every payer at once: the total each payer's
+// pending authorizations hold, read in one pass over the index. A payer with nothing
+// pending is absent from the map. The epoch reward split uses it so that weighing
+// many delegators does not read the index once per delegator
+// (DelegatorHoldWeightActivationHeight). It is a read and writes nothing, and skips
+// the same entries PendingHeld skips.
+func (l *Lifecycle) PendingHeldByPayer() (map[[20]byte]*big.Int, error) {
+	if l == nil || l.state == nil {
+		return nil, errLifecycleUninitialised
+	}
+	ids, err := l.pendingAuthorizationIDs()
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[[20]byte]*big.Int)
+	for _, entry := range ids {
+		if len(entry) != 32 {
+			continue
+		}
+		var id [32]byte
+		copy(id[:], entry)
+		auth, err := l.loadAuthorization(id)
+		if err != nil {
+			if errors.Is(err, errAuthorizationNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if auth.Status != AuthorizationStatusPending || auth.Amount == nil {
+			continue
+		}
+		total, ok := held[auth.Payer]
+		if !ok {
+			total = big.NewInt(0)
+			held[auth.Payer] = total
+		}
+		total.Add(total, auth.Amount)
+	}
+	return held, nil
+}
+
 func (l *Lifecycle) nextAuthorizationID(payer [20]byte) ([32]byte, uint64, error) {
 	var counter storedAuthorizationNonce
 	key := authorizationNonceKey(payer)

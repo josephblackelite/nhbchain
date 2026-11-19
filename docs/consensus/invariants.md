@@ -436,6 +436,59 @@ senderless design of `main` is ever brought here, its own registry namespace (co
   until the established power grows (who may join at what size is a policy choice, see the
   W3 report). Changed only with all validators restarted together, to a height above the
   chain tip.
+- `EscrowEnvelopeChainBindingActivationHeight` must be identical on every validator
+  (`config/config.go`; carried as `core.ValidatorRules`). From the height the signed
+  payload of a delegated escrow create, release, refund or dispute
+  (`applyDelegatedCreateEscrow`, `applyDelegatedEscrowAction`) and the decision of an
+  arbitration quorum (`applyArbitrate`) must carry the network's own chain id as `chainId`,
+  a canonical decimal string equal to the id `nhb_getNetworkStats` reports as
+  `networkChainId` (`StateProcessor.swapVoucherChainID`), and one that does not is refused
+  before the escrow engine looks at it (`requireEscrowEnvelopeChain`). The signature covers
+  the payload bytes, so the chain id is signed with the rest and a relayer cannot add it.
+  An escrow id is a hash of payer, payee, meta hash and nonce and so is the same on every
+  network that holds the escrow: before the height a signature made for one network
+  releases, refunds, disputes or creates the mirror escrow on any other (ledger PL-EXT-07).
+  Before the height the payloads are accepted as they are, and the key is ignored if
+  present, so wallets can start signing it ahead of the height. An unset network id
+  (zero) accepts nothing from the height on. Not covered: the milestone project
+  signatures, which nothing in the tree reaches but tests. The escrow gateway adds the key
+  to the envelopes it builds when `ESCROW_GATEWAY_ENVELOPE_CHAIN_ID` is set. Changed only
+  with all validators restarted together, to a height above the chain tip, and only after
+  the wallets and relayers that build these payloads sign the chain id.
+- `DelegatorHoldWeightActivationHeight` must be identical on every validator
+  (`config/config.go`; carried as `core.ValidatorRules`). From the height the staker
+  pool of an epoch (`splitStakeShare`) weighs each indexed delegator by its locked ZNHB
+  less the ZNHB its own pending POS authorizations hold (`pos.Lifecycle.PendingHeld`),
+  and a delegator whose whole locked balance is held counts for nothing. A pending hold
+  moves ZNHB into the payer's locked balance and that balance was the whole weight, so a
+  wallet that delegated a little and then locked a large amount in a refundable hold took
+  a share of the emission far above its stake (ledger PL-EXT-25). Which hold counts is read
+  from the state at settlement, so it is the same on every node; the epoch settled in the
+  first block at or after the height is the first to use the new weight. Before the height
+  the weight is the whole locked balance, as before. The locked balance is written by
+  only two things, a delegation (`StakeDelegate` and the reward engine's settlement of
+  it) and a POS hold, so the locked balance less the holds is what the wallet delegated.
+  A wallet is delegated to one validator at a time (a second delegation to another
+  validator is refused until the first is fully undelegated), so it is indexed under at
+  most one. Changed only with all validators restarted together, to a height above the
+  chain tip.
+- `PotsoAbuseGuardsActivationHeight` must be identical on every validator
+  (`config/config.go`; carried as `core.ValidatorRules`), and so must the five guard values
+  it governs: `MinStakeToWinWei` and `MinEngagementToWin` (`[potso.weights]`),
+  `MinStakeToEarnWei`, `QuadraticTxDampenAfter` and `MaxUserShareBps` (`[potso.abuse]`).
+  From the height `processPotsoRewardEpoch` applies them as configured; before it (and
+  with the height 0 = never) it applies them as 0 whatever the node's file says
+  (`withoutPotsoAbuseGuards`, and `MaxUserShareBps` of the reward configuration), so the
+  values can be written into the files ahead of the height and every epoch closed before
+  it is computed as it was. The guards stop an account with no stake that makes two
+  one-wei transfers an epoch (a transfer costs a percentage of its value, so that costs
+  nothing) from reaching the engagement cap and taking up to 30 percent of the epoch's
+  emission and of the governance weight (ledger PL-EXT-39, PL-PO-01). The epoch settled in
+  the first block at or after the height is the first to use them, the same block that
+  feeds the governance weight snapshot, so a proposal's voting power follows the same
+  values. The values themselves are the owner's choice; the live files hold 0 for all
+  five. Changed only with all validators restarted together, to a height above the chain
+  tip.
 - `PotsoTreasuryShortfallActivationHeight` must be identical on every validator
   (`config/config.go`; carried as `core.ValidatorRules`). From the height
   `processPotsoRewardEpoch` takes the reward budget to be the emission instead of capping

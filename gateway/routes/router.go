@@ -14,6 +14,11 @@ import (
 // compatibility endpoint.
 const CompatRateLimitKey = "compat"
 
+// MetricsScope is the scope a bearer token needs to read /metrics while the
+// gateway's authentication is on. A scraper is given a token with this scope
+// and nothing else.
+const MetricsScope = "metrics:read"
+
 type ServiceRoute struct {
 	Name           string
 	Prefix         string
@@ -118,7 +123,16 @@ func New(cfg Config) (http.Handler, error) {
 	}
 
 	if obs != nil {
-		r.Handle("/metrics", obs.MetricsHandler())
+		// /metrics names every route and every status the gateway answers, so
+		// with authentication on it takes a token that carries MetricsScope (a
+		// token for a service route does not). It used to be open to anyone who
+		// could reach the listener (ledger PL-EXT-48). With no authenticator, or
+		// one that is switched off, it stays open, like every other route.
+		metrics := obs.MetricsHandler()
+		if cfg.Authenticator != nil {
+			metrics = cfg.Authenticator.Middleware(MetricsScope)(metrics)
+		}
+		r.Handle("/metrics", metrics)
 	}
 
 	return r, nil
