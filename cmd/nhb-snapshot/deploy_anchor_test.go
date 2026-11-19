@@ -302,6 +302,12 @@ func TestDeployWaitUntilSyncedSaysWhetherItHasAReference(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(fakeTools, "nhb-snapshot"), []byte("#!/usr/bin/env bash\necho \"TOOL: $*\" >> \"$FAKE_LOG\"\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The wait is given an operator token that the script mints with the root-built nhb-cli (the node's net_info is
+	// operator-only), so the tool directory needs a stand-in for it too; without one the script stops, correctly,
+	// at "could not create an RPC token for the wait" before it ever runs the wait.
+	if err := os.WriteFile(filepath.Join(fakeTools, "nhb-cli"), []byte("#!/usr/bin/env bash\ncase \"$1\" in rpc-token) echo \"token-for-$(cat)\" ;; esac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name    string
 		tipRPC  string

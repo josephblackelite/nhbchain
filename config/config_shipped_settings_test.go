@@ -218,3 +218,38 @@ func TestShippedConfigCarriesTheSwapOperatorSettingOffAndReadsItOn(t *testing.T)
 		t.Fatalf("the loader did not read RPCSwapOperatorNoHMAC = true")
 	}
 }
+
+// The settings digest of a node (logged at start, sent in the handshake, compared by every peer) must be the same on the
+// live validators and on a node started from the shipped file: a peer that differs makes the validator it connects to log
+// an error saying blocks "may be accepted by one and refused by the other". A clean-machine join (2026-11-19, ledger
+// PL-PUB-06) found three settings in which the shipped config.toml and the production template differed from the live
+// files: the start-up window floors were off, an empty bridge signer list was written (it hashes differently from an
+// unset one) and the pool's fee and swap cap were set. Both live validators run the floors on and set none of the others.
+// Change these only together with both validators' files.
+func TestShippedFilesHaveTheShapeOfTheLiveValidatorsForTheSettingsDigest(t *testing.T) {
+	for _, name := range []string{"config.toml", filepath.Join("config", "prod.toml")} {
+		raw, err := os.ReadFile(filepath.Join("..", name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		dir := t.TempDir()
+		text := regexp.MustCompile(`(?m)^ValidatorKeystorePath\s*=.*$`).ReplaceAllString(string(raw), "ValidatorKeystorePath = "+tomlQuoted(filepath.Join(dir, "validator.keystore")))
+		path := filepath.Join(dir, "config.toml")
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path, WithKeystorePassphrase(testKeystorePassphrase))
+		if err != nil {
+			t.Fatalf("%s: load: %v", name, err)
+		}
+		if !cfg.Governance.EnforceWindowFloors {
+			t.Errorf("%s: [governance] EnforceWindowFloors is off; both live validators run it on", name)
+		}
+		if cfg.Bridge.Signers != nil {
+			t.Errorf("%s: [bridge] Signers is written (%v); the live files do not set it, and an empty list hashes differently from an unset one", name, cfg.Bridge.Signers)
+		}
+		if cfg.Amm.FeeBps != 0 || cfg.Amm.MaxSwapBps != 0 {
+			t.Errorf("%s: [amm] FeeBps %d and MaxSwapBps %d are set; the live files set neither while the pool is off", name, cfg.Amm.FeeBps, cfg.Amm.MaxSwapBps)
+		}
+	}
+}

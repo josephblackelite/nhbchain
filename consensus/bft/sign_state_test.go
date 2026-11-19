@@ -299,14 +299,21 @@ func TestStartNewRoundSkipsRoundsAlreadySignedIn(t *testing.T) {
 // memory either, so the vote can be claimed again when the disk works, and the
 // callers treat the failure as an attempt to retry rather than a conflict.
 func TestAVoteIsNotSignedWhenItsRecordCannotBeWritten(t *testing.T) {
+	// The record's directory does not exist when the engine starts, so on every
+	// operating system it reads no record and starts willing to sign. A regular
+	// file then takes the directory's place, so the record can no longer be written.
+	// (With the file already there at start, Linux reports "not a directory" on the
+	// read, which the engine rightly treats as a record it cannot read and refuses to
+	// sign at all: a different refusal, covered by the tests of an unreadable record,
+	// and one this test must not depend on. ledger PL-PUB-02)
 	dir := t.TempDir()
-	blocker := filepath.Join(dir, "not-a-directory")
-	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	blocker := filepath.Join(dir, "record")
 	path := filepath.Join(blocker, "bft_sign_state.json")
 	tv := newTestValidators(t, 2)
 	engine, _, br := newVoter(t, tv, WithSignStatePath(path))
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	hashA, hashB := sha256Sum([]byte("a")), sha256Sum([]byte("b"))
 
 	err := engine.claimVote(Prevote, hashA, 1, 1)

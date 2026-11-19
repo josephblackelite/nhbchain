@@ -173,6 +173,8 @@ ServerName = "p2pd.internal"
   # whether a transaction is valid: set it identically on every validator, to a
   # time after the chain's current block time, restarting all of them together.
   RejectAmbiguousParamKeysFromUnix = 1792936800
+  # Both live validators run the start-up floors on (it decides nothing about any block, only whether the node starts).
+  EnforceWindowFloors = true
 
 [swap]
   AllowedFiat = ["USD", "EUR", "GBP"]
@@ -275,7 +277,7 @@ ServerName = "p2pd.internal"
   # Stage 1 of the bridge trust plan: no single key releases ZNHB. Required once the bridge is activated; the node
   # refuses to start with an activated bridge and a missing or inconsistent value below.
   # The addresses (nhb1...) whose signatures attest an EVM burn (at least two), and how many distinct ones a release needs (2 up to the number of signers).
-  Signers = []
+  # Not set on the live validators (an empty list written here would not hash like an unset one): Signers = []
   SignerThreshold = 0
   # The address (nhb1...) that may pause the bridge and cancel a waiting release. It can never release and must not be a signer.
   Guardian = ""
@@ -305,10 +307,12 @@ ServerName = "p2pd.internal"
   AmmActivationHeight = 0
   # Swaps stay closed until this height, so the pool is paused by default even after activation. 0 = never open.
   SwapStartHeight = 0
-  # Swap fee in basis points of the amount in; it stays in the pool.
-  FeeBps = 30
+  # Swap fee in basis points of the amount in; it stays in the pool. The live validators do not set the pool's
+  # values yet (the pool is off), so they are not set here either. Set FeeBps (for example 30) and MaxSwapBps
+  # (0 = 500) identically on every validator together with the height.
+  # FeeBps = 30
   # One swap may add at most this share of the reserve it adds to (basis points). 0 = 500.
-  MaxSwapBps = 500
+  # MaxSwapBps = 500
   # The address (nhb1...) that may add or remove liquidity. Not the admin wallet. Required once activated.
   LiquidityProvider = ""
   # Floors no swap or partial removal may take a reserve below (decimal strings). Empty = 1.

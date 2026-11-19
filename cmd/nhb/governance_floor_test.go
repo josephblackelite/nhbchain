@@ -23,6 +23,8 @@ import (
 
 func TestCheckConfigurationWarnsAboutAGovernanceWindowBelowTheFloorAndDoesNotStop(t *testing.T) {
 	cfg := loadShippedConfig(t)
+	// The shipped file carries the live validators' setting (enforcement on, ledger PL-PUB-06); this test is about the default.
+	cfg.Governance.EnforceWindowFloors = false
 	cfg.Governance.VotingPeriodSeconds = 600
 	cfg.Governance.TimelockSeconds = 120
 	logger, buf := capturedLogger()
@@ -59,6 +61,7 @@ func TestCheckConfigurationIsQuietForGovernanceWindowsAtTheFloors(t *testing.T) 
 
 func TestEnforceStartupConfigurationRefusesAWindowBelowTheFloorOnlyWhenAskedTo(t *testing.T) {
 	cfg := loadShippedConfig(t)
+	cfg.Governance.EnforceWindowFloors = false // the shipped file says on (the live setting); start from the default
 	cfg.Governance.VotingPeriodSeconds = config.MinVotingPeriodSeconds - 1
 	if err := enforceStartupConfiguration(cfg); err != nil {
 		t.Fatalf("refused without EnforceWindowFloors: %v", err)
@@ -113,7 +116,8 @@ func TestNodeStartRefusesAGovernanceWindowBelowTheFloorWhenEnforced(t *testing.T
 	}
 	replaceOnce("  VotingPeriodSeconds = 604800", "  VotingPeriodSeconds = 600")
 	replaceOnce("  TimelockSeconds = 172800", "  TimelockSeconds = 120")
-	replaceOnce("EnforceWindowFloors = false", "EnforceWindowFloors = true")
+	// The shipped file already carries enforcement on (the live validators' setting, ledger PL-PUB-06): the node must refuse by it.
+	replaceOnce("\n  EnforceWindowFloors = true\n", "\n  EnforceWindowFloors = true\n")
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)

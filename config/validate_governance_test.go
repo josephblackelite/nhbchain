@@ -141,7 +141,11 @@ func loadGovernanceBlock(t *testing.T, lines string) *Config {
 	return cfg
 }
 
-func TestShippedConfigHasWindowsAboveTheFloorsAndEnforcementOff(t *testing.T) {
+// Both live validators run EnforceWindowFloors on (ledger PL-PUB-06: the settings digest of a node started from the shipped
+// file differed from theirs while it said off), so the shipped file says on. That is safe only while the shipped windows are
+// above the floors, which is what this test proves, both by the policy check and by loading the shipped windows with the
+// setting on (a node with a window below a floor would refuse to start).
+func TestShippedConfigHasWindowsAboveTheFloorsAndEnforcementOnLikeTheLiveValidators(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "config.toml"))
 	if err != nil {
 		t.Fatalf("read the shipped config.toml: %v", err)
@@ -151,12 +155,16 @@ func TestShippedConfigHasWindowsAboveTheFloorsAndEnforcementOff(t *testing.T) {
 	if problems := GovernancePolicyProblems(cfg.Governance); len(problems) != 0 {
 		t.Fatalf("the shipped windows are below the floors: %v", problems)
 	}
-	if cfg.Governance.EnforceWindowFloors {
-		t.Fatal("EnforceWindowFloors is on in the shipped configuration")
+	// the shipped windows load with enforcement on
+	on := loadGovernanceBlock(t, `  VotingPeriodSeconds = 604800
+  TimelockSeconds = 172800
+  EnforceWindowFloors = true`)
+	if !on.Governance.EnforceWindowFloors {
+		t.Fatal("the loader did not read EnforceWindowFloors = true")
 	}
-	// the shipped file documents the setting, off
-	if !strings.Contains(string(raw), "EnforceWindowFloors = false") {
-		t.Fatal("the shipped config.toml does not document EnforceWindowFloors = false")
+	// the shipped file carries the live setting
+	if !strings.Contains(string(raw), "\n  EnforceWindowFloors = true\n") || strings.Contains(string(raw), "EnforceWindowFloors = false") {
+		t.Fatal("the shipped config.toml does not carry EnforceWindowFloors = true (the live validators' setting)")
 	}
 }
 
