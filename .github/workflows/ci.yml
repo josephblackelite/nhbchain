@@ -11,7 +11,7 @@ jobs:
   history-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: No commit may change nothing
@@ -19,7 +19,7 @@ jobs:
   secrets-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install git-secrets
         run: |
           sudo apt-get update
@@ -40,7 +40,7 @@ jobs:
             go: '1.24.3'
             test_target: ./services/lending/...
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -62,7 +62,7 @@ jobs:
     needs: build-test
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Setup Go
