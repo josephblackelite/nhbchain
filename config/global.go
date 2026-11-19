@@ -31,6 +31,9 @@ type PaymasterAutoTopUpConfig struct {
 	Approver       [20]byte
 	ApproverRole   string
 	MinterRole     string
+	// SponsorRole and AggregateDailyCapWei: see config.PaymasterAutoTopUp.
+	SponsorRole          string
+	AggregateDailyCapWei *big.Int
 }
 
 // PaymasterLimits parses the configured paymaster throttling caps into runtime values.
@@ -83,6 +86,22 @@ func (g Global) PaymasterAutoTopUpConfig() (PaymasterAutoTopUpConfig, error) {
 	cfg.DailyCapWei = dailyCap
 	if cfg.Enabled && (cfg.DailyCapWei == nil || cfg.DailyCapWei.Sign() <= 0) {
 		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.DailyCapWei: must be a positive value when auto-top-up is enabled")
+	}
+
+	cfg.SponsorRole = strings.TrimSpace(g.Paymaster.AutoTopUp.SponsorRole)
+	aggregateCap, err := parseUintAmount(g.Paymaster.AutoTopUp.AggregateDailyCapWei)
+	if err != nil {
+		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.AggregateDailyCapWei: %w", err)
+	}
+	cfg.AggregateDailyCapWei = aggregateCap
+	// PL-R5T-64: the policy refills any address that signs a sponsored transfer, and
+	// DailyCapWei is per address, so enabling it needs the two settings that bound
+	// it: a role a sponsor must hold and a cap over all sponsors together.
+	if cfg.Enabled && cfg.SponsorRole == "" {
+		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.SponsorRole: must name a role when auto-top-up is enabled (any address could otherwise draw a full allowance)")
+	}
+	if cfg.Enabled && (cfg.AggregateDailyCapWei == nil || cfg.AggregateDailyCapWei.Sign() <= 0) {
+		return cfg, fmt.Errorf("invalid global.paymaster.AutoTopUp.AggregateDailyCapWei: must be a positive value when auto-top-up is enabled")
 	}
 
 	if g.Paymaster.AutoTopUp.CooldownSeconds > 0 {

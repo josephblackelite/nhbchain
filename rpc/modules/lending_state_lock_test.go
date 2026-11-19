@@ -5,6 +5,7 @@ package modules
 // at an older tree to see what it does there.
 
 import (
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,11 @@ func TestRepeatedLendingReadsDoNotRescanTheChain(t *testing.T) {
 	lc := newLendingChain(t, 21)
 	lc.extend(t, 4000, 0)
 	module := NewLendingModule(lc.node)
+	// A read that arrives while the index is behind the chain asks to be retried
+	// (see TestAReadThatNeedsTheIndexAsksToRetryWhileItIsBehind), and how many
+	// blocks the index gets through in one step depends on the machine, so the
+	// index is brought up to the tip first, as the node's warm-up does.
+	catchUpFully(t, module)
 	if _, _, moduleErr := module.GetMarket(defaultLendingPoolID); moduleErr != nil {
 		t.Fatalf("first read: %v", moduleErr)
 	}
@@ -50,10 +56,24 @@ type lockProbe struct {
 
 // probeFirstLendingRead runs the first lending read of a fresh module, which
 // has the whole chain to look through, while another goroutine reads state as
-// fast as it can.
+// fast as it can. The read may ask to be retried, as the index is not up to the
+// tip when it finishes looking for as long as a read may.
 func probeFirstLendingRead(t *testing.T, lc *lendingChain) lockProbe {
 	t.Helper()
 	module := NewLendingModule(lc.node)
+	return probeLendingRead(t, lc, func() *ModuleError {
+		_, _, moduleErr := module.GetMarket(defaultLendingPoolID)
+		if moduleErr != nil && moduleErr.HTTPStatus == http.StatusServiceUnavailable {
+			return nil
+		}
+		return moduleErr
+	})
+}
+
+// probeLendingRead runs read, a lending read, while another goroutine reads
+// state as fast as it can.
+func probeLendingRead(t *testing.T, lc *lendingChain, read func() *ModuleError) lockProbe {
+	t.Helper()
 	var addr [20]byte
 	addr[0] = 0x42
 
@@ -85,13 +105,13 @@ func probeFirstLendingRead(t *testing.T, lc *lendingChain) lockProbe {
 	time.Sleep(20 * time.Millisecond)
 	scanning.Store(true)
 	scanStart := time.Now()
-	_, _, moduleErr := module.GetMarket(defaultLendingPoolID)
+	moduleErr := read()
 	scan := time.Since(scanStart)
 	scanning.Store(false)
 	stop.Store(true)
 	wg.Wait()
 	if moduleErr != nil {
-		t.Fatalf("GetMarket: %v", moduleErr)
+		t.Fatalf("lending read: %v", moduleErr)
 	}
 	return lockProbe{scan: scan, worst: worst, progress: progress.Load()}
 }

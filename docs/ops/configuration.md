@@ -80,8 +80,10 @@ column is the exact error text):
 (`ProposalTimeout`, `PrevoteTimeout`, `PrecommitTimeout`, `CommitTimeout`) to be
 positive after defaults (`2s`, `2s`, `2s`, `4s`) and after the
 `--consensus-timeout-*` flags and `NHB_CONSENSUS_TIMEOUT_*` variables are applied,
-and requires `MinBlockInterval` to be neither negative nor longer than half the
-commit timeout (`config.ConsensusProblems`). `cmd/consensusd` reports these with
+and requires `MinBlockInterval` not to be negative. A `MinBlockInterval` longer than
+half the commit timeout is an advisory, not an error (`config.ConsensusAdvisories`):
+the engine lowers it, and `cmd/consensusd` logs a `consensus: configuration advisory`
+warning and starts. `cmd/consensusd` reports the errors with
 `log.Fatal("invalid consensus timeouts", "err", err)`. On `cmd/nhb` a timer
 written as `0s` is not a problem: the BFT engine keeps its built-in value for a
 timer that is not positive, and the startup check judges the effective values
@@ -94,8 +96,8 @@ commit and starting the round of the next height. It is local to the validator
 and is not a rule that blocks are checked against. Default `1s` when the key is
 absent (`defaultMinBlockInterval`, `ensureConsensusDefaults` in
 `config/config.go`); `0s` turns the wait off; a value above half the commit
-timeout is refused by `consensusd` at start and lowered to that bound by the
-engine (`config/types.go`, `config/validate.go`). The repository `config.toml`
+timeout is lowered to that bound by the engine, and `consensusd` logs an advisory
+at start (`config/types.go`, `config/validate.go`). The repository `config.toml`
 sets `2s`. Every quantity counted in blocks (epoch length, emission per epoch)
 follows this setting, so block times are a function of it, not a constant; see
 [Block cadence](../consensus/block-cadence.md). `cmd/nhb` and `cmd/consensusd`

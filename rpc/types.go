@@ -25,6 +25,21 @@ type TransactionResult struct {
 }
 
 // ReceiptResult reflects the final state of a confirmed transaction.
+//
+// The node stores no receipts. Every receipt is rebuilt when it is asked for, and the
+// fields after Logs say what each figure is made of (PL-DC-22):
+//
+//   - Status is "0x1" for any transaction found in a block, because a block never
+//     holds a transaction that failed to apply (StatusBasis says so).
+//   - GasUsed is NOT the gas the execution used. It is the result of simulating the
+//     transaction on the node's CURRENT state when that works, or else the
+//     transaction's own gas limit (GasUsedBasis says which). GasUsedKnown is false.
+//   - Logs are the events of that simulation or, when there are none, one transfer
+//     log built from the transaction's own fields (LogsBasis says which). They are
+//     not the events the execution emitted. LogsKnown is false.
+//
+// Reconstructed is true on every receipt. A client that does accounting must not
+// trust GasUsed or Logs; the balances, the block and the events index are the record.
 type ReceiptResult struct {
 	TransactionHash string       `json:"transactionHash"`
 	BlockHash       string       `json:"blockHash,omitempty"`
@@ -32,6 +47,13 @@ type ReceiptResult struct {
 	Status          string       `json:"status"`
 	GasUsed         string       `json:"gasUsed"`
 	Logs            []ReceiptLog `json:"logs"`
+
+	Reconstructed bool   `json:"reconstructed"`
+	StatusBasis   string `json:"statusBasis"`
+	GasUsedKnown  bool   `json:"gasUsedKnown"`
+	GasUsedBasis  string `json:"gasUsedBasis"`
+	LogsKnown     bool   `json:"logsKnown"`
+	LogsBasis     string `json:"logsBasis"`
 }
 
 // ReceiptLog captures a structured event emitted during transaction execution.
@@ -238,6 +260,18 @@ func formatTxType(t types.TxType) string {
 		return "SwapMarkReconciled"
 	case types.TxTypeSubmitEvidence:
 		return "SubmitEvidence"
+	case types.TxTypeLendingWithdrawProtocolFees:
+		return "LendingWithdrawProtocolFees"
+	case types.TxTypeBridgeLock:
+		return "BridgeLock"
+	case types.TxTypeBridgeRelease:
+		return "BridgeRelease"
+	case types.TxTypeAmmAddLiquidity:
+		return "AmmAddLiquidity"
+	case types.TxTypeAmmRemoveLiquidity:
+		return "AmmRemoveLiquidity"
+	case types.TxTypeAmmSwap:
+		return "AmmSwap"
 	case types.TxTypeSwapPayoutReceipt:
 		return "SwapPayoutReceipt"
 	case types.TxTypeLendingSupplyNHB:

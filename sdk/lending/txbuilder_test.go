@@ -3,6 +3,7 @@ package lending
 import (
 	"bytes"
 	"encoding/json"
+	"math/big"
 	"testing"
 
 	"nhbchain/core/types"
@@ -94,5 +95,47 @@ func TestNewSupplyTxRejectsNonPositiveAmount(t *testing.T) {
 	}
 	if _, err := NewSupplyTx(types.NHBChainID(), 1, "default", "-5"); err == nil {
 		t.Fatalf("expected error for negative amount")
+	}
+}
+
+// A builder never produces a transaction without a usable chain id: it used to panic on nil, and a zero or negative id would
+// have been signed. The id comes from the caller (sdk/go/client's TxChainID reads it from the node).
+func TestBuildersRefuseAMissingOrUnusableChainID(t *testing.T) {
+	builders := map[string]func(*big.Int) (*types.Transaction, error){
+		"supply":              func(id *big.Int) (*types.Transaction, error) { return NewSupplyTx(id, 1, "default", "5") },
+		"withdraw":            func(id *big.Int) (*types.Transaction, error) { return NewWithdrawTx(id, 1, "default", "5") },
+		"borrow":              func(id *big.Int) (*types.Transaction, error) { return NewBorrowTx(id, 1, "default", "5") },
+		"repay":               func(id *big.Int) (*types.Transaction, error) { return NewRepayTx(id, 1, "default", "5") },
+		"deposit collateral":  func(id *big.Int) (*types.Transaction, error) { return NewDepositCollateralTx(id, 1, "default", "5") },
+		"withdraw collateral": func(id *big.Int) (*types.Transaction, error) { return NewWithdrawCollateralTx(id, 1, "default", "5") },
+		"liquidate": func(id *big.Int) (*types.Transaction, error) {
+			return NewLiquidateTx(id, 1, "default", "nhb1borroweraddress")
+		},
+	}
+	for name, build := range builders {
+		for label, id := range map[string]*big.Int{"nil": nil, "zero": big.NewInt(0), "negative": big.NewInt(-5)} {
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("%s with a %s chain id panicked: %v", name, label, r)
+					}
+				}()
+				if tx, err := build(id); err == nil || tx != nil {
+					t.Fatalf("%s with a %s chain id produced %v", name, label, tx)
+				}
+			}()
+		}
+		network, _ := new(big.Int).SetString("18346390202490284624", 10)
+		tx, err := build(network)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tx.ChainID.Cmp(network) != 0 {
+			t.Fatalf("%s: chain id %s", name, tx.ChainID)
+		}
+		network.SetInt64(1)
+		if tx.ChainID.Int64() == 1 {
+			t.Fatalf("%s: the transaction keeps the caller's chain id by reference", name)
+		}
 	}
 }

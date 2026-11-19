@@ -12,7 +12,7 @@ This page describes the end-to-end tests that exist in the repository, what each
 
 There is no `make e2e` target.
 
-`TestAuditSmokePlan` (`tests/e2e/audit_smoke_test.go`) only reads `ops/audit/e2e.yaml` and fails if it defines no checks. `scripts/audit/run_phase.sh` calls `tools/audit`, which records each check from the YAML file with the status `pending`, hashes the config, and parses the compose file. It does not execute the checks or start the compose stack.
+`TestAuditSmokePlan` (`tests/e2e/audit_smoke_test.go`) only reads `ops/audit/e2e.yaml` and fails if it defines no checks. `scripts/audit/run_phase.sh` calls `tools/audit`, which records each check from the YAML file with the status `not-run` (or the status in a `--results` JSON file written by whatever ran the check: `passed`, `failed` or `skipped`), gives the report a verdict (`pass`, `fail`, `partial` or, when no check has a result, `no-verdict`), hashes the config, and parses the compose file. It does not execute the checks or start the compose stack. With `--strict` it exits 3 unless the verdict is `pass`.
 
 ## Tests in `tests/e2e`
 

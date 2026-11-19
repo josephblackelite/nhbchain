@@ -63,7 +63,10 @@ Methods that need auth: `nhb_sendTransaction`, `nhb_requestSwapApproval`,
 `swap_voucher_get`, `swap_voucher_list` and `swap_voucher_export` also need this
 token, unless the server has partner API-key authentication configured
 (`RPCSwapAuth`), which then authenticates them instead
-(`requireSwapLedgerAuth`, `rpc/swap_handlers.go`). Everything else in the dispatch
+(`requireSwapLedgerAuth`, `rpc/swap_handlers.go`). In that mode a partner reads only
+the providers listed for its key in `RPCSwapAuth.PartnerProviders` (`"*"` for all; a
+key with no entry reads nothing), and another provider's voucher is answered as
+"voucher not found". Everything else in the dispatch
 table needs no token.
 
 ### Disabled methods
@@ -135,7 +138,30 @@ identity+chain, per method. Defaults from `config/config.go`:
 `config.toml` raises them to 120. `RPCRouteRateLimits` overrides limits per
 method. A limited call returns HTTP 429, code `-32020` and message `RPC rate
 limit exceeded` (or `transaction rate limit exceeded` for
-`nhb_sendTransaction`). Hits are counted by `nhb_rpc_limiter_hits_total`.
+`nhb_sendTransaction`). Hits are counted by `nhb_rpc_limiter_hits_total`. A
+method name the server does not serve, and that has no `RPCRouteRateLimits`
+entry, shares a single bucket per source in place of one bucket per name, so
+repeated requests for unknown methods are limited together.
+
+`RPCMethodCosts` (a table of method name to weight, empty by default) makes a call
+take that many tokens from each bucket it passes through instead of one, so a
+full-scan read can cost a caller more than a balance lookup (a weight of 10 on a
+method with a limit of 120 allows 12 calls per window). A weight below 2 is
+ignored; one above a bucket's size is clamped to it, so one call per window always
+works; a name the server does not serve cannot be given a weight. It is node-local
+and changes only which calls this node refuses. Nothing is weighted by default: the
+public explorer reaches the node from one address and refreshes several heavy reads
+at once, so weights must be set from measured traffic. The heavy reads the node
+already queues (`nhb_getExplorerSnapshot`, `nhb_searchExplorer`,
+`nhb_getTransactionHistory`, `nhb_getAddressActivity`, `nhb_getTransaction`,
+`nhb_getTransactionReceipt`) are the candidates:
+
+```toml
+[RPCMethodCosts]
+nhb_getExplorerSnapshot = 10
+nhb_searchExplorer = 10
+nhb_getTransactionHistory = 5
+```
 
 ### Heavy read queries
 
@@ -161,7 +187,7 @@ and details: [public RPC query limits](../ops/rpc-query-limits.md).
 
 | Field | Encoding |
 | --- | --- |
-| `chainId` | integer, decimal string or `0x` hex string; must equal `0x4e4842` (`types.NHBChainID`) |
+| `chainId` | integer, decimal string or `0x` hex string; must equal `0x4e4842` (`types.NHBChainID`) until the chain reaches `TxNetworkChainIDActivationHeight` (`0` = never, the shipped value); from that height it must equal the network's own chain id instead. `nhb_getNetworkStats` reports the one a transaction must carry now as `txChainId` (decimal), and the running chain's own genesis-derived id (the value `net_info` calls `chainId`, which is operator-only) as `networkChainId` (decimal string, public, unchanged by the activation height) |
 | `type` | integer transaction type (see [overview](../overview/README.md#transaction-types)) |
 | `nonce`, `gasLimit`, `intentExpiry` | integer, decimal string or `0x` hex string (uint64) |
 | `value`, `gasPrice`, `r`, `s`, `v` | integer, decimal string or `0x` hex string |
@@ -173,6 +199,12 @@ and details: [public RPC query limits](../ops/rpc-query-limits.md).
 the 20-byte address. The signature is secp256k1 over the transaction hash (see
 [signing](../transactions/signing.md)); `s` must be in the lower half of the curve
 order and `v` is `27` or `28`.
+
+Transaction types that carry no recoverable sender (mint, reference-price,
+swap-admin and lending fee-withdrawal types) cannot be sent through this method: a
+node admits them only with zero `gasLimit` and `gasPrice` and no signature, and this
+method requires both to be positive. Use the dedicated methods for those types where
+one exists (see [mempool and blocks](../perf/tuning.md#mempool-and-blocks)).
 
 The result is the transaction hash as a `0x`-prefixed string. An identical
 transaction already known from the same sender returns the same hash.
@@ -265,8 +297,18 @@ types and `BuyZNHB`, and `NHB` for `RedeemNHB`; it is omitted for every other ty
 
 Params: `["<tx hash>"]`. Returns `null` if the hash is unknown. The receipt is
 not a stored record: `buildReceiptResult` re-simulates the transaction with
-`SimulateTx` and converts the resulting events to logs. `status` is always
-`"0x1"`, including for a transaction whose simulation fails.
+`SimulateTx` on the node's CURRENT state and converts the resulting events to logs.
+`status` is always `"0x1"`: a block never contains a transaction that failed to
+apply, so any transaction found in a block succeeded (`statusBasis` says so). It is
+the same `"0x1"` when the simulation fails, which it normally does for an old
+transaction (its nonce is already used).
+
+`gasUsed` and `logs` are **not** what the execution used and emitted; the node does
+not store them. The receipt says so field by field: `reconstructed` is `true`,
+`gasUsedKnown` and `logsKnown` are `false`, and `gasUsedBasis` / `logsBasis` name the
+source (`simulation on the current state`, `transaction gas limit`,
+`synthesized from the transaction fields`, or `none available`). Do not use `gasUsed`
+or `logs` for accounting; use balances, the block and the events index.
 
 ```json
 {
@@ -275,6 +317,12 @@ not a stored record: `buildReceiptResult` re-simulates the transaction with
   "blockNumber": "0x1a",
   "status": "0x1",
   "gasUsed": "0x...",
+  "reconstructed": true,
+  "statusBasis": "included in a block",
+  "gasUsedKnown": false,
+  "gasUsedBasis": "transaction gas limit",
+  "logsKnown": false,
+  "logsBasis": "synthesized from the transaction fields",
   "logs": [
     {
       "event": "Transfer",

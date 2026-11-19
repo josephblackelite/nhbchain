@@ -217,6 +217,11 @@ func (sp *StateProcessor) ProcessBlockLifecycle(height uint64, timestamp int64) 
 	if err := sp.ReconcileNHBMintSupplyDriftOnce(); err != nil {
 		return fmt.Errorf("reconcile NHB mint supply drift: %w", err)
 	}
+	// Gated (default off): the part of the genesis allocation the NHB supply
+	// counter never counted (see ReconcileNHBGenesisShortfallOnce).
+	if err := sp.ReconcileNHBGenesisShortfallOnce(); err != nil {
+		return fmt.Errorf("reconcile NHB genesis supply shortfall: %w", err)
+	}
 	// Item 5's grandfathering migration -- see BackfillValidatorRegistrationOnce's
 	// doc comment. Must run on every block (idempotent, no-op after its
 	// guard flag is set) so the currently-active validator(s) are
@@ -412,6 +417,12 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 			}
 			newSet[string(addr)] = copyBigInt(basis)
 		}
+		// From the activation height a validator new to the set is admitted only
+		// while the established ones keep their quorum without it (PL-VAL-01).
+		newSet, err = sp.admitValidators(newSet, now)
+		if err != nil {
+			return err
+		}
 		if len(newSet) == 0 {
 			fallback, err := sp.fallbackValidatorSet(minStake)
 			if err != nil {
@@ -453,6 +464,12 @@ func (sp *StateProcessor) applyValidatorSelection(snapshot epoch.Snapshot, now t
 			continue
 		}
 		desired[k] = copyBigInt(v)
+	}
+	// From the activation height a validator new to the set is admitted only while
+	// the established ones keep their quorum without it (PL-VAL-01).
+	desired, err = sp.admitValidators(desired, now)
+	if err != nil {
+		return err
 	}
 	if len(desired) == 0 {
 		fallback, err := sp.fallbackValidatorSet(minStake)

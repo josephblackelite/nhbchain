@@ -12,11 +12,11 @@ This directory documents the audit tooling that exists in the repository. Start 
 | Unit and package tests | `make audit:tests` (`go test ./...` plus `go test ./...` in `sdk/`) | this page |
 | Determinism and Byzantine-vote tests | `make audit:determinism` (`./tests/determinism/...`, `./tests/consensus/...`) | this page |
 | End-to-end flows | `make audit:e2e`, `make bugcheck-gateway` | [e2e-flows.md](./e2e-flows.md) |
-| Chaos | `go test ./tests/chaos/...` (`make audit:chaos` does not run these tests; it only records the two `pending` checks from `ops/audit/chaos.yaml`) | [e2e-flows.md](./e2e-flows.md) (the tests use the in-process simulation) |
+| Chaos | `go test ./tests/chaos/...` (`make audit:chaos` does not run these tests; it only records the two checks from `ops/audit/chaos.yaml` as `not-run`) | [e2e-flows.md](./e2e-flows.md) (the tests use the in-process simulation) |
 | Network security tests | `make audit:netsec` (`./tests/netsec/...`) | this page |
 | Performance | `make audit:perf` (`./tests/perf/...` benchmarks) | this page |
 | Ledger and supply fixtures | `make audit:ledger`, `make audit:supply` (`./tests/ledger/...`) | this page |
-| Configuration hashes | `make audit:config` (records `pending` checks and hashes `config.toml` and `config/prod.toml`) | this page |
+| Configuration hashes | `make audit:config` (records `not-run` checks and hashes `config.toml` and `config/prod.toml`) | this page |
 | Documentation | `make audit:docs` | [docs-quality.md](./docs-quality.md) |
 | Everything in one run | `make bugcheck` (`scripts/bugcheck.sh`) | [index.md](./index.md) |
 

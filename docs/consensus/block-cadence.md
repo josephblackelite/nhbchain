@@ -98,9 +98,11 @@ height: before it proposes, votes or starts that round's timers.
   with different values, or one with none, take part in the same rounds, so a change
   needs no coordination beyond restarting the validators.
 * It is at most half the commit timeout (2 s at the default 4 s). A longer value is
-  refused by `consensusd` at start-up and lowered, with a warning, by the engine in
-  the other binaries: a peer's round has to still be open when a proposal delayed by
-  the interval reaches it.
+  lowered to that, with a warning, by the engine, and `consensusd` also logs a warning
+  at start-up and starts: a peer's round has to still be open when a proposal delayed
+  by the interval reaches it. A commit timeout under 2 s, set in the file or by
+  `--consensus-timeout-commit`, therefore runs with the default 1 s interval lowered to
+  half of it.
 * It waits only for what is left of the interval since the last commit this validator
   saw. It does not delay a round that follows a failed one, nor the first round of a
   validator that has just started, and a validator that has just taken the last blocks

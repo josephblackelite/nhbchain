@@ -71,6 +71,12 @@ mounts no `/metrics` handler.
 pro-rating applies (`Loyalty()` in `observability/metrics.go`).
 `nhb_staking_paused` is `1` when staking mutations are paused.
 
+The RPC server uses a method's own name as the `module` and `method` label of
+the `nhb_module_*` metrics, and as the `module` and `route` label of
+`nhb_rpc_limiter_hits_total`, only for a method it serves. A request for any
+other name is recorded as `unknown` in both labels, so the number of series does
+not depend on what callers send.
+
 The escrow gateway records one OpenTelemetry counter,
 `nhb.escrow.webhooks.dropped` (attribute `reason`); see
 [Escrow gateway webhook queue operations](./webhooks.md).

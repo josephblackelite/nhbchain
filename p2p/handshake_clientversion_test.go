@@ -54,7 +54,7 @@ func initPeerWithVersion(t *testing.T, server *Server, cfg ServerConfig, version
 	t.Cleanup(func() { right.Close() })
 
 	errc := make(chan error, 1)
-	go func() { errc <- server.initPeer(left, true, false, "") }()
+	go func() { errc <- server.initPeer(left, true, false, "", "") }()
 
 	if _, err := bufio.NewReader(right).ReadBytes('\n'); err != nil {
 		t.Fatalf("read local handshake: %v", err)

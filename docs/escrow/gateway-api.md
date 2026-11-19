@@ -10,10 +10,10 @@ The gateway has no path prefix and no fixed public base URL: routes are served a
 
 ### 1.1 API key + HMAC (every endpoint)
 
-Every endpoint, `POST` and `GET`, calls `Authenticator.Authenticate` (`gateway/auth/auth.go`; the `GET` handlers do it through `authenticateRead`, `services/escrow-gateway/server.go`) and requires:
+Every `POST` endpoint calls `Authenticator.Authenticate` and every `GET` endpoint calls `Authenticator.AuthenticateRead` (`gateway/auth/auth.go`; the `GET` handlers do it through `authenticateRead`, `services/escrow-gateway/server.go`) and requires:
 
 * `X-Api-Key`: the API key identifier.
-* `X-Timestamp`: Unix seconds. The request must be within the allowed skew of the gateway clock (default 2 minutes; the skew is capped at 2 minutes). Within that window the timestamp must also be strictly greater than the last timestamp accepted for the same key, otherwise the request fails with `timestamp not increasing`.
+* `X-Timestamp`: Unix seconds. The request must be within the allowed skew of the gateway clock (default 2 minutes; the skew is capped at 2 minutes). Within that window a write's timestamp must also be strictly greater than the last timestamp a write was accepted at for the same key, otherwise the request fails with `timestamp not increasing`; a key can therefore make at most one write per second. A read is held to a looser rule: its timestamp must not be older than the last accepted write's (an equal one is fine), otherwise it fails with `timestamp older than the last accepted write`, so any number of reads can share a second.
 * `X-Nonce`: per-request nonce. Reusing a `(timestamp, nonce)` pair for the same key fails with `nonce already used`.
 * `X-Signature`: hex-encoded HMAC-SHA256 with the key's secret:
 
@@ -21,7 +21,7 @@ Every endpoint, `POST` and `GET`, calls `Authenticator.Authenticate` (`gateway/a
   signature = hex(HMAC-SHA256(secret, timestamp + "\n" + nonce + "\n" + METHOD + "\n" + path + "\n" + body))
   ```
 
-  `METHOD` is upper-cased. `path` is the request path; if there is a query string it is appended as `?` plus the query parameters sorted as strings (`CanonicalRequestPath`). Request bodies are limited to 1 MiB. For a `GET` the body is empty, so the signed string ends with an empty body. The timestamp and nonce rules apply to reads exactly as to writes: a read consumes a nonce and advances the key's last-accepted timestamp.
+  `METHOD` is upper-cased. `path` is the request path; if there is a query string it is appended as `?` plus the query parameters sorted as strings (`CanonicalRequestPath`). Request bodies are limited to 1 MiB. For a `GET` the body is empty, so the signed string ends with an empty body. The nonce rule applies to reads as to writes (a read consumes a nonce). A read does not advance the key's last-accepted write timestamp, so reads neither fail each other nor make a following write fail.
 
 `GET /escrow/{id}`, `GET /p2p/offers` and `GET /p2p/trades/{id}` call `authenticateRead` first (`handleEscrowGet`, `handleListOffers`, `handleGetTrade`); without a valid API key and signature they answer `401` and write an audit-log row. They need no wallet signature and no `Idempotency-Key`.
 
@@ -124,3 +124,7 @@ Errors are `{"error":"<message>"}` (double quotes in messages are replaced by si
 * `502`: the node call failed (this includes `escrow_get` failures such as an unknown escrow, and every `POST /p2p/accept`).
 
 Every `POST` handler, and a `GET` that fails authentication, writes an audit-log row (`audit_log` table: API key, method, path, request body, response status and body). There is no HTTP endpoint that reads it.
+
+A request that fails authentication has no API key on its row, and what it sent is not trusted: the row keeps the method, the path (cut to 512 bytes, with a marker when cut) and the response (also cut to 512 bytes), but no request body. Those rows are written at a limited rate (a bucket of 50, refilled at 1 per second); beyond it they are not written and the number skipped is logged about once a minute. They are deleted after `ESCROW_GATEWAY_AUDIT_UNAUTHENTICATED_RETENTION` (see [`nhbchain-escrow-gateway.md`](./nhbchain-escrow-gateway.md)). Rows of authenticated requests are written in full and never deleted by the gateway.
+
+The HTTP server limits what a connection may take: 10 seconds to send the request headers, 30 seconds to send the whole request, 60 seconds from the end of the headers to the end of the response, 60 seconds idle, and 16 KiB for the request line and headers together (a larger request gets `431`).

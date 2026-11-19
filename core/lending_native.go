@@ -25,20 +25,18 @@ type lendingNativePayload struct {
 }
 
 func cloneLendingRiskParameters(params lending.RiskParameters) lending.RiskParameters {
-	clone := lending.RiskParameters{
-		MaxLTV:               params.MaxLTV,
-		LiquidationThreshold: params.LiquidationThreshold,
-		LiquidationBonus:     params.LiquidationBonus,
-		CircuitBreakerActive: params.CircuitBreakerActive,
-		DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
-		BorrowCaps:           params.BorrowCaps.Clone(),
-		Oracle:               params.Oracle,
-		Pauses:               params.Pauses,
+	return params.Clone()
+}
+
+// effectiveLendingRiskParameters is what the engine of the block being applied is
+// given: the configured limits from LendingRiskActivationHeight, and before it only
+// what was applied before the gate existed (ledger PL-DC-19).
+func (sp *StateProcessor) effectiveLendingRiskParameters() lending.RiskParameters {
+	params := cloneLendingRiskParameters(sp.lendingParams)
+	if !sp.lendingRiskActive() {
+		return params.WithoutGatedLimits()
 	}
-	if params.OracleAddress.Bytes() != nil {
-		clone.OracleAddress = cloneAddress(params.OracleAddress)
-	}
-	return clone
+	return params
 }
 
 func cloneLendingInterestModel(model *lending.InterestModel) *lending.InterestModel {
@@ -173,6 +171,9 @@ func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lendin
 		return nil, nil, fmt.Errorf("lending: state unavailable")
 	}
 	adapter := sp.lendingStateAdapter(poolID)
+	if err := sp.requireExistingLendingPool(adapter.manager, adapter.poolID); err != nil {
+		return nil, nil, err
+	}
 	if err := adapter.reconcileLegacyPoolState(); err != nil {
 		return nil, nil, err
 	}
@@ -180,7 +181,7 @@ func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lendin
 	if err != nil {
 		return nil, nil, err
 	}
-	engine := lending.NewEngine(cloneAddress(sp.lendingModuleAddr), cloneAddress(sp.lendingCollateralAddr), cloneLendingRiskParameters(sp.lendingParams))
+	engine := lending.NewEngine(cloneAddress(sp.lendingModuleAddr), cloneAddress(sp.lendingCollateralAddr), sp.effectiveLendingRiskParameters())
 	engine.SetPauses(sp.pauses)
 	engine.SetState(adapter)
 	engine.SetPoolID(adapter.poolID)
@@ -189,6 +190,7 @@ func (sp *StateProcessor) lendingEngine(poolID string) (*lending.Engine, *lendin
 	engine.SetProtocolFeeBps(sp.lendingProtocolFeeBps)
 	engine.SetBlockHeight(sp.blockHeight())
 	engine.SetBlockTimestamp(sp.blockTimestamp().Unix())
+	engine.SetAccountingFixes(sp.lendingAccountingFixesActive())
 	engine.SetCollateralRouting(sp.lendingCollateralRouting.Clone())
 	if market != nil {
 		engine.SetDeveloperFee(market.DeveloperFeeBps, market.DeveloperFeeCollector)
@@ -629,6 +631,9 @@ func (a *lendingStateAdapter) reconcileLegacyPoolState() error {
 	if a == nil || a.manager == nil {
 		return fmt.Errorf("lending: state manager unavailable")
 	}
+	if a.legacyPositionsBelongToDefaultPoolOnly() {
+		return nil
+	}
 	done, err := a.manager.LendingLegacyReconciled(a.poolID)
 	if err != nil {
 		return err
@@ -661,6 +666,10 @@ func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*
 			account.Address = addr
 		}
 		return account, nil
+	}
+
+	if a.legacyPositionsBelongToDefaultPoolOnly() {
+		return nil, nil
 	}
 
 	legacyAccount, err := a.manager.GetAccount(addr.Bytes())
@@ -708,10 +717,33 @@ func (a *lendingStateAdapter) reconcileLegacyUserAccount(addr crypto.Address) (*
 	if err := a.manager.LendingPutUserAccount(a.poolID, user); err != nil {
 		return nil, err
 	}
+	if a.processor != nil && a.processor.lendingAccountingFixesActive() {
+		// The position now lives in the pool; clear it from the plain account in the
+		// same step so that no second claim on it can ever be made (PL-EXT-16).
+		legacyAccount.CollateralBalance = big.NewInt(0)
+		legacyAccount.SupplyShares = big.NewInt(0)
+		legacyAccount.DebtPrincipal = big.NewInt(0)
+		legacyAccount.LendingSnapshot.SupplyIndex = big.NewInt(0)
+		legacyAccount.LendingSnapshot.BorrowIndex = big.NewInt(0)
+	}
 	if err := a.manager.PutAccount(addr.Bytes(), legacyAccount); err != nil {
 		return nil, err
 	}
 	return user, nil
+}
+
+// legacyPositionsBelongToDefaultPoolOnly reports whether this pool takes no
+// lending positions recorded on plain accounts. Those fields were written when the
+// implicit default pool was the only pool, so from the accounting-fixes height it
+// is the only pool that takes them; any other pool, which an ordinary signed
+// transaction can create, finds nothing and does no sweep (PL-EXT-16, and the
+// per-pool sweep of PL-R5T-13). Before the height every pool takes a copy, as in
+// every earlier release.
+func (a *lendingStateAdapter) legacyPositionsBelongToDefaultPoolOnly() bool {
+	if a == nil || a.processor == nil || !a.processor.lendingAccountingFixesActive() {
+		return false
+	}
+	return a.poolID != defaultLendingPoolID
 }
 
 func (a *lendingStateAdapter) defaultMarket() *lending.Market {
@@ -1002,6 +1034,11 @@ func (sp *StateProcessor) applyLendingCreatePoolTransaction(tx *types.Transactio
 	}
 
 	manager := nhbstate.NewManager(sp.Trie)
+	// From the pool limits height: the lending pause, the shape of the id and the
+	// number of pools are checked first (PL-R5T-13); nothing before it.
+	if err := sp.checkLendingPoolCreation(manager, poolID); err != nil {
+		return err
+	}
 	if existing, ok, err := manager.LendingGetMarket(poolID); err != nil {
 		return fmt.Errorf("lendingCreatePool: check existing pool: %w", err)
 	} else if ok && existing != nil {

@@ -283,6 +283,140 @@ type StateProcessor struct {
 	// default) keeps the transaction hash as the ID at every height. See
 	// SetLendingFixedTermIDActivationHeight.
 	lendingFixedTermIDFromHeight uint64
+	// nhbSupplyGenesisCorrectionFromHeight is the first block height at which
+	// the NHB supply counter is raised by the part of the genesis allocation it
+	// never counted (PL-R1-SUPPLY90K). Zero (the default) leaves the counter as
+	// it is at every height. See SetNHBSupplyGenesisCorrectionActivationHeight.
+	nhbSupplyGenesisCorrectionFromHeight uint64
+	// transferMonthlyFreeTierFromHeight is the first block height at which a
+	// sender's first transferMonthlyFreeTierTxPerMonth plain transfers each UTC
+	// calendar month pay no transfer fee (PL-CLM-02). Zero (the default) leaves
+	// the rule as it was at every height. See SetTransferMonthlyFreeTier.
+	transferMonthlyFreeTierFromHeight uint64
+	// transferMonthlyFreeTierTxPerMonth is the count that tier waives per sender
+	// per month; with a zero height it has no effect.
+	transferMonthlyFreeTierTxPerMonth uint64
+	// loyaltyBudgetFloorFromHeight is the first block height at which the
+	// base-reward daily budget has a floor of loyaltyBudgetFloorWei, limited to
+	// the existing daily USD cap (PL-CLM-02). Zero (the default) leaves the
+	// budget as it was at every height. See SetLoyaltyBudgetFloor.
+	loyaltyBudgetFloorFromHeight uint64
+	loyaltyBudgetFloorWei        *big.Int
+	// potsoGovernanceWeightFromHeight is the first block height at which the weight
+	// snapshot governance reads is built separately from the one that pays
+	// rewards: delegated stake counted for its owner, and a snapshot every epoch
+	// (PL-CLM-04). Zero (the default) leaves governance reading the rewards'
+	// snapshot at every height. See SetPotsoGovernanceWeights.
+	potsoGovernanceWeightFromHeight uint64
+	// validatorFlagNonceFromHeight is the first block height at which the sender nonce is consumed by a validator register or deregister that carries no value applies (zero, the default,
+	// is off at every height). See SetValidatorFlagNonceActivationHeight.
+	validatorFlagNonceFromHeight uint64
+	// mintRunningChainIDFromHeight is the first block height at which a mint voucher that names the running chain's id is accepted applies (zero, the default,
+	// is off at every height). See SetMintRunningChainIDActivationHeight.
+	mintRunningChainIDFromHeight uint64
+	// mintPhaseERetireFromHeight is the first block height at which a mint voucher that names the retired Phase E chain id is refused applies (zero, the default,
+	// is off at every height). See SetMintPhaseEChainIDRetireHeight.
+	mintPhaseERetireFromHeight uint64
+	// txNetworkChainIDFromHeight is the first block height at which a transaction must carry the network's own chain id instead of the shared legacy one applies (zero, the default,
+	// is off at every height). See SetTxNetworkChainIDActivationHeight.
+	txNetworkChainIDFromHeight uint64
+	// voteChainBindingFromHeight is the first block height at which consensus votes, quorum certificates and equivocation proofs are signed over the genesis hash applies (zero, the default,
+	// is off at every height). See SetVoteChainBindingActivationHeight.
+	voteChainBindingFromHeight uint64
+	// genesisHash is the network's genesis hash, which the vote binding signs over. See SetGenesisHash.
+	genesisHash []byte
+	// validatorRules are the chain rules of the validator-set, slashing and staking
+	// package, each off at zero (see ValidatorRules). Carried by Copy.
+	validatorRules ValidatorRules
+	// lendingFeeWithdrawFromHeight is the first block height of the LendingFeeWithdrawActivationHeight rule
+	// (see SetLendingFeeWithdrawActivationHeight). Zero, the default, leaves it off at every height.
+	lendingFeeWithdrawFromHeight uint64
+	// lendingRiskFromHeight is the first block height of the LendingRiskActivationHeight rule
+	// (see SetLendingRiskActivationHeight). Zero, the default, leaves it off at every height.
+	lendingRiskFromHeight uint64
+	// lendingRefPriceMaxAge is how long before the block time a reference-price bundle may be dated once the guards are active
+	// (see SetLendingRefPriceMaxAgeSeconds). Zero means no such check.
+	lendingRefPriceMaxAge uint64
+	// lendingRefPriceMaxAhead is how far after the block time a reference-price bundle may be dated once the guards are active
+	// (see SetLendingRefPriceMaxAheadSeconds). Zero means no such check.
+	lendingRefPriceMaxAhead uint64
+	// lendingRefPriceGuardsFromHeight is the first block height of the LendingRefPriceGuardsActivationHeight rule
+	// (see SetLendingRefPriceGuardsActivationHeight). Zero, the default, leaves it off at every height.
+	lendingRefPriceGuardsFromHeight uint64
+	// lendingPoolIDMaxLength is the longest pool id that may be created once the pool
+	// limits are active (see SetLendingPoolIDMaxLength). Zero, the default, means no limit.
+	lendingPoolIDMaxLength uint64
+	// lendingMaxPools is the most pools that may exist once the pool limits are active
+	// (see SetLendingMaxPools). Zero, the default, means no limit.
+	lendingMaxPools uint64
+	// lendingPoolLimitsFromHeight is the first block height of the LendingPoolLimitsActivationHeight rule
+	// (see SetLendingPoolLimitsActivationHeight). Zero, the default, leaves it off at every height.
+	lendingPoolLimitsFromHeight uint64
+	// lendingAccountingFixesFromHeight is the first block height of the LendingAccountingFixesActivationHeight rule
+	// (see SetLendingAccountingFixesActivationHeight). Zero, the default, leaves it off at every height.
+	lendingAccountingFixesFromHeight uint64
+	// paymasterSponsorBindingFromHeight is the first block height at which a
+	// sponsor's signature must be over the digest bound to the sender (PL-R5T-22).
+	// Zero (the default) keeps the check on tx.Hash() at every height. See
+	// SetPaymasterSponsorBinding.
+	paymasterSponsorBindingFromHeight uint64
+	// loyaltyPaymasterConsentFromHeight is the first block height at which a loyalty
+	// program reward is paid only out of a wallet with a standing record of consent
+	// (PL-R5T-15). Zero (the default) keeps the older behaviour at every height. See
+	// SetLoyaltyPaymasterConsent.
+	loyaltyPaymasterConsentFromHeight uint64
+	// loyaltyCounterpartyCapFromHeight and loyaltyCounterpartyCapWei are the first
+	// block height from which the base-reward path applies a per-pair daily cap when
+	// the stored loyalty configuration sets none, and that cap (PL-EXT-17). Zero
+	// height (the default) leaves the rule as it is. See SetLoyaltyCounterpartyCap.
+	loyaltyCounterpartyCapFromHeight uint64
+	loyaltyCounterpartyCapWei        *big.Int
+	// buybackMinAskFromHeight and buybackMinAskWei are the first block height from
+	// which the smallest treasury buyback ask is buybackMinAskWei instead of one ZNHB,
+	// and that amount (PL-R5T-33). Zero height (the default) keeps the fixed minimum.
+	// See SetBuybackMinAsk.
+	buybackMinAskFromHeight uint64
+	buybackMinAskWei        *big.Int
+	// subsPauseSettleFromHeight is the first block height at which the per-block
+	// subscription settlement does nothing while the subscriptions module is paused
+	// (PL-R5T-81). Zero (the default) keeps it running through a pause. See
+	// SetSubscriptionsPauseSettlement.
+	subsPauseSettleFromHeight uint64
+	// bridge and amm are the chain rules of the ZNHB bridge escrow and of the native ZNHB/NHB pool
+	// (ledger PL-BC-C, PL-BC-B). Zero values are off at every height. Carried by Copy.
+	bridge BridgeSettings
+	amm    AmmSettings
+	// buybackUnpriceableRefundFromHeight is the first block height of the BuybackUnpriceableEpochRefundActivationHeight rule (see SetBuybackUnpriceableEpochRefund).
+	// Zero, the default, leaves it off at every height.
+	buybackUnpriceableRefundFromHeight uint64
+	// swapVoucherSignedBudgetFromHeight is the first block height of the SwapVoucherSignedBudgetActivationHeight rule (see SetSwapVoucherSignedBudget).
+	// Zero, the default, leaves it off at every height.
+	swapVoucherSignedBudgetFromHeight uint64
+	// sponsoredFeeCreditFromHeight is the first block height of the SponsoredTransferFeeCreditActivationHeight rule (see SetSponsoredTransferFeeCredit).
+	// Zero, the default, leaves it off at every height.
+	sponsoredFeeCreditFromHeight uint64
+	// uniformFeeFromHeight is the first block height of the UniformTransferFeeActivationHeight rule (see SetUniformTransferFee). Zero, the default, leaves the domain fee as it is at every height.
+	uniformFeeFromHeight uint64
+	// feeGovFromHeight and feeGovDelayBlocks carry the TransferFeeGovernanceActivationHeight rule and its delay (see SetTransferFeeGovernance). Zero for the height, the default, leaves the configured fees in force and the proposal kind unavailable.
+	feeGovFromHeight  uint64
+	feeGovDelayBlocks uint64
+	// strictAllowanceFromHeight is the first block height of the TransferFeeStrictAllowanceActivationHeight rule (see SetTransferFeeStrictAllowance). Zero, the default, leaves the whole-transfer allowance at every height.
+	strictAllowanceFromHeight uint64
+	// subsChargeMigrationFromHeight is the first block height from which charge history
+	// under the old key is read through and migrated (PL-R5T-82). Zero (the default)
+	// keeps the newer layout alone. See SetSubscriptionsChargeHistoryMigration.
+	subsChargeMigrationFromHeight uint64
+	// buybackPriceGuardFromHeight is the first block height at which governance
+	// refuses a buyback discount or safety margin that would make the highest
+	// buyback price zero (PL-EXT-28). Zero (the default) leaves governance as it
+	// was at every height. See SetBuybackPriceGuard.
+	buybackPriceGuardFromHeight uint64
+	// epochSettlementFailsafeFromHeight is the first block height at which an
+	// epoch settlement that cannot use the buyback price, or whose reward payout
+	// the admin wallet's liquid ZNHB cannot cover, degrades instead of failing the
+	// block (PL-EXT-28, PL-EXT-29 item E-1b). Zero (the default) leaves the
+	// settlement as it was at every height. See SetEpochSettlementFailsafe.
+	epochSettlementFailsafeFromHeight uint64
 }
 
 func NewStateProcessor(tr *trie.Trie) (*StateProcessor, error) {
@@ -593,87 +727,9 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		default:
 			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
 		}
-		// A share of NHB-denominated fee revenue funds the treasury buyback
-		// engine's accrual account (core/tokenomics/buyback) instead of
-		// going entirely to the domain's OwnerWallet. This is a no-op
-		// (buybackShare stays zero) unless a real buyback signer quorum was
-		// configured at genesis -- see SetBuybackConfig/hasBuybackConfig --
-		// so it changes nothing for any node that hasn't opted in.
-		// FeeShareBps is read live from the governance param store (a passed
-		// policy.buybackParams proposal), falling back to the genesis
-		// default when ungoverned -- see effectiveBuybackConfig.
-		ownerShare := new(big.Int).Set(routed)
-		buybackShare := big.NewInt(0)
-		if result.Asset == fees.AssetNHB && sp.hasBuybackConfig && sp.buybackAccrualAddr.Bytes() != nil {
-			feeShareBps := sp.effectiveBuybackConfig(manager).FeeShareBps
-			if feeShareBps > 0 {
-				buybackShare = new(big.Int).Mul(routed, big.NewInt(int64(feeShareBps)))
-				buybackShare.Div(buybackShare, big.NewInt(buyback.SplitDenominator))
-				ownerShare = new(big.Int).Sub(routed, buybackShare)
-			}
-		}
-		// The transfer's own sender/recipient accounts (fromAcc/toAcc) are
-		// still unpersisted objects in the caller -- applyTransferZNHB and the
-		// NHB transfer path each write them back only after this function
-		// returns. So when the domain-fee route wallet IS the sender or the
-		// recipient of this same transfer, the credit below must land on that
-		// same object, not on a separately loaded copy: a separate copy would
-		// hold the pre-transfer balance and be silently overwritten by the
-		// caller's later write, destroying the fee. The ZNHB half of this has
-		// been in force at every height since before PL-R1-FEEROUTE; the NHB
-		// half changes the state root of any past NHB transfer whose route
-		// wallet was its own sender or recipient, so it is gated by
-		// sp.feeRouteAliasActivationHeight -- see
-		// SetFeeRouteAliasActivationHeight's doc comment. Below that height an
-		// NHB fee falls through to sp.getAccount below, exactly as it always
-		// has.
-		var routeAcc *types.Account
-		if result.Asset == fees.AssetZNHB || sp.blockHeight() >= sp.feeRouteAliasActivationHeight {
-			switch {
-			case fromAcc != nil && bytes.Equal(result.OwnerWallet[:], sender):
-				routeAcc = fromAcc
-			case toAcc != nil && bytes.Equal(result.OwnerWallet[:], tx.To):
-				routeAcc = toAcc
-			}
-		}
-		if routeAcc == nil {
-			routeAcc, err = sp.getAccount(result.OwnerWallet[:])
-			if err != nil {
-				return err
-			}
-		}
-		switch result.Asset {
-		case fees.AssetNHB:
-			if routeAcc.BalanceNHB == nil {
-				routeAcc.BalanceNHB = big.NewInt(0)
-			}
-			routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, ownerShare)
-		case fees.AssetZNHB:
-			if routeAcc.BalanceZNHB == nil {
-				routeAcc.BalanceZNHB = big.NewInt(0)
-			}
-			routeAcc.BalanceZNHB.Add(routeAcc.BalanceZNHB, ownerShare)
-		default:
-			return fmt.Errorf("fees: unsupported asset %s", result.Asset)
-		}
-		if err := sp.setAccount(result.OwnerWallet[:], routeAcc); err != nil {
+		// The route credit and the buyback split are shared with the uniform fee path (creditDomainFee).
+		if err := sp.creditDomainFee(manager, result.Asset, routed, result.OwnerWallet, sender, tx.To, fromAcc, toAcc); err != nil {
 			return err
-		}
-		if buybackShare.Sign() > 0 {
-			accrualAcc, err := sp.getAccount(sp.buybackAccrualAddr.Bytes())
-			if err != nil {
-				return fmt.Errorf("fees: load buyback accrual account: %w", err)
-			}
-			if accrualAcc.BalanceNHB == nil {
-				accrualAcc.BalanceNHB = big.NewInt(0)
-			}
-			accrualAcc.BalanceNHB.Add(accrualAcc.BalanceNHB, buybackShare)
-			if err := sp.setAccount(sp.buybackAccrualAddr.Bytes(), accrualAcc); err != nil {
-				return fmt.Errorf("fees: persist buyback accrual account: %w", err)
-			}
-			if err := manager.ZNHBSetBuybackAccrualBalance(new(big.Int).Set(accrualAcc.BalanceNHB)); err != nil {
-				return fmt.Errorf("fees: update buyback accrual ledger: %w", err)
-			}
 		}
 	}
 	sp.AppendEvent(events.FeeApplied{
@@ -692,6 +748,114 @@ func (sp *StateProcessor) applyTransactionFee(tx *types.Transaction, sender []by
 		WindowStart:       result.WindowStart,
 		FeeBasisPoints:    result.FeeBasisPoints,
 	}.Event())
+	return nil
+}
+
+// creditDomainFee credits a domain fee that has already been debited from its payer: the
+// buyback share (NHB only, when the treasury buyback is configured) to the accrual account and
+// the rest to the domain's route wallet. fromAcc and toAcc are the transfer's own, still
+// unpersisted accounts; a route wallet or accrual account that is one of them is credited on
+// that object (see the comments below).
+func (sp *StateProcessor) creditDomainFee(manager *nhbstate.Manager, asset string, routed *big.Int, ownerWallet [20]byte, sender, recipient []byte, fromAcc, toAcc *types.Account) error {
+	var err error
+	// A share of NHB-denominated fee revenue funds the treasury buyback
+	// engine's accrual account (core/tokenomics/buyback) instead of
+	// going entirely to the domain's OwnerWallet. This is a no-op
+	// (buybackShare stays zero) unless a real buyback signer quorum was
+	// configured at genesis -- see SetBuybackConfig/hasBuybackConfig --
+	// so it changes nothing for any node that hasn't opted in.
+	// FeeShareBps is read live from the governance param store (a passed
+	// policy.buybackParams proposal), falling back to the genesis
+	// default when ungoverned -- see effectiveBuybackConfig.
+	ownerShare := new(big.Int).Set(routed)
+	buybackShare := big.NewInt(0)
+	if asset == fees.AssetNHB && sp.hasBuybackConfig && sp.buybackAccrualAddr.Bytes() != nil {
+		feeShareBps := sp.effectiveBuybackConfig(manager).FeeShareBps
+		if feeShareBps > 0 {
+			buybackShare = new(big.Int).Mul(routed, big.NewInt(int64(feeShareBps)))
+			buybackShare.Div(buybackShare, big.NewInt(buyback.SplitDenominator))
+			ownerShare = new(big.Int).Sub(routed, buybackShare)
+		}
+	}
+	// The transfer's own sender/recipient accounts (fromAcc/toAcc) are
+	// still unpersisted objects in the caller -- applyTransferZNHB and the
+	// NHB transfer path each write them back only after this function
+	// returns. So when the domain-fee route wallet IS the sender or the
+	// recipient of this same transfer, the credit below must land on that
+	// same object, not on a separately loaded copy: a separate copy would
+	// hold the pre-transfer balance and be silently overwritten by the
+	// caller's later write, destroying the fee. The ZNHB half of this has
+	// been in force at every height since before PL-R1-FEEROUTE; the NHB
+	// half changes the state root of any past NHB transfer whose route
+	// wallet was its own sender or recipient, so it is gated by
+	// sp.feeRouteAliasActivationHeight -- see
+	// SetFeeRouteAliasActivationHeight's doc comment. Below that height an
+	// NHB fee falls through to sp.getAccount below, exactly as it always
+	// has.
+	var routeAcc *types.Account
+	if asset == fees.AssetZNHB || sp.blockHeight() >= sp.feeRouteAliasActivationHeight {
+		switch {
+		case fromAcc != nil && bytes.Equal(ownerWallet[:], sender):
+			routeAcc = fromAcc
+		case toAcc != nil && bytes.Equal(ownerWallet[:], recipient):
+			routeAcc = toAcc
+		}
+	}
+	if routeAcc == nil {
+		routeAcc, err = sp.getAccount(ownerWallet[:])
+		if err != nil {
+			return err
+		}
+	}
+	switch asset {
+	case fees.AssetNHB:
+		if routeAcc.BalanceNHB == nil {
+			routeAcc.BalanceNHB = big.NewInt(0)
+		}
+		routeAcc.BalanceNHB.Add(routeAcc.BalanceNHB, ownerShare)
+	case fees.AssetZNHB:
+		if routeAcc.BalanceZNHB == nil {
+			routeAcc.BalanceZNHB = big.NewInt(0)
+		}
+		routeAcc.BalanceZNHB.Add(routeAcc.BalanceZNHB, ownerShare)
+	default:
+		return fmt.Errorf("fees: unsupported asset %s", asset)
+	}
+	if err := sp.setAccount(ownerWallet[:], routeAcc); err != nil {
+		return err
+	}
+	if buybackShare.Sign() > 0 {
+		// PL-R5T-59: the accrual account can be the transfer's own sender or
+		// recipient too. From the same height as the fee wallet above, the share
+		// is credited to the object the caller still holds and writes after this
+		// call, not to a copy that write overwrites (which destroyed the share and
+		// left the accrual ledger recording a balance the account did not hold).
+		var accrualAcc *types.Account
+		if sp.blockHeight() >= sp.feeRouteAliasActivationHeight {
+			switch {
+			case fromAcc != nil && bytes.Equal(sp.buybackAccrualAddr.Bytes(), sender):
+				accrualAcc = fromAcc
+			case toAcc != nil && bytes.Equal(sp.buybackAccrualAddr.Bytes(), recipient):
+				accrualAcc = toAcc
+			}
+		}
+		if accrualAcc == nil {
+			accrualAcc, err = sp.getAccount(sp.buybackAccrualAddr.Bytes())
+			if err != nil {
+				return fmt.Errorf("fees: load buyback accrual account: %w", err)
+			}
+		}
+		if accrualAcc.BalanceNHB == nil {
+			accrualAcc.BalanceNHB = big.NewInt(0)
+		}
+		accrualAcc.BalanceNHB.Add(accrualAcc.BalanceNHB, buybackShare)
+		if err := sp.setAccount(sp.buybackAccrualAddr.Bytes(), accrualAcc); err != nil {
+			return fmt.Errorf("fees: persist buyback accrual account: %w", err)
+		}
+		if err := manager.ZNHBSetBuybackAccrualBalance(new(big.Int).Set(accrualAcc.BalanceNHB)); err != nil {
+			return fmt.Errorf("fees: update buyback accrual ledger: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -776,14 +940,15 @@ func (sp *StateProcessor) transferGasWindowKey() string {
 	}
 }
 
-func (sp *StateProcessor) transferGasStatus(sender []byte, asset string) (nhbstate.TransferGasSpendStatus, error) {
+// transferGasStatus reports the sender's free-allowance status against the policy that governs
+// this block (see effectiveTransferGasPolicy), which the caller has already resolved.
+func (sp *StateProcessor) transferGasStatus(sender []byte, asset string, policy TransferGasPolicy) (nhbstate.TransferGasSpendStatus, error) {
 	if sp == nil {
 		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("fees: state unavailable")
 	}
 	if len(sender) != common.AddressLength {
 		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("fees: sender address invalid")
 	}
-	policy := sp.TransferGasPolicy()
 	var wallet [20]byte
 	copy(wallet[:], sender)
 	manager := nhbstate.NewManager(sp.Trie)
@@ -1266,7 +1431,7 @@ func (sp *StateProcessor) SeedGenesisNHBSupplyOnce() error {
 	// as in a test harness that never wires up a real chain id via
 	// SetSwapVoucherChainID -- so this cannot silently regress every
 	// existing test's behavior; a real node's chain id is never zero.
-	if sp.swapVoucherChainID != 0 && sp.swapVoucherChainID != MintChainID {
+	if sp.swapVoucherChainID != 0 && sp.swapVoucherChainID != phaseEChainID {
 		return nil
 	}
 	manager := nhbstate.NewManager(sp.Trie)
@@ -1329,7 +1494,7 @@ func (sp *StateProcessor) ReconcileNHBMintSupplyDriftOnce() error {
 	// NHB-AUDIT-C9: same reasoning as SeedGenesisNHBSupplyOnce's guard --
 	// nhbMintSupplyDriftWei is a fixed historical fact computed for one
 	// specific chain's history and must never apply to a different one.
-	if sp.swapVoucherChainID != 0 && sp.swapVoucherChainID != MintChainID {
+	if sp.swapVoucherChainID != 0 && sp.swapVoucherChainID != phaseEChainID {
 		return nil
 	}
 	manager := nhbstate.NewManager(sp.Trie)
@@ -1354,6 +1519,103 @@ func (sp *StateProcessor) ReconcileNHBMintSupplyDriftOnce() error {
 		"supply_after":  after.String(),
 	}})
 	return manager.MarkNHBMintSupplyDriftReconciled()
+}
+
+// nhbGenesisShortfallChainID is the chain id of the live network, the one chain
+// the amounts below were measured on. The correction applies to no other.
+const nhbGenesisShortfallChainID uint64 = 18346390202490284624
+
+// nhbGenesisAllocWei is the NHB the live network's genesis allocates directly
+// into account state (config/genesis.relaunch.json: one account, 100,000 NHB).
+// Genesis writes balances without ever touching the tracked supply counter
+// (token/supply/NHB), so none of this was counted when the chain started.
+var nhbGenesisAllocWei = func() *big.Int {
+	amount, ok := new(big.Int).SetString("100000000000000000000000", 10)
+	if !ok {
+		panic("nhbGenesisAllocWei: invalid constant")
+	}
+	return amount
+}()
+
+// ReconcileNHBGenesisShortfallOnce raises the tracked NHB supply counter, once,
+// by the part of the genesis allocation it never counted (ledger
+// PL-R1-SUPPLY90K).
+//
+// Root cause. Genesis puts 100,000 NHB straight into account state without
+// calling AdjustTokenSupply, so the counter starts at zero. The binary that
+// produced block 1 on the live network ran SeedGenesisNHBSupplyOnce, whose
+// constant (genesisNHBSupplyWei, 10,000 NHB) belongs to an older network's
+// genesis; it seeded that figure and set the seeded flag. The counter therefore
+// started 90,000 NHB short, and every later mint and burn is tracked, so it has
+// stayed exactly 90,000 NHB short: on the live state at height 2,321,017 the 98
+// account balances sum to 90,709.812525 NHB and the counter reads 709.812525
+// NHB, a difference of 90,000 NHB to the wei. Audit item C9 later gated the seed
+// to the older network's chain id (so a fresh node seeds nothing at all), which
+// left no code anywhere that brings the live counter right. AdjustTokenSupply
+// refuses a burn larger than the counter, so NHB redemptions and swap
+// settlements fail once their cumulative net burn passes the counter.
+//
+// What it does. From nhbSupplyGenesisCorrectionFromHeight (a chain rule, zero
+// keeps it off), on the live chain id only, in the first block that reaches the
+// height, it adds nhbGenesisAllocWei minus what the seed already counted (the
+// seed's genesisNHBSupplyWei when its flag is set, nothing when it is not), and
+// records that it has run. No NHB is created and no balance changes; only the
+// counter catches up with balances that already exist. It runs at the same call
+// sites as the seed, so the block builder, the validator and the commit path
+// agree on the block that crosses the height.
+func (sp *StateProcessor) ReconcileNHBGenesisShortfallOnce() error {
+	if sp == nil || sp.nhbSupplyGenesisCorrectionFromHeight == 0 {
+		return nil
+	}
+	if sp.blockHeight() < sp.nhbSupplyGenesisCorrectionFromHeight {
+		return nil
+	}
+	// Fails closed: an unset chain id is not the live chain.
+	if sp.swapVoucherChainID != nhbGenesisShortfallChainID {
+		return nil
+	}
+	manager := nhbstate.NewManager(sp.Trie)
+	corrected, err := manager.NHBGenesisShortfallCorrected()
+	if err != nil {
+		return fmt.Errorf("nhb: check genesis shortfall flag: %w", err)
+	}
+	if corrected {
+		return nil
+	}
+	seeded, err := manager.NHBSupplyGenesisSeeded()
+	if err != nil {
+		return fmt.Errorf("nhb: check genesis supply seed flag: %w", err)
+	}
+	delta := new(big.Int).Set(nhbGenesisAllocWei)
+	if seeded {
+		delta.Sub(delta, genesisNHBSupplyWei)
+	}
+	before, err := manager.TokenSupply("NHB")
+	if err != nil {
+		return fmt.Errorf("nhb: load token supply: %w", err)
+	}
+	after, err := manager.AdjustTokenSupply("NHB", delta)
+	if err != nil {
+		return fmt.Errorf("nhb: correct genesis supply shortfall: %w", err)
+	}
+	sp.recordTokenSupplyChange("NHB", delta, after, events.SupplyReasonGenesisCorrection)
+	sp.AppendEvent(&types.Event{Type: "nhb.supply_genesis_shortfall_corrected", Attributes: map[string]string{
+		"corrected_amount": delta.String(),
+		"supply_before":    before.String(),
+		"supply_after":     after.String(),
+	}})
+	return manager.MarkNHBGenesisShortfallCorrected()
+}
+
+// SetNHBSupplyGenesisCorrectionActivationHeight sets the first block height at
+// which ReconcileNHBGenesisShortfallOnce raises the NHB supply counter. Zero, the
+// default, leaves the counter alone at every height. A chain rule: the same value
+// on every validator, chosen above the chain tip, all restarted together.
+func (sp *StateProcessor) SetNHBSupplyGenesisCorrectionActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.nhbSupplyGenesisCorrectionFromHeight = height
 }
 
 // stakeDelegationBackfillSeed lists (delegator, validator) pairs known to
@@ -1912,7 +2174,7 @@ func (sp *StateProcessor) EndBlockRewards(now time.Time) {
 		return
 	}
 
-	budget, fallback, err := manager.GetRemainingDailyBudgetZNHB(now)
+	budget, fallback, err := manager.GetRemainingDailyBudgetZNHBWithFloor(now, sp.loyaltyBudgetFloorAtHeight(sp.blockHeight()))
 	if err != nil {
 		sp.blockCtx.PendingRewards.ClearPendingRewards()
 		return
@@ -2273,8 +2535,12 @@ func (sp *StateProcessor) PotsoRewardConfig() potso.RewardConfig {
 }
 
 // SetPotsoRewardConfig replaces the POTSO reward distribution configuration.
+// It refuses the claim payout mode, see potso.RewardConfig.CheckPayoutModeAvailable.
 func (sp *StateProcessor) SetPotsoRewardConfig(cfg potso.RewardConfig) error {
 	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := cfg.CheckPayoutModeAvailable(); err != nil {
 		return err
 	}
 	sp.potsoRewardConfig = clonePotsoRewardConfig(cfg)
@@ -2503,7 +2769,11 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 	}
 	treasuryBalance := new(big.Int).Set(treasuryAcc.BalanceZNHB)
 	budget := new(big.Int).Set(emission)
-	if treasuryBalance.Cmp(budget) < 0 {
+	// From the activation height the budget is the emission, uncapped by the treasury, so
+	// the shortfall check below can fire; before it, the budget is capped at the treasury
+	// balance, which made that check unreachable (PL-DC-29).
+	shortfallRule := ruleActiveAt(sp.validatorRules.PotsoTreasuryShortfallActivationHeight, sp.blockHeight())
+	if !shortfallRule && treasuryBalance.Cmp(budget) < 0 {
 		budget = new(big.Int).Set(treasuryBalance)
 	}
 
@@ -2514,10 +2784,29 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		return err
 	}
 
+	// Governance's own snapshot (PL-CLM-04, off unless configured): delegated stake
+	// counted for its owner, and one every epoch, whether or not the epoch had a
+	// reward budget. See governanceWeightSnapshot.
+	var governanceStored *potso.StoredWeightSnapshot
+	if sp.potsoGovernanceWeightActive() {
+		governanceStored, err = sp.governanceWeightSnapshot(manager, epochNumber, snapshot.Entries, weightCfg)
+		if err != nil {
+			return err
+		}
+	}
+
+	if outcome.WeightSnapshot == nil && governanceStored != nil {
+		if err := manager.SetSnapshotPotsoWeights(epochNumber, governanceStored); err != nil {
+			return err
+		}
+	}
 	if outcome.WeightSnapshot != nil {
 		stored := outcome.WeightSnapshot.ToStored()
 		if err := manager.PotsoMetricsSetSnapshot(epochNumber, stored); err != nil {
 			return err
+		}
+		if governanceStored != nil {
+			stored = governanceStored
 		}
 		// Governance (CastVote) reads voting power from this key, keyed by
 		// the exact same epoch number PotsoRewardsSetLastProcessedEpoch
@@ -2527,6 +2816,35 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		if err := manager.SetSnapshotPotsoWeights(epochNumber, stored); err != nil {
 			return err
 		}
+	}
+
+	// A treasury that cannot cover what the epoch would pay is found before anything is
+	// written, and the epoch degrades to a recorded zero payout: no winners, no claims, no
+	// debit. It must not be an error: this runs from the block lifecycle on every block, an
+	// error aborts the block, and an epoch is only marked processed after a successful
+	// call, so a shortfall would retry on every later block and halt the chain. Every input
+	// is on-chain state, so every validator reaches the same verdict (PL-DC-29).
+	shortfall := false
+	if shortfallRule && outcome.TotalPaid.Sign() > 0 && treasuryBalance.Cmp(outcome.TotalPaid) < 0 {
+		shortfall = true
+		slog.Error("potso: reward epoch underfunded, payout skipped",
+			slog.Uint64("epoch", epochNumber),
+			slog.String("required", outcome.TotalPaid.String()),
+			slog.String("available", treasuryBalance.String()),
+			slog.String("emission", emission.String()),
+		)
+		if evt := (events.PotsoRewardShortfall{
+			Epoch:     epochNumber,
+			Required:  new(big.Int).Set(outcome.TotalPaid),
+			Available: new(big.Int).Set(treasuryBalance),
+			Budget:    new(big.Int).Set(outcome.Budget),
+			Emission:  new(big.Int).Set(emission),
+		}).Event(); evt != nil {
+			sp.AppendEvent(evt)
+		}
+		outcome.Winners = nil
+		outcome.TotalPaid = big.NewInt(0)
+		outcome.Remainder = new(big.Int).Set(outcome.Budget)
 	}
 
 	winnersAddrs := make([][20]byte, 0, len(outcome.Winners))
@@ -2659,6 +2977,7 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 		TotalPaid:       new(big.Int).Set(outcome.TotalPaid),
 		Remainder:       new(big.Int).Set(outcome.Remainder),
 		Winners:         uint64(len(outcome.Winners)),
+		Shortfall:       shortfall,
 	}
 	if err := manager.PotsoRewardsSetMeta(epochNumber, meta); err != nil {
 		return err
@@ -2874,6 +3193,49 @@ func (sp *StateProcessor) Copy() (*StateProcessor, error) {
 		posHoldUnstakeGuardFromHeight: sp.posHoldUnstakeGuardFromHeight,
 		lendingFixedTermIDFromHeight:  sp.lendingFixedTermIDFromHeight,
 
+		nhbSupplyGenesisCorrectionFromHeight: sp.nhbSupplyGenesisCorrectionFromHeight,
+		transferMonthlyFreeTierFromHeight:    sp.transferMonthlyFreeTierFromHeight,
+		transferMonthlyFreeTierTxPerMonth:    sp.transferMonthlyFreeTierTxPerMonth,
+		loyaltyBudgetFloorFromHeight:         sp.loyaltyBudgetFloorFromHeight,
+		loyaltyBudgetFloorWei:                cloneBigInt(sp.loyaltyBudgetFloorWei),
+		potsoGovernanceWeightFromHeight:      sp.potsoGovernanceWeightFromHeight,
+		validatorFlagNonceFromHeight:         sp.validatorFlagNonceFromHeight,
+		mintRunningChainIDFromHeight:         sp.mintRunningChainIDFromHeight,
+		mintPhaseERetireFromHeight:           sp.mintPhaseERetireFromHeight,
+		txNetworkChainIDFromHeight:           sp.txNetworkChainIDFromHeight,
+		voteChainBindingFromHeight:           sp.voteChainBindingFromHeight,
+		genesisHash:                          append([]byte(nil), sp.genesisHash...),
+		validatorRules:                       sp.validatorRules,
+		lendingFeeWithdrawFromHeight:         sp.lendingFeeWithdrawFromHeight,
+		lendingRiskFromHeight:                sp.lendingRiskFromHeight,
+		lendingRefPriceMaxAge:                sp.lendingRefPriceMaxAge,
+		lendingRefPriceMaxAhead:              sp.lendingRefPriceMaxAhead,
+		lendingRefPriceGuardsFromHeight:      sp.lendingRefPriceGuardsFromHeight,
+		lendingPoolIDMaxLength:               sp.lendingPoolIDMaxLength,
+		lendingMaxPools:                      sp.lendingMaxPools,
+		lendingPoolLimitsFromHeight:          sp.lendingPoolLimitsFromHeight,
+		lendingAccountingFixesFromHeight:     sp.lendingAccountingFixesFromHeight,
+		paymasterSponsorBindingFromHeight:    sp.paymasterSponsorBindingFromHeight,
+		loyaltyPaymasterConsentFromHeight:    sp.loyaltyPaymasterConsentFromHeight,
+		loyaltyCounterpartyCapFromHeight:     sp.loyaltyCounterpartyCapFromHeight,
+		loyaltyCounterpartyCapWei:            cloneBigInt(sp.loyaltyCounterpartyCapWei),
+		buybackMinAskFromHeight:              sp.buybackMinAskFromHeight,
+		subsPauseSettleFromHeight:            sp.subsPauseSettleFromHeight,
+		bridge:                               sp.bridge.clone(),
+		amm:                                  sp.amm.clone(),
+		buybackUnpriceableRefundFromHeight:   sp.buybackUnpriceableRefundFromHeight,
+		swapVoucherSignedBudgetFromHeight:    sp.swapVoucherSignedBudgetFromHeight,
+		sponsoredFeeCreditFromHeight:         sp.sponsoredFeeCreditFromHeight,
+		uniformFeeFromHeight:                 sp.uniformFeeFromHeight,
+		feeGovFromHeight:                     sp.feeGovFromHeight,
+		feeGovDelayBlocks:                    sp.feeGovDelayBlocks,
+		strictAllowanceFromHeight:            sp.strictAllowanceFromHeight,
+		subsChargeMigrationFromHeight:        sp.subsChargeMigrationFromHeight,
+		buybackMinAskWei:                     cloneBigInt(sp.buybackMinAskWei),
+		buybackPriceGuardFromHeight:          sp.buybackPriceGuardFromHeight,
+
+		epochSettlementFailsafeFromHeight: sp.epochSettlementFailsafeFromHeight,
+
 		// A field left out of this literal is zero on the copy, which for these
 		// two (the default is math.MaxUint64, off) would switch the fix on from
 		// height 0 on every copy a block is built, validated or committed on.
@@ -2926,7 +3288,8 @@ func (sp *StateProcessor) executeTransaction(tx *types.Transaction) (*Simulation
 		// transaction.
 		return nil, fmt.Errorf("nil transaction")
 	}
-	if !types.IsValidChainID(tx.ChainID) {
+	// PL-R5T-29: the legacy shared constant, or from the configured height the network's own id.
+	if !sp.txChainIDAccepted(tx.ChainID, sp.blockHeight()) {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidChainID, tx.ChainID)
 	}
 	// NHB-AUDIT-R2: MaxBlockHeight/IntentExpiry were only ever checked once,
@@ -3188,6 +3551,13 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 
 	// Fast-path native transfer
 	if isTransfer {
+		// From TransferFeeGovernanceActivationHeight the rates and the allowance are the
+		// governed schedule in force at this height; below it, the configured values.
+		governedPolicy, err := sp.effectiveTransferGasPolicy()
+		if err != nil {
+			return nil, err
+		}
+		transferGasPolicy = governedPolicy
 		assessment, err := sp.EvaluateSponsorship(tx)
 		if err != nil {
 			return nil, err
@@ -3247,12 +3617,34 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		gasCost := transferGasPolicy.ComputeFee("NHB", tx.Value)
 		freeTransferGas := false
 		if sponsorshipCtx == nil && transferGasPolicy.Enabled {
-			status, err := sp.transferGasStatus(from, "NHB")
+			status, err := sp.transferGasStatus(from, "NHB", transferGasPolicy)
 			if err != nil {
 				return nil, err
 			}
-			freeTransferGas = status.Eligible
+			if sp.strictAllowanceActive() {
+				// Strict allowance: the fee is on the part above what is left of the allowance.
+				_, chargeable, strictFee := transferGasPolicy.FeeWithAllowance("NHB", tx.Value, status.Remaining, true)
+				gasCost = strictFee
+				freeTransferGas = chargeable.Sign() == 0
+			} else {
+				freeTransferGas = status.Eligible
+			}
 		}
+		// Monthly free tier (PL-CLM-02, off unless configured): a sender's first
+		// N plain transfers each month pay no fee, on top of the spend allowance
+		// above. A sponsored transfer's fee is the paymaster's, not the sender's.
+		if sponsorshipCtx == nil && !freeTransferGas {
+			inTier, err := sp.transferMonthlyFreeTierEligible(from)
+			if err != nil {
+				return nil, err
+			}
+			freeTransferGas = inTier
+		}
+		// A transfer that names a fee domain, from UniformTransferFeeActivationHeight, pays
+		// this same fee and nothing more; the fee goes to the domain's route wallet when it
+		// has one (and no sponsor pays it), instead of to the fee collector.
+		uniform := sp.uniformFeeRouting(tx, fees.AssetNHB)
+		uniformRouted := uniform != nil && sponsorshipCtx == nil && !freeTransferGas && gasCost.Sign() > 0 && !isZeroAddress(uniform.route)
 		totalRequired := new(big.Int).Set(tx.Value)
 		if sponsorshipCtx == nil && !freeTransferGas {
 			totalRequired.Add(totalRequired, gasCost)
@@ -3281,7 +3673,15 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 
 		recipientAccount.BalanceNHB.Add(recipientAccount.BalanceNHB, originalValue)
 
-		if err := sp.applyTransactionFee(tx, from, fromAcc, recipientAccount); err != nil {
+		if uniform != nil {
+			charged := big.NewInt(0)
+			if sponsorshipCtx == nil && !freeTransferGas {
+				charged = gasCost
+			}
+			if err := sp.applyUniformDomainFee(tx, from, fromAcc, recipientAccount, uniform, fees.AssetNHB, charged, uniformRouted, transferGasPolicy.FeeBpsForAsset(fees.AssetNHB)); err != nil {
+				return nil, err
+			}
+		} else if err := sp.applyTransactionFee(tx, from, fromAcc, recipientAccount); err != nil {
 			return nil, err
 		}
 		if sponsorshipCtx != nil && len(tx.Paymaster) > 0 {
@@ -3309,7 +3709,11 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 				return nil, fmt.Errorf("%w: status=%s reason=%s", ErrSponsorshipRejected, SponsorshipStatusInsufficientBalance, "paymaster balance below required gas budget")
 			}
 			sponsorAcc.BalanceNHB.Sub(sponsorAcc.BalanceNHB, gasCost)
-			if transferGasPolicy.Enabled {
+			// The fee taken from the sponsor is credited while the transfer gas policy is
+			// enabled and, from SponsoredTransferFeeCreditActivationHeight, whenever it is
+			// positive: with the policy disabled (a zero free tier) it used to be destroyed
+			// (PL-EXT-38).
+			if sp.sponsoredTransferFeeCredited(transferGasPolicy.Enabled, gasCost) {
 				// The fee collector is subject to the same rule as the sponsor:
 				// when it is the sender or the recipient the credit goes to the
 				// object persisted below, not to a copy that write overwrites.
@@ -3351,7 +3755,7 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 			if paymasterTopUp != nil {
 				paymasterTopUp.Finalize(sp)
 			}
-		} else if !freeTransferGas && gasCost.Sign() > 0 {
+		} else if !freeTransferGas && gasCost.Sign() > 0 && !uniformRouted {
 			// Always credit the fee collector when a fee was actually
 			// debited from the sender above (see the `!freeTransferGas`
 			// debit a few lines up), regardless of
@@ -3393,6 +3797,11 @@ func (sp *StateProcessor) applyEvmTransaction(tx *types.Transaction) (*Simulatio
 		}
 		if err := sp.recordTransferGasSpend(from, tx.Value, "NHB"); err != nil {
 			return nil, err
+		}
+		if sponsorshipCtx == nil {
+			if err := sp.recordTransferMonthlyFreeTierUse(from); err != nil {
+				return nil, err
+			}
 		}
 
 		if txHashReady {
@@ -3742,19 +4151,41 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	// mechanism as applyEvmTransaction's transfer fast path, tracked under
 	// its own asset-scoped spend counter since NHB and ZNHB are not
 	// fungible for this purpose) -- see docs/issue30.md item 7b.
-	transferGasPolicy := sp.TransferGasPolicy()
+	transferGasPolicy, err := sp.effectiveTransferGasPolicy()
+	if err != nil {
+		return nil, err
+	}
 	gasCost := transferGasPolicy.ComputeFee("ZNHB", amount)
 	freeTransferGas := false
 	if transferGasPolicy.Enabled {
-		status, err := sp.transferGasStatus(sender, "ZNHB")
+		status, err := sp.transferGasStatus(sender, "ZNHB", transferGasPolicy)
 		if err != nil {
 			return nil, err
 		}
-		freeTransferGas = status.Eligible
+		if sp.strictAllowanceActive() {
+			// Strict allowance: the fee is on the part above what is left of the allowance.
+			_, chargeable, strictFee := transferGasPolicy.FeeWithAllowance("ZNHB", amount, status.Remaining, true)
+			gasCost = strictFee
+			freeTransferGas = chargeable.Sign() == 0
+		} else {
+			freeTransferGas = status.Eligible
+		}
+	}
+	// Monthly free tier (PL-CLM-02, off unless configured); see the NHB path.
+	if !freeTransferGas {
+		inTier, err := sp.transferMonthlyFreeTierEligible(sender)
+		if err != nil {
+			return nil, err
+		}
+		freeTransferGas = inTier
 	}
 	if freeTransferGas {
 		gasCost = big.NewInt(0)
 	}
+	// Under the uniform rule a transfer that names a fee domain pays this same fee and
+	// nothing more, and the fee goes to the domain's route wallet when it has one.
+	uniform := sp.uniformFeeRouting(tx, fees.AssetZNHB)
+	uniformRouted := uniform != nil && gasCost.Sign() > 0 && !isZeroAddress(uniform.route)
 	totalRequired := new(big.Int).Add(amount, gasCost)
 	if senderAccount.BalanceZNHB.Cmp(totalRequired) < 0 {
 		return nil, fmt.Errorf("znhb transfer: insufficient balance")
@@ -3774,7 +4205,7 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	}
 
 	recipientAccount.BalanceZNHB = new(big.Int).Add(recipientAccount.BalanceZNHB, amount)
-	if gasCost.Sign() > 0 {
+	if gasCost.Sign() > 0 && !uniformRouted {
 		var feeCreditedTo []byte
 		// feeIsExternalInflowToAdmin tracks whether this gasCost credit
 		// represents genuinely NEW ZNHB landing on the admin/treasury wallet
@@ -3893,7 +4324,11 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 	// the domain fee routed by applyTransactionFee -- is booked into the
 	// Reward Pool by executeTransaction (see treasuryZNHBFlowTracked), in this
 	// same state transition.
-	if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
+	if uniform != nil {
+		if err := sp.applyUniformDomainFee(tx, sender, senderAccount, recipientAccount, uniform, fees.AssetZNHB, gasCost, uniformRouted, transferGasPolicy.FeeBpsForAsset(fees.AssetZNHB)); err != nil {
+			return nil, err
+		}
+	} else if err := sp.applyTransactionFee(tx, sender, senderAccount, recipientAccount); err != nil {
 		return nil, err
 	}
 	if err := sp.setAccount(sender, senderAccount); err != nil {
@@ -3905,6 +4340,9 @@ func (sp *StateProcessor) applyTransferZNHB(tx *types.Transaction, sender []byte
 		}
 	}
 	if err := sp.recordTransferGasSpend(sender, amount, "ZNHB"); err != nil {
+		return nil, err
+	}
+	if err := sp.recordTransferMonthlyFreeTierUse(sender); err != nil {
 		return nil, err
 	}
 	if err := sp.updateSenderNonce(sender, senderAccount, senderAccount.Nonce+1); err != nil {
@@ -4007,7 +4445,7 @@ func (sp *StateProcessor) applyMintTransaction(tx *types.Transaction) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrMintInvalidPayload, err)
 	}
-	if voucher.ChainID != MintChainID {
+	if !sp.mintVoucherChainIDAccepted(voucher.ChainID, sp.blockHeight()) {
 		return ErrMintInvalidChainID
 	}
 	blockTime := sp.blockTimestamp()
@@ -4398,6 +4836,17 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applyLendingCreatePoolTransaction(tx, sender)
+	case types.TxTypeLendingWithdrawProtocolFees:
+		// Before LendingFeeWithdrawActivationHeight the byte is as unknown as it is on
+		// every earlier release, and is rejected with the same error before any quota or
+		// state is touched (PL-DC-19).
+		if !sp.lendingFeeWithdrawActive() {
+			return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
+		}
+		if err := sp.applyQuota(moduleLending, sender, 1, 0); err != nil {
+			return err
+		}
+		return sp.applyLendingWithdrawProtocolFeesTransaction(tx, sender)
 	case types.TxTypePotsoStakeLock:
 		if err := sp.applyQuota(modulePotso, sender, 1, 0); err != nil {
 			return err
@@ -4528,6 +4977,29 @@ func (sp *StateProcessor) handleNativeTransaction(tx *types.Transaction, sender 
 			return err
 		}
 		return sp.applyMarketCancelListing(tx, sender)
+	case types.TxTypeBridgeLock, types.TxTypeBridgeRelease:
+		// Before BridgeActivationHeight the bytes are as unknown as they are on every earlier
+		// release: rejected before any state is touched (ledger PL-BC-C).
+		if !sp.bridgeActive() {
+			return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
+		}
+		if tx.Type == types.TxTypeBridgeLock {
+			return sp.applyBridgeLockTransaction(tx, sender)
+		}
+		return sp.applyBridgeReleaseTransaction(tx, sender)
+	case types.TxTypeAmmAddLiquidity, types.TxTypeAmmRemoveLiquidity, types.TxTypeAmmSwap:
+		// The same for the pool, from AmmActivationHeight (ledger PL-BC-B).
+		if !sp.ammActive() {
+			return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
+		}
+		switch tx.Type {
+		case types.TxTypeAmmAddLiquidity:
+			return sp.applyAmmAddLiquidityTransaction(tx, sender)
+		case types.TxTypeAmmRemoveLiquidity:
+			return sp.applyAmmRemoveLiquidityTransaction(tx, sender)
+		default:
+			return sp.applyAmmSwapTransaction(tx, sender)
+		}
 	}
 	return fmt.Errorf("%w: %d", ErrUnknownTransactionType, tx.Type)
 }
@@ -4914,6 +5386,8 @@ func (sp *StateProcessor) loyaltyRegistry() *loyalty.Registry {
 	r := loyalty.NewRegistry(manager)
 	r.SetPauses(sp.pauses)
 	r.SetEmitter(stateProcessorEmitter{sp: sp})
+	// PL-R5T-15: off (the registry as it was) unless the configured height is reached.
+	r.SetPaymasterStandingConsent(sp.loyaltyStandingConsentActive())
 	return r
 }
 
@@ -5100,7 +5574,10 @@ func (sp *StateProcessor) applyLoyaltyRemoveMerchant(tx *types.Transaction, send
 		return loyalty.ErrBusinessNotFound
 	}
 	caller := bytesToAddress(sender)
-	if caller != business.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) {
+	// PL-R5T-15: from the configured height a registered merchant address can remove
+	// itself; until then only the owner or a loyalty admin can.
+	selfRemoval := sp.loyaltyStandingConsentActive() && caller == merchant
+	if caller != business.Owner && !sp.HasRole(RoleLoyaltyAdmin, sender) && !selfRemoval {
 		return fmt.Errorf("loyaltyRemoveMerchant: unauthorized: caller lacks ownership or %s", RoleLoyaltyAdmin)
 	}
 	if err := sp.loyaltyRegistry().RemoveMerchantAddress(businessID, merchant); err != nil {
@@ -5614,6 +6091,12 @@ func (sp *StateProcessor) applyBuyZNHB(tx *types.Transaction, sender []byte, sen
 			return fmt.Errorf("buyZNHB: purchase would exceed the treasury Sale Pool's remaining inventory")
 		}
 		return fmt.Errorf("buyZNHB: compute cost: %w", err)
+	}
+	// PL-BC-D: from SaleReferenceActivationHeight the price is the higher of the curve and
+	// the outside reference price; a missing or stale reference pauses the sale.
+	costRat, err = sp.saleCost(manager, costRat, payload.ZNHBAmount)
+	if err != nil {
+		return fmt.Errorf("buyZNHB: %w", err)
 	}
 	nhbCost := curve.RoundCostUp(costRat)
 	if nhbCost.Cmp(payload.MaxNHBAmount) > 0 {
@@ -6249,6 +6732,146 @@ func (sp *StateProcessor) lendingFixedTermIDActive() bool {
 	return sp.blockHeight() >= sp.lendingFixedTermIDFromHeight
 }
 
+// SetLendingAccountingFixesActivationHeight sets the first block height of the LendingAccountingFixesActivationHeight rule. Zero, the
+// default, leaves it off. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingAccountingFixesActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingAccountingFixesFromHeight = height
+}
+
+// lendingAccountingFixesActive reports whether the block being applied is at or past the
+// activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingAccountingFixesActive() bool {
+	if sp == nil || sp.lendingAccountingFixesFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingAccountingFixesFromHeight
+}
+
+// SetLendingPoolLimitsActivationHeight sets the first block height of the LendingPoolLimitsActivationHeight rule. Zero, the
+// default, leaves it off. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingPoolLimitsActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingPoolLimitsFromHeight = height
+}
+
+// lendingPoolLimitsActive reports whether the block being applied is at or past the
+// activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingPoolLimitsActive() bool {
+	if sp == nil || sp.lendingPoolLimitsFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingPoolLimitsFromHeight
+}
+
+// SetLendingMaxPools sets the most pools that may exist once the pool limits are active. Zero, the
+// default, means no limit. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingMaxPools(limit uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingMaxPools = limit
+}
+
+// SetLendingPoolIDMaxLength sets the longest pool id that may be created once the pool limits are active. Zero, the
+// default, means no limit. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingPoolIDMaxLength(limit uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingPoolIDMaxLength = limit
+}
+
+// SetLendingRefPriceGuardsActivationHeight sets the first block height of the LendingRefPriceGuardsActivationHeight rule. Zero, the
+// default, leaves it off. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingRefPriceGuardsActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingRefPriceGuardsFromHeight = height
+}
+
+// lendingRefPriceGuardsActive reports whether the block being applied is at or past the
+// activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingRefPriceGuardsActive() bool {
+	if sp == nil || sp.lendingRefPriceGuardsFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingRefPriceGuardsFromHeight
+}
+
+// SetLendingRefPriceMaxAheadSeconds sets how far after the block time a reference-price bundle may be dated once the guards are active. Zero, the
+// default, means no such check. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingRefPriceMaxAheadSeconds(seconds uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingRefPriceMaxAhead = seconds
+}
+
+// SetLendingRefPriceMaxAgeSeconds sets how long before the block time a reference-price bundle may be dated once the guards are active. Zero, the
+// default, means no such check. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingRefPriceMaxAgeSeconds(seconds uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingRefPriceMaxAge = seconds
+}
+
+// SetLendingRiskActivationHeight sets the first block height of the LendingRiskActivationHeight rule. Zero, the
+// default, leaves it off. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingRiskActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingRiskFromHeight = height
+}
+
+// lendingRiskActive reports whether the block being applied is at or past the
+// activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingRiskActive() bool {
+	if sp == nil || sp.lendingRiskFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingRiskFromHeight
+}
+
+// SetLendingFeeWithdrawActivationHeight sets the first block height of the LendingFeeWithdrawActivationHeight rule. Zero, the
+// default, leaves it off. A chain rule: the same value on every validator, set
+// above the chain tip, with all of them restarted together.
+func (sp *StateProcessor) SetLendingFeeWithdrawActivationHeight(height uint64) {
+	if sp == nil {
+		return
+	}
+	sp.lendingFeeWithdrawFromHeight = height
+}
+
+// lendingFeeWithdrawActive reports whether the block being applied is at or past the
+// activation height. Outside block execution there is no height (blockHeight
+// reports 0), so it is off there.
+func (sp *StateProcessor) lendingFeeWithdrawActive() bool {
+	if sp == nil || sp.lendingFeeWithdrawFromHeight == 0 {
+		return false
+	}
+	return sp.blockHeight() >= sp.lendingFeeWithdrawFromHeight
+}
+
 func (sp *StateProcessor) StakeUndelegate(delegator []byte, amount *big.Int) (*types.StakeUnbond, error) {
 	if len(delegator) == 0 {
 		return nil, fmt.Errorf("delegator address required")
@@ -6621,7 +7244,7 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 			Addr:             claimedAddr,
 			PaidZNHB:         new(big.Int).Set(minted),
 			Periods:          periods,
-			AprBps:           sp.StakeRewardAPR(),
+			AprBps:           sp.stakeAPRInForce(),
 			NextEligibleUnix: nextEligible,
 		}
 		if evt := evtPayload.Event(); evt != nil {
@@ -6779,7 +7402,7 @@ func (sp *StateProcessor) StakeClaimRewards(addr []byte) (*big.Int, error) {
 		Addr:             claimedAddr,
 		PaidZNHB:         new(big.Int).Set(minted),
 		Periods:          periods,
-		AprBps:           sp.StakeRewardAPR(),
+		AprBps:           sp.stakeAPRInForce(),
 		NextEligibleUnix: nextEligible,
 	}
 	if evt := evtPayload.Event(); evt != nil {
@@ -6903,7 +7526,11 @@ func (sp *StateProcessor) applyStake(tx *types.Transaction, sender []byte) error
 	if err != nil {
 		return err
 	}
-	return sp.setValidatorRegistered(sender, account, true)
+	if err := sp.setValidatorRegistered(sender, account, true); err != nil {
+		return err
+	}
+	// PL-R5T-91: a register with no value used to leave the nonce where it was.
+	return sp.consumeValidatorFlagNonce(sender, account)
 }
 
 // unstakePayload is TxTypeUnstake's decoded RLP payload, symmetric with
@@ -6953,7 +7580,14 @@ func (sp *StateProcessor) applyUnstake(tx *types.Transaction, sender []byte) err
 		if err != nil {
 			return err
 		}
-		return sp.setValidatorRegistered(sender, account, false)
+		if err := sp.setValidatorRegistered(sender, account, false); err != nil {
+			return err
+		}
+		if pureDeregister {
+			// PL-R5T-91: a deregister with no value used to leave the nonce where
+			// it was.
+			return sp.consumeValidatorFlagNonce(sender, account)
+		}
 	}
 	return nil
 }
@@ -7021,6 +7655,11 @@ func (sp *StateProcessor) advanceStakeRewards() (*big.Int, error) {
 	}
 	if sp.stakeRewardEngine == nil {
 		sp.stakeRewardEngine = rewards.NewEngine()
+	}
+	// From the activation height the rate is the chain's, settled at the old rate when
+	// it changed (PL-R5T-27); before it, the rate cached at start-up.
+	if err := sp.settleStakeAPRChange(); err != nil {
+		return nil, err
 	}
 	index, changed := sp.stakeRewardEngine.UpdateGlobalIndex(sp.blockTimestamp(), sp.stakeRewardAPR)
 	if changed {
@@ -8452,6 +9091,18 @@ func (sp *StateProcessor) PutAccount(addr []byte, account *types.Account) error 
 // untouched.
 type loyaltyRewardState struct {
 	*StateProcessor
+}
+
+// LoyaltyPaymasterConsentRequired and LoyaltyPaymasterAssigned carry the standing
+// paymaster-consent rule (PL-R5T-15) to native/loyalty's reward path: required from
+// the configured height, and the record SetPaymaster writes when a wallet other than
+// the owner is assigned.
+func (s loyaltyRewardState) LoyaltyPaymasterConsentRequired() bool {
+	return s.StateProcessor.loyaltyStandingConsentActive()
+}
+
+func (s loyaltyRewardState) LoyaltyPaymasterAssigned(id loyalty.BusinessID, paymaster [20]byte) (bool, error) {
+	return s.StateProcessor.loyaltyRegistry().PaymasterAssignmentRecorded(id, paymaster)
 }
 
 func (s loyaltyRewardState) PutAccount(addr []byte, account *types.Account) error {

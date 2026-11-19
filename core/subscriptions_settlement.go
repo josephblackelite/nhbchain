@@ -47,6 +47,12 @@ func (sp *StateProcessor) settleSubscriptionCharges(timestamp int64) error {
 	if !sp.hasSubscriptionsConfig || timestamp < 0 {
 		return nil
 	}
+	// PL-R5T-81: from the configured height a paused module is not settled. Checked
+	// before the watermark is read, so nothing is charged, no attempt is recorded and
+	// the days skipped are found again on unpause.
+	if sp.subscriptionsSettlementPaused() {
+		return nil
+	}
 	manager := nhbstate.NewManager(sp.Trie)
 	today := uint64(timestamp) / secondsPerDay
 
@@ -74,6 +80,8 @@ func (sp *StateProcessor) settleSubscriptionCharges(timestamp int64) error {
 
 	registry := subscriptions.NewRegistry(manager)
 	registry.SetPauses(sp.pauses)
+	// PL-R5T-82: off (the registry as it was) unless the configured height is reached.
+	registry.SetLegacyChargeHistory(sp.subscriptionsChargeMigrationActive())
 	cfg := sp.subscriptionsConfig
 
 	for day := startDay; day <= today; day++ {

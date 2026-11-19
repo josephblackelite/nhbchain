@@ -793,7 +793,7 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	// Export
 	exportReq := &RPCRequest{ID: 12, Params: []json.RawMessage{marshalParam(t, start), marshalParam(t, end)}}
 	exportRec := httptest.NewRecorder()
-	env.server.handleSwapVoucherExport(exportRec, env.newRequest(), exportReq)
+	env.server.handleSwapVoucherExport(exportRec, env.newPartnerRequest(), exportReq)
 	exportResult, rpcErr := decodeRPCResponse(t, exportRec)
 	if rpcErr != nil {
 		t.Fatalf("export error: %+v", rpcErr)
@@ -823,7 +823,7 @@ func TestSwapVoucherExportAndList(t *testing.T) {
 	// List
 	listReq := &RPCRequest{ID: 13, Params: []json.RawMessage{marshalParam(t, start), marshalParam(t, end)}}
 	listRec := httptest.NewRecorder()
-	env.server.handleSwapVoucherList(listRec, env.newRequest(), listReq)
+	env.server.handleSwapVoucherList(listRec, env.newPartnerRequest(), listReq)
 	listResult, rpcErr := decodeRPCResponse(t, listRec)
 	if rpcErr != nil {
 		t.Fatalf("list error: %+v", rpcErr)

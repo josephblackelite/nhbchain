@@ -19,6 +19,40 @@ setting for the `auth.enabled` explicit-set rule.
 The full list of gateway startup rules is in
 [Gateway Overview](../gateway/overview.md#transport-security).
 
+## Gateway rate limits behind a proxy
+
+The gateway's rate limiter counts requests by the address the connection came
+from and ignores `X-Forwarded-For` and `X-Real-IP` unless that peer is listed in
+`trustedProxies` in the gateway config (see
+[Rate limits](../gateway/overview.md#rate-limits)). Behind an ingress controller
+or a load balancer the peer is the proxy, so a gateway started with an empty
+`trustedProxies` list counts every client in one bucket per proxy address.
+Ordinary traffic is then answered with `429` once that bucket is spent (the
+`/rpc` compatibility endpoint allows 2 requests per second with a burst of 20
+unless a `compat` entry in `rateLimits` says otherwise).
+
+Treat these as preconditions for rolling out a gateway behind a proxy:
+
+- List the address range of the ingress controller pods (or of the proxy hosts)
+  in `trustedProxies`, and also the range of any load balancer in front of the
+  controller that adds its own `X-Forwarded-For` entry. Use the narrowest range
+  that covers those proxies; the gateway refuses an entry that covers every
+  address. The sample Helm values for `staging` and `prod` leave the list empty
+  and the chart refuses to render an ingress-enabled gateway until it is filled
+  in (`--set 'trustedProxies={<range>}'` or the values file).
+- The proxy must set or append the client address in `X-Forwarded-For`. The
+  gateway takes the rightmost entry that is not a listed proxy and consults
+  `X-Real-IP` only when there is no `X-Forwarded-For`, so a proxy that sets only
+  `X-Real-IP` is not enough.
+- The proxy must see the real client address. On Kubernetes that usually means
+  keeping the source address on the controller's Service
+  (`externalTrafficPolicy: Local`) or enabling the PROXY protocol between the
+  load balancer and the controller; otherwise every client still arrives from
+  the same address.
+- After the rollout, confirm that two different clients are limited
+  independently (the gateway's start-up log line about an empty
+  `trustedProxies` list should be absent).
+
 ## RPC hardening (`cmd/nhb`)
 
 These `config.toml` settings apply to the node's JSON-RPC server
@@ -40,11 +74,13 @@ These `config.toml` settings apply to the node's JSON-RPC server
   and a forwarded value that is not an IP address is refused with `403`
   (`NewServer`, `resolveClient`, `parseClientAddr`, `isTrustedProxy` in
   `rpc/http.go`).
-  **Behind the gateway.** `POST /v1/transactions/send` always sets
-  `X-Forwarded-For` on the request to the node (the client's own header value,
-  if any, followed by the remote address; `gateway/routes/transactions.go`).
-  With the default `ignore`, the node therefore answers that route with `403`
-  (`X-Forwarded-For header is not permitted`). To accept it, set
+  **Behind the gateway.** `POST /v1/transactions/send` and the escrow lookup
+  `GET /v1/consensus/wallet/escrows/{escrowID}` always set
+  `X-Forwarded-For` on each request to the node (the client's own header value,
+  if any, followed by the remote address; `forwardedForValue` in
+  `gateway/routes/transactions.go`).
+  With the default `ignore`, the node therefore answers those routes with `403`
+  (`X-Forwarded-For header is not permitted`). To accept them, set
   `RPCProxyHeaders.XForwardedFor = "single"` and list the gateway's address in
   `RPCTrustedProxies`. In `single` mode a
   request whose header already holds a chain of several addresses, for example
@@ -106,3 +142,12 @@ set per-partner limits. When any secret is configured the node requires
 `[RPCSwapAuth.Persistence]` with `Backend = "leveldb"` and a `LevelDBPath`
 (relative paths are resolved under `DataDir`), and exits otherwise. `config.Load`
 also refuses `NetworkName = "mainnet"` without any `RPCSwapAuth.Secrets`.
+
+`PartnerProviders` (partner key to a list of provider names) says whose vouchers
+each partner may read back with `swap_voucher_get`, `swap_voucher_list` and
+`swap_voucher_export`. Names are compared trimmed and in lower case, as the
+provider allow-list compares them; `"*"` lets a key read every provider. A key
+with no entry reads no voucher at all, and the node logs one configuration
+warning per such key at start-up. `config.Load` refuses a `PartnerProviders` key
+that is not in `Secrets` and a list with an empty provider name. Another
+provider's voucher is answered exactly as one that does not exist.

@@ -99,17 +99,17 @@ func TestEventLogLimitHasAFloorAndANilLogIsEmpty(t *testing.T) {
 	}
 }
 
-// Events some readers add up or count over the whole run (fees applied, POTSO
-// penalties, escrow events) are not pushed out by a flood of other events; they
+// Events some readers count over the whole run (POTSO penalties, escrow events) are
+// not pushed out by a flood of other events, fees applied included (PL-R5T-42); they
 // have a log of their own, and the two are read back in the order the events
 // happened.
 func TestEventLogKeepsPinnedEventsApartFromTheRest(t *testing.T) {
-	for _, pinned := range []string{events.TypeFeeApplied, events.TypePotsoPenaltyApplied, "escrow.created", "ESCROW.Released"} {
+	for _, pinned := range []string{events.TypePotsoPenaltyApplied, "escrow.created", "ESCROW.Released"} {
 		if !isPinnedEvent(pinned) {
 			t.Fatalf("%q is not pinned", pinned)
 		}
 	}
-	for _, plain := range []string{"test.event", "transfer.native", "escrowed", "loyalty.program.skipped", ""} {
+	for _, plain := range []string{"test.event", "transfer.native", "escrowed", "loyalty.program.skipped", events.TypeFeeApplied, ""} {
 		if isPinnedEvent(plain) {
 			t.Fatalf("%q is pinned", plain)
 		}
@@ -117,7 +117,7 @@ func TestEventLogKeepsPinnedEventsApartFromTheRest(t *testing.T) {
 
 	log := newEventLog(2, 3)
 	log.append([]types.Event{
-		typedEvent(events.TypeFeeApplied, 1),
+		typedEvent("escrow.funded", 1),
 		typedEvent("test.event", 2),
 		typedEvent(events.TypePotsoPenaltyApplied, 3),
 		typedEvent("test.event", 4),
@@ -128,7 +128,7 @@ func TestEventLogKeepsPinnedEventsApartFromTheRest(t *testing.T) {
 	if got := eventNumbers(log.snapshot()); !reflect.DeepEqual(got, []string{"1", "3", "5", "6", "7"}) {
 		t.Fatalf("the log holds %v, want the three pinned events and the last two others in order [1 3 5 6 7]", got)
 	}
-	log.append([]types.Event{typedEvent("test.event", 8), typedEvent(events.TypeFeeApplied, 9), typedEvent("test.event", 10)})
+	log.append([]types.Event{typedEvent("test.event", 8), typedEvent("escrow.released", 9), typedEvent("test.event", 10)})
 	if got := eventNumbers(log.snapshot()); !reflect.DeepEqual(got, []string{"3", "6", "8", "9", "10"}) {
 		t.Fatalf("the log holds %v, want [3 6 8 9 10]: the oldest pinned event goes first once its log is full", got)
 	}
@@ -145,7 +145,7 @@ func TestNodeKeepsPinnedEventsWhileOtherEventsScrollPast(t *testing.T) {
 		node.state.AppendEvent(&evt)
 		node.retainCommittedEventsLocked()
 	}
-	push(typedEvent(events.TypeFeeApplied, 0))
+	push(typedEvent("escrow.created", 0))
 	for n := 1; n <= 50; n++ {
 		push(numberedEvent(n))
 	}

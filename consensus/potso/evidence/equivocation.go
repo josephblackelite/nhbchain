@@ -11,6 +11,8 @@ import (
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"lukechampine.com/blake3"
+
+	"nhbchain/core/types"
 )
 
 // NHB-AUDIT-C10 (second half): ValidateEvidence used to verify only the
@@ -51,10 +53,10 @@ const (
 // encoding). A genuine SignedVote produced during a live consensus round
 // can be submitted here unmodified as proof.
 type equivocationVotePayload struct {
-	BlockHash []byte                `json:"blockHash"`
-	Round     int                   `json:"round"`
-	Type      EquivocationVoteType  `json:"type"`
-	Height    uint64                `json:"height"`
+	BlockHash []byte               `json:"blockHash"`
+	Round     int                  `json:"round"`
+	Type      EquivocationVoteType `json:"type"`
+	Height    uint64               `json:"height"`
 }
 
 func (v *equivocationVotePayload) digest() [32]byte {
@@ -74,11 +76,11 @@ type EquivocationSignedVote struct {
 // decision point both votes claim to be for; VoteA and VoteB must
 // recover to the offender's address and disagree on BlockHash.
 type EquivocationProof struct {
-	Height   uint64                  `json:"height"`
-	Round    int                     `json:"round"`
-	VoteType EquivocationVoteType    `json:"voteType"`
-	VoteA    EquivocationSignedVote  `json:"voteA"`
-	VoteB    EquivocationSignedVote  `json:"voteB"`
+	Height   uint64                 `json:"height"`
+	Round    int                    `json:"round"`
+	VoteType EquivocationVoteType   `json:"voteType"`
+	VoteA    EquivocationSignedVote `json:"voteA"`
+	VoteB    EquivocationSignedVote `json:"voteB"`
 }
 
 func decodeHexBlockHash(value string) ([]byte, error) {
@@ -104,7 +106,10 @@ func decodeHexSignature(value string) ([]byte, error) {
 
 // verifyEquivocationSignature recovers the signer of vote and confirms it
 // equals offender, for the given (height, round, voteType) claim.
-func verifyEquivocationSignature(vote EquivocationSignedVote, offender [20]byte, height uint64, round int, voteType EquivocationVoteType) ([]byte, error) {
+//
+// binding says which digest the vote was signed over (PL-R5T-31): a vote at or above the
+// binding height only verifies over the genesis hash, one below it only over the legacy digest.
+func verifyEquivocationSignature(vote EquivocationSignedVote, offender [20]byte, height uint64, round int, voteType EquivocationVoteType, binding types.VoteBinding) ([]byte, error) {
 	blockHash, err := decodeHexBlockHash(vote.BlockHash)
 	if err != nil {
 		return nil, fmt.Errorf("invalid block hash: %w", err)
@@ -114,7 +119,11 @@ func verifyEquivocationSignature(vote EquivocationSignedVote, offender [20]byte,
 		return nil, fmt.Errorf("invalid signature: %w", err)
 	}
 	payload := &equivocationVotePayload{BlockHash: blockHash, Round: round, Type: voteType, Height: height}
-	digest := payload.digest()
+	encoded, _ := json.Marshal(payload)
+	digest, err := binding.Digest(height, encoded)
+	if err != nil {
+		return nil, err
+	}
 	pubKey, err := ethcrypto.SigToPub(digest[:], sig)
 	if err != nil {
 		return nil, fmt.Errorf("recover signer: %w", err)
@@ -135,11 +144,18 @@ func verifyEquivocationSignature(vote EquivocationSignedVote, offender [20]byte,
 // still act on that decision point: ValidateEvidence binds the proof to the
 // heights the report lists and to the evidence window.
 func VerifyEquivocationProof(offender [20]byte, details []byte) error {
+	return VerifyEquivocationProofBound(offender, details, types.VoteBinding{})
+}
+
+// VerifyEquivocationProofBound is VerifyEquivocationProof under a vote binding (PL-R5T-31):
+// two votes at or above the binding height prove an equivocation only if both were signed
+// over the genesis hash, so votes cast by one key on two networks are not a proof.
+func VerifyEquivocationProofBound(offender [20]byte, details []byte, binding types.VoteBinding) error {
 	proof, err := parseEquivocationProof(details)
 	if err != nil {
 		return err
 	}
-	return verifyEquivocationVotes(proof, offender)
+	return verifyEquivocationVotes(proof, offender, binding)
 }
 
 // parseEquivocationProof decodes Details as an EquivocationProof and checks its
@@ -162,12 +178,12 @@ func parseEquivocationProof(details []byte) (*EquivocationProof, error) {
 
 // verifyEquivocationVotes checks that both votes were signed by offender for the
 // decision point the proof names and that they disagree on the block.
-func verifyEquivocationVotes(proof *EquivocationProof, offender [20]byte) error {
-	hashA, err := verifyEquivocationSignature(proof.VoteA, offender, proof.Height, proof.Round, proof.VoteType)
+func verifyEquivocationVotes(proof *EquivocationProof, offender [20]byte, binding types.VoteBinding) error {
+	hashA, err := verifyEquivocationSignature(proof.VoteA, offender, proof.Height, proof.Round, proof.VoteType, binding)
 	if err != nil {
 		return fmt.Errorf("vote A: %w", err)
 	}
-	hashB, err := verifyEquivocationSignature(proof.VoteB, offender, proof.Height, proof.Round, proof.VoteType)
+	hashB, err := verifyEquivocationSignature(proof.VoteB, offender, proof.Height, proof.Round, proof.VoteType, binding)
 	if err != nil {
 		return fmt.Errorf("vote B: %w", err)
 	}

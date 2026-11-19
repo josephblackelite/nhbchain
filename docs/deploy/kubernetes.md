@@ -30,7 +30,8 @@ helm upgrade --install p2pd deploy/helm/p2pd -f deploy/helm/values/staging/p2pd.
 helm upgrade --install consensusd deploy/helm/consensusd -f deploy/helm/values/staging/consensusd.yaml
 helm upgrade --install governd deploy/helm/governd -f deploy/helm/values/staging/governd.yaml
 helm upgrade --install gateway deploy/helm/gateway -f deploy/helm/values/staging/gateway.yaml \
-  --set secrets.gatewayHMAC="<gateway HMAC secret>"
+  --set secrets.gatewayHMAC="<gateway HMAC secret>" \
+  --set 'trustedProxies={<ingress controller address range>}'
 # lendingd is scaled to zero by default:
 helm upgrade --install lendingd deploy/helm/lendingd -f deploy/helm/values/staging/lendingd.yaml \
   --set replicaCount=1
@@ -99,6 +100,19 @@ consensusd config binds `RPCAddress` to `127.0.0.1:8081` inside the pod and
 `cmd/consensusd` does not start an HTTP RPC listener, so nothing serves port 8081
 on that Service. The gateway chart can also render its own Ingress from
 `ingress.hosts`; `values/staging` and `values/prod` enable it.
+
+Behind an ingress the gateway sees the ingress controller as its peer, and it
+counts rate limits per peer address unless the controller's address range is
+listed in `trustedProxies`. The gateway chart therefore has a `trustedProxies`
+value (an empty list by default) that it writes into the gateway config, and it
+refuses to render while `ingress.enabled` is true and the list is empty. The
+sample `values/staging` and `values/prod` files leave the list empty on purpose,
+because the range is specific to the cluster: set it in the values file or with
+`--set 'trustedProxies={<range>}'` before installing. See
+[Gateway rate limits behind a proxy](../ops/security.md#gateway-rate-limits-behind-a-proxy)
+for what else the proxy must provide. If you use `k8s/ingress.yaml` instead of the
+chart's own Ingress, the chart cannot see it, so list the range in the gateway
+config yourself.
 
 ## Images and chart publishing
 

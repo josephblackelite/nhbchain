@@ -21,8 +21,8 @@ Values are defined in `core/types/transaction.go`; the apply functions are in
 removal). Transactions are submitted through `nhb_sendTransaction` like any
 other signed transaction; `nhb-cli gov ...` builds, signs and broadcasts them
 (`cmd/nhb-cli/gov.go`, see the [devnet runbook](./devnet-runbook.md)). The only
-governance RPC methods on the node are the read-only `gov_proposal` and
-`gov_list` ([API](./api.md)). The gateway's compatibility table also lists the
+governance RPC methods on the node are the read-only `gov_proposal`, `gov_list`
+and `gov_params` ([API](./api.md)). The gateway's compatibility table also lists the
 names `gov_getProposal`, `gov_listProposals`, `gov_getTally`,
 `gov_submitProposal`, `gov_vote` and `gov_deposit`; these are not node methods
 and do not submit governance transactions ([API](./api.md)).
@@ -45,6 +45,7 @@ kind`.
 | `policy.swapPriceSigner` | Registers or revokes a swap price-proof signer for a provider. |
 | `policy.buybackParams` | Sets the three treasury-buyback basis-point parameters. |
 | `policy.swapRiskParams` | Sets the four redeem-side (swap-out burn) caps. |
+| `policy.feeParams` | Sets the transfer fee schedule (NHB and ZNHB rates, free allowance), taking effect a delay after execution. Accepted only from `TransferFeeGovernanceActivationHeight` (off by default); see [fee-params](./fee-params.md). |
 | `policy.redemptionFeeParams` | Sets the redemption fee rate, floor and cap. |
 | `policy.lendingRateSchedule` | Replaces the fixed-term borrow tenure-to-rate table. |
 | `policy.lendingDepositRateSchedule` | Replaces the fixed-term deposit tenure-to-rate table. |

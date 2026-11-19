@@ -89,7 +89,10 @@ func defaultQueryConcurrency() int {
 
 // isGatedQueryMethod lists the public read methods that can run heavy work and
 // therefore run under a deadline and may take a slot in the pool (see the file
-// comment). Every other method is bounded by a small constant.
+// comment). A method left out of the list is expected to answer from a bounded
+// number of lookups, or to read a large set from a copy of the state (see
+// Node.readSnapshot) rather than under the state lock, so that the time it takes
+// never holds up block processing.
 func isGatedQueryMethod(method string) bool {
 	switch method {
 	case "nhb_getTransaction", "nhb_getTransactionReceipt", "nhb_searchExplorer",

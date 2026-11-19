@@ -30,4 +30,12 @@ The caller passes a number of shares (which must not exceed their stake's shares
 
 ## Note on balances
 
-In `StakeCreator` the fan's NHB balance is debited by the deposit and the amount is not credited to any account, and `UnstakeCreator` credits the fan's balance with the redeemed assets without debiting any account (`native/creator/engine.go`). The engine's stake path therefore does not conserve NHB supply. The module's write RPCs are disabled (see [`overview.md`](./overview.md)).
+`StakeCreator` moves the fan's deposit into a module-owned stake vault (the derived address `module/creator/stake`), and `UnstakeCreator` pays the redeemed assets out of that same vault; a vault that holds less than the amount to pay out refuses the payout. The stake path therefore conserves NHB supply: the fan's balance and the vault's move by the exact deposit in opposite directions, and a fan can never redeem more than the shares they hold (`native/creator/engine.go`; PL-DC-39). The yield transfer from the rewards treasury to the payout vault is separate and unchanged.
+
+The module is still dormant: its write RPCs are disabled (see [`overview.md`](./overview.md)) and no transaction type reaches the engine. `core/creator_dormancy_test.go` fails if either changes. Before the engine is re-enabled, all of this must be done, none of it is covered by the vault fix:
+
+1. a transaction type for each write that is applied inside block execution, with the classification and mixed-block tests every transaction type carries;
+2. the engine's clock (`time.Now`) replaced by the block time;
+3. no direct mutation of the state trie outside block processing (the `Node.Creator*` methods lock the state and write it directly, which a replicated chain cannot do);
+4. the same activation-height discipline as every other consensus change;
+5. the stake rate-limit snapshot made storable: running `Node.CreatorStake` on a real node today fails with `rlp: type int64 is not RLP-serializable (storedStakeRateLimit.WindowStart)`, so the write path cannot persist a stake at all (found while testing the vault wiring, PL-DC-39).

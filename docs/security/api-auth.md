@@ -5,7 +5,7 @@ Two components in this repository authenticate requests with an API key and an H
 - the node's JSON-RPC server, for the swap methods listed in `isPublicSwapMethod` in `rpc/http.go` (`swap_submitVoucher`, `swap_voucher_get`, `swap_voucher_list`, `swap_voucher_export`, `nhb_requestSwapApproval`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus`, `nhb_getSwapQuote`, `nhb_checkSwapAllowance`, `nhb_getOraclePrice`, `swap_getRiskParams`, `swap_getRedemptionFeeParams`), enabled when `[RPCSwapAuth].Secrets` is non-empty;
 - the escrow gateway (`services/escrow-gateway`), on its write routes and on its three read routes (see [Escrow gateway routes](#escrow-gateway-routes)).
 
-In the node, this HMAC check is one layer. The HMAC scheme is applied to the swap methods above when `[RPCSwapAuth].Secrets` is set. `nhb_requestSwapApproval`, `nhb_getSwapQuote`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus` and `nhb_checkSwapAllowance` additionally require a verified TLS client certificate or a bearer JWT (`requireAuthInto` in `rpc/http.go`). `swap_voucher_get`, `swap_voucher_list` and `swap_voucher_export` require a certificate or JWT only when `[RPCSwapAuth].Secrets` is empty (`requireSwapLedgerAuth` in `rpc/swap_handlers.go`); with secrets configured, the HMAC check is their credential.
+In the node, this HMAC check is one layer. The HMAC scheme is applied to the swap methods above when `[RPCSwapAuth].Secrets` is set. `nhb_requestSwapApproval`, `nhb_getSwapQuote`, `nhb_swapMint`, `nhb_swapBurn`, `nhb_getSwapStatus` and `nhb_checkSwapAllowance` additionally require a verified TLS client certificate or a bearer JWT (`requireAuthInto` in `rpc/http.go`). `swap_voucher_get`, `swap_voucher_list` and `swap_voucher_export` require a certificate or JWT only when `[RPCSwapAuth].Secrets` is empty (`requireSwapLedgerAuth` in `rpc/swap_handlers.go`); with secrets configured, the HMAC check is their credential and the API key decides which providers' vouchers the caller may read (`[RPCSwapAuth].PartnerProviders`, `swapReadScopeFor` in `rpc/swap_scope.go`; a key with no entry reads none).
 
 The API gateway in `cmd/gateway` does not use this scheme. It validates bearer JWTs (`gateway/middleware/auth.go`).
 
@@ -47,6 +47,8 @@ Source: `ComputeSignature` and `CanonicalRequestPath` in `gateway/auth/auth.go`.
 4. `X-Nonce` or `X-Signature` is missing, the signature is not valid hex, or it does not match;
 5. the `timestamp|nonce` pair was already used by this key inside the nonce window (`nonce already used`);
 6. the timestamp is not strictly greater than the last accepted timestamp for this key while that earlier timestamp is still inside the skew window (`timestamp not increasing`). In practice a key can have at most one accepted request per second.
+
+`AuthenticateRead` runs the same checks except the last: it only rejects a timestamp older than the last one `Authenticate` accepted for the key (`timestamp older than the last accepted write`) and never moves that mark. The escrow gateway uses it for its `GET` endpoints, so any number of reads can share a second and a read cannot make a following write fail. What it gives up is the refusal of a replayed read that is older than the nonce cache remembers, inside the skew window and before the next write.
 
 The signature is verified before the nonce is recorded, so unsigned or badly signed requests do not consume nonces.
 

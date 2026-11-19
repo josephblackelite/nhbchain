@@ -448,4 +448,44 @@ type RiskParameters struct {
 	Oracle OracleConfig
 	// Pauses exposes fine-grained switches for halting market operations.
 	Pauses ActionPauses
+	// MaxTotalSupply bounds the NHB a pool may hold from lenders: the flexible total
+	// plus the principal of fixed-term deposits, counting a supply that is being made.
+	// Nil or zero means no cap. It is the supply side of [lending.breaker].
+	MaxTotalSupply *big.Int
+	// MaxTotalCollateral bounds the ZNHB held in the shared collateral vault, counting a
+	// deposit that is being made. Nil or zero means no cap.
+	MaxTotalCollateral *big.Int
+}
+
+// Clone returns a deep copy of the risk parameters.
+func (p RiskParameters) Clone() RiskParameters {
+	clone := p
+	clone.BorrowCaps = p.BorrowCaps.Clone()
+	if p.OracleAddress.Bytes() != nil {
+		clone.OracleAddress = crypto.MustNewAddress(p.OracleAddress.Prefix(), append([]byte(nil), p.OracleAddress.Bytes()...))
+	}
+	if p.MaxTotalSupply != nil {
+		clone.MaxTotalSupply = new(big.Int).Set(p.MaxTotalSupply)
+	}
+	if p.MaxTotalCollateral != nil {
+		clone.MaxTotalCollateral = new(big.Int).Set(p.MaxTotalCollateral)
+	}
+	return clone
+}
+
+// WithoutGatedLimits returns a copy with the limits that ship behind core's
+// LendingRiskActivationHeight cleared: the liquidation bonus, the borrow caps, the
+// per-action pauses, the circuit breaker and the supply and collateral caps. What
+// is left (the maximum and liquidation loan-to-value, the developer fee cap, the
+// oracle bounds) was applied before that height existed and is applied at every
+// height (ledger PL-DC-19).
+func (p RiskParameters) WithoutGatedLimits() RiskParameters {
+	clone := p.Clone()
+	clone.LiquidationBonus = 0
+	clone.CircuitBreakerActive = false
+	clone.BorrowCaps = BorrowCaps{}
+	clone.Pauses = ActionPauses{}
+	clone.MaxTotalSupply = nil
+	clone.MaxTotalCollateral = nil
+	return clone
 }

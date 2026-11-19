@@ -85,6 +85,54 @@ func TestConsensusProblemsListsEveryProblem(t *testing.T) {
 	}
 }
 
+// An interval above half the commit timeout is an advisory, not an error: the
+// engine lowers it, so ValidateConsensus accepts it, ConsensusAdvisories names it,
+// and ConsensusProblems (what nhb logs) still lists it after the errors.
+func TestAnIntervalAboveHalfTheCommitTimeoutIsAnAdvisoryNotAnError(t *testing.T) {
+	long := config.Consensus{
+		ProposalTimeout:  time.Second,
+		PrevoteTimeout:   time.Second,
+		PrecommitTimeout: time.Second,
+		CommitTimeout:    time.Second,
+		MinBlockInterval: time.Second,
+	}
+	if err := config.ValidateConsensus(long); err != nil {
+		t.Fatalf("ValidateConsensus: %v", err)
+	}
+	advisories := config.ConsensusAdvisories(long)
+	if len(advisories) != 1 || !strings.Contains(advisories[0].Error(), "minimum block interval") {
+		t.Fatalf("advisories %v, want the one about the minimum block interval", advisories)
+	}
+	problems := config.ConsensusProblems(long)
+	if len(problems) != 1 || problems[0].Error() != advisories[0].Error() {
+		t.Fatalf("ConsensusProblems %v, want the advisory %v", problems, advisories)
+	}
+
+	atTheBound := long
+	atTheBound.MinBlockInterval = 500 * time.Millisecond
+	if got := config.ConsensusAdvisories(atTheBound); len(got) != 0 {
+		t.Fatalf("an interval of half the commit timeout has advisories: %v", got)
+	}
+	off := long
+	off.MinBlockInterval = 0
+	if got := config.ConsensusAdvisories(off); len(got) != 0 {
+		t.Fatalf("an interval of zero has advisories: %v", got)
+	}
+
+	// The errors come first, and a negative interval is still one.
+	mixed := long
+	mixed.PrevoteTimeout = 0
+	problems = config.ConsensusProblems(mixed)
+	if len(problems) != 2 || !strings.Contains(problems[0].Error(), "prevote timeout") || !strings.Contains(problems[1].Error(), "minimum block interval") {
+		t.Fatalf("ConsensusProblems %v, want the prevote error and then the advisory", problems)
+	}
+	negative := long
+	negative.MinBlockInterval = -time.Second
+	if err := config.ValidateConsensus(negative); err == nil {
+		t.Fatalf("ValidateConsensus accepted a negative interval")
+	}
+}
+
 // ValidateConfig still stops at the first problem, in the order it always has;
 // ConfigProblems reports the others after it.
 func TestConfigProblemsListsEveryProblemAndValidateConfigTheFirst(t *testing.T) {

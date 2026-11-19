@@ -126,6 +126,7 @@ type ledgerSummary struct {
 
 type summary struct {
 	Phase        string            `json:"phase"`
+	Verdict      string            `json:"verdict"`
 	Description  string            `json:"description,omitempty"`
 	GeneratedAt  string            `json:"generated_at"`
 	ConfigPath   string            `json:"config_path"`
@@ -146,6 +147,8 @@ func main() {
 		outPath     = flag.String("out", "", "path to JSON summary output")
 		markdown    = flag.String("markdown", "", "optional markdown report path")
 		composePath = flag.String("compose", "", "docker compose manifest to inspect")
+		resultsPath = flag.String("results", "", "JSON file mapping a check name to passed, failed or skipped (written by whatever ran the checks)")
+		strict      = flag.Bool("strict", false, "exit non-zero unless every check has a recorded result and all of them passed")
 	)
 	var hashes multiFlag
 	flag.Var(&hashes, "hash", "file to hash and include in the report (repeatable)")
@@ -181,17 +184,15 @@ func main() {
 
 	configSHA := sha256.Sum256(cfgData)
 
-	checks := make([]checkSummary, 0, len(cfg.Checks))
-	for _, chk := range cfg.Checks {
-		checks = append(checks, checkSummary{
-			Name:     chk.Name,
-			Target:   chk.Target,
-			Expect:   chk.Expect,
-			Severity: chk.Severity,
-			Coverage: append([]string(nil), chk.Coverage...),
-			Status:   "pending",
-		})
+	var results map[string]string
+	if *resultsPath != "" {
+		loaded, err := loadResults(*resultsPath, cfg.Checks)
+		if err != nil {
+			fatal(fmt.Sprintf("results: %v", err))
+		}
+		results = loaded
 	}
+	checks := buildChecks(cfg.Checks, results)
 
 	artifacts := make([]artifactSummary, 0, len(cfg.Artifacts))
 	for _, art := range cfg.Artifacts {
@@ -217,6 +218,7 @@ func main() {
 
 	report := summary{
 		Phase:        phase,
+		Verdict:      verdictOf(checks),
 		Description:  strings.TrimSpace(cfg.Description),
 		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
 		ConfigPath:   toRelative(*configPath),
@@ -255,6 +257,108 @@ func main() {
 			fatal(fmt.Sprintf("write markdown: %v", err))
 		}
 	}
+	fmt.Fprintf(os.Stderr, "audit phase %s verdict: %s\n", phase, report.Verdict)
+	if code := exitCodeFor(report.Verdict, *strict); code != 0 {
+		os.Exit(code)
+	}
+}
+
+// Check statuses and report verdicts. The tool itself runs no check: a status is
+// only ever "passed", "failed" or "skipped" because whatever ran the check said so
+// in the results file, and "not-run" otherwise. A report with no recorded result
+// therefore says "no-verdict" rather than looking like a clean audit (PL-DC-27).
+const (
+	statusPassed  = "passed"
+	statusFailed  = "failed"
+	statusSkipped = "skipped"
+	statusNotRun  = "not-run"
+
+	verdictPass    = "pass"
+	verdictFail    = "fail"
+	verdictPartial = "partial"
+	verdictNone    = "no-verdict"
+)
+
+func buildChecks(specs []checkSpec, results map[string]string) []checkSummary {
+	checks := make([]checkSummary, 0, len(specs))
+	for _, chk := range specs {
+		status := statusNotRun
+		if r, ok := results[chk.Name]; ok {
+			status = r
+		}
+		checks = append(checks, checkSummary{
+			Name:     chk.Name,
+			Target:   chk.Target,
+			Expect:   chk.Expect,
+			Severity: chk.Severity,
+			Coverage: append([]string(nil), chk.Coverage...),
+			Status:   status,
+		})
+	}
+	return checks
+}
+
+// verdictOf: any failure is "fail"; otherwise "pass" only when every check
+// passed; "no-verdict" when no check has a result at all; "partial" in between.
+func verdictOf(checks []checkSummary) string {
+	if len(checks) == 0 {
+		return verdictNone
+	}
+	passed, recorded := 0, 0
+	for _, c := range checks {
+		switch c.Status {
+		case statusFailed:
+			return verdictFail
+		case statusPassed:
+			passed++
+			recorded++
+		case statusSkipped:
+			recorded++
+		}
+	}
+	switch {
+	case passed == len(checks):
+		return verdictPass
+	case recorded == 0:
+		return verdictNone
+	default:
+		return verdictPartial
+	}
+}
+
+func exitCodeFor(verdict string, strict bool) int {
+	if strict && verdict != verdictPass {
+		return 3
+	}
+	return 0
+}
+
+// loadResults reads {"check name": "passed|failed|skipped"} and refuses any other
+// status word and any name the configuration does not list.
+func loadResults(path string, specs []checkSpec) (map[string]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("decode %s: %w", path, err)
+	}
+	known := make(map[string]struct{}, len(specs))
+	for _, s := range specs {
+		known[s.Name] = struct{}{}
+	}
+	for name, status := range raw {
+		if _, ok := known[name]; !ok {
+			return nil, fmt.Errorf("result for %q, which the config does not list as a check", name)
+		}
+		switch status {
+		case statusPassed, statusFailed, statusSkipped:
+		default:
+			return nil, fmt.Errorf("check %q has status %q: use passed, failed or skipped", name, status)
+		}
+	}
+	return raw, nil
 }
 
 func fatal(msg string) {
@@ -449,12 +553,13 @@ func writeMarkdown(path string, sum *summary) error {
 	fmt.Fprintf(&b, "- Config: `%s`\n", sum.ConfigPath)
 	fmt.Fprintf(&b, "- Config SHA256: `%s`\n\n", sum.ConfigSHA256)
 
+	fmt.Fprintf(&b, "- Verdict: **%s**\n\n", sum.Verdict)
 	if len(sum.Checks) > 0 {
 		b.WriteString("## Checks\n\n")
-		b.WriteString("| Name | Target | Expectation | Severity |\n")
-		b.WriteString("| --- | --- | --- | --- |\n")
+		b.WriteString("| Name | Target | Expectation | Severity | Status |\n")
+		b.WriteString("| --- | --- | --- | --- | --- |\n")
 		for _, chk := range sum.Checks {
-			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", escapeMD(chk.Name), escapeMD(chk.Target), escapeMD(chk.Expect), escapeMD(chk.Severity))
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", escapeMD(chk.Name), escapeMD(chk.Target), escapeMD(chk.Expect), escapeMD(chk.Severity), escapeMD(chk.Status))
 		}
 		b.WriteString("\n")
 	}

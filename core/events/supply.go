@@ -20,6 +20,11 @@ const (
 	// attested failed -- distinct from SupplyReasonMint so an auditor can
 	// tell a fresh mint apart from a burn being undone.
 	SupplyReasonRedeemRefund = "redeem_refund"
+	// SupplyReasonGenesisCorrection identifies the one-time rise of the NHB
+	// supply counter by the part of the genesis allocation it never counted
+	// (StateProcessor.ReconcileNHBGenesisShortfallOnce). No NHB is created:
+	// the balances already existed, only the counter catches up with them.
+	SupplyReasonGenesisCorrection = "genesis_correction"
 )
 
 // TokenSupply captures a supply delta for a fungible token.

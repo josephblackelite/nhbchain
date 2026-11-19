@@ -4,7 +4,7 @@ A Next.js app that was written for the creator flow publish, tip, stake, payout.
 
 **Retired RPC methods.** `creator_publish`, `creator_tip`, `creator_stake`, `creator_unstake` and `creator_payouts` with `claim: true` return HTTP `410 Gone` from the node (`creatorRPCDisabledMessage` in `rpc/creator_handlers.go`). The Publish, Tip, Stake and Claim controls in the UI are disabled and only log a note.
 
-**Security warning: this is a demo.** `pages/api/rpc.ts` forwards only `creator_publish`, `creator_tip`, `creator_stake` and `creator_payouts` (a fixed allowlist), attaching `Authorization: Bearer <token>` from `NHB_RPC_TOKEN` (or `NEXT_PUBLIC_NHB_RPC_TOKEN`). It does not authenticate the visitor. Do not expose it on a public network without adding per-visitor authentication.
+**Security warning: this is a demo.** `pages/api/rpc.ts` forwards only `creator_publish`, `creator_tip`, `creator_stake` and `creator_payouts` (a fixed allowlist), attaching `Authorization: Bearer <token>` from `NHB_RPC_TOKEN` (server-side only; a `NEXT_PUBLIC_` variable is shipped to every visitor's browser and must never hold a token). It does not authenticate the visitor. Do not expose it on a public network without adding per-visitor authentication.
 
 ## Getting started
 

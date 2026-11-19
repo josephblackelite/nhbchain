@@ -17,31 +17,79 @@ import (
 // commit synced blocks without ever checking who signed them. Change it here, in config.toml and in the tests together, in the release that changes the live value.
 const liveQuorumCertActivationHeight uint64 = 1380200
 
-// liveRewardsByStakeFromEpoch is the first epoch whose emission the live validators pay by stake (config RewardsByStakeFromEpoch); 0 means they still pay the
-// earlier split. A node that starts from a snapshot executes every later block itself, so it must carry the same value: with another it would compute other
+// liveRewardsByStakeFromEpoch is the first epoch whose emission the live validators pay by stake (config RewardsByStakeFromEpoch); zero would mean the earlier split. A node that starts from a snapshot executes every later block itself, so it must carry the same value: with another it would compute other
 // reward payouts at an epoch boundary, a different state root, and stop following the network. Change it here, in config.toml and in the tests together, in
 // the release that changes the live value.
-const liveRewardsByStakeFromEpoch uint64 = 0
+const liveRewardsByStakeFromEpoch uint64 = 17280
 
 // liveChainRules are the other settings that decide what a block leaves behind or
-// whether a transaction is valid, each an activation height that is off (0) on the
-// live chain. A node that starts from a snapshot executes every later block itself,
+// whether a transaction is valid, each with the value the live validators run with:
+// the five activation heights set on 2026-10-25 (1718500 to 1723300) and the block
+// time of the duplicate-parameter-key rule, and 0 (off) for every rule not yet
+// switched on. A node that starts from a snapshot executes every later block itself,
 // so one set to another value computes another state root at the first block it
-// applies to and stops following the network. A key left out of the file is the
-// default, 0. Change a value here, in config.toml and in the tests together, in the
-// release that changes the live value.
+// applies to and stops following the network (a follower with RewardsByStakeFromEpoch
+// left at 0 refuses block 2,321,100, the first epoch boundary after the hosted
+// snapshot). A key left out of the file is the default, 0. Change a value here, in
+// config.toml and in the tests together, in the release that changes the live value.
 var liveChainRules = []struct {
 	table string // "" for a top-level key
 	key   string
 	live  uint64
 }{
-	{"", "POSSweepSkipActivationHeight", 0},
-	{"", "POSHoldUnstakeGuardActivationHeight", 0},
-	{"", "GovCreditPreservationActivationHeight", 0},
-	{"", "FeeRouteAliasActivationHeight", 0},
-	{"", "LendingFixedTermIDActivationHeight", 0},
+	{"", "POSSweepSkipActivationHeight", 1718500},
+	{"", "POSHoldUnstakeGuardActivationHeight", 1718500},
+	{"", "GovCreditPreservationActivationHeight", 1719700},
+	{"", "FeeRouteAliasActivationHeight", 1720900},
+	{"", "LendingFixedTermIDActivationHeight", 1723300},
+	{"", "NHBSupplyGenesisCorrectionActivationHeight", 0},
+	{"", "TransferMonthlyFreeTierActivationHeight", 0},
+	{"", "LoyaltyBudgetFloorActivationHeight", 0},
+	{"", "PotsoGovernanceWeightActivationHeight", 0},
+	{"", "ValidatorFlagNonceActivationHeight", 2726000},
+	{"", "MintRunningChainIDActivationHeight", 0},
+	{"", "MintPhaseEChainIDRetireHeight", 0},
+	{"", "TxNetworkChainIDActivationHeight", 0},
+	{"", "VoteChainBindingActivationHeight", 2726000},
+	{"", "SlashEligibilityRefreshActivationHeight", 2726000},
+	{"", "SlashPendingUnbondsActivationHeight", 2726000},
+	{"", "EvidenceIntakeGuardActivationHeight", 2726000},
+	{"", "StakeAPRFromStateActivationHeight", 0},
+	{"", "ValidatorAdmissionGuardActivationHeight", 0},
+	{"", "ValidatorAdmissionProbationSeconds", 0},
+	{"", "PotsoTreasuryShortfallActivationHeight", 0},
+	{"", "LendingAccountingFixesActivationHeight", 0},
+	{"", "LendingPoolLimitsActivationHeight", 0},
+	{"", "LendingMaxPools", 0},
+	{"", "LendingPoolIDMaxLength", 0},
+	{"", "LendingRefPriceGuardsActivationHeight", 0},
+	{"", "LendingRefPriceMaxAheadSeconds", 0},
+	{"", "LendingRefPriceMaxAgeSeconds", 0},
+	{"", "LendingRiskActivationHeight", 0},
+	{"", "LendingFeeWithdrawActivationHeight", 0},
+	{"", "PaymasterSponsorBindingActivationHeight", 0},
+	{"", "LoyaltyPaymasterConsentActivationHeight", 0},
+	{"", "LoyaltyCounterpartyCapActivationHeight", 0},
+	{"", "BuybackMinAskActivationHeight", 0},
+	{"", "SubscriptionsPauseSettlementActivationHeight", 0},
+	{"", "SubscriptionsChargeHistoryMigrationActivationHeight", 0},
+	{"", "BuybackUnpriceableEpochRefundActivationHeight", 2674600},
+	{"", "SwapVoucherSignedBudgetActivationHeight", 2674600},
+	{"", "SponsoredTransferFeeCreditActivationHeight", 2674600},
+	{"", "UniformTransferFeeActivationHeight", 2770000},
+	{"", "TransferFeeGovernanceActivationHeight", 2770000},
+	{"", "TransferFeeGovernanceDelayBlocks", 41760},
+	{"", "BuybackPriceGuardActivationHeight", 2770000},
+	{"", "EpochSettlementFailsafeActivationHeight", 2770000},
+	{"", "TransferFeeStrictAllowanceActivationHeight", 2770000},
+	{"", "SaleReferenceActivationHeight", 0},
+	{"", "SaleReferenceMaxAgeSeconds", 0},
+	{"", "SaleReferenceMaxStepBps", 0},
 	{"swap", "PayoutReceiptActivationHeight", 0},
-	{"governance", "RejectAmbiguousParamKeysFromUnix", 0},
+	{"bridge", "BridgeActivationHeight", 0},
+	{"amm", "AmmActivationHeight", 0},
+	{"amm", "SwapStartHeight", 0},
+	{"governance", "RejectAmbiguousParamKeysFromUnix", 1792936800},
 }
 
 // A node that starts from a snapshot executes every later block itself, so the

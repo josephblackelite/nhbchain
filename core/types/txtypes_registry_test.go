@@ -130,8 +130,9 @@ func TestAllTxTypesIsSortedUniqueAndACopy(t *testing.T) {
 	if AllTxTypes()[0] == 0xFF {
 		t.Fatalf("AllTxTypes must return a fresh copy")
 	}
-	// The design's inventory: 0x01-0x4C with a gap at 0x1F.
-	if len(all) != 75 || seen[0x1F] || !seen[0x01] || !seen[0x4C] {
+	// The design's inventory: 0x01-0x52 with a gap at 0x1F (0x4E-0x52 are the bridge and the native pool, valid
+	// only from their activation heights).
+	if len(all) != 81 || seen[0x1F] || !seen[0x01] || !seen[0x4D] || !seen[0x4E] || !seen[0x52] {
 		t.Fatalf("unexpected inventory: %d types", len(all))
 	}
 }

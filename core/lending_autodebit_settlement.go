@@ -86,6 +86,11 @@ func (sp *StateProcessor) settleLendingAutoDebitsDueOnDay(manager *nhbstate.Mana
 			return err
 		}
 	}
+	if sp.lendingAccountingFixesActive() {
+		// Take out only what this pass handled: a retry or a final cycle that was
+		// scheduled onto this same day during the pass stays (ledger PL-EXT-42).
+		return manager.LendingAutoDebitRemoveDue(day, due)
+	}
 	return manager.LendingAutoDebitClearDue(day)
 }
 

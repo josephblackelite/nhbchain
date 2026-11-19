@@ -141,6 +141,21 @@ func main() {
 	if err := config.ValidateConfig(cfg.Global); err != nil {
 		log.Fatal("invalid configuration", "err", err)
 	}
+	// The [governance] block is the one the proposal engine reads (the global block
+	// above is a different one): warn about a window below its floor, and refuse
+	// to start if the operator turned on EnforceWindowFloors.
+	warnGovernanceWindows(slog.Default(), cfg.Governance)
+	if err := config.EnforceGovernanceWindowFloors(cfg.Governance); err != nil {
+		log.Fatal("invalid configuration", "err", err)
+	}
+	// The transfer fee schedule under governance: a delay below its floor or a rate above the
+	// ceiling is a warning, and a refusal under the same EnforceWindowFloors setting.
+	for _, problem := range config.FeeScheduleProblems(cfg) {
+		slog.Warn("configuration problem", slog.String("section", "fees"), slog.String("problem", problem.Error()))
+	}
+	if err := config.EnforceFeeScheduleFloors(cfg); err != nil {
+		log.Fatal("invalid configuration", "err", err)
+	}
 
 	consensusTimeouts, err := applyConsensusTimeoutOverrides(cfg.Consensus, proposalTimeoutFlag, prevoteTimeoutFlag, precommitTimeoutFlag, commitTimeoutFlag, os.LookupEnv)
 	if err != nil {
@@ -150,6 +165,7 @@ func main() {
 	if err := config.ValidateConsensus(cfg.Consensus); err != nil {
 		log.Fatal("invalid consensus timeouts", "err", err)
 	}
+	warnConsensusAdvisories(slog.Default(), cfg.Consensus)
 
 	allowAutogenesis, err := resolveAllowAutogenesis(cfg.AllowAutogenesis, allowAutogenesisCLISet, *allowAutogenesisFlag, os.LookupEnv)
 	if err != nil {
@@ -168,6 +184,12 @@ func main() {
 		panic(fmt.Sprintf("Failed to open database: %v", err))
 	}
 	defer db.Close()
+
+	// The hash of every setting two validators must hold alike, logged and left in
+	// the data directory (PL-R5T-16, PL-R5T-30). It never stops the node.
+	if _, digestErr := cfg.PublishConsensusDigest(slog.Default(), os.Getenv, cfg.DataDir); digestErr != nil {
+		slog.Warn("Could not compute the consensus settings digest", slog.Any("error", digestErr))
+	}
 
 	privKey, err := loadValidatorKey(cfg, passSource.Get)
 	if err != nil {
@@ -227,6 +249,122 @@ func main() {
 	// Same setting as cmd/nhb/main.go: zero (the default) keeps the transaction
 	// hash as the fixed-term loan and deposit ID.
 	node.SetLendingFixedTermIDActivationHeight(cfg.LendingFixedTermIDActivationHeight)
+	// Same setting as cmd/nhb/main.go: zero (the default) leaves the NHB supply
+	// counter as it is.
+	node.SetNHBSupplyGenesisCorrectionActivationHeight(cfg.NHBSupplyGenesisCorrectionActivationHeight)
+	// Both default to off (zero); see config.Config.TransferMonthlyFreeTierActivationHeight
+	// and config.Config.LoyaltyBudgetFloorActivationHeight. Chain rules, so the
+	// values are set identically on every validator in config.toml.
+	node.SetTransferMonthlyFreeTier(cfg.TransferMonthlyFreeTierActivationHeight, cfg.TransferMonthlyFreeTierTxPerMonth)
+	loyaltyFloor, floorErr := config.ParseAmount(cfg.LoyaltyBudgetFloorZNHBWei)
+	if floorErr != nil {
+		log.Fatalf("Invalid LoyaltyBudgetFloorZNHBWei: %v", floorErr)
+	}
+	node.SetLoyaltyBudgetFloor(cfg.LoyaltyBudgetFloorActivationHeight, loyaltyFloor)
+	// Off (zero) by default; see config.Config.PotsoGovernanceWeightActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetPotsoGovernanceWeights(cfg.PotsoGovernanceWeightActivationHeight)
+	// Off (zero) by default; see config.Config.ValidatorFlagNonceActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetValidatorFlagNonceActivationHeight(cfg.ValidatorFlagNonceActivationHeight)
+	// Off (zero) by default; see config.Config.MintRunningChainIDActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetMintRunningChainIDActivationHeight(cfg.MintRunningChainIDActivationHeight)
+	// Off (zero) by default; see config.Config.MintPhaseEChainIDRetireHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetMintPhaseEChainIDRetireHeight(cfg.MintPhaseEChainIDRetireHeight)
+	// Off (zero) by default; see config.Config.TxNetworkChainIDActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetTxNetworkChainIDActivationHeight(cfg.TxNetworkChainIDActivationHeight)
+	// Off (zero) by default; see config.Config.VoteChainBindingActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetVoteChainBindingActivationHeight(cfg.VoteChainBindingActivationHeight)
+	// The validator-set, slashing and staking chain rules; every one is off (zero) by
+	// default and set identically on every validator (core.ValidatorRules).
+	node.SetValidatorRules(core.ValidatorRulesFromConfig(cfg))
+	// Off (zero) by default; see config.Config.LendingFeeWithdrawActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingFeeWithdrawActivationHeight(cfg.LendingFeeWithdrawActivationHeight)
+	// Off (zero) by default; see config.Config.LendingRiskActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRiskActivationHeight(cfg.LendingRiskActivationHeight)
+	// Off (zero) by default; see config.Config.LendingRefPriceMaxAgeSeconds.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRefPriceMaxAgeSeconds(cfg.LendingRefPriceMaxAgeSeconds)
+	// Off (zero) by default; see config.Config.LendingRefPriceMaxAheadSeconds.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRefPriceMaxAheadSeconds(cfg.LendingRefPriceMaxAheadSeconds)
+	// Off (zero) by default; see config.Config.LendingRefPriceGuardsActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingRefPriceGuardsActivationHeight(cfg.LendingRefPriceGuardsActivationHeight)
+	// Off (zero) by default; see config.Config.LendingPoolIDMaxLength.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingPoolIDMaxLength(cfg.LendingPoolIDMaxLength)
+	// Off (zero) by default; see config.Config.LendingMaxPools.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingMaxPools(cfg.LendingMaxPools)
+	// Off (zero) by default; see config.Config.LendingPoolLimitsActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingPoolLimitsActivationHeight(cfg.LendingPoolLimitsActivationHeight)
+	// Off (zero) by default; see config.Config.LendingAccountingFixesActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLendingAccountingFixesActivationHeight(cfg.LendingAccountingFixesActivationHeight)
+	// Off (zero) by default; see config.Config.PaymasterSponsorBindingActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetPaymasterSponsorBinding(cfg.PaymasterSponsorBindingActivationHeight)
+	// Off (zero) by default; see config.Config.LoyaltyPaymasterConsentActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetLoyaltyPaymasterConsent(cfg.LoyaltyPaymasterConsentActivationHeight)
+	// Off (zero) by default; see config.Config.LoyaltyCounterpartyCapActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	counterpartyCap, counterpartyCapErr := config.ParseAmount(cfg.LoyaltyCounterpartyCapZNHBWei)
+	if counterpartyCapErr != nil {
+		log.Fatalf("Invalid LoyaltyCounterpartyCapZNHBWei: %v", counterpartyCapErr)
+	}
+	node.SetLoyaltyCounterpartyCap(cfg.LoyaltyCounterpartyCapActivationHeight, counterpartyCap)
+	// Off (zero) by default; see config.Config.BuybackMinAskActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	buybackMinAsk, buybackMinAskErr := config.ParseAmount(cfg.BuybackMinAskZNHBWei)
+	if buybackMinAskErr != nil {
+		log.Fatalf("Invalid BuybackMinAskZNHBWei: %v", buybackMinAskErr)
+	}
+	node.SetBuybackMinAsk(cfg.BuybackMinAskActivationHeight, buybackMinAsk)
+	// Off (zero) by default; see config.Config.SubscriptionsPauseSettlementActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSubscriptionsPauseSettlement(cfg.SubscriptionsPauseSettlementActivationHeight)
+	// Off (zero) by default; see config.Config.SubscriptionsChargeHistoryMigrationActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSubscriptionsChargeHistoryMigration(cfg.SubscriptionsChargeHistoryMigrationActivationHeight)
+	// Off (zero) by default; see config.Config.BuybackUnpriceableEpochRefundActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetBuybackUnpriceableEpochRefund(cfg.BuybackUnpriceableEpochRefundActivationHeight)
+	// The ZNHB bridge escrow and the native pool: off (activation height zero) by default; chain rules, so the
+	// values are set identically on every validator. A block that is activated with a bad value stops the node.
+	bridgeSettings, ammSettings, bridgeAmmErr := core.BridgeAmmSettingsFromConfig(cfg)
+	if bridgeAmmErr != nil {
+		slog.Error("Refusing to start: invalid [bridge] or [amm] settings", slog.Any("error", bridgeAmmErr))
+		os.Exit(1)
+	}
+	node.SetBridgeAndAmm(bridgeSettings, ammSettings)
+	// Off (zero) by default; see config.Config.SwapVoucherSignedBudgetActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSwapVoucherSignedBudget(cfg.SwapVoucherSignedBudgetActivationHeight)
+	// Off (zero) by default; see config.Config.SponsoredTransferFeeCreditActivationHeight.
+	// A chain rule, so the value is set identically on every validator.
+	node.SetSponsoredTransferFeeCredit(cfg.SponsoredTransferFeeCreditActivationHeight)
+	// All off (zero) by default; see config.Config.UniformTransferFeeActivationHeight and
+	// config.Config.TransferFeeGovernanceActivationHeight. Chain rules, so the values are set
+	// identically on every validator.
+	node.SetUniformTransferFee(cfg.UniformTransferFeeActivationHeight)
+	node.SetTransferFeeGovernance(cfg.TransferFeeGovernanceActivationHeight, cfg.TransferFeeGovernanceDelayBlocks)
+	// Off (zero) by default; see config.Config.BuybackPriceGuardActivationHeight and
+	// config.Config.EpochSettlementFailsafeActivationHeight. Chain rules, so the
+	// values are set identically on every validator.
+	node.SetBuybackPriceGuard(cfg.BuybackPriceGuardActivationHeight)
+	node.SetEpochSettlementFailsafe(cfg.EpochSettlementFailsafeActivationHeight)
+	// Off (zero) by default; see config.Config.TransferFeeStrictAllowanceActivationHeight. A chain rule, so the value is
+	// set identically on every validator.
+	node.SetTransferFeeStrictAllowance(cfg.TransferFeeStrictAllowanceActivationHeight)
 	node.SetMempoolLimit(cfg.Mempool.MaxTransactions)
 
 	paymasterLimits, err := cfg.Global.PaymasterLimits()
@@ -251,6 +389,10 @@ func main() {
 		Approver:       autoTopUpCfg.Approver,
 		ApproverRole:   autoTopUpCfg.ApproverRole,
 		MinterRole:     autoTopUpCfg.MinterRole,
+		SponsorRole:    autoTopUpCfg.SponsorRole,
+	}
+	if autoTopUpCfg.AggregateDailyCapWei != nil {
+		autoPolicy.AggregateDailyCapWei = new(big.Int).Set(autoTopUpCfg.AggregateDailyCapWei)
 	}
 	if autoTopUpCfg.MinBalanceWei != nil {
 		autoPolicy.MinBalanceWei = new(big.Int).Set(autoTopUpCfg.MinBalanceWei)
@@ -284,15 +426,15 @@ func main() {
 		panic(fmt.Sprintf("Failed to apply POTSO weight config: %v", err))
 	}
 
-	node.SetLendingRiskParameters(lending.RiskParameters{
-		MaxLTV:               cfg.Lending.MaxLTVBps,
-		LiquidationThreshold: cfg.Lending.LiquidationThresholdBps,
-		DeveloperFeeCapBps:   cfg.Lending.DeveloperFeeBps,
-		Oracle: lending.OracleConfig{
-			MaxAgeBlocks:    cfg.Lending.OracleMaxAgeBlocks,
-			MaxDeviationBps: cfg.Lending.OracleMaxDeviationBps,
-		},
-	})
+	// Both entry points build the engine's limits from the one mapping, so they cannot
+	// disagree; the limits that the engine applies only from
+	// LendingRiskActivationHeight are included here and cleared by core before it
+	// (ledger PL-DC-19).
+	lendingRisk, riskErr := cfg.Lending.RiskParameters()
+	if riskErr != nil {
+		panic(fmt.Sprintf("Invalid [lending] risk limits: %v", riskErr))
+	}
+	node.SetLendingRiskParameters(lendingRisk)
 
 	node.SetLendingAccrualConfig(cfg.Lending.ReserveFactorBps, cfg.Lending.ProtocolFeeBps, lending.DefaultInterestModel)
 
@@ -386,6 +528,13 @@ func main() {
 	aggregator.Register("coingecko", swap.NewCoinGeckoOracle(nil, "", map[string]string{}))
 	node.SetSwapOracle(aggregator)
 	node.SetSwapManualOracle(manualOracle)
+	// The swap sanctions checker, as cmd/nhb sets it: without it this node would accept a swap
+	// the other binary refuses (ledger PL-EXT-47).
+	sanctionsParams, err := swapCfg.Sanctions.Parameters()
+	if err != nil {
+		panic(fmt.Sprintf("Failed to parse swap sanctions config: %v", err))
+	}
+	node.SetSwapSanctionsChecker(sanctionsParams.Checker())
 
 	node.SetModulePauses(cfg.Global.Pauses)
 	if !cfg.Global.Pauses.Staking {
@@ -406,10 +555,26 @@ func main() {
 		"market":        convertQuota(cfg.Global.Quotas.Market),
 	})
 
+	// The staking rate and its validation, as cmd/nhb does them: without SyncStakingParams the
+	// processor keeps its default rate of 0 and this node accrues no stake rewards while the other
+	// binary accrues at the configured rate, so the same stake transaction gives different state
+	// roots (ledger PL-EXT-47, PL-R5T-27).
+	if err := node.SyncStakingParams(); err != nil {
+		panic(fmt.Sprintf("Failed to apply staking params: %v", err))
+	}
+	if err := node.ValidateStakingConfig(); err != nil {
+		panic(fmt.Sprintf("Failed to validate staking config: %v", err))
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	broadcaster := newResilientBroadcaster(ctx)
+	// The node's own gossip goes out through the same stream the engine's messages do, as cmd/nhb hands
+	// the node its peer-to-peer server. Without it a transaction submitted to this validator is never
+	// forwarded: it waits in this node's mempool until this validator itself proposes, and is lost if
+	// the node restarts (ledger PL-EXT-47).
+	node.SetNetworkBroadcaster(broadcaster)
 	baseDir := filepath.Dir(*configFile)
 	allowInsecureNetwork, networkDialOpts, err := buildNetworkDialOptions(cfg, baseDir, *networkAddress, *allowInsecureFlag)
 	if err != nil {
@@ -424,16 +589,32 @@ func main() {
 		Precommit: cfg.Consensus.PrecommitTimeout,
 		Commit:    cfg.Consensus.CommitTimeout,
 	}), bft.WithMinBlockInterval(cfg.Consensus.MinBlockInterval),
+		// Votes at or above the configured height are signed, and checked, over the genesis hash
+		// (PL-R5T-31); 0, the shipped value, keeps the legacy digest. A chain rule: the same value
+		// on every validator.
+		bft.WithVoteBinding(node.GenesisHash(), cfg.VoteChainBindingActivationHeight),
 		bft.WithLockSnapshotPath(filepath.Join(cfg.DataDir, "polc_lock.json")),
 		// What this validator has voted, so a restart cannot make it sign a
 		// different vote for a round it already voted in (see cmd/nhb/main.go).
-		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")))
+		bft.WithSignStatePath(filepath.Join(cfg.DataDir, "bft_sign_state.json")),
+		// How many weak (no-quorum-otherwise) round jumps this validator has
+		// already granted at its current height, so a restart of THIS validator
+		// cannot hand a fresh maxFutureRounds allowance to a validator it was
+		// already following (see cmd/nhb/main.go and round_sync.go's
+		// admitWeakRoundJumpLocked).
+		bft.WithWeakJumpSnapshotPath(filepath.Join(cfg.DataDir, "bft_weak_jump.json")))
 	slog.Info("consensus: minimum block interval", slog.Duration("interval", bftEngine.MinBlockInterval()))
 	node.SetBftEngine(bftEngine)
+	// A block committed from a peer's blocks tells the engine, so a round still aimed at an
+	// already-final height does not run out its timers (see cmd/nhb/main.go; ledger PL-EXT-47).
+	node.SetExternalCommitNotifier(bftEngine.NotifyExternalCommit)
 	// Bound one block build to half the proposal timeout (see cmd/nhb/main.go)
 	// and start the optional Prometheus listener (NHB_METRICS_ADDR); a failure
 	// to start it is logged and never stops the validator.
 	node.SetProposalBuildBudget(cfg.Consensus.ProposalTimeout / 2)
+	// Keep the blocks this node proposes small enough for one network frame, whatever frame limit is
+	// configured, as cmd/nhb does (ledger PL-EXT-47).
+	node.SetProposalFrameLimit(cfg.MaxMsgBytes)
 	observability.StartMetricsServerFromEnv(slog.Default())
 
 	grpcListener, err := net.Listen("tcp", *grpcAddress)
@@ -476,6 +657,23 @@ func main() {
 	fmt.Println("--- Consensus node initialised and running ---")
 	<-ctx.Done()
 	fmt.Println("--- Consensus node shutting down ---")
+}
+
+// warnConsensusAdvisories logs a WARN for each consensus setting the node starts
+// on but does not run as written, and returns how many it found. Today that is a
+// minimum block interval above half the commit timeout, which the engine lowers.
+func warnConsensusAdvisories(logger *slog.Logger, c config.Consensus) int {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	advisories := config.ConsensusAdvisories(c)
+	for _, advisory := range advisories {
+		logger.Warn("consensus: configuration advisory",
+			slog.String("advisory", advisory.Error()),
+			slog.Duration("commitTimeout", c.CommitTimeout),
+			slog.Duration("minBlockInterval", c.MinBlockInterval))
+	}
+	return len(advisories)
 }
 
 func applyConsensusTimeoutOverrides(base config.Consensus, proposal, prevote, precommit, commit durationFlag, lookup envLookupFunc) (config.Consensus, error) {
@@ -562,7 +760,9 @@ func maintainNetworkStream(ctx context.Context, target string, broadcaster *resi
 		broadcaster.SetClient(client)
 		backoff = networkReconnectBaseDelay
 
-		streamErr := client.Run(ctx, node.ProcessNetworkMessage, nil)
+		// HandlePeerMessage answers a chain data request to the peer that
+		// made it, when p2pd says which peer that was.
+		streamErr := client.RunPeers(ctx, node.HandlePeerMessage, nil)
 		broadcaster.SetClient(nil)
 		client.Close()
 		if streamErr != nil && ctx.Err() == nil {

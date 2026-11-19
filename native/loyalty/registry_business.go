@@ -61,7 +61,11 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 	if !ok {
 		return ErrBusinessNotFound
 	}
-	if caller != business.Owner && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) {
+	// Under the standing-consent rule (PL-R5T-15) the current paymaster may
+	// withdraw itself: a wallet that was assigned can leave. Until then only the
+	// owner and loyalty admins can clear it.
+	withdrawing := r.standingConsent && isZeroAddress(newPaymaster) && !isZeroAddress(business.Paymaster) && caller == business.Paymaster
+	if caller != business.Owner && !r.st.HasRole(roleLoyaltyAdmin, caller[:]) && !withdrawing {
 		if !isZeroAddress(newPaymaster) && newPaymaster == caller {
 			return r.st.KVPut(paymasterConsentKey(business.ID, caller), uint64(1))
 		}
@@ -79,7 +83,10 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 		return ErrPaymasterConsentRequired
 	}
 	if business.Paymaster == newPaymaster {
-		return nil
+		if !r.standingConsent || isZeroAddress(newPaymaster) || newPaymaster == business.Owner {
+			return nil
+		}
+		return r.recordLegacyAssignment(business, caller, newPaymaster)
 	}
 	consentKey := paymasterConsentKey(business.ID, newPaymaster)
 	consumeConsent := false
@@ -127,8 +134,79 @@ func (r *Registry) SetPaymaster(id BusinessID, caller [20]byte, newPaymaster [20
 			return err
 		}
 	}
+	if r.standingConsent {
+		// The wallet that stops being the paymaster loses its standing record, the
+		// one that becomes the paymaster gets one: the reward path debits only a
+		// wallet that has one (or is the owner's own).
+		if !isZeroAddress(oldPaymaster) && oldPaymaster != business.Owner {
+			if err := r.st.KVPut(paymasterAssignedKey(business.ID, oldPaymaster), uint64(0)); err != nil {
+				return err
+			}
+		}
+		if !isZeroAddress(newPaymaster) && newPaymaster != business.Owner {
+			if err := r.st.KVPut(paymasterAssignedKey(business.ID, newPaymaster), uint64(1)); err != nil {
+				return err
+			}
+		}
+	}
 	r.emit(newPaymasterRotatedEvent(business, caller, oldPaymaster, newPaymaster))
 	return nil
+}
+
+// recordLegacyAssignment handles the no-op case of SetPaymaster under the standing
+// rule: the named wallet is already the paymaster, from before the rule, and has no
+// standing record. The same consent an assignment needs is needed to record it
+// (the wallet's own call, or its opt-in, which this consumes); nothing else changes
+// and no event is emitted.
+func (r *Registry) recordLegacyAssignment(business *Business, caller, paymaster [20]byte) error {
+	recorded, err := r.PaymasterAssignmentRecorded(business.ID, paymaster)
+	if err != nil {
+		return err
+	}
+	if recorded {
+		return nil
+	}
+	consentKey := paymasterConsentKey(business.ID, paymaster)
+	consume := false
+	if paymaster != caller {
+		var consent uint64
+		found, err := r.st.KVGet(consentKey, &consent)
+		if err != nil {
+			return err
+		}
+		if !found || consent != 1 {
+			return ErrPaymasterConsent
+		}
+		consume = true
+	}
+	if err := r.st.KVPut(paymasterAssignedKey(business.ID, paymaster), uint64(1)); err != nil {
+		return err
+	}
+	if consume {
+		return r.st.KVPut(consentKey, uint64(0))
+	}
+	return nil
+}
+
+// SetPaymasterStandingConsent switches the standing paymaster-consent rule
+// (PL-R5T-15) on or off for this registry. The state processor sets it from the
+// configured activation height; off keeps every behaviour of SetPaymaster as it was.
+func (r *Registry) SetPaymasterStandingConsent(active bool) {
+	if r == nil {
+		return
+	}
+	r.standingConsent = active
+}
+
+// PaymasterAssignmentRecorded reports whether a standing record exists that
+// paymaster was assigned to the business with its consent.
+func (r *Registry) PaymasterAssignmentRecorded(id BusinessID, paymaster [20]byte) (bool, error) {
+	var value uint64
+	found, err := r.st.KVGet(paymasterAssignedKey(id, paymaster), &value)
+	if err != nil {
+		return false, err
+	}
+	return found && value == 1, nil
 }
 
 func (r *Registry) AddMerchantAddress(id BusinessID, addr [20]byte) error {

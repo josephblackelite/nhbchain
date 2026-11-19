@@ -75,6 +75,15 @@ EXTERNAL_ADDRESS_HOSTPORT=''
 ALLOW_INSECURE_HTTP=0
 ALLOW_BINARY_MISMATCH=0
 ALLOW_EXISTING_KEY=0
+ALLOW_UNANCHORED=0
+# Set to 1 when this run went ahead without an outside check on its snapshot
+# because --allow-unanchored said to: the closing message then says so.
+UNANCHORED_RUN=0
+# Set to 1 when this run's snapshot was checked against --tip-hash and --state-root
+# but no usable reference node (--tip-rpc) was there to check the blocks the node
+# applies after it: those pins show where the snapshot ends, nothing more, so the
+# closing message says that the node's place at the tip rests on the bootnode.
+PINNED_ONLY_RUN=0
 MAX_SNAPSHOT_AGE=''
 TIP_HASH=''
 STATE_ROOT=''
@@ -123,11 +132,18 @@ Options:
                            steer you to old consensus code. Needs that commit and
                            the manifest's in this checkout (git fetch first). May
                            be given as NHB_MIN_RELEASE_COMMIT. Strongly advised.
-  --tip-rpc <url>          RPC URL of a node you trust. Used to decide when this
-                           node has caught up: its newest blocks are compared
-                           with that node's, and a node whose blocks differ from
-                           that node's is refused. Without it the age of the
-                           newest block is used. May be given as NHB_TIP_RPC_URL.
+  --tip-rpc <url>          RPC URL of a node you trust, which neither the snapshot
+                           host nor the bootnode runs. A snapshot is not signed
+                           by anyone, so a run that installs one needs a check on
+                           it from outside: this, or --tip-hash and --state-root
+                           together, or --allow-unanchored. Only this checks the
+                           blocks the node applies after the snapshot: its newest
+                           blocks are compared with that node's when deciding
+                           that it has caught up, and a node whose blocks differ
+                           from that node's is refused. https unless
+                           --allow-insecure-http, and a host other than the
+                           snapshot's and the bootnode's. May be given as
+                           NHB_TIP_RPC_URL.
   --max-lag-blocks <n>     How far from the network tip (either side) still
                            counts as caught up (default 3, at most 15; needs
                            --tip-rpc).
@@ -147,7 +163,12 @@ Options:
                            blocks; see the documentation for the measured limit.
   --tip-hash <hex>         The tip hash the snapshot must have (32 bytes of hex),
                            as read from nodes you trust. A snapshot with another
-                           tip is refused before it is downloaded.
+                           tip is refused before it is downloaded. With
+                           --state-root, this lets a run that gives no --tip-rpc
+                           go on, but it only pins where the snapshot ends: the
+                           blocks the node applies after it are then the
+                           bootnode's word alone, and the run warns about that
+                           when it starts and when it ends.
   --state-root <hex>       The state root the snapshot must have, likewise.
   --max-snapshot-gib <n>   Refuse a snapshot whose archive, or whose unpacked
                            database, is larger than this many GiB (default 16),
@@ -167,7 +188,15 @@ Options:
                            validator never forgets what it voted; it works on
                            a node that is already a validator. Use it only
                            when the data directory is broken.
-  --allow-insecure-http    Accept an http:// or file:// snapshot URL.
+  --allow-insecure-http    Accept an http:// or file:// snapshot URL, and an
+                           http:// --tip-rpc.
+  --allow-unanchored       Go on without any check from outside on the snapshot
+                           (no usable --tip-rpc, and not both --tip-hash and
+                           --state-root). The script warns, and says so again at
+                           the end: the node is then reported at the network tip
+                           on the word of the snapshot host and the bootnode
+                           alone. Do not stake to it before you have compared its
+                           newest blocks with nodes you trust.
   --allow-existing-key     Run with a validator key that is already in
                            /etc/nhbchain/validator.key although this script did
                            not create it. Only if you are sure no other node in
@@ -176,6 +205,12 @@ Options:
   --allow-binary-mismatch  Continue although the node built here is not the
                            binary the snapshot was taken with (see below).
   --help                   Show this help message.
+
+Before anything is installed, a run that will install a snapshot checks that it
+has a check from outside on it (--tip-rpc, or --tip-hash with --state-root, or
+--allow-unanchored) and stops when it has none. Only --tip-rpc also checks the
+blocks the node applies after the snapshot; a run with the pins alone, or with
+--allow-unanchored, is warned about that.
 
 What it does, in order (each step stops the script if it fails):
   1. installs Go and the build tools, builds nhb, nhb-cli and nhb-snapshot from
@@ -199,7 +234,8 @@ What it does, in order (each step stops the script if it fails):
   5. writes the node's config from the shipped config.toml (only paths, ports
      and peers change) and checks the values consensus depends on;
   6. starts nhb.service as a follower and waits until it is at the network tip:
-     connected to a peer, and (after a snapshot) past the snapshot's height;
+     connected to a peer, (after a snapshot) past the snapshot's height, and
+     (with --tip-rpc) holding the same newest blocks as that node;
   7. only then registers the validator and prints the next steps.
 
 Getting paid:
@@ -246,6 +282,7 @@ parse_args() {
       --allow-insecure-http) ALLOW_INSECURE_HTTP=1; shift ;;
       --allow-existing-key) ALLOW_EXISTING_KEY=1; shift ;;
       --allow-binary-mismatch) ALLOW_BINARY_MISMATCH=1; shift ;;
+      --allow-unanchored) ALLOW_UNANCHORED=1; shift ;;
       --help|-h) usage; exit 0 ;;
       *) echo "[ERROR] unknown argument: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -320,6 +357,105 @@ validate_inputs() {
   if [[ -n "${NHB_MASTER_TREASURY:-}" ]]; then
     die "NHB_MASTER_TREASURY is set in this environment; a node that overrides the treasury computes different state from the network. Unset it."
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Outside check on the snapshot
+# ---------------------------------------------------------------------------
+
+# url_host prints the lower-case host of a URL or of a host:port: without the
+# scheme, a user name, the port and the path. Names are compared as written; a
+# second name for the same machine is not recognised.
+url_host() {
+  local s=$1
+  s=${s#*://}
+  s=${s%%/*}
+  s=${s##*@}
+  s=${s%%:*}
+  printf '%s' "${s}" | tr 'A-Z' 'a-z'
+}
+
+# reference_problem prints why --tip-rpc cannot be the check from outside on a
+# snapshot, and nothing when it can: it has to be reached over https (unless the
+# operator accepted plain http), and it has to be a host other than the one the
+# snapshot comes from and the bootnode, because one party that answers for both
+# the snapshot and the reference is checked against nothing.
+reference_problem() {
+  local host
+  if [[ "${TIP_RPC}" != https://* && "${ALLOW_INSECURE_HTTP}" != "1" ]]; then
+    echo "--tip-rpc ${TIP_RPC} is not https, so whoever is on the path to it can answer in its place (pass --allow-insecure-http only if you know that path is trusted)"
+    return 0
+  fi
+  host=$(url_host "${TIP_RPC}")
+  if [[ -z "${host}" ]]; then
+    echo "--tip-rpc ${TIP_RPC} names no host"
+    return 0
+  fi
+  if [[ "${host}" == "$(url_host "${SNAPSHOT_URL}")" ]]; then
+    echo "--tip-rpc is on ${host}, which is where the snapshot comes from, so one party would answer for both"
+    return 0
+  fi
+  if [[ "${host}" == "$(url_host "${BOOTNODE}")" ]]; then
+    echo "--tip-rpc is on ${host}, which is the bootnode, so one party would answer for both"
+    return 0
+  fi
+}
+
+# require_trust_anchor <install|recover> stops the run when nothing from outside
+# the snapshot host and the bootnode is there to check the node against. A
+# snapshot is not signed by anyone, and the bootnode is the only peer the new node
+# starts with, so without a node of the operator's choosing (--tip-rpc) or the block
+# the snapshot must end at (--tip-hash with --state-root) the script would report
+# the node at the network tip on the word of those two alone.
+#
+# "install" is a run that is about to install a snapshot: there the tip hash and
+# state root are checked against it, so the two together are enough to accept the
+# snapshot. They pin the snapshot's own newest block and nothing after it, though:
+# the blocks the node applies on top are the bootnode's word unless a reference
+# node checks them, so a run that has only the pins goes on with a warning (and
+# PINNED_ONLY_RUN, which the closing message reads). "recover" is a run that finds
+# the record of an earlier run's snapshot that was not yet seen past its height:
+# nothing is checked against the installed data now, so only a reference node is
+# enough. --allow-unanchored goes on with a warning (and UNANCHORED_RUN, which the
+# closing message reads).
+require_trust_anchor() {
+  local mode=$1 problem=''
+  if [[ -n "${TIP_RPC}" ]]; then
+    problem=$(reference_problem)
+    if [[ -z "${problem}" ]]; then
+      return 0
+    fi
+  else
+    problem="no reference node was given (--tip-rpc)"
+  fi
+  if [[ "${mode}" == "install" && -n "${TIP_HASH}" && -n "${STATE_ROOT}" ]]; then
+    PINNED_ONLY_RUN=1
+    warn "${problem}. --tip-hash and --state-root check where the snapshot ends, not the blocks this node applies after it: those come from the bootnode alone, so the node will be reported at the network tip on its word. Give --tip-rpc to have them checked, and compare the node's newest blocks with nodes you trust before you stake to it."
+    return 0
+  fi
+  if [[ "${ALLOW_UNANCHORED}" == "1" ]]; then
+    UNANCHORED_RUN=1
+    warn "--allow-unanchored: ${problem}. Nothing outside the snapshot host and the bootnode checks this node, so it will be reported at the network tip on their word alone. Compare its newest blocks with nodes you trust before you stake to it."
+    return 0
+  fi
+  echo "[ERROR] this run has no check from outside on the snapshot: ${problem}." >&2
+  if [[ "${mode}" == "recover" ]]; then
+    echo "        An earlier run installed a snapshot and was not seen to get the node past its height, so this" >&2
+    echo "        run still has to prove it. Give it --tip-rpc <https url> (a node you trust that neither the" >&2
+    echo "        snapshot host nor the bootnode runs), or --allow-unanchored to go on without one." >&2
+  else
+    echo "        A snapshot is not signed by anyone, and the snapshot host and the bootnode are the only parties" >&2
+    echo "        this node hears from at first, so the script needs something outside both to check it against." >&2
+    echo "        Give it one of:" >&2
+    echo "          --tip-rpc <https url>                  a node you trust that neither of them runs; the node is" >&2
+    echo "                                                 refused when its newest blocks differ from that node's" >&2
+    echo "          --tip-hash <hex> --state-root <hex>    the block the snapshot must end at, read from nodes you trust;" >&2
+    echo "                                                 this checks the snapshot only, not the blocks the node applies" >&2
+    echo "                                                 after it, and the run says so" >&2
+    echo "        or --allow-unanchored to go on without one. Nothing has been installed or downloaded." >&2
+  fi
+  echo "        See docs/validators/snapshot-onboarding.md (\"What a snapshot proves, and what it does not\")." >&2
+  exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -698,7 +834,7 @@ install_config() {
   if [[ -f "${CONFIG_DIR}/config.toml" ]] && cmp -s "${tmp}" "${CONFIG_DIR}/config.toml"; then
     CONFIG_CHANGED=0
   else
-    as_root install -m 0600 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${tmp}" "${CONFIG_DIR}/config.toml" || { rm -f "${tmp}"; die "could not install ${CONFIG_DIR}/config.toml"; }
+    as_root install -m 0640 -o root -g "${SERVICE_USER}" "${tmp}" "${CONFIG_DIR}/config.toml" || { rm -f "${tmp}"; die "could not install ${CONFIG_DIR}/config.toml"; }
     CONFIG_CHANGED=1
   fi
   rm -f "${tmp}"
@@ -953,10 +1089,14 @@ install_prerequisites() {
 install_tree_and_build() {
   as_root useradd --system --home "${INSTALL_ROOT}" --shell /usr/sbin/nologin "${SERVICE_USER}" 2>/dev/null || true
   as_root mkdir -p "${CONFIG_DIR}" "${STATE_DIR}" "${INSTALL_ROOT}"
-  # The service runs as ${SERVICE_USER}: the config directory must be its own,
-  # or it cannot even traverse into it to read config.toml.
-  as_root chown "${SERVICE_USER}:${SERVICE_USER}" "${CONFIG_DIR}"
-  as_root chmod 700 "${CONFIG_DIR}"
+  # The config directory belongs to root and is readable by the service group
+  # (PL-R5T-75). systemd reads node.env from it as root, so the service user must
+  # not own the directory: an owner can unlink a file in it and leave a symbolic
+  # link that root's systemd would follow. The service user traverses it to read
+  # config.toml (group read) and the validator key (its own file, mode 0600); it
+  # cannot create, replace or remove anything in it.
+  as_root chown "root:${SERVICE_USER}" "${CONFIG_DIR}"
+  as_root chmod 750 "${CONFIG_DIR}"
 
   # No build cache is excluded from the copy: an earlier version of this script
   # built inside INSTALL_ROOT, and what is left of that is the service user's to
@@ -1027,7 +1167,7 @@ ensure_key() {
   as_service chmod 600 "${VALIDATOR_KEY_FILE}"
   # Deriving the address from the key file needs to read it: only the CLI, as
   # the service user, does that. The raw key is never printed.
-  VALIDATOR_ADDRESS=$(as_service "${INSTALL_ROOT}/bin/nhb-cli" address "${VALIDATOR_KEY_FILE}" 2>/dev/null | grep -o 'nhb1[a-z0-9]*' | head -1 || true)
+  VALIDATOR_ADDRESS=$(as_service "${TOOL_DIR}/nhb-cli" address "${VALIDATOR_KEY_FILE}" 2>/dev/null | grep -o 'nhb1[a-z0-9]*' | head -1 || true)
   [[ -n "${VALIDATOR_ADDRESS}" ]] || die "could not determine the validator address from ${VALIDATOR_KEY_FILE}"
 }
 
@@ -1107,7 +1247,13 @@ start_or_leave_running() {
 wait_until_synced() {
   local args=(wait-synced --rpc "http://${RPC_ADDR}/" --chain-id "${NETWORK_ID_DEFAULT}" --genesis-hash "${GENESIS_HASH_DEFAULT}"
     --interval "${SYNC_INTERVAL}" --timeout "${SYNC_TIMEOUT_SECS}s" --rpc-timeout "${RPC_UP_TIMEOUT_SECS}s" --stall-timeout 15m --max-lag-blocks "${MAX_LAG_BLOCKS}")
-  if [[ -n "${TIP_RPC}" ]]; then args+=(--tip-rpc "${TIP_RPC}"); fi
+  # wait-synced is told, one way or the other, whether it has a reference: a run
+  # that got here without one had its snapshot pinned (--tip-hash with
+  # --state-root, which says where the snapshot ends and nothing about the blocks
+  # after it), went on with --allow-unanchored, or installed no snapshot. In none of
+  # those is the node's place at the tip checked against anything outside the
+  # bootnode, which is why the first two are warned about, up front and at the end.
+  if [[ -n "${TIP_RPC}" ]]; then args+=(--tip-rpc "${TIP_RPC}"); else args+=(--no-reference); fi
   if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then args+=(--min-height "${SNAPSHOT_HEIGHT}"); fi
   # The node's net_info (which the wait reads the chain id and the peer count from) is
   # an operator-only method, so the wait needs a token with the operator role. It is
@@ -1251,6 +1397,17 @@ print_next_steps() {
   echo "=================================================================="
   echo "[OK] Validator node is running and at the network tip."
   echo
+  if [[ "${UNANCHORED_RUN}" == "1" ]]; then
+    echo "[WARN] --allow-unanchored was given: nothing outside the snapshot host and the bootnode"
+    echo "       checked this node. Compare its newest blocks with nodes you trust before you stake to it."
+    echo
+  fi
+  if [[ "${PINNED_ONLY_RUN}" == "1" ]]; then
+    echo "[WARN] No reference node (--tip-rpc) checked this node. --tip-hash and --state-root showed where the"
+    echo "       snapshot ends, but the blocks the node has applied since come from the bootnode alone, and nothing"
+    echo "       outside it checked them. Compare the node's newest blocks with nodes you trust before you stake to it."
+    echo
+  fi
   echo "It follows the network as a NON-voting node: its key is not registered with"
   echo "stake, so its votes are ignored, until the steps below have taken effect."
   echo
@@ -1291,6 +1448,13 @@ print_next_steps() {
   echo "stake. The ZNHB you delegate earns into your own wallet by itself, and nothing has"
   echo "to be collected from this server. Anything paid to this node's own address goes to"
   echo "the --beneficiary wallet you gave."
+  echo
+  echo "Firewall: this script does not change your firewall. The node needs TCP 6001"
+  echo "open to peers and nothing else; its RPC listens on the loopback address only."
+  echo "On a host without a provider firewall, for example with ufw (allow SSH first,"
+  echo "or you will lock yourself out):"
+  echo "  sudo ufw allow OpenSSH && sudo ufw allow 6001/tcp && sudo ufw enable"
+  echo "On a cloud server, open TCP 6001 (and your SSH port) in the provider's security group."
   echo
   echo "Check status with:"
   echo "  sudo systemctl status nhb.service"
@@ -1343,6 +1507,9 @@ main() {
   refuse_service_owned_checkout || exit 1
   take_lock
   refuse_second_node || exit 1
+  # A run that will install a snapshot needs a check from outside on it. It is
+  # asked for now, before anything is installed or built, not after the build.
+  if snapshot_needed; then require_trust_anchor install; fi
   install_prerequisites
   require_cmd curl
   refuse_foreign_key || exit 1
@@ -1368,13 +1535,15 @@ main() {
   else
     log "the data directory already holds data: no snapshot is needed, so none is fetched"
     # A run that installed a snapshot and was interrupted before it saw the node
-    # get past the snapshot's height must still require that of this run.
+    # get past the snapshot's height must still require that of this run, and
+    # still needs a reference node to be checked against.
     recover_snapshot_height
+    if [[ -n "${SNAPSHOT_HEIGHT}" ]]; then require_trust_anchor recover; fi
   fi
 
   ensure_key
   detect_external_address
-  as_root install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${CONFIG_DIR}"
+  as_root install -d -m 0750 -o root -g "${SERVICE_USER}" "${CONFIG_DIR}"
   prepare_data_dir
   install_config
   write_env

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -324,6 +325,11 @@ func (bc *Blockchain) BuybackSigners() ([][20]byte, uint32, bool) {
 	return signers, bc.buybackSignerThreshold, true
 }
 
+// errBlockPrevHashMismatch is what AddBlock returns for a block that does not
+// extend the current tip. It is a verdict on the block, which a caller can tell
+// from a failure of the database.
+var errBlockPrevHashMismatch = errors.New("block prevhash mismatch")
+
 // AddBlock validates a new block and adds it to the chain.
 func (bc *Blockchain) AddBlock(b *types.Block) error {
 	bc.mu.Lock()
@@ -345,7 +351,7 @@ func (bc *Blockchain) AddBlock(b *types.Block) error {
 
 	// Basic linkage check: parent hash must match current tip.
 	if !bytes.Equal(b.Header.PrevHash, bc.tip) {
-		return fmt.Errorf("block prevhash mismatch")
+		return errBlockPrevHashMismatch
 	}
 
 	// Verify TxRoot against the computed root for this block's tx list.

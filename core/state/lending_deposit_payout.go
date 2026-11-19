@@ -51,6 +51,15 @@ func (m *Manager) LendingDepositPayoutClearDue(day uint64) error {
 	return m.KVDelete(lendingDepositPayoutDueListKey(day))
 }
 
+// LendingDepositPayoutRemoveDue removes the entries a settlement pass has handled from
+// a day's due list and keeps every other entry, in order, as LendingAutoDebitRemoveDue
+// does for loans: a payout the pass scheduled onto the day it is settling (the final
+// cycle after a delayed retry) survives, where clearing the whole bucket destroyed it
+// and the depositor, principal included, was never paid (ledger PL-EXT-42).
+func (m *Manager) LendingDepositPayoutRemoveDue(day uint64, processed [][32]byte) error {
+	return m.removeDueIDs(lendingDepositPayoutDueListKey(day), processed, m.LendingDepositPayoutDueOnDay, day)
+}
+
 // LendingDepositPayoutLastProcessedDay returns the UTC day number the
 // settlement hook last finished processing through (inclusive), and
 // whether a watermark has ever been recorded.

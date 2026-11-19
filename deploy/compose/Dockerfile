@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.6
 # NOTE: This Dockerfile lives in deploy/compose so docker-compose can reference
 # it without interfering with Go tooling that scans *.go sources.
-ARG GO_VERSION=1.23.0
+ARG GO_VERSION=1.24.3
 FROM golang:${GO_VERSION}-bookworm AS builder
 WORKDIR /src
 COPY go.mod go.sum ./

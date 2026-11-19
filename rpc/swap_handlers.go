@@ -136,7 +136,12 @@ func (s *Server) handleSwapSubmitVoucher(w http.ResponseWriter, _ *http.Request,
 	writeResult(w, req.ID, map[string]interface{}{"txHash": txHash, "minted": minted})
 }
 
-func (s *Server) handleSwapVoucherGet(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+func (s *Server) handleSwapVoucherGet(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	scope, ok := s.swapReadScopeFor(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, req.ID, codeUnauthorized, "partner identity required", nil)
+		return
+	}
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected providerTxId", nil)
 		return
@@ -157,12 +162,14 @@ func (s *Server) handleSwapVoucherGet(w http.ResponseWriter, _ *http.Request, re
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "providerTxId required", nil)
 		return
 	}
-	record, ok, err := s.node.SwapGetVoucher(providerTxID)
+	// A voucher of a provider the caller may not read is answered exactly as a
+	// voucher that does not exist, so the answer does not say which ids exist.
+	record, found, err := s.node.SwapGetVoucherWhere(providerTxID, scope.keep())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load voucher", err.Error())
 		return
 	}
-	if !ok {
+	if !found {
 		writeError(w, http.StatusNotFound, req.ID, codeInvalidParams, "voucher not found", providerTxID)
 		return
 	}
@@ -195,6 +202,11 @@ func (s *Server) requireSwapLedgerAuth(w http.ResponseWriter, r **http.Request, 
 }
 
 func (s *Server) handleSwapVoucherList(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	scope, ok := s.swapReadScopeFor(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, req.ID, codeUnauthorized, "partner identity required", nil)
+		return
+	}
 	if len(req.Params) < 2 || len(req.Params) > 4 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected startTs, endTs, [cursor], [limit]", nil)
 		return
@@ -230,12 +242,12 @@ func (s *Server) handleSwapVoucherList(w http.ResponseWriter, r *http.Request, r
 			limit = int(limit64)
 		}
 	}
-	// Reading a page holds the node's state lock for as long as the page is long,
-	// so it takes a slot in the query pool first.
+	// Reading a page takes as long as the page is long, so it takes a slot in the
+	// query pool first.
 	if !s.admitHeavy(w, r, req) {
 		return
 	}
-	records, nextCursor, err := s.node.SwapListVouchers(startTs, endTs, cursor, limit)
+	records, nextCursor, err := s.node.SwapListVouchersWhere(startTs, endTs, cursor, limit, scope.keep())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to list vouchers", err.Error())
 		return
@@ -248,6 +260,11 @@ func (s *Server) handleSwapVoucherList(w http.ResponseWriter, r *http.Request, r
 }
 
 func (s *Server) handleSwapVoucherExport(w http.ResponseWriter, r *http.Request, req *RPCRequest) {
+	scope, ok := s.swapReadScopeFor(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, req.ID, codeUnauthorized, "partner identity required", nil)
+		return
+	}
 	if len(req.Params) != 2 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "expected startTs and endTs", nil)
 		return
@@ -261,12 +278,11 @@ func (s *Server) handleSwapVoucherExport(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "invalid endTs", err.Error())
 		return
 	}
-	// An export reads the whole range under the node's state lock, so it takes a
-	// slot in the query pool first.
+	// An export reads the whole range, so it takes a slot in the query pool first.
 	if !s.admitHeavy(w, r, req) {
 		return
 	}
-	csvBase64, count, total, err := s.node.SwapExportVouchers(startTs, endTs)
+	csvBase64, count, total, err := s.node.SwapExportVouchersWhere(startTs, endTs, scope.keep())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to export vouchers", err.Error())
 		return

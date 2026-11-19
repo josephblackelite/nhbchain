@@ -41,6 +41,7 @@ func main() {
 func run(args []string) int {
 	var err error
 	rpcEndpoint = defaultRPCEndpoint()
+	chainIDFlag = nil
 	args, err = applyGlobalFlags(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -280,6 +281,26 @@ func applyGlobalFlags(args []string) ([]string, error) {
 			rpcEndpoint = strings.TrimPrefix(arg, "--rpc=")
 			continue
 		}
+		if arg == "--chain-id" {
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("missing value for --chain-id")
+			}
+			id, err := parseChainIDOverride(args[i+1])
+			if err != nil {
+				return nil, fmt.Errorf("--chain-id: %w", err)
+			}
+			chainIDFlag = id
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--chain-id=") {
+			id, err := parseChainIDOverride(strings.TrimPrefix(arg, "--chain-id="))
+			if err != nil {
+				return nil, fmt.Errorf("--chain-id: %w", err)
+			}
+			chainIDFlag = id
+			continue
+		}
 		out = append(out, arg)
 	}
 	return out, nil
@@ -301,8 +322,13 @@ func stake(amount *big.Int, keyFile string) int {
 		return 1
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeStake,
 		Nonce:    account.Nonce,
 		Value:    amount, // For a stake tx, Value is the amount of ZapNHB
@@ -336,8 +362,13 @@ func unStake(amount *big.Int, keyFile string) int {
 		return 1
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeUnstake,
 		Nonce:    account.Nonce,
 		Value:    amount,
@@ -371,8 +402,13 @@ func heartbeat(keyFile string) int {
 		return 1
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeHeartbeat,
 		Nonce:    account.Nonce,
 		Value:    big.NewInt(0), // Heartbeats transfer no value
@@ -518,8 +554,13 @@ func claimUsername(username string, keyFile string) int {
 	}
 
 	// Construct the native TxTypeRegisterIdentity transaction
+	chainID, err := txChainID()
+	if err != nil {
+		fmt.Printf("Error: refusing to sign: %v\n", err)
+		return 1
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     types.TxTypeRegisterIdentity, // Type 2
 		Nonce:    account.Nonce,
 		Data:     []byte(username),
@@ -765,8 +806,12 @@ func signAndSendTx(txType types.TxType, data []byte, keyFile string) error {
 		return fmt.Errorf("fetching account details: %w", err)
 	}
 
+	chainID, err := txChainID()
+	if err != nil {
+		return fmt.Errorf("refusing to sign: %w", err)
+	}
 	tx := types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  chainID,
 		Type:     txType,
 		Nonce:    account.Nonce,
 		Data:     data,
@@ -1044,6 +1089,7 @@ func printUsage() {
 	fmt.Println("  register-validator <amount> <key_file>   - Explicitly register this address as a validator candidate (0 = no additional stake)")
 	fmt.Println("  deregister-validator <key_file>          - Explicitly un-register this address as a validator candidate")
 	fmt.Println("  address <key_file>                 - Print the public address for a local key file")
+	fmt.Println("  --chain-id <n> (or NHB_CHAIN_ID)   - Sign with this chain id instead of asking the node (an explicit choice; a positive integer; the flag beats the variable)")
 	fmt.Println("  send-nhb [--rpc <url>] [--gas <limit>] [--gas-price <price>] <recipient> <amount> <key_file> - Transfers NHB")
 	fmt.Println("  send-znhb [--rpc <url>] [--gas <limit>] [--gas-price <price>] <recipient> <amount> <key_file> - Transfers ZapNHB using the new transaction type")
 	fmt.Println("  id                                 - Identity lookups (resolve, reverse); the alias mutators are retired and exit non-zero")

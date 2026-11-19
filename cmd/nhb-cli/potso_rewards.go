@@ -102,7 +102,7 @@ func runPotsoRewardExport(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	params := potsoRewardExportCLIParams{Epoch: epoch}
-	raw, err := callPotsoRPC("potso_export_epoch", params)
+	raw, err := callPotsoRPCWithAuth("potso_export_epoch", params, true)
 	if err != nil {
 		fmt.Fprintf(stderr, "Error exporting epoch: %v\n", err)
 		return 1

@@ -107,8 +107,11 @@ MinBlockInterval = "2s"
 If a key is absent from the file the built-in default applies (2s, 2s, 2s, 4s
 and, for `MinBlockInterval`, 1s; `config.defaultConsensusConfig`). If a key is
 present it is used as written: `consensusd` validates the final values with
-`config.ValidateConsensus` and exits when a timer is not positive, when
-`MinBlockInterval` is negative, or when it is longer than half the commit timeout.
+`config.ValidateConsensus` and exits when a timer is not positive or when
+`MinBlockInterval` is negative. A `MinBlockInterval` longer than half the commit
+timeout (the default 1s with a commit timeout under 2s, for example) does not stop
+it: `consensusd` logs a `consensus: configuration advisory` warning and the engine
+lowers the interval to half the commit timeout.
 A file that writes `"0s"` for a timer therefore needs the flag or environment
 variable above to set it. The `cmd/nhb` binary passes the values to
 `bft.WithTimeouts`, which ignores non-positive durations and keeps the engine
@@ -131,6 +134,13 @@ turns the wait off. See [Block cadence](../consensus/block-cadence.md).
   messages (the oldest is dropped when full) and retried with a delay that
   grows from 100 ms to 5 s while the link is down
   (`cmd/consensusd/resilient_broadcaster.go`).
+- Requests for chain data (`GetStatus`, `GetBlocks`) reach `consensusd` tagged
+  with the peer that sent them (`peer_id` on the `network.v1` `GossipMessage`),
+  and the answer is sent to that peer alone, as the all-in-one binary does. A
+  frame that carries a `peer_id` is delivered to that peer only, and dropped if
+  the peer has gone or its send queue is full. A frame without one is sent to
+  every peer. An older `p2pd` does not tag requests and an older `consensusd`
+  does not address its answers, so the two can be upgraded in either order.
 
 ## Services on the gRPC port
 
@@ -139,6 +149,13 @@ turns the wait off. See [Block cadence](../consensus/block-cadence.md).
 `GetHeight`, `GetMempool`, `CreateBlock`, `CommitBlock`, `GetLastCommitHash`) and
 `consensus.v1.QueryService` (see [Consensus Query API](query-api.md)). Definitions
 are in `proto/consensus/v1/`. Server reflection is not registered.
+
+`CreateBlock` and `CommitBlock` answer `PermissionDenied` in `consensusd`: a block
+committed through them would skip the quorum certificate check that a block from a
+peer must pass, and the block message cannot carry a certificate. The node commits
+blocks from its own consensus rounds and from peers' blocks only. A development
+harness that produces blocks from outside has to build the server with
+`service.WithBlockWrites()`.
 
 ## Health and diagnostics
 

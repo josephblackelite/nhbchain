@@ -4,7 +4,7 @@ A node combines up to three sources of seed peers (`p2p/seeds/registry.go`,
 `p2p/server.go`):
 
 1. **Static configuration**: `[p2p] Seeds` entries in the local TOML, each
-   `0xNODEID@host:port`. Entries without a node ID are ignored with a warning.
+   `0xNODEID@host:port`. Entries without a node ID are ignored with a warning. The node ID is checked: the seed loop dials the address and refuses (`ErrPeerIDMismatch`) a connection whose handshake proves another ID, holding nothing against either ID, so a reassigned address or a hijacked route cannot pass for a seed. Check each configured ID against the seed it names before starting a node with it.
 2. **Registry static fallbacks**: the `static` list of the on-chain `network.seeds`
    governance parameter.
 3. **DNS authorities**: TXT records signed by the Ed25519 keys listed in the same

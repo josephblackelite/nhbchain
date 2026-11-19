@@ -1,0 +1,8 @@
+# Commits that are already in the history and change no file. The history was
+# rewritten once; these three commits kept their messages but lost their diffs
+# to that rewrite. They are listed by full id so that check_empty_commits.sh does
+# not fail on them. Do not add a commit here to make the check pass: a new empty
+# commit is a mistake to fix.
+44477c529c2bf8b7dcea06ccde4e1554bd67660e
+0eaf8ba40df7064b83a85deb7371d437fedcfed4
+359158bcdbb3fa5dcf4e9b1d856f79bfe65ddf06

@@ -31,6 +31,64 @@ type govListResponse struct {
 	NextCursor *uint64                `json:"nextCursor,omitempty"`
 }
 
+type govEngagementResult struct {
+	Available       bool   `json:"available"`
+	Epoch           uint64 `json:"epoch"`
+	TotalEngagement uint64 `json:"totalEngagement"`
+	TotalStakeWei   string `json:"totalStakeWei"`
+	EligibleVoters  uint64 `json:"eligibleVoters"`
+}
+
+type govParamsResult struct {
+	VotingPeriodSeconds uint64              `json:"votingPeriodSeconds"`
+	TimelockSeconds     uint64              `json:"timelockSeconds"`
+	MinDepositWei       string              `json:"minDepositWei"`
+	QuorumBps           uint64              `json:"quorumBps"`
+	PassThresholdBps    uint64              `json:"passThresholdBps"`
+	AllowedParams       []string            `json:"allowedParams"`
+	AllowedRoles        []string            `json:"allowedRoles"`
+	Engagement          govEngagementResult `json:"engagement"`
+}
+
+// handleGovernanceParams answers gov_params: the voting rules this node applies
+// to a new governance proposal (voting period, timelock, minimum deposit,
+// quorum, pass threshold, and the parameter and role allow-lists) and the
+// engagement total of the weight snapshot that voting power is drawn from.
+//
+// Anonymous and read-only, like gov_proposal and gov_list. The rules are the
+// node's own [governance] configuration, not chain state, so a different
+// validator can report different ones; the response is what THIS node would
+// enforce on a proposal submitted to it. engagement.available is false until a
+// POTSO reward epoch has been processed.
+func (s *Server) handleGovernanceParams(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
+	if len(req.Params) != 0 {
+		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "no parameters expected", nil)
+		return
+	}
+	params, err := s.node.GovernanceParams()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, req.ID, codeServerError, "failed to load governance parameters", err.Error())
+		return
+	}
+	result := govParamsResult{
+		VotingPeriodSeconds: params.VotingPeriodSeconds,
+		TimelockSeconds:     params.TimelockSeconds,
+		MinDepositWei:       weiOrZero(params.MinDepositWei),
+		QuorumBps:           params.QuorumBps,
+		PassThresholdBps:    params.PassThresholdBps,
+		AllowedParams:       params.AllowedParams,
+		AllowedRoles:        params.AllowedRoles,
+		Engagement: govEngagementResult{
+			Available:       params.Engagement.Available,
+			Epoch:           params.Engagement.Epoch,
+			TotalEngagement: params.Engagement.TotalEngagement,
+			TotalStakeWei:   weiOrZero(params.Engagement.TotalStake),
+			EligibleVoters:  params.Engagement.EligibleVoters,
+		},
+	}
+	writeResult(w, req.ID, result)
+}
+
 func (s *Server) handleGovernanceProposal(w http.ResponseWriter, _ *http.Request, req *RPCRequest) {
 	if len(req.Params) != 1 {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "exactly one parameter object expected", nil)

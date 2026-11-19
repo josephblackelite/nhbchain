@@ -103,6 +103,7 @@ var (
 	govStaleRejectedDepositsSweptKey = []byte("gov/staleRejectedDepositsSwept")
 	nhbSupplyGenesisSeededKey        = []byte("nhb/supply/genesisSeeded")
 	nhbMintSupplyDriftReconciledKey  = []byte("nhb/supply/mintDriftReconciled")
+	nhbGenesisShortfallCorrectedKey  = []byte("nhb/supply/genesisShortfallCorrected")
 	potsoHeartbeatPrefix             = []byte("potso/heartbeat/")
 	potsoMeterPrefix                 = []byte("potso/meter/")
 	potsoDayIndexPrefix              = []byte("potso/day-index/")
@@ -164,6 +165,7 @@ var (
 	feesTotalsPrefix              = []byte("fees/totals/")
 	feesTotalsIndexPrefix         = []byte("fees/totals/index/")
 	transferGasSpendPrefix        = []byte("fees/transfer-gas/spend/")
+	transferGasTxCountPrefix      = []byte("fees/transfer-gas/txcount/")
 )
 
 // StakingGlobalIndexKey returns the deterministic storage key for the global
@@ -1836,6 +1838,26 @@ func (m *Manager) LendingPutMarket(poolID string, market *lending.Market) error 
 	return m.lendingEnsurePoolIndexed(normalized)
 }
 
+// LendingUpdateIndexedMarket persists a market of a pool that is already in the
+// pool index, without loading and scanning the index again. LendingPutMarket does
+// that scan on every call (the index is one list holding every pool id), so a
+// caller that writes every market it has just listed from the index, such as the
+// lending reference-price transaction, paid for the whole list once per market:
+// O(pools squared). The bytes written are the ones LendingPutMarket writes for a
+// pool that is indexed already, which writes nothing else. A pool that is not in
+// the index must go through LendingPutMarket (PL-R5T-13).
+func (m *Manager) LendingUpdateIndexedMarket(poolID string, market *lending.Market) error {
+	if market == nil {
+		return fmt.Errorf("lending: market must not be nil")
+	}
+	normalized, err := normalizePoolID(poolID)
+	if err != nil {
+		return err
+	}
+	market.PoolID = normalized
+	return m.KVPut(lendingMarketKey(normalized), newStoredLendingMarket(market))
+}
+
 // LendingLegacyReconciled reports whether the one-time sweep that moves the
 // lending positions still recorded on plain accounts into the pool's own
 // records (core/lending_native.go's reconcileLegacyPoolState) has completed for
@@ -2561,6 +2583,86 @@ func (m *Manager) AppendMarketFill(fill *market.Fill) error {
 	return m.KVAppend(marketFillsBySellerKey(seller), fill.ID[:])
 }
 
+// marketFillSeqKey and marketFillAtPrefix hold the market-wide fill sequence (ledger PL-BC-B2): fill number n (counted
+// from 1) is stored under marketFillAtPrefix+n as the fill's id, and marketFillSeqKey holds the highest number. It is
+// written only from the pool's activation height (the caller decides), so before that the state is byte-for-byte what
+// it was without this index.
+const (
+	marketFillSeqKey   = "market/fillSeq"
+	marketFillAtPrefix = "market/fillAt/"
+)
+
+func marketFillAtKey(n uint64) []byte { return []byte(marketFillAtPrefix + strconv.FormatUint(n, 10)) }
+
+// AppendMarketFillGlobal records a fill's id under the next number of the market-wide sequence (one small key per fill and
+// a counter, never a growing list) and folds the fill into its day's row (market_day.go). The fill record itself must
+// already have been stored by AppendMarketFill.
+func (m *Manager) AppendMarketFillGlobal(fill *market.Fill) error {
+	if fill == nil {
+		return fmt.Errorf("market: fill must not be nil")
+	}
+	var seq uint64
+	if _, err := m.KVGet([]byte(marketFillSeqKey), &seq); err != nil {
+		return err
+	}
+	seq++
+	if err := m.KVPut(marketFillAtKey(seq), fill.ID[:]); err != nil {
+		return err
+	}
+	if err := m.KVPut([]byte(marketFillSeqKey), seq); err != nil {
+		return err
+	}
+	return m.recordMarketFillDay(fill)
+}
+
+// MarketFillSequence returns how many fills the market-wide index holds (0 when the index was never written).
+func (m *Manager) MarketFillSequence() (uint64, error) {
+	var seq uint64
+	if _, err := m.KVGet([]byte(marketFillSeqKey), &seq); err != nil {
+		return 0, err
+	}
+	return seq, nil
+}
+
+// ListRecentMarketFills returns the newest fills of the market-wide index first, at most limit of them. It reads state
+// and writes nothing.
+func (m *Manager) ListRecentMarketFills(limit int) ([]*market.Fill, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	seq, err := m.MarketFillSequence()
+	if err != nil {
+		return nil, err
+	}
+	fills := make([]*market.Fill, 0, limit)
+	for n := seq; n >= 1 && len(fills) < limit; n-- {
+		var raw []byte
+		found, err := m.KVGet(marketFillAtKey(n), &raw)
+		if err != nil {
+			return nil, err
+		}
+		if !found || len(raw) != 32 {
+			continue
+		}
+		var id [32]byte
+		copy(id[:], raw)
+		var stored storedMarketFill
+		ok, err := m.KVGet(marketFillKey(id), &stored)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		fill, err := stored.toFill()
+		if err != nil {
+			return nil, err
+		}
+		fills = append(fills, fill)
+	}
+	return fills, nil
+}
+
 func (m *Manager) marketListFillsByIndex(key []byte) ([]*market.Fill, error) {
 	var raw [][]byte
 	if err := m.KVGetList(key, &raw); err != nil {
@@ -2952,6 +3054,25 @@ func (m *Manager) NHBMintSupplyDriftReconciled() (bool, error) {
 // papered over again.
 func (m *Manager) MarkNHBMintSupplyDriftReconciled() error {
 	return m.KVPut(nhbMintSupplyDriftReconciledKey, true)
+}
+
+// NHBGenesisShortfallCorrected reports whether the one-time correction of the
+// NHB supply counter's uncounted genesis allocation (see
+// StateProcessor.ReconcileNHBGenesisShortfallOnce in core/state_transition.go)
+// has already run.
+func (m *Manager) NHBGenesisShortfallCorrected() (bool, error) {
+	var flag bool
+	ok, err := m.KVGet(nhbGenesisShortfallCorrectedKey, &flag)
+	if err != nil {
+		return false, err
+	}
+	return ok && flag, nil
+}
+
+// MarkNHBGenesisShortfallCorrected records that the one-time genesis
+// shortfall correction has run, so it is never repeated.
+func (m *Manager) MarkNHBGenesisShortfallCorrected() error {
+	return m.KVPut(nhbGenesisShortfallCorrectedKey, true)
 }
 
 // getZNHBPoolBalance is a shared helper: every ZNHB tokenomics counter is

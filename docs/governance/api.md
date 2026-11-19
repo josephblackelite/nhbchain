@@ -1,6 +1,6 @@
 # Governance API Surface
 
-Governance has two RPC read methods and five signed transaction types. There
+Governance has three RPC read methods and five signed transaction types. There
 are no `gov_propose`, `gov_vote`, `gov_finalize`, `gov_queue` or `gov_execute`
 RPC methods on the node JSON-RPC endpoint: they were removed because they
 trusted a client-supplied address (`rpc/governance_handlers.go`,
@@ -23,8 +23,9 @@ gRPC only, and its write RPCs cannot change chain state (see
 
 ## Read methods (JSON-RPC)
 
-Both are handled in `rpc/governance_handlers.go` and take a single positional
-parameter object.
+All three are handled in `rpc/governance_handlers.go`, are open to every caller
+(no credential) and change no state. `gov_proposal` and `gov_list` take a single
+positional parameter object; `gov_params` takes none.
 
 ### `gov_proposal`
 
@@ -66,6 +67,38 @@ returned newest first, starting at `cursor` (or the latest id when absent).
 Result: `{"proposals": [<Proposal>...], "nextCursor": <uint64>}`. `nextCursor`
 is omitted when there are no older proposals; pass it back as `cursor` to
 continue.
+
+### `gov_params`
+
+Params: none (`[]`). Any parameter is refused with `codeInvalidParams`.
+
+```json
+{"jsonrpc": "2.0", "id": 1, "method": "gov_params", "params": []}
+```
+
+The voting rules this node applies to a new proposal, and the engagement total
+of the weight snapshot that voting power is drawn from:
+
+| Field | Type in JSON |
+| --- | --- |
+| `votingPeriodSeconds`, `timelockSeconds` | numbers: the `[governance]` windows this node was started with |
+| `minDepositWei` | string, wei (`"0"` when the policy has no minimum) |
+| `quorumBps`, `passThresholdBps` | numbers |
+| `allowedParams` | array of the parameter keys a `param.update` proposal may name, in the node's order, trimmed, without blanks or repeats; `[]` when none |
+| `allowedRoles` | array of the role names a `role.allowlist` proposal may grant or revoke, cleaned the same way; `[]` when none |
+| `engagement.available` | boolean: `false` until a POTSO reward epoch has been processed, then every other `engagement` field is zero |
+| `engagement.epoch` | number: the last processed reward epoch, whose weight snapshot `CastVote` reads |
+| `engagement.totalEngagement` | number: `TotalEngagement` of that snapshot |
+| `engagement.totalStakeWei` | string, wei: `TotalStake` of that snapshot |
+| `engagement.eligibleVoters` | number: the addresses the snapshot holds a weight for, the only addresses that can vote |
+
+The rules in this response are **not chain state**. They come from this node's
+own `[governance]` configuration (`config.GovConfig.Policy`), so a validator
+with a different file reports, and enforces, different values; the response says
+what this node would apply to a proposal submitted to it. The same is true of
+`allowedParams`. A node that starts with a window below 3600 seconds logs a
+warning, and refuses to start if `EnforceWindowFloors` is set (see
+[policy invariants](../gov/policy-invariants.md)).
 
 ## Write path (signed transactions)
 

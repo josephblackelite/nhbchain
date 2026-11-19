@@ -1,6 +1,7 @@
 package potso
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -323,6 +324,45 @@ func TestRewardConfigValidate(t *testing.T) {
 	cfg = RewardConfig{EpochLengthBlocks: 1, EmissionPerEpoch: big.NewInt(1), TreasuryAddress: addr(1), MaxUserShareBps: RewardBpsDenominator + 1}
 	if err := cfg.Validate(); err == nil {
 		t.Fatalf("expected max user share validation error")
+	}
+}
+
+func TestRewardConfigCheckPayoutModeAvailable(t *testing.T) {
+	for _, mode := range []RewardPayoutMode{RewardPayoutModeClaim, "CLAIM", "Claim", " claim "} {
+		cfg := DefaultRewardConfig()
+		cfg.PayoutMode = mode
+		if err := cfg.CheckPayoutModeAvailable(); !errors.Is(err, ErrClaimModeUnavailable) {
+			t.Fatalf("mode %q: expected ErrClaimModeUnavailable, got %v", mode, err)
+		}
+	}
+	// Unset and unrecognised values normalise to auto and stay accepted.
+	for _, mode := range []RewardPayoutMode{RewardPayoutModeAuto, "", "AUTO", "no-such-mode"} {
+		cfg := DefaultRewardConfig()
+		cfg.PayoutMode = mode
+		if err := cfg.CheckPayoutModeAvailable(); err != nil {
+			t.Fatalf("mode %q: expected the mode to be accepted, got %v", mode, err)
+		}
+	}
+}
+
+// The availability check is applied where a configuration is accepted. It must
+// not change what ComputeRewards, which runs for every epoch, does with a
+// configuration it is handed.
+func TestComputeRewardsIgnoresPayoutModeAvailability(t *testing.T) {
+	cfg := RewardConfig{
+		EpochLengthBlocks: 1,
+		AlphaStakeBps:     7000,
+		MinPayoutWei:      big.NewInt(0),
+		EmissionPerEpoch:  big.NewInt(1000),
+		TreasuryAddress:   addr(1),
+		PayoutMode:        RewardPayoutModeClaim,
+	}
+	snapshot := RewardSnapshot{
+		Epoch:   1,
+		Entries: []RewardSnapshotEntry{{Address: addr(2), Stake: big.NewInt(60), Meter: EngagementMeter{TxCount: 3}}},
+	}
+	if _, err := ComputeRewards(cfg, DefaultWeightParams(), snapshot, big.NewInt(1000)); err != nil {
+		t.Fatalf("compute rewards: %v", err)
 	}
 }
 

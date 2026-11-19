@@ -14,7 +14,7 @@ builder guide](../docs/sdk/wallets.md).
 
 | Path | Contents |
 | --- | --- |
-| `go/client` | JSON-RPC client: `SendNHBTransfer`, `SendZNHBTransfer`, `AccountNonce`. Defaults: gas limit `25000`, gas price `1`, chain ID `0x4e4842`. `nhb_sendTransaction` needs a bearer token (`WithAuthToken`). |
+| `go/client` | JSON-RPC client: `SendNHBTransfer`, `SendZNHBTransfer`, `AccountNonce`. Defaults: gas limit `25000`, gas price `1`. The chain ID is read from the node (`nhb_getNetworkStats`, `txChainId`; `client.TxChainID`) and nothing is signed when the node reports none. `nhb_sendTransaction` needs a bearer token (`WithAuthToken`). |
 | `consensus` | gRPC client for `consensusd` (submit, height, blocks, validator set, mempool, `QueryState`, `QueryPrefix`, `SimulateTx`) and the `NewTx` / `Sign` / `Submit` envelope helpers. |
 | `network` | gRPC client for the `p2pd` network service (`Gossip`, `GetView`, `ListPeers`, `DialPeer`, `BanPeer`). |
 | `lending` | gRPC client for the lending service, plus transaction builders (`NewSupplyTx`, ...) and `SignAndEncode`. |

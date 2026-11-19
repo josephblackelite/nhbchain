@@ -133,20 +133,29 @@ func (e *Engine) now() int64 {
 // rateNumerator/rateDenominator (ZNHB per NHB), escrowing the ZNHB into the
 // engine's market-escrow account.
 func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateNumerator, rateDenominator *big.Int, allowPartial bool) (*Listing, error) {
+	listing, _, err := e.CreateListingReport(seller, znhbAmount, rateNumerator, rateDenominator, allowPartial)
+	return listing, err
+}
+
+// CreateListingReport is CreateListing that also says whether this call moved funds: true when it escrowed the ZNHB and wrote a
+// new listing, false when an identical listing already existed (same seller, amount, rate, partial flag and block second) and the
+// call was the idempotent no-op described below. A caller that books the escrow somewhere else (the admin wallet's pool
+// bookkeeping) must book it only when this is true (ledger PL-EXT-49).
+func (e *Engine) CreateListingReport(seller crypto.Address, znhbAmount *big.Int, rateNumerator, rateDenominator *big.Int, allowPartial bool) (*Listing, bool, error) {
 	if e == nil || e.state == nil {
-		return nil, errNilState
+		return nil, false, errNilState
 	}
 	if err := nativecommon.Guard(e.pauses, moduleName); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if znhbAmount == nil || znhbAmount.Sign() <= 0 {
-		return nil, errInvalidAmount
+		return nil, false, errInvalidAmount
 	}
 	if rateNumerator == nil || rateNumerator.Sign() <= 0 {
-		return nil, errInvalidRate
+		return nil, false, errInvalidRate
 	}
 	if rateDenominator == nil || rateDenominator.Sign() <= 0 {
-		return nil, errInvalidRate
+		return nil, false, errInvalidRate
 	}
 
 	now := e.now()
@@ -170,30 +179,30 @@ func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateN
 	// that deliberately request the exact same listing twice -- treating
 	// that as a no-op is the correct, safe behavior either way.
 	if existing, err := e.state.GetListing(listingID); err != nil {
-		return nil, err
+		return nil, false, err
 	} else if existing != nil {
-		return existing.Clone(), nil
+		return existing.Clone(), false, nil
 	}
 
 	accounts := newAccountBook(e)
 	sellerAcc, err := accounts.load(seller)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if sellerAcc.BalanceZNHB.Cmp(znhbAmount) < 0 {
-		return nil, errInsufficientBalance
+		return nil, false, errInsufficientBalance
 	}
 
 	escrowAcc, err := accounts.load(e.marketEscrowAddress)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	sellerAcc.BalanceZNHB = new(big.Int).Sub(sellerAcc.BalanceZNHB, znhbAmount)
 	escrowAcc.BalanceZNHB = new(big.Int).Add(escrowAcc.BalanceZNHB, znhbAmount)
 
 	if err := accounts.persist(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	listing := &Listing{
@@ -210,13 +219,13 @@ func (e *Engine) CreateListing(seller crypto.Address, znhbAmount *big.Int, rateN
 	}
 
 	if err := e.state.PutListing(listing); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := e.state.AppendOpenListing(listing.ID); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	return listing.Clone(), nil
+	return listing.Clone(), true, nil
 }
 
 // FillListing executes a full or partial purchase of znhbAmountRequested

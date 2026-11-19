@@ -38,8 +38,25 @@ import (
 //     however far ahead the message was;
 //   - this validator moves to a higher round only on the evidence of those
 //     round numbers (supportedRoundLocked): never on the word of validators that
-//     hold less than a third of the power, never to the lowest round anyone
-//     mentioned, and at once instead of at the end of the round it is in.
+//     hold less than a third of the power, unless no quorum can be made without
+//     them, never to the lowest round anyone mentioned, and at once instead of at
+//     the end of the round it is in;
+//   - moving on that last, no-quorum-otherwise evidence alone is bounded to
+//     maxFutureRounds distinct rounds per height (admitWeakRoundJumpLocked), so
+//     a validator under a third of the power cannot draw this one through an
+//     unbounded number of them by repeating its claim as this validator's own
+//     round catches up to it. What the bound counts is only ever a round this
+//     validator actually moves to (startNewRound's call to supportedRoundLocked),
+//     never a message merely looked at to decide whether to wake the round loop
+//     early (admitFutureRoundLocked's preview, previewSupportedRoundLocked) --
+//     otherwise a burst of such messages, costing their sender nothing and
+//     needing no round of real time to pass, spent the bound before the one
+//     real jump a quorum needed ever asked for it. The bound also survives a
+//     restart of this validator (WithWeakJumpSnapshotPath), the same as the
+//     lock and the sign state: without that, restarting the validator the bound
+//     protects reset it to zero, and the validator it was bounding could win a
+//     fresh maxFutureRounds every time it -- or an operator trying to unstick
+//     it -- restarted.
 //
 // Nothing here changes what a valid message is, what is signed, or which blocks
 // commit: every message keeps its encoding, and the vote and lock rules
@@ -135,7 +152,19 @@ const (
 	dropTooFarAhead   = "too far ahead"
 	dropNotProposer   = "signer is not the round's proposer"
 	dropReplayedNotOK = "not the round's proposer at replay"
+
+	// Reasons the round loop does not validate a proposal it has dequeued
+	// (proposalValidations).
+	dropRepeatedProposal = "proposal already validated in this round"
+	dropTooManyProposals = "too many different proposals from this signer in this round"
 )
+
+// maxProposalsValidatedPerSigner is how many different proposals of one signer the
+// round loop validates in a round. An honest proposer signs one proposal for a
+// round; the rest of the margin is for a proposer that restarts and signs a block
+// of its own again. A further one is not validated, so what a validator spends on a
+// round's proposals does not grow with how many a signer sends.
+const maxProposalsValidatedPerSigner = 4
 
 // dropNote is the state of the rate limiter for one drop reason.
 type dropNote struct {
@@ -195,6 +224,38 @@ func (e *Engine) recordRoundClaimLocked(signer []byte, height uint64, round int)
 	}
 }
 
+// noteHeard records that signer sent a message for round at height, a round this
+// validator is in or has passed. The messages for a later round are recorded by
+// admitFutureRoundLocked, but a validator that is level with this one sends none of
+// those, and it has to be known to be there (levelPowerLocked). It takes the write
+// lock only when the record changes.
+func (e *Engine) noteHeard(signer []byte, height uint64, round int) {
+	e.mu.RLock()
+	have, ok := e.roundClaims[string(signer)]
+	stale := height != e.currentState.Height || (ok && have.height == height && have.round >= round)
+	e.mu.RUnlock()
+	if stale {
+		return
+	}
+	e.mu.Lock()
+	if height == e.currentState.Height {
+		e.recordRoundClaimLocked(signer, height, round)
+	}
+	e.mu.Unlock()
+}
+
+// ownPowerLocked returns this validator's own voting power (zero when it is not
+// in the validator set). Must be called with e.mu held.
+func (e *Engine) ownPowerLocked() *big.Int {
+	if len(e.selfAddr) == 0 {
+		return new(big.Int)
+	}
+	if w := e.validatorSet[string(e.selfAddr)]; w != nil && w.Sign() > 0 {
+		return w
+	}
+	return new(big.Int)
+}
+
 // atLeastOneThird reports whether power is at least a third of total.
 func atLeastOneThird(power, total *big.Int) bool {
 	if power == nil || total == nil || total.Sign() <= 0 {
@@ -232,7 +293,59 @@ func atLeastOneThird(power, total *big.Int) bool {
 // validator's own power is not counted: it is the one about to move.
 // The result is the highest round for which the condition holds, so a validator
 // that claims a round far above everyone else's does not raise it.
+//
+// There is one more case (the end of the function), and in it, and only in it, this
+// validator's own power is counted. The validators ahead are followed when the rule above
+// does not hold for them, if this validator and the ones seen at this height in its own
+// round or in the rounds shortly before it (levelPowerLocked) are not a quorum, and they
+// and the validators ahead are: no round can decide without a validator that is ahead
+// then, and it does not come back to a round it has left.
+// That case holds no floor at all on how little power the validators ahead need --
+// down to one holding far less than a third -- so it is bounded a different way,
+// by how many distinct rounds it will move this validator through at one height
+// (admitWeakRoundJumpLocked): a validator, or a coalition, under a third can only
+// ever be the ones a quorum is otherwise missing for a bounded run of rounds, not
+// for as many as it cares to claim.
+//
+// This is the entry point that SPENDS that bound: only call it where reaching the
+// round it returns is what actually happens next (startNewRound). A caller that
+// only wants to know whether a later round would be supported, without that
+// necessarily following, must call previewSupportedRoundLocked instead -- see its
+// doc comment for why the difference matters.
 func (e *Engine) supportedRoundLocked() (int, bool) {
+	return e.supportedRoundLockedImpl(true)
+}
+
+// previewSupportedRoundLocked answers exactly the question supportedRoundLocked
+// does -- would enough voting power support moving to a later round than this
+// validator's own, right now -- but never spends any of the admitWeakRoundJumpLocked
+// bound itself: it is what admitFutureRoundLocked calls to decide whether to wake
+// the round loop early (roundSkipCh), a decision made anew for every future-round
+// vote or proposal this validator receives, whether or not any round transition
+// follows from it. Before this existed, that decision was made with
+// supportedRoundLocked itself, so every one of those messages that fell on the
+// last, no-floor rule spent one of the bound's maxFutureRounds slots -- a burst of
+// such messages, needing no round of real time to pass and costing its sender one
+// ordinary message each, could exhaust the whole height's bound before the one
+// real jump a quorum-completing validator needed ever asked for it, refusing that
+// validator for the rest of the height (see round_sync_test.go's
+// TestABurstOfFutureRoundVotesDoesNotSpendTheWeakJumpBudget). The two entry points
+// answer identically at any instant nothing has been granted since the last real
+// call to supportedRoundLocked -- previewing changes nothing for a caller to
+// observe later -- which is what makes it safe for admitFutureRoundLocked to act
+// on this answer (the wake-up signal) without itself being the thing that spends
+// the bound the later, real call still has to pass.
+func (e *Engine) previewSupportedRoundLocked() (int, bool) {
+	return e.supportedRoundLockedImpl(false)
+}
+
+// supportedRoundLockedImpl is supportedRoundLocked and previewSupportedRoundLocked's
+// shared body. consume selects which of the two it is: true spends a slot of the
+// admitWeakRoundJumpLocked bound when the last, no-floor rule is what supports the
+// round returned (the real jump, startNewRound); false only asks whether that rule
+// would currently allow it, spending nothing (the preview, admitFutureRoundLocked).
+// Must be called with e.mu held.
+func (e *Engine) supportedRoundLockedImpl(consume bool) (int, bool) {
 	total := e.totalVotingPower
 	if total == nil || total.Sign() <= 0 || len(e.roundClaims) == 0 {
 		return 0, false
@@ -273,7 +386,129 @@ func (e *Engine) supportedRoundLocked() (int, bool) {
 			return c.round, true
 		}
 	}
+	// The validators ahead may hold less than a third of the power and still be the ones
+	// to follow. That is the state of a set in which every validator that runs is needed
+	// for a quorum -- three of four, five of seven -- once a restart has left one of them
+	// rounds ahead of the others: a round lasts as long at every validator, so it stays
+	// ahead, and the others, level with each other, see nobody but it in a later round,
+	// which is less than a third of the power, so none of them could ever leave its round.
+	// A validator that has a quorum in its own round does not move (below): one validator,
+	// or a group of less than a third, cannot take the round away from a quorum in step.
+	own := e.ownPowerLocked()
+	base := new(big.Int).Add(own, e.levelPowerLocked())
+	if types.HasQuorum(base, total) {
+		return 0, false // a quorum is here or close to here: no one ahead is needed
+	}
+	power.SetInt64(0)
+	for _, c := range claims {
+		power.Add(power, c.power)
+		if types.HasQuorum(new(big.Int).Add(power, base), total) {
+			if consume {
+				if !e.admitWeakRoundJumpLocked(c.round) {
+					return 0, false
+				}
+			} else if !e.wouldAdmitWeakRoundJumpLocked(c.round) {
+				return 0, false
+			}
+			return c.round, true
+		}
+	}
 	return 0, false
+}
+
+// admitWeakRoundJumpLocked reports whether the last rule of supportedRoundLocked --
+// the one above, which holds no floor on how little power the validators ahead
+// need -- may still move this validator to round. It may, the first maxFutureRounds
+// distinct times it is asked at one height: past that it refuses, however many more
+// times the shortfall that rule acts on (this validator and the ones level with it
+// short of a quorum) comes and goes while the height runs. A round already granted
+// costs nothing more, so this never takes back a move it has already allowed.
+//
+// Without this, a single validator under a third of the power (or a coalition under
+// it) that keeps claiming one round further, each time this validator's own round
+// catches up, is exactly as convincing every time: the rule above has no way to
+// tell that claimant apart from the one, real, validator a restarted set is
+// legitimately missing (see the doc comment above), because at the boundary the
+// rule is built for -- this validator and its level peers one short of a quorum --
+// the two look the same. What does differ is how long it can go on: a genuine
+// catch-up needs the rule only until this validator reaches the validators it was
+// missing, after which a real quorum no longer needs it (the case just above this
+// one); a false claim, repeated, does not, and this bounds what it can cost to no
+// more rounds than a restarted validator is ever expected to need to rejoin.
+//
+// This must be called only from the path that actually moves currentState.Round
+// (supportedRoundLocked, consume=true, from startNewRound): a caller that merely
+// wants to know whether round would be granted, without that necessarily
+// happening, must call wouldAdmitWeakRoundJumpLocked instead, which answers the
+// same question and spends nothing. Conflating the two was exactly how a burst of
+// messages -- no restart, no round of real time, nothing but ordinary future-round
+// votes or proposals arriving faster than the round loop reaches them -- used to
+// exhaust this bound for free (see previewSupportedRoundLocked's doc comment).
+//
+// A grant is made durable at weakJumpSnapshotPath (WithWeakJumpSnapshotPath)
+// before this returns, the same write-ahead discipline sign_state.go's claimVote
+// uses for a vote: so that a restart of the very validator this bound protects --
+// a crash, an upgrade, or an operator bouncing a node that looks stuck, exactly
+// the event this feature exists to survive -- recovers the rounds already granted
+// (restoreWeakJumpState) instead of starting a fresh maxFutureRounds allowance for
+// the same claimant at the same, still-uncommitted height.
+//
+// Must be called with e.mu held.
+func (e *Engine) admitWeakRoundJumpLocked(round int) bool {
+	if e.weakJumpHeight != e.currentState.Height {
+		e.weakJumpHeight = e.currentState.Height
+		e.weakJumpRounds = nil
+	}
+	if e.weakJumpRounds[round] {
+		return true
+	}
+	if len(e.weakJumpRounds) >= maxFutureRounds {
+		return false
+	}
+	if e.weakJumpRounds == nil {
+		e.weakJumpRounds = make(map[int]bool, maxFutureRounds)
+	}
+	e.weakJumpRounds[round] = true
+	e.writeWeakJumpSnapshotLocked()
+	return true
+}
+
+// wouldAdmitWeakRoundJumpLocked reports whether admitWeakRoundJumpLocked would
+// grant round if asked right now, without spending any of its bound and without
+// writing anything to disk: it reads weakJumpHeight/weakJumpRounds but changes
+// neither. See previewSupportedRoundLocked, its only caller, for why a preview
+// must never itself consume what a later, real jump may need. Must be called with
+// e.mu held.
+func (e *Engine) wouldAdmitWeakRoundJumpLocked(round int) bool {
+	if e.weakJumpHeight != e.currentState.Height {
+		// Nothing has been granted yet at this height (or the record is for a
+		// height already left behind): the first real grant would succeed, and
+		// so would this preview of it.
+		return true
+	}
+	if e.weakJumpRounds[round] {
+		return true
+	}
+	return len(e.weakJumpRounds) < maxFutureRounds
+}
+
+// levelPowerLocked returns the voting power of the validators, other than this one,
+// that have been seen at this height in this validator's own round or in one of the
+// maxFutureRounds before it: the ones it has not fallen behind, and that have not
+// been silent for longer than a validator can be while it runs. A validator seen in a
+// round further back is taken for one that is gone. Must be called with e.mu held.
+func (e *Engine) levelPowerLocked() *big.Int {
+	power := new(big.Int)
+	for key, claim := range e.roundClaims {
+		if claim.height != e.currentState.Height || claim.round > e.currentState.Round ||
+			claim.round < e.currentState.Round-maxFutureRounds || key == string(e.selfAddr) {
+			continue
+		}
+		if weight := e.validatorSet[key]; weight != nil && weight.Sign() > 0 {
+			power.Add(power, weight)
+		}
+	}
+	return power
 }
 
 // admission is what to do with a message for a round after the current one.
@@ -306,7 +541,13 @@ func (e *Engine) admitFutureRoundLocked(signer []byte, what string, height uint6
 		return admitDrop
 	}
 	e.recordRoundClaimLocked(signer, height, round)
-	if target, ok := e.supportedRoundLocked(); ok && target > e.currentState.Round {
+	// previewSupportedRoundLocked, not supportedRoundLocked: this call is made for
+	// every future-round message and only ever decides whether to send the wake-up
+	// below, never whether this validator actually moves -- only startNewRound's
+	// own call to supportedRoundLocked does that, and only it may spend a slot of
+	// admitWeakRoundJumpLocked's bound (see previewSupportedRoundLocked's doc
+	// comment for what went wrong when this used supportedRoundLocked directly).
+	if target, ok := e.previewSupportedRoundLocked(); ok && target > e.currentState.Round {
 		// Do not wait for the end of the round: the validators this one needs
 		// are somewhere else. The round loop returns and startNewRound moves.
 		select {
@@ -338,6 +579,47 @@ func sameProposal(a, b *SignedProposal) bool {
 	}
 	return bytes.Equal(a.Proposer, b.Proposer) && a.Proposal.Round == b.Proposal.Round &&
 		proposalDigest(a) == proposalDigest(b)
+}
+
+// validatedProposal identifies a proposal the round loop has validated: who signed
+// it and what they signed (proposalDigest), not how the signature is encoded.
+type validatedProposal struct {
+	signer string
+	digest [sha256.Size]byte
+}
+
+// proposalValidations is what one round of the round loop has validated, so that
+// the same proposal is validated once, whichever way and however often it reaches
+// the loop: validating a block executes all of it, with the node's state locked,
+// and a second validation of the very same signed content cannot give another
+// answer. The loop keeps one for each round it runs, so nothing is kept beyond the
+// round and nothing is shared with the other goroutines. The zero value is ready
+// for use; it is not safe for concurrent use.
+type proposalValidations struct {
+	seen      map[validatedProposal]struct{}
+	perSigner map[string]int
+}
+
+// admit records p as about to be validated and returns "", or returns the reason p
+// is not to be validated: the loop has validated it already, or has validated
+// maxProposalsValidatedPerSigner different proposals of its signer. Different
+// proposals of one signer in one round -- a proposer signing two blocks -- are each
+// validated, up to that limit.
+func (v *proposalValidations) admit(p *SignedProposal) string {
+	key := validatedProposal{signer: string(p.Proposer), digest: proposalDigest(p)}
+	if _, done := v.seen[key]; done {
+		return dropRepeatedProposal
+	}
+	if v.perSigner[key.signer] >= maxProposalsValidatedPerSigner {
+		return dropTooManyProposals
+	}
+	if v.seen == nil {
+		v.seen = make(map[validatedProposal]struct{})
+		v.perSigner = make(map[string]int)
+	}
+	v.seen[key] = struct{}{}
+	v.perSigner[key.signer]++
+	return ""
 }
 
 // evictOldestProposalLocked drops the oldest buffered proposal at height -- the
@@ -944,7 +1226,7 @@ func (e *Engine) learnValidBlock(p *SignedProposal) {
 	if err != nil {
 		return
 	}
-	counted, power := countedPolkaVotes(prop.ValidRoundProof, prop.ValidRound, hash, height, validators)
+	counted, power := countedPolkaVotesBound(prop.ValidRoundProof, prop.ValidRound, hash, height, validators, e.voteBinding)
 	if !types.HasQuorum(power, total) {
 		return
 	}

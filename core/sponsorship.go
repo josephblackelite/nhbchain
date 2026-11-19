@@ -130,6 +130,16 @@ type PaymasterAutoTopUpPolicy struct {
 	Approver       [20]byte
 	ApproverRole   string
 	MinterRole     string
+	// SponsorRole, when set, is the on-chain role an address must hold before
+	// the policy tops it up (failure reason sponsor_not_registered). Empty keeps
+	// every address eligible, which lets a fresh key draw a full allowance
+	// (PL-R5T-64); the node's config refuses to enable the policy without it.
+	SponsorRole string
+	// AggregateDailyCapWei, when positive, caps what the funding account pays out
+	// per UTC day over all sponsors together, fee included (failure reason
+	// global_daily_cap_exceeded). DailyCapWei is per sponsor address, so without
+	// this a new key gets a new allowance each day (PL-R5T-64).
+	AggregateDailyCapWei *big.Int
 }
 
 // Clone returns a deep copy of the policy structure.
@@ -143,6 +153,10 @@ func (p PaymasterAutoTopUpPolicy) Clone() PaymasterAutoTopUpPolicy {
 		Approver:       p.Approver,
 		ApproverRole:   p.ApproverRole,
 		MinterRole:     p.MinterRole,
+		SponsorRole:    p.SponsorRole,
+	}
+	if p.AggregateDailyCapWei != nil {
+		clone.AggregateDailyCapWei = new(big.Int).Set(p.AggregateDailyCapWei)
 	}
 	if p.MinBalanceWei != nil {
 		clone.MinBalanceWei = new(big.Int).Set(p.MinBalanceWei)
@@ -237,7 +251,22 @@ func (sp *StateProcessor) EvaluateSponsorship(tx *types.Transaction) (*Sponsorsh
 		return assessment, nil
 	}
 
-	sponsor, err := tx.PaymasterSponsor()
+	var sponsor []byte
+	var err error
+	if sp.paymasterSponsorBindingActive() {
+		// PL-R5T-22: from the configured height the sponsor's signature is over a
+		// digest that names the sender, so it neither validates for another sender
+		// nor serves as an envelope signature. See paymaster_sponsor_binding.go.
+		from, fromErr := tx.From()
+		if fromErr != nil {
+			assessment.Status = SponsorshipStatusSignatureInvalid
+			assessment.Reason = "unable to recover the sender the paymaster signed for"
+			return assessment, nil
+		}
+		sponsor, err = tx.PaymasterSponsorBound(from)
+	} else {
+		sponsor, err = tx.PaymasterSponsor()
+	}
 	if err != nil {
 		switch err {
 		case types.ErrPaymasterSignatureMissing:
@@ -651,7 +680,17 @@ type paymasterTopUpMutation struct {
 	dayRecordExisted bool
 	previousStatus   *nhbstate.PaymasterTopUpStatus
 	statusExisted    bool
+	// aggregateTouched is set once the aggregate day record has been written, so
+	// Rollback restores it (previousAggregate nil: it did not exist) and a top-up
+	// without an aggregate cap never touches the key.
+	aggregateTouched  bool
+	previousAggregate *nhbstate.PaymasterTopUpDay
 }
+
+// paymasterTopUpAggregateKey is the "paymaster" key of the day record that totals
+// what the funding account paid out over all sponsors (PL-R5T-64). Sponsor keys
+// are lower-case hex addresses, so it cannot collide with one.
+const paymasterTopUpAggregateKey = "aggregate"
 
 func (m *paymasterTopUpMutation) Finalize(sp *StateProcessor) {
 	if m == nil || sp == nil {
@@ -734,6 +773,15 @@ func (m *paymasterTopUpMutation) Rollback(sp *StateProcessor) error {
 		}
 	}
 	manager := nhbstate.NewManager(sp.Trie)
+	if m.aggregateTouched {
+		if m.previousAggregate != nil {
+			if err := manager.PaymasterPutTopUpDay(m.previousAggregate.Clone()); err != nil {
+				return err
+			}
+		} else if err := manager.PaymasterDeleteTopUpDay(paymasterTopUpAggregateKey, m.day); err != nil {
+			return err
+		}
+	}
 	if m.dayRecordExisted {
 		if m.previousDay != nil {
 			if err := manager.PaymasterPutTopUpDay(m.previousDay.Clone()); err != nil {
@@ -812,6 +860,15 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 	}
 	paymasterKey := strings.ToLower(addr.Hex())
 	manager := nhbstate.NewManager(sp.Trie)
+	// PL-R5T-64: when the policy names a sponsor role only an address holding it is
+	// topped up. Without one any address that signs a sponsored transfer is.
+	if role := strings.TrimSpace(policy.SponsorRole); role != "" && !manager.HasRole(role, addr.Bytes()) {
+		var paymasterBytes [20]byte
+		copy(paymasterBytes[:], addr.Bytes())
+		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, sp.currentPaymasterDay(), "failure", "sponsor_not_registered")
+		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+		return nil, nil
+	}
 	feeWei, err := readGovernedPaymasterTopUpFeeWei(manager)
 	if err != nil {
 		return nil, err
@@ -855,6 +912,29 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 		sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "daily_cap_exceeded")
 		observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
 		return nil, nil
+	}
+	// PL-R5T-64: the cap on the funding account's outflow over all sponsors. The
+	// per-sponsor cap above is keyed by the sponsor address, so a new address gets a
+	// new allowance; this one is not. Nothing is read or written without it.
+	var aggregateRecord *nhbstate.PaymasterTopUpDay
+	aggregateProjected := (*big.Int)(nil)
+	if policy.AggregateDailyCapWei != nil && policy.AggregateDailyCapWei.Sign() > 0 {
+		aggregateRecord, _, err = manager.PaymasterGetTopUpDay(paymasterTopUpAggregateKey, day)
+		if err != nil {
+			return nil, err
+		}
+		aggregateSoFar := big.NewInt(0)
+		if aggregateRecord != nil && aggregateRecord.DebitedWei != nil {
+			aggregateSoFar = new(big.Int).Set(aggregateRecord.DebitedWei)
+		}
+		aggregateProjected = new(big.Int).Add(aggregateSoFar, totalDebit)
+		if aggregateProjected.Cmp(policy.AggregateDailyCapWei) > 0 {
+			var paymasterBytes [20]byte
+			copy(paymasterBytes[:], addr.Bytes())
+			sp.emitPaymasterAutoTopUpEvent(paymasterBytes, token, nil, currentBalance, day, "failure", "global_daily_cap_exceeded")
+			observability.Paymaster().RecordAutoTopUp("failure", big.NewInt(0))
+			return nil, nil
+		}
 	}
 	statusRecord, _, err := manager.PaymasterGetTopUpStatus(paymasterKey)
 	if err != nil {
@@ -1041,6 +1121,20 @@ func (sp *StateProcessor) maybeAutoTopUpPaymaster(addr common.Address, raw []byt
 			return nil, errors.Join(err, rollbackErr)
 		}
 		return nil, err
+	}
+
+	if aggregateProjected != nil {
+		updatedAggregate := &nhbstate.PaymasterTopUpDay{Paymaster: paymasterTopUpAggregateKey, Day: day, DebitedWei: aggregateProjected}
+		mutation.aggregateTouched = true
+		if aggregateRecord != nil {
+			mutation.previousAggregate = aggregateRecord.Clone()
+		}
+		if err := manager.PaymasterPutTopUpDay(updatedAggregate); err != nil {
+			if rollbackErr := mutation.Rollback(sp); rollbackErr != nil {
+				return nil, errors.Join(err, rollbackErr)
+			}
+			return nil, err
+		}
 	}
 
 	status := &nhbstate.PaymasterTopUpStatus{Paymaster: paymasterKey, LastUnix: uint64(sp.blockTimestamp().Unix())}

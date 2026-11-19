@@ -72,9 +72,15 @@ func main() {
 Behavior, from `sdk/go/client/tx.go`:
 
 - `client.New(endpoint, opts...)` requires a non-empty endpoint. Options:
-  `WithHTTPClient`, `WithAuthToken`, `WithChainID`, `WithGasLimit`, `WithGasPrice`.
-- Defaults: chain ID `types.NHBChainID()` (`0x4e4842`), gas limit `25000`, gas
-  price `1`.
+  `WithHTTPClient`, `WithAuthToken`, `WithChainID`, `WithChainIDExpiry`,
+  `WithGasLimit`, `WithGasPrice`.
+- Chain ID: there is no built-in default. A transfer carries the id the node reports
+  as `txChainId` in the public `nhb_getNetworkStats` call (`client.TxChainID(ctx)`),
+  read once and reused for 15 seconds (`WithChainIDExpiry`), because a node accepts
+  the legacy constant `0x4e4842` until `TxNetworkChainIDActivationHeight` and only the
+  network's own id from it. If the node cannot be asked or reports none, the transfer
+  is not signed. `WithChainID` is an explicit choice that skips the question.
+- Defaults: gas limit `25000`, gas price `1`.
 - `SendNHBTransfer` (transaction type `TxTypeTransfer`, `0x01`) and
   `SendZNHBTransfer` (`TxTypeTransferZNHB`, `0x10`) take
   `(ctx, key, recipient, amount, ...TxOption)`. `TxWithGasLimit` and

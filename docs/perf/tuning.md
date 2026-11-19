@@ -13,13 +13,28 @@ of them.
 | `[global.Mempool] POSReservationBPS` | 1500 | Share of each block reserved for POS-tagged transfers ([QoS](../specs/pos-qos.md)). |
 | `[global.Blocks] MaxTxs` | 500 | Maximum transactions per block; enforced when proposing and when validating a block. |
 
+Transaction types that carry no recoverable sender (`types.RequiresSignature` is
+false: the mint, reference-price, swap-admin and lending fee-withdrawal types) are
+admitted to the mempool only in their canonical envelope, which is what the node's
+own submitters build: `chainId`, `type` and `data` set, every other field zero or
+empty, plus `intentRef` and `intentExpiry` for the two lending fee withdrawals. A
+node keeps at most 64 pending transactions of each such type except the two mint
+types, which already admit one pending transaction per voucher. A payload that is
+already pending is not queued a second time and the repeat submission still reports
+success. A full type answers `mempool full` (`-32030`). These are admission rules
+only (`core/senderless_envelope.go`): a block that contains such a transaction is
+validated and applied exactly as before.
+
 ## Block production containment
 
 A proposer builds each block from a copy of committed state in waves
 (`core/proposal_containment.go`): every wave runs the candidate transactions,
 collects all failures, and the survivors run again from a fresh copy; a panic in
 one transaction is recovered; when the budget or the wave cap runs out, the clean
-prefix of the last wave is used, and failing that an empty block is built. This is
+prefix of the last wave is used (trimmed so that its re-verification fits the 300 ms
+prefix budget, keeping at least the first transaction when that one fits the budget
+on its own; the rest stays in the mempool for later blocks), and failing that an
+empty block is built. This is
 local to the proposer (validators re-execute the block as before and reject it on
 any error) and nothing in it changes a consensus rule. Transactions that fail are
 recorded in a bounded strike book and evicted from the local mempool after repeated

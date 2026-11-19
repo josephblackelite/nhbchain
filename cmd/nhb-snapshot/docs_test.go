@@ -209,6 +209,128 @@ func TestTheCommandsThePagesGiveCarryTheAgeLimit(t *testing.T) {
 	}
 }
 
+// A run that installs a snapshot stops unless something outside the snapshot host
+// and the bootnode checks the result. The commands the pages give carry the
+// reference node that does, and the pages that describe the flags say what the
+// script requires.
+func TestTheCommandsThePagesGiveCarryACheckFromOutside(t *testing.T) {
+	for doc, headings := range map[string][]string{
+		"docs/validators/snapshot-onboarding.md": {"## Quick start"},
+		"docs/validators/onboarding.md":          {stepOneHeading},
+		"README.md":                              {"### Join As A Validator In One Command", "### Step 6: Get paid (stake at least 10,000 ZNHB)"},
+	} {
+		for _, heading := range headings {
+			text := docSection(t, doc, heading)
+			at := strings.Index(text, "validator-only-bootstrap.sh")
+			if at < 0 {
+				t.Errorf("the %q section of %s has no command", heading, doc)
+				continue
+			}
+			block := text[at:]
+			if end := strings.Index(block, "```"); end >= 0 {
+				block = block[:end]
+			}
+			if !strings.Contains(block, "--tip-rpc ") {
+				t.Errorf("the command in the %q section of %s does not carry --tip-rpc:\n%s", heading, doc, block)
+			}
+		}
+	}
+	for _, doc := range []string{"docs/validators/snapshot-onboarding.md", "docs/validators/onboarding.md"} {
+		text := strings.Join(strings.Fields(readRepoFile(t, doc)), " ")
+		for _, want := range []string{"--allow-unanchored", "neither the snapshot host nor the bootnode runs"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not say %q", doc, want)
+			}
+		}
+		if strings.Contains(text, "Optional (or `NHB_TIP_RPC_URL`)") || strings.Contains(text, "# optional") {
+			t.Errorf("%s still calls --tip-rpc optional", doc)
+		}
+	}
+	script := readRepoFile(t, "scripts/deployvalidator.sh")
+	for _, want := range []string{"--allow-unanchored", "require_trust_anchor install", "require_trust_anchor recover"} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the script does not have %q", want)
+		}
+	}
+}
+
+// What a snapshot proves is said as far as the code goes: a forged snapshot does not
+// get past an honest peer, and that is not the same as never getting there. The
+// page says what else a run needs.
+func TestThePageDoesNotSayAForgedSnapshotNeverReachesTheTip(t *testing.T) {
+	const page = "docs/validators/snapshot-onboarding.md"
+	whole := strings.Join(strings.Fields(readRepoFile(t, page)), " ")
+	if strings.Contains(whole, "and then never gets there") || strings.Contains(whole, "so this is what a forged snapshot cannot fake") {
+		t.Errorf("%s still says a forged snapshot never reaches the tip, without saying that this holds only against an honest peer", page)
+	}
+	proves := strings.Join(strings.Fields(docSection(t, page, "## What a snapshot proves, and what it does not")), " ")
+	for _, want := range []string{
+		"only while the node's peers are honest",
+		"needs a check from outside the snapshot host and the bootnode",
+		"`--tip-rpc`",
+		"`--tip-hash` with `--state-root`",
+		"`--allow-unanchored`",
+		"comes from the snapshot's own state",
+	} {
+		if !strings.Contains(proves, want) {
+			t.Errorf("the %q section of %s does not say %q", "What a snapshot proves", page, want)
+		}
+	}
+}
+
+// The tip hash and the state root pin the snapshot's own newest block. They are
+// accepted as a check on the snapshot, and nothing in the pages or the script says
+// that they also check the blocks the node applies after it: only a reference node
+// does, and a run that has only the pins is warned about that.
+func TestThePagesSayThePinsCheckTheSnapshotOnly(t *testing.T) {
+	for doc, wants := range map[string][]string{
+		"docs/validators/snapshot-onboarding.md": {
+			"pins show where the snapshot ends and nothing after it",
+			"judged at the tip on the bootnode's word",
+			"the pins check the snapshot alone",
+		},
+		"docs/validators/onboarding.md": {
+			"pins show where the snapshot ends and nothing after it",
+			"rests on the bootnode",
+		},
+		"README.md": {
+			"pins show where the snapshot ends and nothing after it",
+			"rests on the bootnode",
+		},
+		"docs/ops/snapshots.md": {
+			"pins check the snapshot only, not the blocks a node applies after it",
+			"rests on the bootnode",
+		},
+		"scripts/deployvalidator.sh": {
+			"it only pins where the snapshot ends",
+			"Only --tip-rpc also checks the blocks the node applies after the snapshot",
+			"PINNED_ONLY_RUN=1",
+		},
+	} {
+		text := strings.Join(strings.Fields(readRepoFile(t, doc)), " ")
+		for _, want := range wants {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not say %q", doc, want)
+			}
+		}
+		for _, banned := range []string{"in place of `--tip-rpc`", "is the check from outside that a run needs when it gives no --tip-rpc"} {
+			if strings.Contains(text, banned) {
+				t.Errorf("%s still presents the pins as a replacement for the reference node (%q)", doc, banned)
+			}
+		}
+	}
+	// The section on what a snapshot proves is where a reader looks first.
+	proves := strings.Join(strings.Fields(docSection(t, "docs/validators/snapshot-onboarding.md", "## What a snapshot proves, and what it does not")), " ")
+	for _, want := range []string{
+		"Only the reference node checks the blocks the node applies after the snapshot",
+		"a run that has only them is judged at the tip on the bootnode's word",
+	} {
+		if !strings.Contains(proves, want) {
+			t.Errorf("the %q section does not say %q", "What a snapshot proves", want)
+		}
+	}
+}
+
 // README Step 5 is the from-genesis start, which cannot sync this network: it says
 // so and points to the snapshot procedure, before and after the command.
 func TestReadmeStepFiveWarnsThatItCannotJoinTheMainnet(t *testing.T) {

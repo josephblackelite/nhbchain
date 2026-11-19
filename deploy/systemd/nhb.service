@@ -14,5 +14,33 @@ Restart=on-failure
 RestartSec=5
 LimitNOFILE=65535
 
+# Sandboxing (PL-JN-11). The node needs the network, its data directory and its
+# own files, nothing else: it gains no privileges, sees a private /tmp and no home
+# directories, cannot load kernel modules, change the clock or the kernel's
+# settings, uses only IPv4, IPv6 and local sockets, and holds no capability (it
+# listens on ports above 1024). /usr, /boot and /etc are read-only to it.
+# ProtectSystem=strict with ReadWritePaths=/var/lib/nhbchain is the tighter form;
+# use it only after a start, a sync and a restart have been proven under it on a
+# clean server.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+UMask=0077
+
 [Install]
 WantedBy=multi-user.target

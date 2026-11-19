@@ -465,9 +465,12 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 		return ErrSwapDuplicateProviderTx
 	}
 
-	usdAmount := strings.TrimSpace(submission.USDAmount)
-	if usdAmount == "" && strings.EqualFold(voucher.Fiat, "USD") {
-		usdAmount = strings.TrimSpace(voucher.FiatAmount)
+	// The budget the curve guard below holds the mint to: the submission's own usdAmount
+	// (unsigned) below SwapVoucherSignedBudgetActivationHeight, only signed fields from
+	// it (PL-EXT-35).
+	usdAmount, err := sp.swapVoucherUSDBudget(voucher, submission.USDAmount)
+	if err != nil {
+		return err
 	}
 
 	// The Genesis Treasury Distribution Curve (core/tokenomics/curve), not
@@ -497,6 +500,13 @@ func (sp *StateProcessor) applySwapVoucherMintTransaction(tx *types.Transaction)
 			return fmt.Errorf("%w: mint would exceed the treasury Sale Pool's remaining inventory", ErrSwapAmountAboveMaximum)
 		}
 		return fmt.Errorf("swap: compute curve cost: %w", err)
+	}
+	// PL-BC-D: from SaleReferenceActivationHeight the price this mint is held to is the
+	// higher of the curve and the outside reference price. A missing or stale reference
+	// pauses the sale (skippable: a fresh reference ends it).
+	curveCostRat, err = sp.saleCost(curveManager, curveCostRat, voucher.Amount)
+	if err != nil {
+		return fmt.Errorf("swap: %w", err)
 	}
 	budgetRat, ok := new(big.Rat).SetString(usdAmount)
 	if !ok || budgetRat.Sign() <= 0 {
@@ -637,6 +647,7 @@ func (sp *StateProcessor) emitSwapRiskViolation(violation *swap.RiskViolation, p
 			ProviderTxID:  providerTxID,
 			WindowSeconds: violation.WindowSeconds,
 			ObservedCount: violation.Count,
+			AllowedMints:  bigToUint64(violation.Limit),
 		}).Event(); evt != nil {
 			sp.AppendEvent(evt)
 		}
@@ -667,4 +678,13 @@ func (sp *StateProcessor) emitSwapRiskViolation(violation *swap.RiskViolation, p
 		}
 		return fmt.Errorf("swap: risk violation %s", violation.Code)
 	}
+}
+
+// bigToUint64 returns the value of a non-negative integer that fits in 64 bits
+// and 0 for nil, negative or larger values. It only feeds an alert attribute.
+func bigToUint64(value *big.Int) uint64 {
+	if value == nil || value.Sign() <= 0 || !value.IsUint64() {
+		return 0
+	}
+	return value.Uint64()
 }

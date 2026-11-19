@@ -13,6 +13,10 @@ import (
 	"nhbchain/crypto"
 )
 
+// testNetworkChainID is what the fake nodes report: the network's own id, not the shared constant, so a client that
+// signed with the constant would be caught by the tests that look at the transaction it sent.
+const testNetworkChainID = "18346390202490284624"
+
 type rpcCall struct {
 	Method string
 	Body   string
@@ -45,6 +49,9 @@ func TestSendZNHBTransfer(t *testing.T) {
 		}
 		calls = append(calls, rpcCall{Method: req.Method, Body: string(body), Header: r.Header.Clone()})
 		switch req.Method {
+		case "nhb_getNetworkStats":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"txChainId":"` + testNetworkChainID + `"}}`))
 		case "nhb_getBalance":
 			w.Header().Set("Content-Type", "application/json")
 			io := `{"result":{"nonce":7}}`
@@ -64,6 +71,9 @@ func TestSendZNHBTransfer(t *testing.T) {
 			}
 			if got := tx.Nonce; got != 7 {
 				t.Fatalf("unexpected nonce: got %d", got)
+			}
+			if tx.ChainID == nil || tx.ChainID.String() != testNetworkChainID {
+				t.Fatalf("the transaction must carry the id the node reports, got %v", tx.ChainID)
 			}
 			if tx.GasLimit == 0 {
 				t.Fatalf("gas limit must be set")
@@ -108,8 +118,8 @@ func TestSendZNHBTransfer(t *testing.T) {
 	if tx.Value == nil || tx.Value.Cmp(amount) != 0 {
 		t.Fatalf("unexpected amount: %s", tx.Value)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("expected two RPC calls, got %d", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("expected three RPC calls (chain id, nonce, send), got %d", len(calls))
 	}
 }
 
@@ -134,6 +144,9 @@ func TestSendZNHBTransferOptions(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		switch req.Method {
+		case "nhb_getNetworkStats":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"txChainId":"` + testNetworkChainID + `"}}`))
 		case "nhb_getBalance":
 			_, _ = w.Write([]byte(`{"result":{"nonce":11}}`))
 		case "nhb_sendTransaction":
@@ -219,6 +232,9 @@ func TestSendNHBTransfer(t *testing.T) {
 		}
 		calls = append(calls, rpcCall{Method: req.Method, Body: string(body), Header: r.Header.Clone()})
 		switch req.Method {
+		case "nhb_getNetworkStats":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"txChainId":"` + testNetworkChainID + `"}}`))
 		case "nhb_getBalance":
 			w.Header().Set("Content-Type", "application/json")
 			if _, err := w.Write([]byte(`{"result":{"nonce":3}}`)); err != nil {
@@ -281,8 +297,8 @@ func TestSendNHBTransfer(t *testing.T) {
 	if tx.Value == nil || tx.Value.Cmp(amount) != 0 {
 		t.Fatalf("unexpected amount: %s", tx.Value)
 	}
-	if len(calls) != 2 {
-		t.Fatalf("expected two RPC calls, got %d", len(calls))
+	if len(calls) != 3 {
+		t.Fatalf("expected three RPC calls (chain id, nonce, send), got %d", len(calls))
 	}
 }
 
@@ -307,6 +323,9 @@ func TestSendNHBTransferOptions(t *testing.T) {
 			t.Fatalf("decode request: %v", err)
 		}
 		switch req.Method {
+		case "nhb_getNetworkStats":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":{"txChainId":"` + testNetworkChainID + `"}}`))
 		case "nhb_getBalance":
 			_, _ = w.Write([]byte(`{"result":{"nonce":9}}`))
 		case "nhb_sendTransaction":

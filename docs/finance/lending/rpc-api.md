@@ -18,12 +18,15 @@ from `NHB_RPC_TOKEN`; the node does not read that variable. `nhb-cli
 rpc-token` prints a short-lived token signed with the node's JWT secret (run on
 the node host: `export NHB_RPC_TOKEN="$(nhb-cli rpc-token)"`).
 
-`lending_getMarket`, `lend_getPools` and `lending_getUserAccount` hold the
-node's state lock while they read, so they take a slot in the public query
-pool first. When the pool is full the answer is HTTP 429 with JSON-RPC code
+`lending_getMarket`, `lend_getPools` and `lending_getUserAccount` can replay the
+lending history of a pool while they read, so they take a slot in the public
+query pool first. When the pool is full the answer is HTTP 429 with JSON-RPC code
 `-32020` and a `Retry-After` header; a query that runs past the pool's deadline
 gets HTTP 503 with code `-32021`
-([`docs/ops/rpc-query-limits.md`](../../ops/rpc-query-limits.md)).
+([`docs/ops/rpc-query-limits.md`](../../ops/rpc-query-limits.md)). Just after a
+node restarts, a read for a pool or address with nothing stored may get HTTP 503
+with code `-32000` and a `Retry-After` header until the node has finished indexing
+its lending transactions; retrying after the hint succeeds.
 
 ## Disabled and removed methods
 

@@ -10,7 +10,7 @@ command -v golangci-lint >/dev/null 2>&1 || GO111MODULE=on go install github.com
 command -v staticcheck >/dev/null 2>&1 || GO111MODULE=on go install honnef.co/go/tools/cmd/staticcheck@latest; \
 command -v gosec >/dev/null 2>&1 || GO111MODULE=on go install github.com/securego/gosec/v2/cmd/gosec@latest; \
 command -v govulncheck >/dev/null 2>&1 || GO111MODULE=on go install golang.org/x/vuln/cmd/govulncheck@latest; \
-command -v buf >/dev/null 2>&1 || GO111MODULE=on go install github.com/bufbuild/buf/cmd/buf@latest'
+command -v buf >/dev/null 2>&1 || GO111MODULE=on go install github.com/bufbuild/buf/cmd/buf@v1.50.0'
 
 bugcheck-static:
 	@bash -o errexit -o nounset -o pipefail -c ' \

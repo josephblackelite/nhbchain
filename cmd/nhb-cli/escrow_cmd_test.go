@@ -198,6 +198,10 @@ func TestEscrowCreateSignsAndSendsRealTransaction(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x` + strings.Repeat("ab", 32) + `"}`))
+		case "nhb_getNetworkStats":
+			// The command asks which chain id to sign with: the network's own, which the transaction must then carry.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"nodeId":"test","txChainId":"18346390202490284624"}}`))
 		default:
 			t.Fatalf("unexpected method: %s", req.Method)
 		}
@@ -207,6 +211,8 @@ func TestEscrowCreateSignsAndSendsRealTransaction(t *testing.T) {
 	originalEndpoint := rpcEndpoint
 	rpcEndpoint = server.URL
 	defer func() { rpcEndpoint = originalEndpoint }()
+	resetTxChainID()
+	defer resetTxChainID()
 
 	originalToken := rpcAuthToken
 	rpcAuthToken = "test-token"
@@ -241,6 +247,9 @@ func TestEscrowCreateSignsAndSendsRealTransaction(t *testing.T) {
 		t.Fatalf("unexpected stdout: %q", stdout.String())
 	}
 
+	if capturedTx.ChainID == nil || capturedTx.ChainID.String() != "18346390202490284624" {
+		t.Fatalf("the transaction must carry the id the node reports, got %v", capturedTx.ChainID)
+	}
 	if capturedTx.Type != types.TxTypeCreateEscrow {
 		t.Fatalf("unexpected tx type: got %d, want %d", capturedTx.Type, types.TxTypeCreateEscrow)
 	}
@@ -321,6 +330,10 @@ func TestEscrowCreateRealmSignsAndSendsRealTransaction(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x` + strings.Repeat("cd", 32) + `"}`))
+		case "nhb_getNetworkStats":
+			// The command asks which chain id to sign with: the network's own, which the transaction must then carry.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"nodeId":"test","txChainId":"18346390202490284624"}}`))
 		default:
 			t.Fatalf("unexpected method: %s", req.Method)
 		}
@@ -330,6 +343,8 @@ func TestEscrowCreateRealmSignsAndSendsRealTransaction(t *testing.T) {
 	originalEndpoint := rpcEndpoint
 	rpcEndpoint = server.URL
 	defer func() { rpcEndpoint = originalEndpoint }()
+	resetTxChainID()
+	defer resetTxChainID()
 
 	originalToken := rpcAuthToken
 	rpcAuthToken = "test-token"
@@ -358,6 +373,9 @@ func TestEscrowCreateRealmSignsAndSendsRealTransaction(t *testing.T) {
 		t.Fatalf("unexpected stdout: %q", stdout.String())
 	}
 
+	if capturedTx.ChainID == nil || capturedTx.ChainID.String() != "18346390202490284624" {
+		t.Fatalf("the transaction must carry the id the node reports, got %v", capturedTx.ChainID)
+	}
 	if capturedTx.Type != types.TxTypeEscrowCreateRealm {
 		t.Fatalf("unexpected tx type: got %d, want %d", capturedTx.Type, types.TxTypeEscrowCreateRealm)
 	}

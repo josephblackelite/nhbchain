@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 
 const RPC_URL = process.env.NHB_RPC_URL ?? 'http://localhost:8545';
-const RPC_TOKEN = process.env.NHB_RPC_TOKEN ?? process.env.NEXT_PUBLIC_NHB_RPC_TOKEN ?? '';
+const RPC_TOKEN = process.env.NHB_RPC_TOKEN ?? '';
 
 // NHB-AUDIT-C5: this handler used to forward ANY client-specified method
 // to the node with the server's own privileged bearer token attached, no

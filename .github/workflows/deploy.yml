@@ -13,9 +13,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# The workflow-wide token is read-only. Only the jobs that publish images and
+# charts get write access to packages (PL-R5T-35).
 permissions:
   contents: read
-  packages: write
 
 jobs:
   proto-compatibility:
@@ -34,7 +35,7 @@ jobs:
           cache: true
 
       - name: Install Buf
-        run: go install github.com/bufbuild/buf/cmd/buf@latest
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.50.0
 
       - name: Fetch main branch
         run: git fetch origin main:refs/remotes/origin/main
@@ -70,6 +71,9 @@ jobs:
     name: Build and publish images
     needs: proto-compatibility
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +130,9 @@ jobs:
     name: Package Helm charts
     needs: build-images
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         chart:

@@ -71,9 +71,10 @@ The `[consensus]` section of the config holds the round timeouts
 `MinBlockInterval`. When the key is absent the timeouts default to 2s, 2s, 2s and
 4s and `MinBlockInterval` defaults to 1s (`defaultConsensusConfig` in
 `config/config.go`). `consensusd` exits at startup if a timeout is not positive
-or if `MinBlockInterval` is negative or above half the commit timeout
-(`ConsensusProblems` in `config/validate.go`, called from `cmd/consensusd/main.go`
-after the flag and environment overrides are applied). `MinBlockInterval` is the
+or if `MinBlockInterval` is negative (`ValidateConsensus` in `config/validate.go`,
+called from `cmd/consensusd/main.go` after the flag and environment overrides are
+applied); a `MinBlockInterval` above half the commit timeout only logs a
+`consensus: configuration advisory` warning. `MinBlockInterval` is the
 least time this validator waits, after it sees a block commit, before it starts
 the next height; `0s` turns the wait off. The engine itself also lowers a value
 above half the commit timeout to that (`bft.WithMinBlockInterval`). It is local to the validator, not a rule blocks are

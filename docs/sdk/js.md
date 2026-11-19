@@ -38,9 +38,11 @@ const { transaction, response } = await client.sendTransfer({
 Behavior:
 
 - Constructor options: `baseUrl` (required), `authToken`, `fetchImpl` (defaults to
-  `globalThis.fetch`; one must exist), `chainId` (default `0x4e4842`),
+  `globalThis.fetch`; one must exist), `chainId` (explicit; without it the client
+  reads the `txChainId` the node reports in `nhb_getNetworkStats`, reuses it for
+  `chainIdTtlMs` (default 15000) and signs nothing when the node reports none),
   `gasLimit` (default `25000`), `gasPrice` (default `1`). Gas values must be
-  greater than zero.
+  greater than zero. `txChainId()` returns the id a transaction signed now must carry.
 - `sendTransfer` options: `recipient`, `amount`, `privateKey`, `asset`
   (`'NHB'` or `'ZNHB'`; **the default is `'ZNHB'`**), and optional `gasLimit` and
   `gasPrice`. The amount must be positive.

@@ -166,3 +166,57 @@ func (m *Manager) TransferGasSpendAdd(wallet [20]byte, window string, now time.T
 	}
 	return status, nil
 }
+
+type storedTransferGasTxCount struct {
+	Count uint64
+}
+
+// transferGasTxCountKey is one counter per sender per UTC calendar month,
+// shared by NHB and ZNHB plain transfers: the monthly free tier counts a
+// sender's transfers, not the value they move.
+func transferGasTxCountKey(wallet [20]byte, monthKeyValue string) []byte {
+	hexAddr := hex.EncodeToString(wallet[:])
+	trimmed := strings.TrimSpace(monthKeyValue)
+	buf := make([]byte, 0, len(transferGasTxCountPrefix)+len(trimmed)+1+len(hexAddr))
+	buf = append(buf, transferGasTxCountPrefix...)
+	buf = append(buf, trimmed...)
+	buf = append(buf, '/')
+	buf = append(buf, hexAddr...)
+	return buf
+}
+
+// TransferGasMonthlyTxCount returns how many plain transfers the wallet has
+// made in the UTC calendar month that contains now, as counted for the
+// monthly free tier (see StateProcessor.transferMonthlyFreeTierEligible).
+func (m *Manager) TransferGasMonthlyTxCount(wallet [20]byte, now time.Time) (uint64, error) {
+	if m == nil {
+		return 0, fmt.Errorf("fees: state manager not initialised")
+	}
+	var stored storedTransferGasTxCount
+	ok, err := m.KVGet(transferGasTxCountKey(wallet, monthKey(now)), &stored)
+	if err != nil {
+		return 0, fmt.Errorf("fees: load transfer tx count: %w", err)
+	}
+	if !ok {
+		return 0, nil
+	}
+	return stored.Count, nil
+}
+
+// TransferGasMonthlyTxCountAdd counts one more plain transfer for the wallet in
+// the month that contains now and returns the new count.
+func (m *Manager) TransferGasMonthlyTxCountAdd(wallet [20]byte, now time.Time) (uint64, error) {
+	current, err := m.TransferGasMonthlyTxCount(wallet, now)
+	if err != nil {
+		return 0, err
+	}
+	next := current + 1
+	if next < current {
+		return current, nil
+	}
+	stored := storedTransferGasTxCount{Count: next}
+	if err := m.KVPut(transferGasTxCountKey(wallet, monthKey(now)), &stored); err != nil {
+		return 0, fmt.Errorf("fees: store transfer tx count: %w", err)
+	}
+	return next, nil
+}

@@ -325,6 +325,7 @@ func (re *RiskEngine) CheckLimits(addr [20]byte, amount *big.Int, params RiskPar
 				Message:       fmt.Sprintf("velocity exceeded %d events in %d seconds", params.VelocityMaxMints, params.VelocityWindowSeconds),
 				WindowSeconds: params.VelocityWindowSeconds,
 				Count:         len(recent),
+				Limit:         new(big.Int).SetUint64(params.VelocityMaxMints),
 			}, nil
 		}
 	}

@@ -44,6 +44,10 @@ type Config struct {
 	Observability ObservabilityConfig `yaml:"observability"`
 	Auth          AuthConfig          `yaml:"auth"`
 	Security      SecurityConfig      `yaml:"security"`
+	// TrustedProxies lists the IP addresses and CIDR ranges of the proxies in
+	// front of the gateway. Only a request that arrives from one of them has its
+	// X-Forwarded-For / X-Real-IP client address believed by the rate limiter.
+	TrustedProxies []string `yaml:"trustedProxies"`
 }
 
 type AuthConfig struct {

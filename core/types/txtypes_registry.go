@@ -89,6 +89,12 @@ var txTypeRegistry = []struct {
 	{TxTypeSwapVoucherReverse, "SwapVoucherReverse"},
 	{TxTypeSwapMarkReconciled, "SwapMarkReconciled"},
 	{TxTypeSubmitEvidence, "SubmitEvidence"},
+	{TxTypeLendingWithdrawProtocolFees, "LendingWithdrawProtocolFees"},
+	{TxTypeBridgeLock, "BridgeLock"},
+	{TxTypeBridgeRelease, "BridgeRelease"},
+	{TxTypeAmmAddLiquidity, "AmmAddLiquidity"},
+	{TxTypeAmmRemoveLiquidity, "AmmRemoveLiquidity"},
+	{TxTypeAmmSwap, "AmmSwap"},
 }
 
 // AllTxTypes returns every defined transaction type in ascending byte order.

@@ -202,6 +202,7 @@ type Node struct {
 	lendingCollateralRouting      lending.CollateralRouting
 	creatorPayoutVaultAddr        crypto.Address
 	creatorRewardsTreasuryAddr    crypto.Address
+	creatorStakeVaultAddr         crypto.Address
 	modulePauseMu                 sync.RWMutex
 	modulePauses                  map[string]bool
 	moduleQuotaMu                 sync.RWMutex
@@ -259,6 +260,173 @@ type Node struct {
 	// Zero leaves them on the transaction hash. Kept here as well as on the state
 	// processor so a rebuilt state processor carries it. Guarded by stateMu.
 	lendingFixedTermIDHeight uint64
+
+	// nhbSupplyGenesisCorrectionHeight is the activation height of the one-time
+	// NHB supply counter correction (see SetNHBSupplyGenesisCorrectionActivationHeight).
+	// Zero leaves the counter alone. Kept here as well as on the state processor
+	// so a rebuilt state processor carries it. Guarded by stateMu.
+	nhbSupplyGenesisCorrectionHeight uint64
+
+	// transferMonthlyFreeTierHeight and transferMonthlyFreeTierTxPerMonth carry
+	// the monthly free tier for plain transfers (see SetTransferMonthlyFreeTier);
+	// loyaltyBudgetFloorHeight and loyaltyBudgetFloorWei carry the base-reward
+	// budget floor (see SetLoyaltyBudgetFloor). Zero leaves each off. Kept here as
+	// well as on the state processor so a rebuilt state processor carries them.
+	// Guarded by stateMu.
+	transferMonthlyFreeTierHeight     uint64
+	transferMonthlyFreeTierTxPerMonth uint64
+	loyaltyBudgetFloorHeight          uint64
+	loyaltyBudgetFloorWei             *big.Int
+
+	// potsoGovernanceWeightHeight carries the governance weight snapshot setting
+	// (see SetPotsoGovernanceWeights). Zero leaves governance reading the snapshot
+	// of the rewards. Kept here as well as on the state processor so a rebuilt state
+	// processor carries it. Guarded by stateMu.
+	potsoGovernanceWeightHeight uint64
+
+	// validatorFlagNonceHeight carries the ValidatorFlagNonceActivationHeight setting (see Node.SetValidatorFlagNonceActivationHeight). Zero is off. Kept here as
+	// well as on the state processor so a rebuilt state processor carries it. Guarded
+	// by stateMu.
+	validatorFlagNonceHeight uint64
+
+	// mintRunningChainIDHeight carries the MintRunningChainIDActivationHeight setting (see Node.SetMintRunningChainIDActivationHeight). Zero is off. Kept here as
+	// well as on the state processor so a rebuilt state processor carries it. Guarded
+	// by stateMu.
+	mintRunningChainIDHeight uint64
+
+	// mintPhaseERetireHeight carries the MintPhaseEChainIDRetireHeight setting (see Node.SetMintPhaseEChainIDRetireHeight). Zero is off. Kept here as
+	// well as on the state processor so a rebuilt state processor carries it. Guarded
+	// by stateMu.
+	mintPhaseERetireHeight uint64
+
+	// txNetworkChainIDHeight carries the TxNetworkChainIDActivationHeight setting (see Node.SetTxNetworkChainIDActivationHeight). Zero is off. Kept here as
+	// well as on the state processor so a rebuilt state processor carries it. Guarded
+	// by stateMu.
+	txNetworkChainIDHeight uint64
+
+	// voteChainBindingHeight carries the VoteChainBindingActivationHeight setting (see Node.SetVoteChainBindingActivationHeight). Zero is off. Kept here as
+	// well as on the state processor so a rebuilt state processor carries it. Guarded
+	// by stateMu.
+	voteChainBindingHeight uint64
+	// validatorRules carries the validator-set, slashing and staking chain rules (see
+	// ValidatorRules). Kept here as well as on the state processor so a rebuilt state
+	// processor carries them. Guarded by stateMu.
+	validatorRules ValidatorRules
+	// lendingFeeWithdrawHeight carries the LendingFeeWithdrawActivationHeight setting (see SetLendingFeeWithdrawActivationHeight).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingFeeWithdrawHeight uint64
+
+	// lendingRiskHeight carries the LendingRiskActivationHeight setting (see SetLendingRiskActivationHeight).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingRiskHeight uint64
+	// lendingRiskGate mirrors lendingRiskHeight for LendingRiskParameters, which must
+	// not take the state lock (see there).
+	lendingRiskGate atomic.Uint64
+
+	// lendingRefPriceMaxAgeValue carries the LendingRefPriceMaxAgeSeconds setting (see SetLendingRefPriceMaxAgeSeconds).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingRefPriceMaxAgeValue uint64
+
+	// lendingRefPriceMaxAheadValue carries the LendingRefPriceMaxAheadSeconds setting (see SetLendingRefPriceMaxAheadSeconds).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingRefPriceMaxAheadValue uint64
+
+	// lendingRefPriceGuardsHeight carries the LendingRefPriceGuardsActivationHeight setting (see SetLendingRefPriceGuardsActivationHeight).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingRefPriceGuardsHeight uint64
+
+	// lendingPoolIDMaxLengthValue carries the LendingPoolIDMaxLength setting (see SetLendingPoolIDMaxLength).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingPoolIDMaxLengthValue uint64
+
+	// lendingMaxPoolsValue carries the LendingMaxPools setting (see SetLendingMaxPools).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingMaxPoolsValue uint64
+
+	// lendingPoolLimitsHeight carries the LendingPoolLimitsActivationHeight setting (see SetLendingPoolLimitsActivationHeight).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingPoolLimitsHeight uint64
+
+	// lendingAccountingFixesHeight carries the LendingAccountingFixesActivationHeight setting (see SetLendingAccountingFixesActivationHeight).
+	// Kept here as well as on the state processor so a rebuilt state processor
+	// carries it. Guarded by stateMu.
+	lendingAccountingFixesHeight uint64
+
+	// paymasterSponsorBindingHeight carries the sponsor-signature binding setting
+	// (see SetPaymasterSponsorBinding). Kept here as well as on the state processor
+	// so a rebuilt state processor carries it. Guarded by stateMu.
+	paymasterSponsorBindingHeight uint64
+
+	// loyaltyPaymasterConsentHeight carries the loyalty standing-consent setting
+	// (see SetLoyaltyPaymasterConsent). Kept here as well as on the state processor
+	// so a rebuilt state processor carries it. Guarded by stateMu.
+	loyaltyPaymasterConsentHeight uint64
+
+	// loyaltyCounterpartyCapHeight and loyaltyCounterpartyCapWei carry the per-pair
+	// reward cap setting (see SetLoyaltyCounterpartyCap). Kept here as well as on the
+	// state processor so a rebuilt state processor carries them. Guarded by stateMu.
+	loyaltyCounterpartyCapHeight uint64
+	loyaltyCounterpartyCapWei    *big.Int
+
+	// buybackMinAskHeight and buybackMinAskWei carry the buyback minimum-ask setting
+	// (see SetBuybackMinAsk). Kept here as well as on the state processor so a rebuilt
+	// state processor carries them. Guarded by stateMu.
+	buybackMinAskHeight uint64
+	buybackMinAskWei    *big.Int
+
+	// subscriptionsPauseSettlementHeight carries the subscription pause-settlement
+	// setting (see SetSubscriptionsPauseSettlement). Kept here as well as on the state
+	// processor so a rebuilt state processor carries it. Guarded by stateMu.
+	subscriptionsPauseSettlementHeight uint64
+
+	// buybackUnpriceableRefundHeight carries the BuybackUnpriceableEpochRefundActivationHeight setting (see Node.SetBuybackUnpriceableEpochRefund). Kept here as well as on the
+	// state processor so a rebuilt state processor carries it. Guarded by stateMu.
+	buybackUnpriceableRefundHeight uint64
+
+	// swapVoucherSignedBudgetHeight carries the SwapVoucherSignedBudgetActivationHeight setting (see Node.SetSwapVoucherSignedBudget). Kept here as well as on the
+	// state processor so a rebuilt state processor carries it. Guarded by stateMu.
+	swapVoucherSignedBudgetHeight uint64
+
+	// sponsoredTransferFeeCreditHeight carries the SponsoredTransferFeeCreditActivationHeight setting (see Node.SetSponsoredTransferFeeCredit). Kept here as well as on the
+	// state processor so a rebuilt state processor carries it. Guarded by stateMu.
+	sponsoredTransferFeeCreditHeight uint64
+
+	// uniformTransferFeeHeight carries the UniformTransferFeeActivationHeight setting and
+	// transferFeeGovHeight / transferFeeGovDelayBlocks carry the
+	// TransferFeeGovernanceActivationHeight setting and its delay (see
+	// Node.SetUniformTransferFee, Node.SetTransferFeeGovernance). Kept here as well as on
+	// the state processor so a rebuilt state processor carries them. Guarded by stateMu.
+	uniformTransferFeeHeight  uint64
+	transferFeeGovHeight      uint64
+	transferFeeGovDelayBlocks uint64
+	// transferFeeStrictAllowanceHeight carries the TransferFeeStrictAllowanceActivationHeight setting (see
+	// Node.SetTransferFeeStrictAllowance), kept here as well as on the state processor so a rebuilt one carries it.
+	transferFeeStrictAllowanceHeight uint64
+
+	// subscriptionsChargeHistoryMigrationHeight carries the charge history migration
+	// setting (see SetSubscriptionsChargeHistoryMigration). Kept here as well as on the
+	// state processor so a rebuilt state processor carries it. Guarded by stateMu.
+	subscriptionsChargeHistoryMigrationHeight uint64
+
+	// bridgeSettings and ammSettings carry the bridge and pool chain rules (see SetBridgeAndAmm). Kept here as
+	// well as on the state processor so a rebuilt state processor carries them. Guarded by stateMu.
+	bridgeSettings BridgeSettings
+	ammSettings    AmmSettings
+	// buybackPriceGuardHeight and epochSettlementFailsafeHeight carry the two
+	// settlement failsafe settings (see SetBuybackPriceGuard and
+	// SetEpochSettlementFailsafe). Zero leaves each off. Kept here as well as on
+	// the state processor so a rebuilt state processor carries them. Guarded by
+	// stateMu.
+	buybackPriceGuardHeight       uint64
+	epochSettlementFailsafeHeight uint64
 }
 
 const (
@@ -292,6 +460,10 @@ var ErrReputationVerifierUnauthorized = errors.New("reputation: caller lacks ver
 
 // ErrMempoolFull is returned when the node's mempool has reached its configured capacity.
 var ErrMempoolFull = errors.New("mempool: transaction limit reached")
+
+// ErrBlockRequestWithoutSender is returned by ProcessNetworkMessage for a block request that arrives
+// with no peer to answer: it is refused, not broadcast to every peer (ledger PL-EXT-43).
+var ErrBlockRequestWithoutSender = errors.New("network: a block request needs the peer that sent it")
 
 // ErrInvalidTransaction marks transactions that fail basic validation or cannot be executed.
 var ErrInvalidTransaction = errors.New("mempool: invalid transaction")
@@ -459,12 +631,48 @@ func (n *Node) rebuildStateProcessorLocked(root common.Hash) error {
 	stateProcessor.SetPOSSweepSkipActivationHeight(n.state.posSweepSkipActivationHeight)
 	stateProcessor.SetPOSHoldUnstakeGuardActivationHeight(n.posHoldUnstakeGuardHeight)
 	stateProcessor.SetLendingFixedTermIDActivationHeight(n.lendingFixedTermIDHeight)
+	stateProcessor.SetNHBSupplyGenesisCorrectionActivationHeight(n.nhbSupplyGenesisCorrectionHeight)
+	stateProcessor.SetTransferMonthlyFreeTier(n.transferMonthlyFreeTierHeight, n.transferMonthlyFreeTierTxPerMonth)
+	stateProcessor.SetLoyaltyBudgetFloor(n.loyaltyBudgetFloorHeight, n.loyaltyBudgetFloorWei)
+	stateProcessor.SetPotsoGovernanceWeights(n.potsoGovernanceWeightHeight)
+	stateProcessor.SetValidatorFlagNonceActivationHeight(n.validatorFlagNonceHeight)
+	stateProcessor.SetMintRunningChainIDActivationHeight(n.mintRunningChainIDHeight)
+	stateProcessor.SetMintPhaseEChainIDRetireHeight(n.mintPhaseERetireHeight)
+	stateProcessor.SetTxNetworkChainIDActivationHeight(n.txNetworkChainIDHeight)
+	stateProcessor.SetVoteChainBindingActivationHeight(n.voteChainBindingHeight)
+	stateProcessor.SetValidatorRules(n.validatorRules)
+	stateProcessor.SetLendingFeeWithdrawActivationHeight(n.lendingFeeWithdrawHeight)
+	stateProcessor.SetLendingRiskActivationHeight(n.lendingRiskHeight)
+	stateProcessor.SetLendingRefPriceMaxAgeSeconds(n.lendingRefPriceMaxAgeValue)
+	stateProcessor.SetLendingRefPriceMaxAheadSeconds(n.lendingRefPriceMaxAheadValue)
+	stateProcessor.SetLendingRefPriceGuardsActivationHeight(n.lendingRefPriceGuardsHeight)
+	stateProcessor.SetLendingPoolIDMaxLength(n.lendingPoolIDMaxLengthValue)
+	stateProcessor.SetLendingMaxPools(n.lendingMaxPoolsValue)
+	stateProcessor.SetLendingPoolLimitsActivationHeight(n.lendingPoolLimitsHeight)
+	stateProcessor.SetLendingAccountingFixesActivationHeight(n.lendingAccountingFixesHeight)
+	stateProcessor.SetPaymasterSponsorBinding(n.paymasterSponsorBindingHeight)
+	stateProcessor.SetLoyaltyPaymasterConsent(n.loyaltyPaymasterConsentHeight)
+	stateProcessor.SetLoyaltyCounterpartyCap(n.loyaltyCounterpartyCapHeight, n.loyaltyCounterpartyCapWei)
+	stateProcessor.SetBuybackMinAsk(n.buybackMinAskHeight, n.buybackMinAskWei)
+	stateProcessor.SetSubscriptionsPauseSettlement(n.subscriptionsPauseSettlementHeight)
+	stateProcessor.SetBuybackUnpriceableEpochRefund(n.buybackUnpriceableRefundHeight)
+	stateProcessor.SetSwapVoucherSignedBudget(n.swapVoucherSignedBudgetHeight)
+	stateProcessor.SetSponsoredTransferFeeCredit(n.sponsoredTransferFeeCreditHeight)
+	stateProcessor.SetUniformTransferFee(n.uniformTransferFeeHeight)
+	stateProcessor.SetTransferFeeGovernance(n.transferFeeGovHeight, n.transferFeeGovDelayBlocks)
+	stateProcessor.SetTransferFeeStrictAllowance(n.transferFeeStrictAllowanceHeight)
+	stateProcessor.SetSubscriptionsChargeHistoryMigration(n.subscriptionsChargeHistoryMigrationHeight)
+	stateProcessor.SetBridge(n.bridgeSettings)
+	stateProcessor.SetAmm(n.ammSettings)
+	stateProcessor.SetBuybackPriceGuard(n.buybackPriceGuardHeight)
+	stateProcessor.SetEpochSettlementFailsafe(n.epochSettlementFailsafeHeight)
 	stateProcessor.SetGovCreditPreservationActivationHeight(n.govCreditPreservationActivationHeight)
 	stateProcessor.SetFeeRouteAliasActivationHeight(n.feeRouteAliasActivationHeight)
 	stateProcessor.SetSwapPayoutAuthorities(n.swapConfig().PayoutAuthorities)
 	stateProcessor.SetSwapConfig(n.swapConfig())
 	if n.chain != nil {
 		stateProcessor.SetSwapVoucherChainID(n.chain.ChainID())
+		stateProcessor.SetGenesisHash(n.chain.GenesisHash())
 	}
 	if err := stateProcessor.SetEngagementConfig(n.state.EngagementConfig()); err != nil {
 		return err
@@ -593,6 +801,19 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		}
 	}
 
+	// The admin wallet (as just resolved, environment override included) and
+	// the buyback signer quorum are not covered by the genesis hash, so a
+	// different genesis file or environment would silently give different
+	// state. Compare them with what this database was first started with and
+	// refuse to start on a difference (see treasury_config_record.go).
+	buybackSigners, buybackThreshold, hasBuybackSigners := chain.BuybackSigners()
+	if err := chain.verifyOrRecordTreasuryConfig(
+		newTreasuryConfig(treasury, hasAdminWallet, buybackSigners, buybackThreshold, hasBuybackSigners),
+		treasuryConfigRerecordRequested(os.Getenv),
+	); err != nil {
+		return nil, err
+	}
+
 	stateProcessor.SetEscrowFeeTreasury(treasury)
 	stateProcessor.SetAdminWallet(treasury, hasAdminWallet)
 	// Defaults the consensus-level voucher-reversal refund sink to the same
@@ -656,6 +877,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	collateralAddr := deriveModuleAddress("module/lending/collateral", crypto.ZNHBPrefix)
 	creatorVaultAddr := deriveModuleAddress("module/creator/payout", crypto.NHBPrefix)
 	creatorRewardsAddr := deriveModuleAddress("module/creator/rewards", crypto.NHBPrefix)
+	creatorStakeAddr := deriveModuleAddress("module/creator/stake", crypto.NHBPrefix)
 
 	potsoEngine, err := potso.NewEngine(potso.DefaultEngineParams())
 	if err != nil {
@@ -666,6 +888,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 	stateProcessor.SetSwapPayoutAuthorities(defaultSwapCfg.PayoutAuthorities)
 	stateProcessor.SetSwapConfig(defaultSwapCfg)
 	stateProcessor.SetSwapVoucherChainID(chain.ChainID())
+	stateProcessor.SetGenesisHash(chain.GenesisHash())
 
 	node := &Node{
 		db:                   db,
@@ -706,6 +929,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		lendingCollateralAddr:         collateralAddr,
 		creatorPayoutVaultAddr:        creatorVaultAddr,
 		creatorRewardsTreasuryAddr:    creatorRewardsAddr,
+		creatorStakeVaultAddr:         creatorStakeAddr,
 		modulePauses:                  make(map[string]bool),
 		moduleQuotas:                  make(map[string]nativecommon.Quota),
 		feesPolicy:                    fees.Policy{Domains: map[string]fees.DomainPolicy{}},
@@ -1108,9 +1332,13 @@ func (n *Node) TransferGasStatus(addr []byte) (nhbstate.TransferGasSpendStatus, 
 	if len(addr) != 20 {
 		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("address must be 20 bytes")
 	}
-	policy := n.TransferGasPolicy()
+	// The allowance of the next block: the configured one, or the governed one once it is in force.
+	policy, err := n.EffectiveTransferGasPolicy()
+	if err != nil {
+		return nhbstate.TransferGasSpendStatus{}, err
+	}
 	var status nhbstate.TransferGasSpendStatus
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err = n.WithState(func(m *nhbstate.Manager) error {
 		var wallet [20]byte
 		copy(wallet[:], addr)
 		window := nhbstate.TransferGasWindowLifetime
@@ -1142,9 +1370,13 @@ func (n *Node) TransferGasStatusForAsset(addr []byte, asset string) (nhbstate.Tr
 	if len(addr) != 20 {
 		return nhbstate.TransferGasSpendStatus{}, fmt.Errorf("address must be 20 bytes")
 	}
-	policy := n.TransferGasPolicy()
+	// The allowance of the next block: the configured one, or the governed one once it is in force.
+	policy, err := n.EffectiveTransferGasPolicy()
+	if err != nil {
+		return nhbstate.TransferGasSpendStatus{}, err
+	}
 	var status nhbstate.TransferGasSpendStatus
-	err := n.WithState(func(m *nhbstate.Manager) error {
+	err = n.WithState(func(m *nhbstate.Manager) error {
 		var wallet [20]byte
 		copy(wallet[:], addr)
 		window := nhbstate.TransferGasWindowLifetime
@@ -2092,19 +2324,7 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 	if n == nil {
 		return
 	}
-	copyParams := lending.RiskParameters{
-		MaxLTV:               params.MaxLTV,
-		LiquidationThreshold: params.LiquidationThreshold,
-		LiquidationBonus:     params.LiquidationBonus,
-		CircuitBreakerActive: params.CircuitBreakerActive,
-		DeveloperFeeCapBps:   params.DeveloperFeeCapBps,
-		BorrowCaps:           params.BorrowCaps.Clone(),
-		Oracle:               params.Oracle,
-		Pauses:               params.Pauses,
-	}
-	if params.OracleAddress.Bytes() != nil {
-		copyParams.OracleAddress = cloneAddress(params.OracleAddress)
-	}
+	copyParams := params.Clone()
 	n.lendingMu.Lock()
 	n.lendingParams = copyParams
 	n.lendingMu.Unlock()
@@ -2115,15 +2335,27 @@ func (n *Node) SetLendingRiskParameters(params lending.RiskParameters) {
 	n.stateMu.Unlock()
 }
 
-// LendingRiskParameters returns the currently configured lending risk limits.
+// LendingRiskParameters returns the lending risk limits in force for the next
+// block: the configured limits from LendingRiskActivationHeight, and before it only
+// the ones that were applied before that gate existed. What the RPC shows (the
+// pools, the health of a position, the room left to borrow) is therefore what the
+// engine will enforce, not what the file merely says.
 func (n *Node) LendingRiskParameters() lending.RiskParameters {
 	n.lendingMu.RLock()
-	params := n.lendingParams
+	params := n.lendingParams.Clone()
 	n.lendingMu.RUnlock()
-	if params.OracleAddress.Bytes() != nil {
-		params.OracleAddress = cloneAddress(params.OracleAddress)
+	// The gate is read from its own atomic copy, never under the state lock: the
+	// lending RPC builds engines from inside state callbacks that already hold it.
+	gate := n.lendingRiskGate.Load()
+	next := uint64(1)
+	if n.chain != nil {
+		if header := n.chain.CurrentHeader(); header != nil {
+			next = header.Height + 1
+		}
 	}
-	params.BorrowCaps = params.BorrowCaps.Clone()
+	if gate == 0 || next < gate {
+		return params.WithoutGatedLimits()
+	}
 	return params
 }
 
@@ -2377,11 +2609,12 @@ func (n *Node) ProcessNetworkMessage(msg *p2p.Message) error {
 		return n.handleNetworkStatus(status)
 
 	case p2p.MsgTypeGetBlocks:
-		var payload p2p.GetBlocksPayload
-		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			return err
-		}
-		return n.handleNetworkGetBlocks(payload, n.networkBroadcast())
+		// A block request is answered to the peer that asked, alone (HandlePeerMessage). Without
+		// a sender there is nobody to answer, and answering every connected peer would turn one
+		// request into a broadcast of up to a frame of blocks to all of them (ledger PL-EXT-43):
+		// refuse. The peer-to-peer server always passes the peer, so no message from the network
+		// reaches this arm.
+		return ErrBlockRequestWithoutSender
 
 	case p2p.MsgTypeBlocks:
 		var payload p2p.BlocksPayload
@@ -2558,7 +2791,13 @@ func (n *Node) handleNetworkBlocks(blocks []*types.Block) error {
 			return n.requestBlockSync(localHeight + 1)
 		}
 		if err := n.commitSyncedBlock(block); err != nil {
-			return fmt.Errorf("commit synced block %d: %w", block.Header.Height, err)
+			err = fmt.Errorf("commit synced block %d: %w", block.Header.Height, err)
+			if n.syncedBlockRejected(block, err) {
+				// The peer sent a block that is bad in itself: the server must
+				// treat it as a protocol violation, not as a message handled.
+				return fmt.Errorf("%w: %w", p2p.ErrInvalidPayload, err)
+			}
+			return err
 		}
 		applied++
 		if n.externalCommitNotifier != nil {
@@ -2630,6 +2869,15 @@ func (n *Node) AddTransaction(tx *types.Transaction) error {
 func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 	if n == nil || tx == nil {
 		return fmt.Errorf("add transaction: invalid arguments")
+	}
+	// A transaction type with no recoverable sender is authenticated only by
+	// its Data payload, so its envelope must be the canonical one (see
+	// senderlessEnvelopeError). This is a plain field comparison, checked
+	// first so a non-canonical copy never reaches the simulation below.
+	if !types.RequiresSignature(tx.Type) {
+		if err := senderlessEnvelopeError(tx); err != nil {
+			return fmt.Errorf("%w: sender-less transaction envelope: %v", ErrInvalidTransaction, err)
+		}
 	}
 	if err := n.validateTransaction(tx); err != nil {
 		return err
@@ -2792,6 +3040,20 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 		}
 	}
 
+	// Sender-less types have no sender to count against, so the per-sender
+	// limits below never apply to them. Bound them per type instead, and do
+	// not queue a second copy of a payload that is already pending: the
+	// submission is already accepted, so the caller sees success.
+	if !types.RequiresSignature(tx.Type) {
+		duplicate, err := n.senderlessPendingCheckLocked(tx)
+		if err != nil {
+			return err
+		}
+		if duplicate {
+			return nil
+		}
+	}
+
 	if limit := n.mempoolLimit; limit > 0 && len(n.mempool) >= limit {
 		return ErrMempoolFull
 	}
@@ -2939,7 +3201,7 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 	if tx.ChainID == nil {
 		return fmt.Errorf("%w: missing chain id", ErrInvalidTransaction)
 	}
-	if !types.IsValidChainID(tx.ChainID) {
+	if !n.TxChainIDAcceptedForNextBlock(tx.ChainID) {
 		return fmt.Errorf("%w: unexpected chain id %s", ErrInvalidTransaction, tx.ChainID.String())
 	}
 	if types.RequiresSignature(tx.Type) {
@@ -3809,6 +4071,10 @@ func classifyProposalError(err error) proposalTxDisposition {
 	if errors.As(err, &redeemViolation) {
 		return proposalDispositionSkip
 	}
+	// The bridge and the native pool (ledger PL-BC-C, PL-BC-B): every refusal they can return is classified.
+	if disposition, ok := classifyBridgeAmmError(err); ok {
+		return disposition
+	}
 	switch {
 	case errors.Is(err, ErrNonceTooLow),
 		errors.Is(err, ErrHeartbeatTooSoon),
@@ -3868,11 +4134,29 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// ErrBuybackRefPriceStaleEpoch's doc comment (core/buyback_tx.go)
 		// for the 2026-09-18 incident this fixes.
 		errors.Is(err, ErrBuybackRefPriceStaleEpoch),
+		// PL-BC-D: a reference already older than the maximum age can never become valid
+		// (block time only grows), and one that moves further than the step bound from the
+		// fresh previous reference belongs to an epoch that only ends, so both are dead.
+		errors.Is(err, ErrSaleReferenceTooOld),
+		errors.Is(err, ErrSaleReferenceStepTooLarge),
 		// The lending ref price has no epoch, but its accepted timestamp is
 		// monotonic in the same way, so a submission at or behind it is
 		// equally dead. See ErrLendingRefPriceStaleTimestamp's doc comment
 		// (core/lending_tx.go).
 		errors.Is(err, ErrLendingRefPriceStaleTimestamp),
+		// A timestamp beyond 64 signed bits, a bundle dated too long before the
+		// block (the block time only grows) and a rate whose median is zero are
+		// decided by the payload and the block time alone and can never become
+		// valid. See core/lending_tx.go.
+		errors.Is(err, ErrLendingRefPriceTimestampRange),
+		errors.Is(err, ErrLendingRefPriceTooOld),
+		errors.Is(err, ErrLendingRefPriceRateTooSmall),
+		// A pool id that breaks the character or length rule, or a pool creation
+		// over the pool-count limit (pools are never removed), can never become
+		// valid. See core/lending_pool_limits.go.
+		errors.Is(err, ErrLendingPoolIDInvalid),
+		errors.Is(err, ErrLendingFeeWithdrawInvalidPayload),
+		errors.Is(err, ErrLendingPoolLimitReached),
 		// A TxTypeSubmitEvidence payload that does not decode, or whose
 		// reporter is not the account that signed it, is a pure function of
 		// the transaction's own immutable bytes. A report that is already
@@ -3883,6 +4167,9 @@ func classifyProposalError(err error) proposalTxDisposition {
 		errors.Is(err, ErrEvidenceInvalidPayload),
 		errors.Is(err, ErrEvidenceReporterMismatch),
 		errors.Is(err, ErrEvidenceAlreadyRecorded),
+		// A report of a kind the intake no longer accepts (PL-R5T-09) is decided by
+		// the report alone.
+		errors.Is(err, ErrEvidenceTypeNotAccepted),
 		// NHB-AUDIT-R2: a transaction whose MaxBlockHeight or IntentExpiry
 		// has already passed at execution time can never succeed later
 		// either -- height only increases and block timestamps only
@@ -3964,6 +4251,9 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// The ask list of an epoch is full, or the seller's share of it is; the
 		// count starts again with the next epoch.
 		errors.Is(err, ErrBuybackAskLimit),
+		// A second identical admin listing in the same block second is a no-op for the engine; in a later second the same
+		// transaction lists normally (ledger PL-EXT-49).
+		errors.Is(err, ErrMarketDuplicateAdminListing),
 		// A same-block-or-later credit to the voucher's recipient could
 		// make a currently-insufficient reversal succeed on a later
 		// attempt, mirroring ErrRedeemInsufficientBalance's reasoning
@@ -3983,6 +4273,37 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// SAME proposal attempt -- a later attempt can genuinely change the
 		// outcome, same reasoning as the two lending errors above.
 		errors.Is(err, lending.ErrWithdrawSameBlockAsSupply),
+		// The pause, cap and oracle outcomes of the lending engine (reachable now
+		// that the node hands the engine its limits) all depend on state or
+		// configuration that can change: a repayment frees borrow room, an oracle
+		// update refreshes the price, an operator lifts a pause. Skippable.
+		errors.Is(err, lending.ErrSupplyPaused),
+		errors.Is(err, lending.ErrBorrowPaused),
+		errors.Is(err, lending.ErrLiquidationsPaused),
+		errors.Is(err, lending.ErrRepayPaused),
+		errors.Is(err, lending.ErrBorrowCapPerBlock),
+		errors.Is(err, lending.ErrBorrowCapGlobal),
+		errors.Is(err, lending.ErrBorrowCapUtilisation),
+		errors.Is(err, lending.ErrSupplyCapExceeded),
+		errors.Is(err, lending.ErrCollateralCapExceeded),
+		errors.Is(err, lending.ErrOracleStale),
+		errors.Is(err, lending.ErrOracleDeviation),
+		// A lending transaction naming a pool that an earlier transaction of this
+		// proposal, or a later block, may still create: skippable, like the
+		// other outcomes that depend on what else is in the proposal.
+		errors.Is(err, ErrLendingPoolNotFound),
+		// A fee withdrawal by a sender who may be granted the role later, or for more than
+		// the pool can pay out now (fees accrue, loans are repaid): skippable.
+		errors.Is(err, ErrLendingFeeWithdrawUnauthorized),
+		errors.Is(err, ErrLendingFeeWithdrawExceedsAvailable),
+		// A bundle dated too far after the block becomes valid when the block
+		// time catches up with it: skippable, offered again, not pruned.
+		errors.Is(err, ErrLendingRefPriceTooFarAhead),
+		// PL-BC-D: a sale while no fresh outside reference price exists is paused until one
+		// is accepted, and a reference dated after the block becomes valid when block time
+		// catches up: skippable, offered again, not pruned.
+		errors.Is(err, ErrSaleReferenceUnavailable),
+		errors.Is(err, ErrSaleReferenceTooFarAhead),
 		// NHB-AUDIT-C2: two unrelated accounts racing to claim the same
 		// username is an ordinary same-attempt ordering collision, not a
 		// malformed or malicious transaction -- skip just the losing
@@ -3994,6 +4315,7 @@ func classifyProposalError(err error) proposalTxDisposition {
 		// out of the evidence window -- all transient, so skippable rather
 		// than prunable, like the caps and pauses above.
 		errors.Is(err, ErrEvidenceReporterNotBonded),
+		errors.Is(err, ErrEvidenceOffenderNotBonded),
 		errors.Is(err, evidence.ErrIndexFull),
 		errors.Is(err, evidence.ErrReporterQuota),
 		// A ref price for an epoch the chain has not reached yet becomes
@@ -4132,6 +4454,9 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 	if err := stateCopy.ReconcileNHBMintSupplyDriftOnce(); err != nil {
 		return fmt.Errorf("reconcile NHB mint supply drift: %w", err)
 	}
+	if err := stateCopy.ReconcileNHBGenesisShortfallOnce(); err != nil {
+		return fmt.Errorf("reconcile NHB genesis supply shortfall: %w", err)
+	}
 	for i, tx := range orderedTxs {
 		if err := stateCopy.ApplyTransaction(tx); err != nil {
 			// Same message as before ("apply transaction N: ..."); the typed
@@ -4172,6 +4497,45 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 
 func (n *Node) commitSyncedBlock(b *types.Block) error {
 	return n.commitBlock(b, true)
+}
+
+// blockRejectedError marks a commitBlock failure that is a verdict on the
+// content of the block itself, as opposed to a fault of this node's own storage
+// or state. Its message and the error it wraps are those of the plain error it
+// stands for, so logs and errors.Is / errors.As behave as they did before.
+type blockRejectedError struct{ Err error }
+
+func (e *blockRejectedError) Error() string { return e.Err.Error() }
+func (e *blockRejectedError) Unwrap() error { return e.Err }
+
+// rejectedBlock marks err as a verdict on the content of the block being
+// committed.
+func rejectedBlock(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &blockRejectedError{Err: err}
+}
+
+// syncedBlockRejected reports whether err, returned by commitSyncedBlock for
+// block, says that the block itself is bad, which is something its sender can
+// be held to. It does not when the failure is this node's own (see
+// isInfrastructureError), nor when the chain already reached the height of the
+// block: a block this node committed from consensus in the meantime settles
+// that height, and says nothing about an honest peer that sent the same one.
+func (n *Node) syncedBlockRejected(block *types.Block, err error) bool {
+	if err == nil || block == nil || block.Header == nil || isInfrastructureError(err) {
+		return false
+	}
+	if n.GetHeight() >= block.Header.Height {
+		return false
+	}
+	var rejected *blockRejectedError
+	if errors.As(err, &rejected) {
+		return true
+	}
+	var applyErr *blockApplyError
+	return errors.As(err, &applyErr)
 }
 
 func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err error) {
@@ -4229,7 +4593,7 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		return fmt.Errorf("blockchain not initialised")
 	}
 	if err := n.rejectOversizedBlock(b); err != nil {
-		return err
+		return rejectedBlock(err)
 	}
 
 	// NHB-TRIAGE-C1: a block reaching this function via the untrusted P2P
@@ -4267,22 +4631,22 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 			// be who was actually active at this height).
 			return fmt.Errorf("resolve validator set for quorum verification: %w", vsErr)
 		}
-		if err := b.QuorumCert.Verify(headerHash, validatorPower); err != nil {
-			return fmt.Errorf("quorum certificate verification failed: %w", err)
+		if err := b.QuorumCert.VerifyBound(headerHash, validatorPower, n.VoteBinding()); err != nil {
+			return rejectedBlock(fmt.Errorf("quorum certificate verification failed: %w", err))
 		}
 	}
 
 	// Verify TxRoot before executing
 	txRoot, err := ComputeTxRoot(b.Transactions)
 	if err != nil {
-		return err
+		return rejectedBlock(err)
 	}
 	if !bytes.Equal(txRoot, b.Header.TxRoot) {
-		return fmt.Errorf("tx root mismatch")
+		return rejectedBlock(fmt.Errorf("tx root mismatch"))
 	}
 
 	if err := n.validateBlockTimestamp(b.Header.Timestamp, allowHistoricalTimestamp); err != nil {
-		return err
+		return rejectedBlock(err)
 	}
 
 	n.stateMu.Lock()
@@ -4341,14 +4705,14 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	// Compute V3 Canonical Conflict DAG
 	orderedTxs, executionGraphRoot, dagErr := computeDependencyGraph(b.Transactions)
 	if dagErr != nil {
-		return fmt.Errorf("canonical scheduler failed: %w", dagErr)
+		return rejectedBlock(fmt.Errorf("canonical scheduler failed: %w", dagErr))
 	}
 
 	// Verify or Assign Execution Graph Root
 	if len(b.Header.ExecutionGraphRoot) == 0 {
 		b.Header.ExecutionGraphRoot = executionGraphRoot
 	} else if !bytes.Equal(b.Header.ExecutionGraphRoot, executionGraphRoot) {
-		return fmt.Errorf("execution graph root mismatch")
+		return rejectedBlock(fmt.Errorf("execution graph root mismatch"))
 	}
 
 	b.Transactions = orderedTxs
@@ -4362,6 +4726,9 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 	}
 	if err := stateCopy.ReconcileNHBMintSupplyDriftOnce(); err != nil {
 		return fmt.Errorf("reconcile NHB mint supply drift: %w", err)
+	}
+	if err := stateCopy.ReconcileNHBGenesisShortfallOnce(); err != nil {
+		return fmt.Errorf("reconcile NHB genesis supply shortfall: %w", err)
 	}
 
 	// Apply transactions deterministically in the canonical topological order.
@@ -4392,14 +4759,14 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 
 	// Check derived StateRoot matches header (if header set) or fill it
 	if err := stateCopy.ProcessBlockLifecycle(b.Header.Height, b.Header.Timestamp); err != nil {
-		return fmt.Errorf("block lifecycle: %w", err)
+		return rejectedBlock(fmt.Errorf("block lifecycle: %w", err))
 	}
 	if traceStateRoots {
 		rootAfterLifecycle = hexRoot(stateCopy.PendingRoot())
 	}
 
 	if err := n.processPendingEvidenceForState(stateCopy, b.Header.Height); err != nil {
-		return fmt.Errorf("process evidence: %w", err)
+		return rejectedBlock(fmt.Errorf("process evidence: %w", err))
 	}
 	if traceStateRoots {
 		rootAfterEvidence = hexRoot(stateCopy.PendingRoot())
@@ -4432,7 +4799,7 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 				slog.String("root_after_refresh", rootAfterRefresh),
 			)
 		}
-		return fmt.Errorf("state root mismatch")
+		return rejectedBlock(fmt.Errorf("state root mismatch"))
 	}
 
 	// Commit state at this height
@@ -4451,6 +4818,9 @@ func (n *Node) commitBlock(b *types.Block, allowHistoricalTimestamp bool) (err e
 		prevTimestamp = n.chain.LastTimestamp()
 	}
 	if err := n.chain.AddBlock(b); err != nil {
+		if errors.Is(err, errBlockPrevHashMismatch) {
+			return rejectedBlock(err)
+		}
 		return err
 	}
 	// Best-effort, strictly-after-commit persistence of this block's BuyZNHB
@@ -4704,6 +5074,63 @@ func (n *Node) SetLendingFixedTermIDActivationHeight(height uint64) {
 	n.lendingFixedTermIDHeight = height
 	if n.state != nil {
 		n.state.SetLendingFixedTermIDActivationHeight(height)
+	}
+}
+
+// SetNHBSupplyGenesisCorrectionActivationHeight sets the first block height at
+// which the NHB supply counter is raised by the part of the genesis allocation it
+// never counted (see StateProcessor.ReconcileNHBGenesisShortfallOnce). Zero, the
+// default, leaves the counter alone. It is a chain rule and must be the same on
+// every validator, set before the chain reaches the height.
+func (n *Node) SetNHBSupplyGenesisCorrectionActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.nhbSupplyGenesisCorrectionHeight = height
+	if n.state != nil {
+		n.state.SetNHBSupplyGenesisCorrectionActivationHeight(height)
+	}
+}
+
+// SetTransferMonthlyFreeTier sets the first block height from which a sender's
+// first txPerMonth plain transfers each UTC calendar month pay no transfer fee
+// (see StateProcessor.SetTransferMonthlyFreeTier). Zero for either leaves the
+// tier off. A chain rule: the same values on every validator, set before the
+// chain reaches the height.
+func (n *Node) SetTransferMonthlyFreeTier(height, txPerMonth uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.transferMonthlyFreeTierHeight = height
+	n.transferMonthlyFreeTierTxPerMonth = txPerMonth
+	if n.state != nil {
+		n.state.SetTransferMonthlyFreeTier(height, txPerMonth)
+	}
+}
+
+// SetLoyaltyBudgetFloor sets the first block height from which the base-reward
+// daily budget has a floor of floorWei ZNHB wei, limited to the existing daily
+// USD cap (see StateProcessor.SetLoyaltyBudgetFloor). A zero height or a nil or
+// non-positive amount leaves the budget as it is. A chain rule: the same values
+// on every validator, set before the chain reaches the height.
+func (n *Node) SetLoyaltyBudgetFloor(height uint64, floorWei *big.Int) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.loyaltyBudgetFloorHeight = height
+	if floorWei == nil || floorWei.Sign() <= 0 {
+		n.loyaltyBudgetFloorWei = nil
+	} else {
+		n.loyaltyBudgetFloorWei = new(big.Int).Set(floorWei)
+	}
+	if n.state != nil {
+		n.state.SetLoyaltyBudgetFloor(height, n.loyaltyBudgetFloorWei)
 	}
 }
 
@@ -5344,9 +5771,13 @@ func (n *Node) PotsoRewardEpochPayouts(epoch uint64, cursor *[20]byte, limit int
 	if limit <= 0 {
 		limit = 50
 	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	manager := nhbstate.NewManager(n.state.Trie)
+	// The epoch's winner list is one stored record that is decoded whole however
+	// small the page asked for, so it is read from a copy of the state rather than
+	// under the state lock.
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return nil, err
+	}
 	winners, err := manager.PotsoRewardsListWinners(epoch)
 	if err != nil {
 		return nil, err
@@ -5501,10 +5932,13 @@ func (n *Node) PotsoRewardsHistory(addr [20]byte, cursor string, limit int) ([]p
 		offset = parsed
 	}
 
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
+	// An address's payout history is one stored record that is decoded whole
+	// however small the page asked for, so it is read from a copy of the state
+	// rather than under the state lock.
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return nil, "", err
+	}
 	history, err := manager.PotsoRewardsHistory(addr)
 	if err != nil {
 		return nil, "", err
@@ -5538,10 +5972,12 @@ func (n *Node) PotsoRewardsHistory(addr [20]byte, cursor string, limit int) ([]p
 }
 
 func (n *Node) PotsoExportEpoch(epoch uint64) ([]byte, *big.Int, int, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
+	// The export reads the payout and claim of every winner of the epoch, so it is
+	// read from a copy of the state rather than under the state lock.
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return nil, nil, 0, err
+	}
 	data, total, winners, err := manager.PotsoRewardsBuildCSV(epoch)
 	if err != nil {
 		return nil, nil, 0, err
@@ -5561,10 +5997,13 @@ func (n *Node) PotsoLeaderboard(epoch uint64, offset, limit int) (uint64, uint64
 	if limit < 0 {
 		limit = 0
 	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
+	// The epoch's weight snapshot is one stored record that is decoded whole
+	// however small the page asked for, so it is read from a copy of the state
+	// rather than under the state lock.
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return 0, 0, nil, err
+	}
 	target := epoch
 	if target == 0 {
 		last, ok, err := manager.PotsoRewardsLastProcessedEpoch()
@@ -5620,10 +6059,13 @@ func (n *Node) PotsoLeaderboard(epoch uint64, offset, limit int) (uint64, uint64
 // address with no recorded entry both return a zero weight, not an error --
 // this is a passive eligibility check, not a vote being cast.
 func (n *Node) PotsoWeight(epoch uint64, addr [20]byte) (uint64, uint64, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
+	// The epoch's weight snapshot is one stored record that is decoded whole and
+	// searched entry by entry, so it is read from a copy of the state rather than
+	// under the state lock.
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return 0, 0, err
+	}
 	target := epoch
 	if target == 0 {
 		last, ok, err := manager.PotsoRewardsLastProcessedEpoch()
@@ -5696,6 +6138,363 @@ type LoyaltyBudgetStatus struct {
 	GuardFallback string
 }
 
+// SetPotsoGovernanceWeights sets the first block height from which the weight
+// snapshot governance reads is built separately from the one of the rewards (see
+// StateProcessor.SetPotsoGovernanceWeights). A zero height leaves governance as it
+// was. A chain rule: the same value on every validator, set before the chain
+// reaches the height.
+func (n *Node) SetPotsoGovernanceWeights(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.potsoGovernanceWeightHeight = height
+	if n.state != nil {
+		n.state.SetPotsoGovernanceWeights(height)
+	}
+}
+
+// SetLendingAccountingFixesActivationHeight sets the first block height of the LendingAccountingFixesActivationHeight rule (see
+// StateProcessor.SetLendingAccountingFixesActivationHeight). Zero, the default, leaves it off. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingAccountingFixesActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingAccountingFixesHeight = height
+	if n.state != nil {
+		n.state.SetLendingAccountingFixesActivationHeight(height)
+	}
+}
+
+// SetLendingPoolLimitsActivationHeight sets the first block height of the LendingPoolLimitsActivationHeight rule (see
+// StateProcessor.SetLendingPoolLimitsActivationHeight). Zero, the default, leaves it off. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingPoolLimitsActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingPoolLimitsHeight = height
+	if n.state != nil {
+		n.state.SetLendingPoolLimitsActivationHeight(height)
+	}
+}
+
+// SetLendingMaxPools sets the most pools that may exist once the pool limits are active (see
+// StateProcessor.SetLendingMaxPools). Zero, the default, means no limit. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingMaxPools(limit uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingMaxPoolsValue = limit
+	if n.state != nil {
+		n.state.SetLendingMaxPools(limit)
+	}
+}
+
+// SetLendingPoolIDMaxLength sets the longest pool id that may be created once the pool limits are active (see
+// StateProcessor.SetLendingPoolIDMaxLength). Zero, the default, means no limit. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingPoolIDMaxLength(limit uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingPoolIDMaxLengthValue = limit
+	if n.state != nil {
+		n.state.SetLendingPoolIDMaxLength(limit)
+	}
+}
+
+// SetLendingRefPriceGuardsActivationHeight sets the first block height of the LendingRefPriceGuardsActivationHeight rule (see
+// StateProcessor.SetLendingRefPriceGuardsActivationHeight). Zero, the default, leaves it off. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingRefPriceGuardsActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingRefPriceGuardsHeight = height
+	if n.state != nil {
+		n.state.SetLendingRefPriceGuardsActivationHeight(height)
+	}
+}
+
+// SetLendingRefPriceMaxAheadSeconds sets how far after the block time a reference-price bundle may be dated once the guards are active (see
+// StateProcessor.SetLendingRefPriceMaxAheadSeconds). Zero, the default, means no such check. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingRefPriceMaxAheadSeconds(seconds uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingRefPriceMaxAheadValue = seconds
+	if n.state != nil {
+		n.state.SetLendingRefPriceMaxAheadSeconds(seconds)
+	}
+}
+
+// SetLendingRefPriceMaxAgeSeconds sets how long before the block time a reference-price bundle may be dated once the guards are active (see
+// StateProcessor.SetLendingRefPriceMaxAgeSeconds). Zero, the default, means no such check. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingRefPriceMaxAgeSeconds(seconds uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingRefPriceMaxAgeValue = seconds
+	if n.state != nil {
+		n.state.SetLendingRefPriceMaxAgeSeconds(seconds)
+	}
+}
+
+// SetLendingRiskActivationHeight sets the first block height of the LendingRiskActivationHeight rule (see
+// StateProcessor.SetLendingRiskActivationHeight). Zero, the default, leaves it off. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingRiskActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingRiskHeight = height
+	n.lendingRiskGate.Store(height)
+	if n.state != nil {
+		n.state.SetLendingRiskActivationHeight(height)
+	}
+}
+
+// SetLendingFeeWithdrawActivationHeight sets the first block height of the LendingFeeWithdrawActivationHeight rule (see
+// StateProcessor.SetLendingFeeWithdrawActivationHeight). Zero, the default, leaves it off. A chain
+// rule: the same value on every validator, set before the chain reaches the height.
+func (n *Node) SetLendingFeeWithdrawActivationHeight(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.lendingFeeWithdrawHeight = height
+	if n.state != nil {
+		n.state.SetLendingFeeWithdrawActivationHeight(height)
+	}
+}
+
+// SetPaymasterSponsorBinding sets the first block height from which a sponsor's
+// signature must be over the digest bound to the sender (see
+// StateProcessor.SetPaymasterSponsorBinding). A zero height leaves the check as it
+// was. A chain rule: the same value on every validator, set before the chain
+// reaches the height.
+func (n *Node) SetPaymasterSponsorBinding(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.paymasterSponsorBindingHeight = height
+	if n.state != nil {
+		n.state.SetPaymasterSponsorBinding(height)
+	}
+}
+
+// SetLoyaltyPaymasterConsent sets the first block height from which a loyalty
+// program reward is paid only out of a wallet with a standing record of consent
+// (see StateProcessor.SetLoyaltyPaymasterConsent). A zero height leaves the
+// loyalty rules as they were. A chain rule: the same value on every validator,
+// set before the chain reaches the height.
+func (n *Node) SetLoyaltyPaymasterConsent(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.loyaltyPaymasterConsentHeight = height
+	if n.state != nil {
+		n.state.SetLoyaltyPaymasterConsent(height)
+	}
+}
+
+// SetLoyaltyCounterpartyCap sets the first block height from which the base-reward
+// path applies a per-pair daily cap when the stored configuration sets none, and
+// the cap in ZNHB wei (see StateProcessor.SetLoyaltyCounterpartyCap). A zero height
+// or a nil or non-positive amount leaves the rule as it was. A chain rule: the same
+// values on every validator, set before the chain reaches the height.
+func (n *Node) SetLoyaltyCounterpartyCap(height uint64, capWei *big.Int) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.loyaltyCounterpartyCapHeight = height
+	n.loyaltyCounterpartyCapWei = nil
+	if capWei != nil && capWei.Sign() > 0 {
+		n.loyaltyCounterpartyCapWei = new(big.Int).Set(capWei)
+	}
+	if n.state != nil {
+		n.state.SetLoyaltyCounterpartyCap(height, n.loyaltyCounterpartyCapWei)
+	}
+}
+
+// SetBuybackMinAsk sets the first block height from which the smallest treasury
+// buyback ask is the given amount of ZNHB wei, if that is above the fixed minimum of
+// one ZNHB (see StateProcessor.SetBuybackMinAsk). A zero height or a nil or
+// non-positive amount leaves the minimum as it was. A chain rule: the same values on
+// every validator, set before the chain reaches the height.
+func (n *Node) SetBuybackMinAsk(height uint64, minAskWei *big.Int) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.buybackMinAskHeight = height
+	n.buybackMinAskWei = nil
+	if minAskWei != nil && minAskWei.Sign() > 0 {
+		n.buybackMinAskWei = new(big.Int).Set(minAskWei)
+	}
+	if n.state != nil {
+		n.state.SetBuybackMinAsk(height, n.buybackMinAskWei)
+	}
+}
+
+// SetSubscriptionsPauseSettlement sets the first block height from which the
+// per-block subscription settlement does nothing while the module is paused (see
+// StateProcessor.SetSubscriptionsPauseSettlement). A zero height leaves it running
+// through a pause. A chain rule: the same value on every validator, set before the
+// chain reaches the height.
+func (n *Node) SetSubscriptionsPauseSettlement(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.subscriptionsPauseSettlementHeight = height
+	if n.state != nil {
+		n.state.SetSubscriptionsPauseSettlement(height)
+	}
+}
+
+// SetSubscriptionsChargeHistoryMigration sets the first block height from which a
+// subscription's charge history under the old key is read through and migrated (see
+// StateProcessor.SetSubscriptionsChargeHistoryMigration). A zero height keeps the newer
+// layout alone. A chain rule: the same value on every validator, set before the chain
+// reaches the height.
+func (n *Node) SetSubscriptionsChargeHistoryMigration(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.subscriptionsChargeHistoryMigrationHeight = height
+	if n.state != nil {
+		n.state.SetSubscriptionsChargeHistoryMigration(height)
+	}
+}
+
+// SetSponsoredTransferFeeCredit sets the first block height of the SponsoredTransferFeeCreditActivationHeight rule (see
+// StateProcessor.SetSponsoredTransferFeeCredit). Zero, the default, leaves it off. A chain rule: the same
+// value on every validator, set before the chain reaches the height.
+func (n *Node) SetSponsoredTransferFeeCredit(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.sponsoredTransferFeeCreditHeight = height
+	if n.state != nil {
+		n.state.SetSponsoredTransferFeeCredit(height)
+	}
+}
+
+// SetSwapVoucherSignedBudget sets the first block height of the SwapVoucherSignedBudgetActivationHeight rule (see
+// StateProcessor.SetSwapVoucherSignedBudget). Zero, the default, leaves it off. A chain rule: the same
+// value on every validator, set before the chain reaches the height.
+func (n *Node) SetSwapVoucherSignedBudget(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.swapVoucherSignedBudgetHeight = height
+	if n.state != nil {
+		n.state.SetSwapVoucherSignedBudget(height)
+	}
+}
+
+// SetBuybackUnpriceableEpochRefund sets the first block height of the BuybackUnpriceableEpochRefundActivationHeight rule (see
+// StateProcessor.SetBuybackUnpriceableEpochRefund). Zero, the default, leaves it off. A chain rule: the same
+// value on every validator, set before the chain reaches the height.
+func (n *Node) SetBuybackUnpriceableEpochRefund(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.buybackUnpriceableRefundHeight = height
+	if n.state != nil {
+		n.state.SetBuybackUnpriceableEpochRefund(height)
+	}
+}
+
+// SetUniformTransferFee sets the first block height of the UniformTransferFeeActivationHeight rule (see
+// StateProcessor.SetUniformTransferFee). Zero, the default, leaves it off. A chain rule: the same
+// value on every validator, set before the chain reaches the height.
+func (n *Node) SetUniformTransferFee(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.uniformTransferFeeHeight = height
+	if n.state != nil {
+		n.state.SetUniformTransferFee(height)
+	}
+}
+
+// SetTransferFeeGovernance sets the first block height of the TransferFeeGovernanceActivationHeight rule
+// and the delay in blocks between the execution of a fee proposal and its first charged block (see
+// StateProcessor.SetTransferFeeGovernance). Zero for the height, the default, leaves it off. A chain
+// rule: the same values on every validator, set before the chain reaches the height.
+func (n *Node) SetTransferFeeGovernance(height, delayBlocks uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.transferFeeGovHeight = height
+	n.transferFeeGovDelayBlocks = delayBlocks
+	if n.state != nil {
+		n.state.SetTransferFeeGovernance(height, delayBlocks)
+	}
+}
+
+// loyaltyBudgetFloorForNextBlock is the budget floor the next block will settle
+// with, or nil when there is none (see StateProcessor.SetLoyaltyBudgetFloor).
+func (n *Node) loyaltyBudgetFloorForNextBlock() *big.Int {
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil {
+		return nil
+	}
+	var next uint64 = 1
+	if n.chain != nil {
+		if header := n.chain.CurrentHeader(); header != nil {
+			next = header.Height + 1
+		}
+	}
+	return n.state.loyaltyBudgetFloorAtHeight(next)
+}
+
 // LoyaltyBudgetStatus reads the loyalty engine's budget for the current UTC day.
 // It runs against a disposable view of the state (see WithStateView) and only
 // reads: the budget is worked out by the same function the block executor calls
@@ -5707,8 +6506,9 @@ func (n *Node) LoyaltyBudgetStatus() (*LoyaltyBudgetStatus, error) {
 	}
 	now := n.currentTime()
 	status := &LoyaltyBudgetStatus{}
+	floor := n.loyaltyBudgetFloorForNextBlock()
 	err := n.WithStateView(func(m *nhbstate.Manager) error {
-		remaining, fallback, err := m.GetRemainingDailyBudgetZNHB(now)
+		remaining, fallback, err := m.GetRemainingDailyBudgetZNHBWithFloor(now, floor)
 		if err != nil {
 			return err
 		}
@@ -5760,10 +6560,31 @@ func (n *Node) SubscriptionPlanByID(id subscriptions.PlanID) (*subscriptions.Pla
 	return n.SubscriptionsRegistry().GetPlan(id)
 }
 
-func (n *Node) SubscriptionPlansByMerchant(merchant [20]byte) ([]subscriptions.PlanID, error) {
+// subscriptionsSnapshotRegistry returns a registry over a copy of the state (see
+// readSnapshot), for the reads that list the records of a merchant, a payer or
+// a subscription: their cost follows the length of the list, so they must not
+// be done under the state lock.
+func (n *Node) subscriptionsSnapshotRegistry() (*subscriptions.Registry, error) {
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	registry := subscriptions.NewRegistry(manager)
+	registry.SetPauses(n)
+	// PL-R5T-82: a charge history under the old key is listed once the setting is on,
+	// so the read agrees with the settlement that continues it.
 	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	return n.SubscriptionsRegistry().ListPlansByMerchant(merchant)
+	registry.SetLegacyChargeHistory(n.subscriptionsChargeHistoryMigrationHeight != 0)
+	n.stateMu.Unlock()
+	return registry, nil
+}
+
+func (n *Node) SubscriptionPlansByMerchant(merchant [20]byte) ([]subscriptions.PlanID, error) {
+	registry, err := n.subscriptionsSnapshotRegistry()
+	if err != nil {
+		return nil, err
+	}
+	return registry.ListPlansByMerchant(merchant)
 }
 
 func (n *Node) SubscriptionByID(id subscriptions.SubscriptionID) (*subscriptions.Subscription, bool) {
@@ -5773,21 +6594,27 @@ func (n *Node) SubscriptionByID(id subscriptions.SubscriptionID) (*subscriptions
 }
 
 func (n *Node) SubscriptionsByPayer(payer [20]byte) ([]subscriptions.SubscriptionID, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	return n.SubscriptionsRegistry().ListSubscriptionsByPayer(payer)
+	registry, err := n.subscriptionsSnapshotRegistry()
+	if err != nil {
+		return nil, err
+	}
+	return registry.ListSubscriptionsByPayer(payer)
 }
 
 func (n *Node) SubscriptionsByMerchant(merchant [20]byte) ([]subscriptions.SubscriptionID, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	return n.SubscriptionsRegistry().ListSubscriptionsByMerchant(merchant)
+	registry, err := n.subscriptionsSnapshotRegistry()
+	if err != nil {
+		return nil, err
+	}
+	return registry.ListSubscriptionsByMerchant(merchant)
 }
 
 func (n *Node) SubscriptionCharges(id subscriptions.SubscriptionID) ([]subscriptions.Charge, error) {
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	return n.SubscriptionsRegistry().ListCharges(id)
+	registry, err := n.subscriptionsSnapshotRegistry()
+	if err != nil {
+		return nil, err
+	}
+	return registry.ListCharges(id)
 }
 
 // SubscriptionsEngineConfig exposes the deployment-configured management
@@ -5880,6 +6707,9 @@ func (n *Node) newCreatorEngine(manager *nhbstate.Manager) *creator.Engine {
 	var rewardsTreasury [20]byte
 	copy(rewardsTreasury[:], n.creatorRewardsTreasuryAddr.Bytes())
 	engine.SetRewardsTreasury(rewardsTreasury)
+	var stakeVault [20]byte
+	copy(stakeVault[:], n.creatorStakeVaultAddr.Bytes())
+	engine.SetStakeVault(stakeVault)
 	return engine
 }
 
@@ -7303,7 +8133,7 @@ func (n *Node) EngagementSubmitHeartbeat(deviceID, token string, timestamp int64
 	}
 
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeHeartbeat,
 		Nonce:    account.Nonce,
 		Data:     data,
@@ -7607,10 +8437,12 @@ func (n *Node) PotsoTop(day string, limit int) ([]PotsoLeaderboardEntry, error) 
 	if limit <= 0 {
 		limit = 10
 	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-
-	manager := nhbstate.NewManager(n.state.Trie)
+	// Every participant of the day is read and ranked before the page is cut, so
+	// the work is read from a copy of the state rather than under the state lock.
+	manager, err := n.readSnapshot()
+	if err != nil {
+		return nil, err
+	}
 	participants, err := manager.PotsoListParticipants(day)
 	if err != nil {
 		return nil, err
@@ -7706,13 +8538,23 @@ func (n *Node) PotsoStakeInfo(owner [20]byte) (*potso.StakeAccountInfo, error) {
 	return info, nil
 }
 
+// claimableNow is the time the claimable methods use: the state processor's clock,
+// which inside block execution is the block's own timestamp and otherwise the
+// processor's configured clock. It is never the machine's clock read directly, so two
+// nodes executing the same transaction cannot disagree about a deadline (PL-DC-40,
+// PL-DC-55). The claimable RPC methods are retired (410) and nothing in block
+// execution reaches these methods today.
+func (n *Node) claimableNow() int64 {
+	return n.state.blockTimestamp().Unix()
+}
+
 func (n *Node) ClaimableCreate(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64) ([32]byte, error) {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
 	chainID := fmt.Sprintf("%d", n.ChainID())
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID, claimable.RecipientKindNone)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, [32]byte{}, chainID, claimable.RecipientKindNone, n.claimableNow())
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -7740,7 +8582,7 @@ func (n *Node) IdentityCreateClaimable(payer [20]byte, token string, amount *big
 	var hashLock [32]byte
 	copy(hashLock[:], hash)
 	chainID := fmt.Sprintf("%d", n.ChainID())
-	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID, recipientKind)
+	record, err := manager.CreateClaimable(payer, token, amount, hashLock, deadline, hint, chainID, recipientKind, n.claimableNow())
 	if err != nil {
 		return nil, err
 	}
@@ -7823,7 +8665,7 @@ func (n *Node) ClaimableClaim(id [32]byte, preimage []byte, payee [20]byte) erro
 	if err := n.authorizeClaimablePayee(manager, record, payee); err != nil {
 		return err
 	}
-	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, time.Now().Unix())
+	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, n.claimableNow())
 	if err != nil {
 		return err
 	}
@@ -7862,7 +8704,7 @@ func (n *Node) IdentityClaim(id [32]byte, preimage []byte, payee [20]byte) (*cla
 	if err := n.authorizeClaimablePayee(manager, record, payee); err != nil {
 		return nil, err
 	}
-	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, time.Now().Unix())
+	updated, changed, err := manager.ClaimableClaim(id, preimage, payee, n.claimableNow())
 	if err != nil {
 		return nil, err
 	}
@@ -7888,7 +8730,7 @@ func (n *Node) ClaimableCancel(id [32]byte, caller [20]byte) error {
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
-	record, changed, err := manager.ClaimableCancel(id, caller, time.Now().Unix())
+	record, changed, err := manager.ClaimableCancel(id, caller, n.claimableNow())
 	if err != nil {
 		return err
 	}
@@ -7912,7 +8754,7 @@ func (n *Node) ClaimableExpire(id [32]byte) error {
 	defer n.stateMu.Unlock()
 
 	manager := nhbstate.NewManager(n.state.Trie)
-	record, changed, err := manager.ClaimableExpire(id, time.Now().Unix())
+	record, changed, err := manager.ClaimableExpire(id, n.claimableNow())
 	if err != nil {
 		return err
 	}
@@ -7956,7 +8798,9 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 	if _, err := voucher.AmountBig(); err != nil {
 		return "", err
 	}
-	if voucher.ChainID != MintChainID {
+	// One rule for the executor and for admission (PL-R5T-58): the Phase E id, and from
+	// the configured heights the running chain's own id.
+	if !n.mintVoucherChainIDAcceptedForNextBlock(voucher.ChainID) {
 		return "", ErrMintInvalidChainID
 	}
 	if voucher.Expiry <= n.currentTime().Unix() {
@@ -7995,7 +8839,7 @@ func (n *Node) MintWithSignature(voucher *MintVoucher, signature []byte) (string
 		return "", err
 	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeMint,
 		Data:     payload,
 		GasLimit: 0,
@@ -8112,7 +8956,7 @@ func (n *Node) SwapSubmitVoucher(submission *swap.VoucherSubmission) (string, bo
 		return "", false, err
 	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeSwapVoucherMint,
 		Data:     payload,
 		GasLimit: 0,
@@ -8269,7 +9113,7 @@ func (n *Node) SubmitBuybackRefPrice(rateNum, rateDenom *big.Int, epoch, timesta
 		return "", fmt.Errorf("buyback: encode payload: %w", err)
 	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeBuybackRefPrice,
 		Data:     payload,
 		GasLimit: 0,
@@ -8380,7 +9224,7 @@ func (n *Node) SubmitLendingRefPrice(rateNum, rateDenom *big.Int, timestamp uint
 		return "", fmt.Errorf("lendingRefPrice: encode payload: %w", err)
 	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeLendingRefPrice,
 		Data:     payload,
 		GasLimit: 0,
@@ -8401,6 +9245,13 @@ func (n *Node) SubmitLendingRefPrice(rateNum, rateDenom *big.Int, timestamp uint
 // transaction identifier. It reads a disposable view of the state (see
 // WithStateView), like the other read-only queries.
 func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, error) {
+	return n.SwapGetVoucherWhere(providerTxID, nil)
+}
+
+// SwapGetVoucherWhere is SwapGetVoucher for a caller who may see only some of the
+// records: a record keep does not accept is reported as not found, exactly as a
+// record that does not exist is. A nil keep reads any record.
+func (n *Node) SwapGetVoucherWhere(providerTxID string, keep func(*swap.VoucherRecord) bool) (*swap.VoucherRecord, bool, error) {
 	trimmed := strings.TrimSpace(providerTxID)
 	if trimmed == "" {
 		return nil, false, fmt.Errorf("swap: providerTxId required")
@@ -8421,6 +9272,9 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 	if !ok {
 		return nil, false, nil
 	}
+	if keep != nil && !keep(record) {
+		return nil, false, nil
+	}
 	return record.Copy(), true, nil
 }
 
@@ -8428,13 +9282,20 @@ func (n *Node) SwapGetVoucher(providerTxID string) (*swap.VoucherRecord, bool, e
 // reads a disposable view of the state (see WithStateView), like the other
 // read-only queries.
 func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) ([]*swap.VoucherRecord, string, error) {
+	return n.SwapListVouchersWhere(startTs, endTs, cursor, limit, nil)
+}
+
+// SwapListVouchersWhere is SwapListVouchers for a caller who may see only some of
+// the records (see swap.Ledger.ListWhere): the page holds, and the cursor points
+// at, only records keep accepts. A nil keep lists every record.
+func (n *Node) SwapListVouchersWhere(startTs, endTs int64, cursor string, limit int, keep func(*swap.VoucherRecord) bool) ([]*swap.VoucherRecord, string, error) {
 	var (
 		results    []*swap.VoucherRecord
 		nextCursor string
 	)
 	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
-		records, cursorOut, err := ledger.List(startTs, endTs, cursor, limit)
+		records, cursorOut, err := ledger.ListWhere(startTs, endTs, cursor, limit, keep)
 		if err != nil {
 			return err
 		}
@@ -8455,6 +9316,13 @@ func (n *Node) SwapListVouchers(startTs, endTs int64, cursor string, limit int) 
 // It reads a disposable view of the state (see WithStateView), like the other
 // read-only queries.
 func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, error) {
+	return n.SwapExportVouchersWhere(startTs, endTs, nil)
+}
+
+// SwapExportVouchersWhere is SwapExportVouchers for a caller who may see only
+// some of the records: the rows, the count and the total cover only the records
+// keep accepts. A nil keep exports every record.
+func (n *Node) SwapExportVouchersWhere(startTs, endTs int64, keep func(*swap.VoucherRecord) bool) (string, int, *big.Int, error) {
 	var (
 		encoded string
 		count   int
@@ -8463,7 +9331,7 @@ func (n *Node) SwapExportVouchers(startTs, endTs int64) (string, int, *big.Int, 
 	err := n.WithStateView(func(m *nhbstate.Manager) error {
 		ledger := swap.NewLedger(m)
 		var err error
-		encoded, count, total, err = ledger.ExportCSV(startTs, endTs)
+		encoded, count, total, err = ledger.ExportCSVWhere(startTs, endTs, keep)
 		return err
 	})
 	if err != nil {
@@ -8642,7 +9510,7 @@ func (n *Node) SwapReverseVoucher(providerTxID string, signature []byte) (string
 		return "", err
 	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeSwapVoucherReverse,
 		Data:     payload,
 		GasLimit: 0,
@@ -8687,7 +9555,7 @@ func (n *Node) SwapMarkReconciled(ids []string, signature []byte) (string, error
 		return "", err
 	}
 	tx := &types.Transaction{
-		ChainID:  types.NHBChainID(),
+		ChainID:  n.txChainIDForNextBlock(),
 		Type:     types.TxTypeSwapMarkReconciled,
 		Data:     payload,
 		GasLimit: 0,
@@ -8854,19 +9722,25 @@ func (n *Node) retainCommittedEventsLocked() {
 
 // Events returns the events the node has seen, oldest first: the most recent of
 // those committed blocks produced (see event_log.go for how many are kept),
-// then the ones the live state has logged since the last commit. It is read
-// under the state lock so an event is never missed or counted twice while a
-// block is being committed.
+// then the ones the live state has logged since the last commit. The two are
+// taken together under the state lock so an event is never missed or counted
+// twice while a block is being committed, but only as a view that shares the
+// events' attribute maps; the copy the caller receives is made after the lock is
+// released, so the time block validation and commit wait on this call does not
+// grow with the number of events the log holds.
 func (n *Node) Events() []types.Event {
 	if n == nil {
 		return nil
 	}
 	n.stateMu.RLock()
-	defer n.stateMu.RUnlock()
 	if n.state == nil {
+		n.stateMu.RUnlock()
 		return nil
 	}
-	return append(n.eventLog.snapshot(), n.state.Events()...)
+	retained := n.eventLog.view()
+	pending := n.state.pendingEventsView()
+	n.stateMu.RUnlock()
+	return copyEvents(append(retained, pending...))
 }
 
 func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
@@ -8891,21 +9765,48 @@ func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
 // WithState from a query handler becomes part of this validator's next
 // block proposal even though no other validator executed the query, so
 // their independently computed root would diverge from this one's.
+//
+// The state lock is held only while the copy is taken (see readSnapshot); fn
+// runs without it, so a callback that reads a large set does not hold up block
+// validation or commit. fn sees the state as of the moment of the copy and must
+// not rely on the lock for anything else.
 func (n *Node) WithStateView(fn func(*nhbstate.Manager) error) error {
 	if fn == nil {
 		return fmt.Errorf("state callback required")
 	}
-	n.stateMu.Lock()
-	defer n.stateMu.Unlock()
-	if n.state == nil {
-		return fmt.Errorf("state unavailable")
-	}
-	view, err := n.state.Copy()
+	manager, err := n.readSnapshot()
 	if err != nil {
 		return err
 	}
-	manager := nhbstate.NewManager(view.Trie)
 	return fn(manager)
+}
+
+// readSnapshot returns a state manager over a private copy of the node's current
+// state trie, taken under the state lock and used without it. Public reads that
+// walk a set whose size depends on the chain (a leaderboard, a day's
+// participants, an index of subscriptions) use it, so the time they take is not
+// time block validation and commit spend waiting for the lock.
+//
+// The lock is taken exclusively because reading a trie changes it (it keeps the
+// nodes it has loaded), so two holders of the shared lock could still change the
+// live trie at once. The copy shares no node with the live trie, so reading it
+// while blocks are validated and committed is safe, and anything written to it
+// is discarded with it. It shows the state as it is at the moment of the copy,
+// including what has been applied since the last commit.
+func (n *Node) readSnapshot() (*nhbstate.Manager, error) {
+	if n == nil {
+		return nil, fmt.Errorf("node unavailable")
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	if n.state == nil || n.state.Trie == nil {
+		return nil, fmt.Errorf("state unavailable")
+	}
+	snapshot, err := n.state.Trie.Copy()
+	if err != nil {
+		return nil, err
+	}
+	return nhbstate.NewManager(snapshot), nil
 }
 
 func (n *Node) QueryState(namespace, key string) (*QueryResult, error) {
@@ -9274,6 +10175,67 @@ type ZNHBTokenomicsState struct {
 	SalePoolBalanceWei        string `json:"salePoolBalanceWei"`
 	RewardPoolBalanceWei      string `json:"rewardPoolBalanceWei"`
 	BuybackAccrualBalanceWei  string `json:"buybackAccrualBalanceWei"`
+	// SaleReference is present only on a network whose SaleReferenceActivationHeight is set
+	// (PL-BC-D): whether the treasury sale follows the outside market yet, whether it is paused for
+	// want of a fresh reference, and the reference itself. Absent, the sale is priced by the curve
+	// alone, as it always was.
+	SaleReference *ZNHBSaleReferenceState `json:"saleReference,omitempty"`
+}
+
+// ZNHBSaleReferenceState is the reference-price half of the tokenomics state (PL-BC-D).
+type ZNHBSaleReferenceState struct {
+	// Active is true when the rule applies to the next block.
+	Active bool `json:"active"`
+	// Paused is true when the rule applies and no fresh reference exists: sales are refused.
+	Paused bool `json:"paused"`
+	// RateNHBPerZNHB is the recorded reference as an exact decimal (18 places), empty when none.
+	RateNHBPerZNHB string `json:"rateNhbPerZnhb,omitempty"`
+	// StruckAt is the signed time the reference was struck at (unix seconds), zero when none.
+	StruckAt uint64 `json:"struckAt,omitempty"`
+	// AgeSeconds is the reference's age at the next block, zero when none.
+	AgeSeconds uint64 `json:"ageSeconds,omitempty"`
+	// MaxAgeSeconds is the setting: the oldest a reference may be and still price a sale.
+	MaxAgeSeconds uint64 `json:"maxAgeSeconds"`
+	// ActivationHeight is the setting: the first block the rule applies to.
+	ActivationHeight uint64 `json:"activationHeight"`
+}
+
+// saleReferenceState reads the reference half of the tokenomics state for the next block, or nil
+// when the network has not set the rule.
+func (n *Node) saleReferenceState(manager *nhbstate.Manager) (*ZNHBSaleReferenceState, error) {
+	rules := n.state.ValidatorRulesInForce()
+	if rules.SaleReferenceActivationHeight == 0 {
+		return nil, nil
+	}
+	nextHeight := uint64(1)
+	if n.chain != nil {
+		nextHeight = n.chain.GetHeight() + 1
+	}
+	now := n.state.blockTimestamp()
+	out := &ZNHBSaleReferenceState{
+		Active:           saleReferenceActiveAt(rules, nextHeight),
+		MaxAgeSeconds:    rules.SaleReferenceMaxAgeSeconds,
+		ActivationHeight: rules.SaleReferenceActivationHeight,
+	}
+	rec, found, err := manager.SaleReference()
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		rate := new(big.Rat).SetFrac(rec.RateNum, rec.RateDenom)
+		out.RateNHBPerZNHB = rate.FloatString(curve.Decimals)
+		out.StruckAt = rec.TimestampAt
+		out.AgeSeconds = saleReferenceAge(rec.TimestampAt, now)
+	}
+	if out.Active {
+		if _, err := saleReferenceRate(manager, rules, now); err != nil {
+			if !errors.Is(err, ErrSaleReferenceUnavailable) {
+				return nil, err
+			}
+			out.Paused = true
+		}
+	}
+	return out, nil
 }
 
 // GetZNHBTokenomicsState returns the live, independently-verifiable state
@@ -9314,6 +10276,11 @@ func (n *Node) GetZNHBTokenomicsState() (*ZNHBTokenomicsState, error) {
 		RewardPoolBalanceWei:      rewardPool.String(),
 		BuybackAccrualBalanceWei:  buybackAccrual.String(),
 	}
+	saleRef, err := n.saleReferenceState(manager)
+	if err != nil {
+		return nil, fmt.Errorf("load sale reference: %w", err)
+	}
+	state.SaleReference = saleRef
 	if cumulative.Cmp(params.SalePoolCapWei()) >= 0 {
 		state.FullySoldOut = true
 		state.CurrentTrancheIndex = params.TrancheCount
@@ -9377,6 +10344,18 @@ func (n *Node) QuoteBuyZNHB(znhbAmount *big.Int) (*ZNHBBuyQuote, error) {
 	if err != nil {
 		return nil, err
 	}
+	// PL-BC-D: the quote is the price the next block would charge, the higher of the curve
+	// and the outside reference price once SaleReferenceActivationHeight has been reached.
+	// While no fresh reference exists the sale is paused and the quote says so
+	// (ErrSaleReferenceUnavailable) instead of quoting the curve.
+	nextHeight := uint64(1)
+	if n.chain != nil {
+		nextHeight = n.chain.GetHeight() + 1
+	}
+	costRat, err = saleCostAt(manager, n.state.ValidatorRulesInForce(), nextHeight, n.state.blockTimestamp(), costRat, znhbAmount)
+	if err != nil {
+		return nil, err
+	}
 	nhbCost := curve.RoundCostUp(costRat)
 	effectiveRate := new(big.Rat).SetFrac(nhbCost, znhbAmount)
 	return &ZNHBBuyQuote{
@@ -9394,4 +10373,39 @@ func (n *Node) GetLastCommitHash() []byte {
 // Chain returns a reference to the node's blockchain object.
 func (n *Node) Chain() *Blockchain {
 	return n.chain
+}
+
+// SetBuybackPriceGuard sets the first block height from which governance refuses
+// a buyback discount or safety margin that would make the highest buyback price
+// zero (see StateProcessor.SetBuybackPriceGuard). A zero height leaves governance
+// as it was. A chain rule: the same value on every validator, set before the chain
+// reaches the height.
+func (n *Node) SetBuybackPriceGuard(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.buybackPriceGuardHeight = height
+	if n.state != nil {
+		n.state.SetBuybackPriceGuard(height)
+	}
+}
+
+// SetEpochSettlementFailsafe sets the first block height from which an epoch
+// settlement that cannot use the buyback price, or that finds the admin wallet's
+// liquid ZNHB below the reward payout, degrades instead of failing the block (see
+// StateProcessor.SetEpochSettlementFailsafe). A zero height leaves the settlement
+// as it was. A chain rule: the same value on every validator, set before the
+// chain reaches the height.
+func (n *Node) SetEpochSettlementFailsafe(height uint64) {
+	if n == nil {
+		return
+	}
+	n.stateMu.Lock()
+	defer n.stateMu.Unlock()
+	n.epochSettlementFailsafeHeight = height
+	if n.state != nil {
+		n.state.SetEpochSettlementFailsafe(height)
+	}
 }

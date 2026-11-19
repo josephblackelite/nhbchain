@@ -31,6 +31,19 @@ object of the genesis file or by a governance `role.allowlist` proposal for a ro
 list `ROLE_POS_REGISTRY_ADMIN` in `AllowedRoles`, so on that chain only merchant owners can
 change the registry until a role is added to that list and granted.
 
+* Device ids are one global namespace, first come first served (state key `pos/device/<id>`).
+  Any account, with no merchant record, role or balance, can register an unused id under its
+  own address (the merchant it names is its own address, so it has authority over it); the real
+  merchant is then refused with `pos: signer may not change this registry entry`, and the
+  squatter can revoke the id too. Sponsored transactions naming the id are throttled
+  (`core/tx/checks.go`, `CheckPOSRegistry`). Only a `ROLE_POS_REGISTRY_ADMIN` holder can evict:
+  it registers the id again under the real merchant (the revoked flag carries over, so it then
+  restores it). The same holder can pre-register the real merchants' ids before anyone else.
+  The live chain has no such holder until the role is added to `Governance.AllowedRoles` on every
+  validator (identical edit, restart together) and granted by a `role.allowlist` proposal;
+  `TestPOSRegistryDeviceIDsAreFirstComeAndOnlyAnAdminEvicts` states the rule. A change to it
+  (per-merchant device keys, an id-prefix rule) would change which registry transactions are
+  valid and needs an activation height.
 * Registering a device needs authority over the merchant named in the message. If the device
   already exists, the merchant it is currently bound to must also agree, so one merchant cannot
   take over another's device.

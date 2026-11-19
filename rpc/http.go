@@ -124,8 +124,14 @@ type SwapAuthConfig struct {
 	NonceCapacity        int
 	RateLimitWindow      time.Duration
 	PartnerRateLimits    map[string]int
-	Now                  func() time.Time
-	Persistence          gatewayauth.NoncePersistence
+	// PartnerProviders names, for each partner API key, the providers whose
+	// vouchers that partner may read back with swap_voucher_get, swap_voucher_list
+	// and swap_voucher_export. Provider names are compared trimmed and in lower
+	// case; "*" lets the key read every provider. A key with no entry reads no
+	// voucher at all.
+	PartnerProviders map[string][]string
+	Now              func() time.Time
+	Persistence      gatewayauth.NoncePersistence
 }
 
 // RouteRateLimitConfig captures optional per-method quota overrides for JSON-RPC handlers.
@@ -170,6 +176,13 @@ type JWTConfig struct {
 
 // ServerConfig controls optional behaviours of the RPC server.
 type ServerConfig struct {
+	// SwapOperatorNoHMAC makes nhb_swapMint, nhb_swapBurn and
+	// swap_voucher_get/list/export need the operator role when the node has no partner
+	// HMAC secrets configured (PL-R5T-84). Those methods are exempt from the operator
+	// gate on the ground that the partner HMAC check is a stronger control, but that
+	// check runs only when secrets exist: without them the effective requirement is any
+	// valid bearer token. false (the default) keeps the exemption as it was.
+	SwapOperatorNoHMAC bool
 	// TrustProxyHeaders states that the server runs behind a reverse proxy. It
 	// does not widen who is trusted: proxy forwarding headers such as
 	// X-Forwarded-For are honoured only from a caller listed in TrustedProxies,
@@ -261,6 +274,13 @@ type ServerConfig struct {
 	// JSON-RPC method names (e.g. "nhb_sendTransaction"). Values mirror the global
 	// MaxTxPer* knobs but apply only to the corresponding method.
 	RouteRateLimits map[string]RouteRateLimitConfig
+	// MethodCosts gives a method a weight: a call to it takes that many tokens from
+	// every limiter it passes through instead of one, so a full-scan read does not
+	// cost a caller the same as a balance lookup (PL-DC-48). Keys are JSON-RPC method
+	// names; a value below 1 is ignored; a value above a limiter's size is clamped to
+	// that size, so one call per window always works. Empty (the default) leaves every
+	// call at one token. Node-local: it affects only which calls this node refuses.
+	MethodCosts map[string]int
 	// The public read queries that are not cheap (see isGatedQueryMethod and
 	// query_gate.go) share a small pool so they can never take the CPU that block
 	// production needs. QueryMaxConcurrent caps how many hold a slot at once (zero
@@ -326,11 +346,14 @@ type Server struct {
 	jwtVerifierErr           error
 
 	swapAuth                *gatewayauth.Authenticator
+	swapOperatorNoHMAC      bool
 	swapPartnerLimits       map[string]int
+	swapPartnerProviders    map[string]map[string]struct{}
 	swapRateWindow          time.Duration
 	swapRateCounters        map[string]*rateLimiter
 	swapRateMu              sync.Mutex
 	rateLimitMax            map[string]map[string]int
+	methodCosts             map[string]int
 	rateLimitWindow         time.Duration
 	rateLimiterStaleAfter   time.Duration
 	rateLimiterSweepBackoff time.Duration
@@ -496,6 +519,18 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 	requireClientCert := clientCAPath != ""
 	if cfg.JWT.Enable {
 		jwtVerifier, jwtErr = newJWTVerifier(cfg.JWT)
+		if jwtErr != nil {
+			// A verifier that cannot be built (an empty secret variable, a missing
+			// issuer or audience, an unreadable key file) used to be remembered and
+			// reported as a 401 on the first protected call, so the node started with
+			// its authentication silently broken (PL-DC-32). Refuse to start, unless
+			// mutual TLS is configured: then client certificates are the
+			// authentication and the broken verifier only affects token callers.
+			if !requireClientCert {
+				return nil, fmt.Errorf("rpc: JWT authentication is enabled but its verifier cannot be built: %w", jwtErr)
+			}
+			slog.Warn("rpc: the JWT verifier cannot be built; only callers with a verified client certificate are accepted", "error", jwtErr.Error())
+		}
 	} else if !requireClientCert {
 		return nil, fmt.Errorf("JWT authentication must be enabled unless mutual TLS is configured")
 	}
@@ -677,12 +712,15 @@ func NewServer(node *core.Node, netClient NetworkService, cfg ServerConfig) (*Se
 		jwtVerifier:              jwtVerifier,
 		jwtVerifierErr:           jwtErr,
 		swapAuth:                 swapAuth,
+		swapOperatorNoHMAC:       cfg.SwapOperatorNoHMAC,
 		swapPartnerLimits:        swapLimits,
+		swapPartnerProviders:     normalisePartnerProviders(cfg.SwapAuth.PartnerProviders),
 		swapRateWindow:           swapWindow,
 		swapRateCounters:         make(map[string]*rateLimiter),
 		swapNowFn:                swapNow,
 		callerNonces:             make(map[string]callerNonceState),
 		rateLimitMax:             rateLimits,
+		methodCosts:              normalizeMethodCosts(cfg.MethodCosts),
 		callerMetadataMaxTTL:     maxCallerTTL,
 		rateLimitWindow:          rateWindow,
 		rateLimiterStaleAfter:    staleAfter,
@@ -829,6 +867,8 @@ func (v *jwtVerifier) Verify(token string) (*rpcClaims, error) {
 	opts := []jwt.ParserOption{
 		jwt.WithValidMethods([]string{v.method.Alg()}),
 		jwt.WithIssuer(v.issuer),
+		// A token with no expiry would never lapse, so exp must be present.
+		jwt.WithExpirationRequired(),
 	}
 	if v.leeway > 0 {
 		opts = append(opts, jwt.WithLeeway(v.leeway))
@@ -1216,6 +1256,25 @@ func isPublicSwapMethod(method string) bool {
 	default:
 		return false
 	}
+}
+
+// swapMethodExemptFromOperatorGate reports whether method is exempt from the
+// operator-role gate because it is a public swap method. The exemption rests on the
+// per-partner HMAC check being the stronger control, but that check runs only when the
+// node has partner secrets (s.swapAuth != nil); without them the effective requirement
+// for nhb_swapMint, nhb_swapBurn and swap_voucher_get/list/export is any valid bearer
+// token. With swapOperatorNoHMAC set, those methods lose the
+// exemption when there is no partner check to stand in for the operator role
+// (PL-R5T-84). swap_submitVoucher keeps it either way: its own control is the on-chain
+// voucher signature, as mint_with_sig's is.
+func (s *Server) swapMethodExemptFromOperatorGate(method string) bool {
+	if !isPublicSwapMethod(method) {
+		return false
+	}
+	if !s.swapOperatorNoHMAC || s.swapAuth != nil {
+		return true
+	}
+	return strings.TrimSpace(method) == "swap_submitVoucher"
 }
 
 // isSelfAuthenticatedMintMethod reports whether method is exempt from the
@@ -1691,11 +1750,27 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "swap partner rate limit exceeded", nil)
 			return
 		}
+		// The handlers of the voucher ledger reads need to know WHICH partner this
+		// is, not only that it is one (PL-EXT-32).
+		r = r.WithContext(context.WithValue(r.Context(), swapPartnerContextKey, principal.APIKey))
 	}
 
 	if req.Method != "nhb_sendTransaction" {
 		source := s.clientSource(r)
+		// The identity the per-identity quotas are counted under is the subject of a
+		// valid bearer token, read HERE, before the limiter: the only place that puts
+		// an identity into the request context is requireAuth, which runs later and
+		// only inside the methods that ask for it, so on this path the identity used
+		// to be empty for every call and MaxTxPerIdentity (and the per-route identity
+		// overrides) never applied (PL-EXT-37). A request with no token, or one that
+		// does not verify, has no identity and is limited by its address alone, as
+		// before; authentication is not made mandatory by this. The value is used
+		// only to pick the limiter's key: it is not put into the context, so no
+		// handler sees anything it did not see before.
 		identity, _ := r.Context().Value(clientIdentityContextKey).(string)
+		if identity == "" {
+			identity = s.serviceIdentity(r)
+		}
 		if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, "", req.Method, time.Now()); !allowed {
 			recorder.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 			writeError(recorder, http.StatusTooManyRequests, req.ID, codeRateLimited, "RPC rate limit exceeded", source)
@@ -1760,7 +1835,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	// answer through instead of this gate's own 401/403 masking the method
 	// as merely access-denied rather than retired. See retiredRPCMethods for
 	// the full list and why each one was retired instead of just gated.
-	if IsOperatorOnlyMethod(req.Method) && !isPublicSwapMethod(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) && !isSignatureThresholdAuthorizedMethod(req.Method) && !isRetiredMethod(req.Method) {
+	if IsOperatorOnlyMethod(req.Method) && !s.swapMethodExemptFromOperatorGate(req.Method) && !isSelfAuthenticatedMintMethod(req.Method) && !isSignatureThresholdAuthorizedMethod(req.Method) && !isRetiredMethod(req.Method) {
 		if authErr := s.requireOperatorInto(&r); authErr != nil {
 			status := http.StatusUnauthorized
 			if authErr.Code == codeOperatorOnly {
@@ -1838,6 +1913,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGetRewardHistory(recorder, r, req)
 	case "mint_with_sig":
 		s.handleMintWithSig(recorder, r, req)
+	case "mint_getInvoiceStatus":
+		s.handleMintGetInvoiceStatus(recorder, r, req)
 	case "swap_getRiskParams":
 		s.handleSwapGetRiskParams(recorder, r, req)
 	case "swap_getRedemptionFeeParams":
@@ -1931,6 +2008,8 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleFeesGetTransferStatus(recorder, r, req)
 	case "fees_getTransferQuote":
 		s.handleFeesGetTransferQuote(recorder, r, req)
+	case "fees_getTransferSchedule":
+		s.handleFeesGetTransferSchedule(recorder, r, req)
 	case "subscriptions_getPlan":
 		s.handleSubscriptionsGetPlan(recorder, r, req)
 	case "subscriptions_listPlansByMerchant":
@@ -2242,6 +2321,24 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGovernanceProposal(recorder, r, req)
 	case "gov_list":
 		s.handleGovernanceList(recorder, r, req)
+	case "gov_params":
+		s.handleGovernanceParams(recorder, r, req)
+	case "bridge_getStatus":
+		s.handleBridgeStatus(recorder, r, req)
+	case "amm_getPool":
+		s.handleAmmPool(recorder, r, req)
+	case "amm_quote":
+		s.handleAmmQuote(recorder, r, req)
+	case "amm_getTrades":
+		s.handleAmmTrades(recorder, r, req)
+	case "amm_getTicker":
+		s.handleAmmTicker(recorder, r, req)
+	case "market_getTicker":
+		s.handleMarketTicker(recorder, r, req)
+	case "market_getRecentFills":
+		s.handleMarketRecentFills(recorder, r, req)
+	case "market_getDailyStats":
+		s.handleMarketDailyStats(recorder, r, req)
 	case "reputation_verifySkill":
 		s.handleReputationVerifySkill(recorder, r, req)
 	default:
@@ -2576,6 +2673,10 @@ func (s *Server) buildReceiptResult(ctx context.Context, tx *types.Transaction, 
 		Status:          "0x1",
 		GasUsed:         hexString(0),
 		Logs:            []ReceiptLog{},
+		Reconstructed:   true,
+		StatusBasis:     "included in a block",
+		GasUsedBasis:    "none available",
+		LogsBasis:       "none available",
 	}
 	if len(blockHash) > 0 {
 		receipt.BlockHash = ensureHexPrefix(hex.EncodeToString(blockHash))
@@ -2583,14 +2684,20 @@ func (s *Server) buildReceiptResult(ctx context.Context, tx *types.Transaction, 
 	if sim, err := s.simulateTransaction(tx); err == nil && sim != nil {
 		if sim.GasUsed > 0 {
 			receipt.GasUsed = hexString(sim.GasUsed)
+			receipt.GasUsedBasis = "simulation on the current state"
 		}
 		receipt.Logs = convertEventsToLogs(sim.Events)
+		if len(receipt.Logs) > 0 {
+			receipt.LogsBasis = "simulation on the current state"
+		}
 	} else if tx.GasLimit > 0 {
 		receipt.GasUsed = hexString(tx.GasLimit)
+		receipt.GasUsedBasis = "transaction gas limit"
 	}
 	if len(receipt.Logs) == 0 {
 		if fallback := buildFallbackTransferLog(tx); fallback != nil {
 			receipt.Logs = append(receipt.Logs, fallback)
+			receipt.LogsBasis = "synthesized from the transaction fields"
 		}
 	}
 	return receipt, nil
@@ -2846,7 +2953,9 @@ func (s *Server) requireAuth(r *http.Request) (*http.Request, *RPCError) {
 		return r, nil
 	}
 	if s.jwtVerifierErr != nil {
-		return nil, &RPCError{Code: codeUnauthorized, Message: "JWT authentication misconfigured", Data: s.jwtVerifierErr.Error()}
+		// The cause (it names the secret's environment variable) was logged at
+		// start-up; an unauthenticated caller is not told it.
+		return nil, &RPCError{Code: codeUnauthorized, Message: "JWT authentication misconfigured"}
 	}
 	if s.jwtVerifier == nil {
 		return nil, &RPCError{Code: codeUnauthorized, Message: "JWT authentication not configured"}
@@ -3131,6 +3240,21 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 		}
 		return 0
 	}
+	// The tokens a call to this method takes from a limiter of the given size: its
+	// configured weight (PL-DC-48), one when it has none, never more than the limiter
+	// holds. Only a name the server serves can have a weight.
+	cost := 1
+	if route != unknownLimiterRoute {
+		if c, ok := s.methodCosts[trimmedMethod]; ok && c > 1 {
+			cost = c
+		}
+	}
+	weight := func(limit int) int {
+		if cost > limit {
+			return limit
+		}
+		return cost
+	}
 	type reservation struct {
 		limiter *rateLimiter
 		limit   int
@@ -3152,7 +3276,7 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 		// Peek (non-destructive) at time now: TokensAt refills the bucket as
 		// of now without consuming anything, so every key in this request
 		// can be checked before any of them commit a token below.
-		if limit > 0 && limiter.limiter.TokensAt(now) < 1 {
+		if limit > 0 && limiter.limiter.TokensAt(now) < float64(weight(limit)) {
 			limiter.lastSeen = now
 			retryAfter := rateLimiterRetryAfter(limiter.limiter, now)
 			s.mu.Unlock()
@@ -3165,12 +3289,32 @@ func (s *Server) allowSourceWithRetryAfter(source, identity, chainNonce, method 
 		if reserved.limit > 0 {
 			// Already confirmed available via TokensAt above at this same
 			// now, so this commits the token rather than re-deciding.
-			reserved.limiter.limiter.AllowN(now, 1)
+			reserved.limiter.limiter.AllowN(now, weight(reserved.limit))
 		}
 		reserved.limiter.lastSeen = now
 	}
 	s.mu.Unlock()
 	return true, 0
+}
+
+// normalizeMethodCosts keeps the usable weights: a trimmed, non-empty method name
+// with a weight above one (a weight of one is the default and needs no entry).
+func normalizeMethodCosts(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for method, cost := range in {
+		name := strings.TrimSpace(method)
+		if name == "" || cost <= 1 {
+			continue
+		}
+		out[name] = cost
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // newSourceRateLimiter builds the golang.org/x/time/rate limiter backing a
@@ -3789,7 +3933,7 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 		PaymasterV:      pv,
 	}
 
-	if !types.IsValidChainID(tx.ChainID) {
+	if !s.node.TxChainIDAcceptedForNextBlock(tx.ChainID) {
 		writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "transaction chainId does not match NHBCoin network", tx.ChainID)
 		return
 	}
@@ -4124,6 +4268,12 @@ func (s *Server) handleZNHBQuoteBuy(w http.ResponseWriter, _ *http.Request, req 
 	if err != nil {
 		if errors.Is(err, curve.ErrExceedsSalePool) {
 			writeError(w, http.StatusBadRequest, req.ID, codeInvalidParams, "znhbAmount exceeds the treasury Sale Pool's remaining inventory", nil)
+			return
+		}
+		if errors.Is(err, core.ErrSaleReferenceUnavailable) {
+			// PL-BC-D: with the rule on and no fresh outside reference price, sales are paused;
+			// the quote says so instead of quoting the curve.
+			writeError(w, http.StatusServiceUnavailable, req.ID, codeServerError, "sales are paused: no fresh outside reference price", nil)
 			return
 		}
 		slog.Error("rpc: failed to quote ZNHB purchase",

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-import EscrowDisputeClient from '../../../../../../clients/ts/escrow/dispute';
+import EscrowDisputeClient from '../../../../../../../clients/ts/escrow/dispute';
 import { readServerConfig } from '../../../../lib/config';
 
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {

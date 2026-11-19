@@ -43,6 +43,10 @@ Three prefixes have dedicated handlers in front of the generic proxy:
   [Transaction submission via the gateway](./transactions.md).
 - `/v1/consensus`: `GET /wallet/escrows/{escrowID}`
   (`gateway/routes/wallet.go`). Every other path under this prefix is proxied.
+  The escrow route makes two JSON-RPC calls to the node (`escrow_get`, then
+  `identity_reverse`) and sends each one the same appended `X-Forwarded-For`
+  header as the transaction route, so a node needs the proxy settings described
+  in [Transaction submission via the gateway](./transactions.md).
 
 The four backend names `lendingd`, `swapd`, `governd` and `consensusd` are all
 required. This repository builds `lendingd`, `governd`, `consensusd` and `p2pd`;
@@ -65,7 +69,10 @@ Bearer tokens are HMAC-signed JWTs (`gateway/middleware/auth.go`):
 
 - Only HMAC signing methods are accepted, verified with `auth.hmacSecret`.
 - `auth.issuer` and `auth.audience`, when set, must match the token's `iss` and
-  `aud` claims.
+  `aud` claims. With `auth.audience` set, a token that has no `aud` claim is
+  rejected.
+- A token must carry an `exp` claim; one without it, or one that has expired, is
+  rejected.
 - Scopes are read from the claim named by `auth.scopeClaim` (default `scope`),
   either as a space-separated string or as an array.
 - Clock-skew leeway is `auth.clockSkew` (default 2 minutes, capped at 2 minutes).
@@ -125,7 +132,8 @@ Defaults apply for every omitted key:
 
 Other keys: `services[]` (`name`, `endpoint`, `timeout`, `insecureSkipVerify`),
 `rateLimits[]` (`id`, `requestsPerMinute` or `ratePerSecond`, `burst`, `paths`),
-`auth.hmacSecret`, `auth.issuer`, `auth.audience`, `auth.optionalPaths`,
+`trustedProxies` (see [Rate limits](#rate-limits)), `auth.hmacSecret`,
+`auth.issuer`, `auth.audience`, `auth.optionalPaths`,
 `security.autoUpgradeHTTP`, `security.tlsCertFile`, `security.tlsKeyFile`,
 `security.tlsClientCAFile`. A relative TLS path is resolved against the config
 file's directory. `cmd/gateway` reads only `name` and `endpoint` from each
@@ -160,11 +168,21 @@ by matching `services[]` entries in the YAML file:
 
 ### Rate limits
 
-Limits are token buckets keyed by rate-limit key and client identity. The client
-identity is, in order: the `X-API-Key` header, `X-Real-IP`, `X-Forwarded-For`,
-then the remote address. Exceeding a bucket returns `429`. `requestsPerMinute`
-is converted to a per-second rate; `ratePerSecond` takes precedence when both
-are set. If `rateLimits` is empty, the gateway uses these built-in limits:
+Limits are token buckets keyed by rate-limit key and client identity. The limiter
+runs before authentication, so the identity is never taken from a header the caller
+chooses: it is the address the connection came from (an IPv6 address counts as its
+`/64`). `X-API-Key` plays no part. When that peer is listed in `trustedProxies` (IP
+addresses or CIDR ranges), the client address the proxy relayed is used instead: the
+rightmost `X-Forwarded-For` entry that is not itself a listed proxy, or `X-Real-IP`
+when there is no `X-Forwarded-For`. A header that does not hold a usable address is
+ignored. `trustedProxies` is empty by default, which ignores every forwarded header,
+so clients behind a proxy share one bucket per proxy address until the proxy is
+listed; the gateway logs that at start-up and refuses an entry that covers every
+address. What a rollout behind an ingress or load balancer needs is listed in
+[Gateway rate limits behind a proxy](../ops/security.md#gateway-rate-limits-behind-a-proxy). At most 100000 buckets are held (the least recently used is dropped first)
+and a bucket with no requests for 5 minutes is dropped. Exceeding a bucket returns
+`429`. `requestsPerMinute` is converted to a per-second rate; `ratePerSecond` takes
+precedence when both are set. If `rateLimits` is empty, the gateway uses these built-in limits:
 `lending` 2/s burst 20, `swap` 1/s burst 10, `gov` 1/s burst 10, `consensus`
 4/s burst 40. Whether or not `rateLimits` is empty, the `compat` key (used by
 `/rpc`) gets 2/s burst 20 when no entry with the id `compat` exists

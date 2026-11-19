@@ -10,7 +10,7 @@ For signing itself see [`docs/transactions/signing.md`](../transactions/signing.
 | --- | --- |
 | NHB transfer | `type` `1` (`TxTypeTransfer`, `0x01`) |
 | ZNHB transfer | `type` `16` (`TxTypeTransferZNHB`, `0x10`) |
-| Chain ID | `0x4e4842` = `5130306`. Any other value is rejected with `transaction chainId does not match NHBCoin network`. |
+| Chain ID | `0x4e4842` = `5130306`. Any other value is rejected with `transaction chainId does not match NHBCoin network`. From `TxNetworkChainIDActivationHeight` (off, `0`, in the shipped configuration) the network's own chain id is required instead; `nhb_getNetworkStats` returns the id to sign with now as `txChainId`. |
 | `to` | Base64 of the 20-byte address (Go `[]byte` JSON encoding). A `0x`-hex string is rejected: `invalid transaction format`. |
 | `data` | Base64 bytes; omit it for a plain transfer. |
 | `gasLimit`, `gasPrice` | Both must be greater than zero. `nhb-cli` defaults: gas limit `21000` (NHB) and `25000` (ZNHB), gas price `1`. |

@@ -131,7 +131,7 @@ You need a server that runs 24/7. Rent a basic VPS (Virtual Private Server).
 - **Recommended Size:** 2 vCPUs, 4GB RAM (e.g., AWS `t3.medium` or a $10 DigitalOcean droplet).
 - **Crucial Security Step:** In your server provider's firewall settings (AWS Security Groups), you must open the following ports to the public (`0.0.0.0/0`):
   - `22` (TCP) - For your SSH access
-  - `6001` (TCP/UDP) - For the blockchain P2P network
+  - `6001` (TCP) - For the blockchain P2P network
   - `8545` (TCP) - (Optional) If you want to accept RPC requests like MetaMask
 
 ### Step 2: Connect to your Server
@@ -144,8 +144,10 @@ ssh ubuntu@YOUR_SERVER_IP
 Once you are logged in, copy and paste this exact block of text and press Enter. This updates the server and installs the necessary Go programming language:
 ```bash
 sudo apt update && sudo apt install git build-essential -y
-wget https://go.dev/dl/go1.23.0.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.0.linux-amd64.tar.gz
+# go.mod needs Go 1.24.0 or newer. Take the newest patch release of the Go version you choose from https://go.dev/dl/ and set it here.
+GO_VERSION=1.24.3
+wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
 echo 'export PATH="/usr/local/go/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
@@ -194,7 +196,8 @@ bash scripts/validator-only-bootstrap.sh \
   --beneficiary YOUR_NHB_WALLET_ADDRESS \
   --snapshot-url SNAPSHOT_URL \
   --bootnode BOOTNODE_HOST_PORT \
-  --max-snapshot-age 72h
+  --max-snapshot-age 72h \
+  --tip-rpc TRUSTED_RPC_URL
 ```
 
    This generates a fresh validator key **on this machine** the first time
@@ -204,7 +207,8 @@ bash scripts/validator-only-bootstrap.sh \
    address (required), signed locally before the key is used for anything
    else. It prints that validator's node address at the end. See
    [Join As A Validator In One Command](#join-as-a-validator-in-one-command)
-   for where `SNAPSHOT_URL` and `BOOTNODE_HOST_PORT` come from.
+   for where `SNAPSHOT_URL` and `BOOTNODE_HOST_PORT` come from and what
+   `TRUSTED_RPC_URL` is.
 
 2. **Get the validator's stake to at least 10,000 ZNHB.** A validator's stake
    is its account's total stake, which includes ZNHB that other wallets
@@ -291,8 +295,17 @@ bash scripts/validator-only-bootstrap.sh \
   --snapshot-url SNAPSHOT_URL \
   --bootnode BOOTNODE_HOST_PORT \
   --max-snapshot-age 72h \
-  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT
+  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT \
+  --tip-rpc TRUSTED_RPC_URL
 ```
+
+`TRUSTED_RPC_URL` is the https RPC URL of a node you trust that neither the snapshot
+host nor the bootnode runs: a snapshot is not signed by anyone, and a run that
+installs one stops before it downloads anything unless something outside those two
+checks it (this reference node, or `--tip-hash` together with `--state-root`). Only
+the reference node also checks the blocks the node applies after the snapshot; the
+pins show where the snapshot ends and nothing after it, and a run that has only them
+is warned that the node's place at the tip rests on the bootnode.
 
 It is safe to run again: what is already in place is left alone, and a node that
 already holds the chain is not given a snapshot (so it does not depend on the

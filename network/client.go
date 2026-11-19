@@ -21,6 +21,7 @@ import (
 var (
 	errNotConnected   = errors.New("network client not connected")
 	errQueueSaturated = errors.New("network client send queue full")
+	errEmptyPeerID    = errors.New("network client: peer id required to address a single peer")
 )
 
 // Client maintains the bidirectional stream with p2pd and implements
@@ -81,6 +82,39 @@ func (c *Client) Close() error {
 // Broadcast implements p2p.Broadcaster by enqueueing the message onto the gRPC
 // stream. The call is non-blocking and drops when the queue is saturated.
 func (c *Client) Broadcast(msg *p2p.Message) error {
+	return c.send("", msg)
+}
+
+// SendTo enqueues a message for one connected peer only: p2pd delivers it to
+// that peer and to nobody else, and drops it if the peer is gone. It never
+// falls back to a broadcast. The call is non-blocking and drops when the queue
+// is saturated.
+func (c *Client) SendTo(peerID string, msg *p2p.Message) error {
+	if peerID == "" {
+		return errEmptyPeerID
+	}
+	return c.send(peerID, msg)
+}
+
+// Peer returns the send path to one connected peer, for handlers that answer a
+// request to the peer that made it.
+func (c *Client) Peer(peerID string) p2p.PeerSender {
+	return &clientPeer{client: c, id: peerID}
+}
+
+// clientPeer is a p2p.PeerSender that reaches a peer through p2pd.
+type clientPeer struct {
+	client *Client
+	id     string
+}
+
+func (p *clientPeer) ID() string { return p.id }
+
+func (p *clientPeer) Enqueue(msg *p2p.Message) error { return p.client.SendTo(p.id, msg) }
+
+// send enqueues a gossip frame, addressed to one peer when peerID is set and to
+// every peer otherwise.
+func (c *Client) send(peerID string, msg *p2p.Message) error {
 	if msg == nil {
 		return nil
 	}
@@ -89,6 +123,7 @@ func (c *Client) Broadcast(msg *p2p.Message) error {
 			Gossip: &networkv1.GossipMessage{
 				Type:    uint32(msg.Type),
 				Payload: append([]byte(nil), msg.Payload...),
+				PeerId:  peerID,
 			},
 		},
 	}
@@ -111,6 +146,18 @@ func (c *Client) Broadcast(msg *p2p.Message) error {
 // forwarded to handleMessage while heartbeats trigger handleHeartbeat when
 // provided.
 func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error, handleHeartbeat func(time.Time)) error {
+	var handlePeerMessage func(p2p.PeerSender, *p2p.Message) error
+	if handleMessage != nil {
+		handlePeerMessage = func(_ p2p.PeerSender, msg *p2p.Message) error { return handleMessage(msg) }
+	}
+	return c.RunPeers(ctx, handlePeerMessage, handleHeartbeat)
+}
+
+// RunPeers is Run for a handler that wants to know which peer a message came
+// from. It is given the peer for a request that p2pd tagged with one, so the
+// request can be answered to that peer alone, and nil for any other message,
+// including every message from a p2pd that does not tag them.
+func (c *Client) RunPeers(ctx context.Context, handleMessage func(p2p.PeerSender, *p2p.Message) error, handleHeartbeat func(time.Time)) error {
 	if c == nil {
 		return fmt.Errorf("nil network client")
 	}
@@ -180,7 +227,13 @@ func (c *Client) Run(ctx context.Context, handleMessage func(*p2p.Message) error
 				Type:    byte(event.Gossip.Type),
 				Payload: append([]byte(nil), event.Gossip.Payload...),
 			}
-			if err := handleMessage(msg); err != nil {
+			// The sender is passed as a nil interface, not a typed nil, when
+			// the frame does not name one.
+			var from p2p.PeerSender
+			if id := event.Gossip.PeerId; id != "" {
+				from = c.Peer(id)
+			}
+			if err := handleMessage(from, msg); err != nil {
 				// TODO: determine whether repeated handler failures should trigger
 				// peer backoff or stream termination instead of continuing.
 				fmt.Printf("network client handler error: %v\n", err)

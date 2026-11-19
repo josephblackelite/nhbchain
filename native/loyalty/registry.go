@@ -30,6 +30,9 @@ type Registry struct {
 	st      registryState
 	emitter events.Emitter
 	pauses  nativecommon.PauseView
+	// standingConsent switches on the standing paymaster-consent rule
+	// (PL-R5T-15); see SetPaymasterStandingConsent.
+	standingConsent bool
 }
 
 // NewRegistry creates a registry backed by the provided state manager.

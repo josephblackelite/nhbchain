@@ -158,10 +158,11 @@ func TestDeployRunsTheToolsRootBuiltAndNeverTheServiceUsersCopies(t *testing.T) 
 		if !strings.Contains(got, "tools generate-key") || strings.Contains(got, "service-tree generate-key") {
 			t.Fatalf("generate-key was not run from root's directory of tools:\n%s", got)
 		}
-		// What is asked of the service user's own key file is run as that user, from its
-		// own tree: that is where its binaries are.
-		if !strings.Contains(got, "service-tree address") {
-			t.Fatalf("the address was not read by the service user's own nhb-cli:\n%s", got)
+		// The service user reads its own key file, but with root's tool: the address
+		// printed as the place to send the stake must not come from a binary the
+		// service user could have replaced (PL-R5T-75).
+		if !strings.Contains(got, "tools address") || strings.Contains(got, "service-tree address") {
+			t.Fatalf("the address was not read with root's own nhb-cli:\n%s", got)
 		}
 	})
 

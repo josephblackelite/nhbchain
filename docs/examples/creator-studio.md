@@ -27,7 +27,7 @@ yarn dev
 The browser calls `POST /api/rpc` (`pages/api/rpc.ts`) with `{method, params}`. The route:
 
 - rejects anything but `POST` (`405`), a missing `method` (`400`), and any method outside a fixed allowlist (`403`): `creator_publish`, `creator_tip`, `creator_stake`, `creator_payouts` (`creator_unstake` is not in the list);
-- forwards the call to `NHB_RPC_URL` as JSON-RPC 2.0, adding `Authorization: Bearer <token>` when a token is set. The token is `NHB_RPC_TOKEN`, falling back to `NEXT_PUBLIC_NHB_RPC_TOKEN`;
+- forwards the call to `NHB_RPC_URL` as JSON-RPC 2.0, adding `Authorization: Bearer <token>` when a token is set. The token is `NHB_RPC_TOKEN` (server-side only: a `NEXT_PUBLIC_` variable would be shipped to every visitor's browser, so there is no fallback to one);
 - returns the node's status and body.
 
 The proxy does not authenticate the visitor. Every method in its allowlist is a write on behalf of an address the caller supplies, so do not expose this app on a public network without adding per-visitor authentication.

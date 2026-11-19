@@ -71,16 +71,13 @@ var defaultAllowedGovernanceParams = []string{
 	// fixed, pre-allocated genesis treasury Sale Pool rather than minting
 	// new supply, so they carry no external financial risk needing a
 	// circuit breaker. See core/swap_risk_params.go.
-	"swap.VelocityWindowSeconds",
-	"swap.VelocityMaxMints",
-	"swap.cashOut.assetMonthlyCapWei",
-	"lending.MaxLTVBps",
-	"lending.LiquidationThresholdBps",
-	"lending.ReserveFactorBps",
-	"lending.ProtocolFeeBps",
-	"lending.breaker.MaxTotalSupplyWei",
-	"lending.breaker.MaxTotalBorrowWei",
-	"lending.breaker.MaxTotalCollateralWei",
+	// swap.VelocityWindowSeconds, swap.VelocityMaxMints, swap.cashOut.assetMonthlyCapWei,
+	// lending.MaxLTVBps, lending.LiquidationThresholdBps, lending.ReserveFactorBps,
+	// lending.ProtocolFeeBps and lending.breaker.MaxTotal{Supply,Borrow,Collateral}Wei
+	// were removed from this list (PL-DC-10): the engine has no validator for any of them,
+	// so a proposal for one was always rejected with "missing validation rule" and the list
+	// promised voters a change the network cannot make. A test fails if a key without a
+	// validator is added here again.
 }
 
 type Config struct {
@@ -117,35 +114,38 @@ type Config struct {
 	// on a node that serves no public RPC. The default (false) keeps them
 	// running. With it set, a snapshot that is asked for is built on demand and
 	// cached per window and chain height, and /ws/explorer refuses connections.
-	RPCDisableExplorerLoop      bool                         `toml:"RPCDisableExplorerLoop"`
-	RPCQueryMaxConcurrent       int                          `toml:"RPCQueryMaxConcurrent"`
-	RPCQueryMaxPerClient        int                          `toml:"RPCQueryMaxPerClient"`
-	RPCQueryQueueDepth          int                          `toml:"RPCQueryQueueDepth"`
-	RPCQueryQueueWaitMS         int                          `toml:"RPCQueryQueueWaitMS"`
-	RPCQueryTimeoutSeconds      int                          `toml:"RPCQueryTimeoutSeconds"`
-	RPCProxyHeaders             RPCProxyHeaders              `toml:"RPCProxyHeaders"`
-	RPCJWT                      RPCJWT                       `toml:"RPCJWT"`
-	RPCSwapAuth                 RPCSwapAuth                  `toml:"RPCSwapAuth"`
-	RPCReadHeaderTimeout        int                          `toml:"RPCReadHeaderTimeout"`
-	RPCReadTimeout              int                          `toml:"RPCReadTimeout"`
-	RPCWriteTimeout             int                          `toml:"RPCWriteTimeout"`
-	RPCIdleTimeout              int                          `toml:"RPCIdleTimeout"`
-	RPCMaxTxPerWindow           int                          `toml:"RPCMaxTxPerWindow"`
-	RPCMaxTxPerIP               int                          `toml:"RPCMaxTxPerIP"`
-	RPCMaxTxPerIdentity         int                          `toml:"RPCMaxTxPerIdentity"`
-	RPCMaxTxPerChain            int                          `toml:"RPCMaxTxPerChain"`
-	RPCMaxTxPerIdentityChain    int                          `toml:"RPCMaxTxPerIdentityChain"`
-	RPCRouteRateLimits          map[string]RPCRouteRateLimit `toml:"RPCRouteRateLimits"`
-	RPCRateLimitWindow          int                          `toml:"RPCRateLimitWindow"`
-	RPCCallerMetadataMaxTTL     int                          `toml:"RPCCallerMetadataMaxTTL"`
-	RPCAllowInsecure            bool                         `toml:"RPCAllowInsecure"`
-	RPCAllowInsecureUnspecified bool                         `toml:"RPCAllowInsecureUnspecified"`
-	RPCTLSCertFile              string                       `toml:"RPCTLSCertFile"`
-	RPCTLSKeyFile               string                       `toml:"RPCTLSKeyFile"`
-	RPCTLSClientCAFile          string                       `toml:"RPCTLSClientCAFile"`
-	DataDir                     string                       `toml:"DataDir"`
-	GenesisFile                 string                       `toml:"GenesisFile"`
-	AllowAutogenesis            bool                         `toml:"AllowAutogenesis"`
+	RPCDisableExplorerLoop   bool                         `toml:"RPCDisableExplorerLoop"`
+	RPCQueryMaxConcurrent    int                          `toml:"RPCQueryMaxConcurrent"`
+	RPCQueryMaxPerClient     int                          `toml:"RPCQueryMaxPerClient"`
+	RPCQueryQueueDepth       int                          `toml:"RPCQueryQueueDepth"`
+	RPCQueryQueueWaitMS      int                          `toml:"RPCQueryQueueWaitMS"`
+	RPCQueryTimeoutSeconds   int                          `toml:"RPCQueryTimeoutSeconds"`
+	RPCProxyHeaders          RPCProxyHeaders              `toml:"RPCProxyHeaders"`
+	RPCJWT                   RPCJWT                       `toml:"RPCJWT"`
+	RPCSwapAuth              RPCSwapAuth                  `toml:"RPCSwapAuth"`
+	RPCReadHeaderTimeout     int                          `toml:"RPCReadHeaderTimeout"`
+	RPCReadTimeout           int                          `toml:"RPCReadTimeout"`
+	RPCWriteTimeout          int                          `toml:"RPCWriteTimeout"`
+	RPCIdleTimeout           int                          `toml:"RPCIdleTimeout"`
+	RPCMaxTxPerWindow        int                          `toml:"RPCMaxTxPerWindow"`
+	RPCMaxTxPerIP            int                          `toml:"RPCMaxTxPerIP"`
+	RPCMaxTxPerIdentity      int                          `toml:"RPCMaxTxPerIdentity"`
+	RPCMaxTxPerChain         int                          `toml:"RPCMaxTxPerChain"`
+	RPCMaxTxPerIdentityChain int                          `toml:"RPCMaxTxPerIdentityChain"`
+	RPCRouteRateLimits       map[string]RPCRouteRateLimit `toml:"RPCRouteRateLimits"`
+	// RPCMethodCosts weights RPC methods in the rate limiters: a call takes this many
+	// tokens instead of one. Empty by default (every call costs one). Node-local.
+	RPCMethodCosts              map[string]int `toml:"RPCMethodCosts"`
+	RPCRateLimitWindow          int            `toml:"RPCRateLimitWindow"`
+	RPCCallerMetadataMaxTTL     int            `toml:"RPCCallerMetadataMaxTTL"`
+	RPCAllowInsecure            bool           `toml:"RPCAllowInsecure"`
+	RPCAllowInsecureUnspecified bool           `toml:"RPCAllowInsecureUnspecified"`
+	RPCTLSCertFile              string         `toml:"RPCTLSCertFile"`
+	RPCTLSKeyFile               string         `toml:"RPCTLSKeyFile"`
+	RPCTLSClientCAFile          string         `toml:"RPCTLSClientCAFile"`
+	DataDir                     string         `toml:"DataDir"`
+	GenesisFile                 string         `toml:"GenesisFile"`
+	AllowAutogenesis            bool           `toml:"AllowAutogenesis"`
 	// QuorumCertActivationHeight enables NHB-TRIAGE-C1's quorum-certificate
 	// check on the untrusted P2P block-sync path once set: blocks at this
 	// height or below sync without one (grandfathering already-committed
@@ -198,6 +198,8 @@ type Config struct {
 	Governance              GovConfig       `toml:"governance"`
 	Swap                    swap.Config     `toml:"swap"`
 	Lending                 lending.Config  `toml:"lending"`
+	Bridge                  BridgeConfig    `toml:"bridge"`
+	Amm                     AmmConfig       `toml:"amm"`
 	Subscriptions           Subscriptions   `toml:"subscriptions"`
 	Mempool                 MempoolConfig   `toml:"mempool"`
 	Global                  Global          `toml:"global"`
@@ -246,7 +248,9 @@ type Config struct {
 	// domain fee whose route wallet is the transfer's own sender or recipient is
 	// credited to that account as the transfer leaves it, instead of to a
 	// separately loaded copy the transfer's own later write overwrites, which
-	// destroys the fee (PL-R1-FEEROUTE). The same fix for ZNHB is already in
+	// destroys the fee (PL-R1-FEEROUTE). The same holds for the share of that fee
+	// that funds the buyback accrual account when the accrual account is the
+	// transfer's sender or recipient (PL-R5T-59). The same fix for ZNHB is already in
 	// force at every height. 0 (the default) leaves the NHB half off. A chain
 	// rule, not a node setting: it changes the state a block leaves behind, so
 	// set the same non-zero height on every validator, above the chain tip, with
@@ -266,6 +270,499 @@ type Config struct {
 	// goes before the first [table] of the file. See
 	// core.StateProcessor.SetLendingFixedTermIDActivationHeight.
 	LendingFixedTermIDActivationHeight uint64 `toml:"LendingFixedTermIDActivationHeight"`
+	// NHBSupplyGenesisCorrectionActivationHeight is the first block height at
+	// which the tracked NHB supply counter (nhb_getTotalSupply) is raised, once,
+	// by the part of the genesis allocation it never counted (PL-R1-SUPPLY90K):
+	// the live network's counter started 90,000 NHB short of its 100,000 NHB
+	// allocation and has stayed exactly that far short, and it refuses a burn
+	// larger than itself, so NHB redemptions and swap settlements above its figure fail.
+	// 0 (the default) leaves the counter as it is. No balance changes and no NHB
+	// is created. A chain rule, not a node setting: set the same non-zero height
+	// on every validator, above the chain tip, with all of them restarted
+	// together. As a top-level key it goes before the first [table] of the file.
+	// See core.StateProcessor.ReconcileNHBGenesisShortfallOnce.
+	NHBSupplyGenesisCorrectionActivationHeight uint64 `toml:"NHBSupplyGenesisCorrectionActivationHeight"`
+	// TransferMonthlyFreeTierActivationHeight is the first block height from
+	// which a sender's first TransferMonthlyFreeTierTxPerMonth plain transfers
+	// in each UTC calendar month, in NHB or ZNHB, pay no transfer fee (PL-CLM-02).
+	// Until then the only waiver is the spend allowance (TransferFreeTierSpendWei,
+	// a lifetime amount); the statement "your first 100 transactions each month
+	// are free" describes the merchant point-of-sale fee domain, not ordinary
+	// transfers. The tier adds to the allowance and never removes it. 0 (the
+	// default) leaves transfers as they are, and the tier also needs a non-zero
+	// TransferMonthlyFreeTierTxPerMonth. A chain rule, not a node setting: set
+	// the same values on every validator, above the chain tip, with all of them
+	// restarted together. As top-level keys they go before the first [table] of
+	// the file. See core.StateProcessor.SetTransferMonthlyFreeTier.
+	TransferMonthlyFreeTierActivationHeight uint64 `toml:"TransferMonthlyFreeTierActivationHeight"`
+	// TransferMonthlyFreeTierTxPerMonth is the number of plain transfers per
+	// sender per UTC calendar month the tier waives the fee for. 0 (the default)
+	// leaves the tier off whatever the height.
+	TransferMonthlyFreeTierTxPerMonth uint64 `toml:"TransferMonthlyFreeTierTxPerMonth"`
+	// LoyaltyBudgetFloorActivationHeight is the first block height from which the
+	// daily budget for base rewards (the reward for spending NHB) is at least
+	// LoyaltyBudgetFloorZNHBWei (PL-CLM-02). The budget is the smaller of a USD
+	// cap and 60 percent of the last seven days of fees, so with next to no fees
+	// it is zero and every reward is pro-rated to nothing; the floor is the
+	// day's emission the loyalty treasury is willing to fund regardless of fees,
+	// and it is limited to the existing daily USD cap (and not applied when that
+	// cap is set and no price is available). The per-transaction, per-user and
+	// per-counterparty caps still apply. 0 (the default), or an empty amount,
+	// leaves the budget as it is. How large the floor is, and whether rewards are
+	// funded this way at all, is an owner decision: it ships off. A chain rule:
+	// set the same values on every validator, above the chain tip, with all of
+	// them restarted together. See core.StateProcessor.SetLoyaltyBudgetFloor.
+	LoyaltyBudgetFloorActivationHeight uint64 `toml:"LoyaltyBudgetFloorActivationHeight"`
+	// LoyaltyBudgetFloorZNHBWei is the floor, in ZNHB wei, as a decimal string
+	// (the same notations as the other amounts, for example "1000e18").
+	LoyaltyBudgetFloorZNHBWei string `toml:"LoyaltyBudgetFloorZNHBWei"`
+	// PotsoGovernanceWeightActivationHeight is the first block height from which
+	// the weight snapshot that decides who may vote on a proposal, and with how
+	// much power, is built separately from the one that pays POTSO rewards
+	// (PL-CLM-04). Until then only the validators hold weight: a validator's
+	// counted stake includes everything delegated to it, so the owners of the
+	// delegated ZNHB hold none. From the height, in the governance snapshot only:
+	// delegated stake is counted for the delegator instead of the validator (the
+	// total does not change), and a snapshot is built every epoch even when the
+	// reward treasury is empty (today an epoch with no reward budget stores none
+	// and every vote fails). Rewards are paid from the existing snapshot and do not
+	// change. Engagement is not changed (see the comment in
+	// core/potso_governance_weights.go). 0 (the default) leaves governance reading
+	// the snapshot of the rewards. A chain rule: set the same value on every
+	// validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetPotsoGovernanceWeights.
+	PotsoGovernanceWeightActivationHeight uint64 `toml:"PotsoGovernanceWeightActivationHeight"`
+	// ValidatorFlagNonceActivationHeight is the first block height from which a
+	// stake transaction that only registers the sender as a validator candidate, or an
+	// unstake transaction that only deregisters it, each carrying no value, consumes
+	// the sender's nonce like every other transaction (PL-R5T-91). Until then those two
+	// never advance the nonce, so the signed bytes of one of them pass the strict nonce
+	// check again and again and re-apply the flag state the key owner signed at that
+	// nonce. 0 (the default) leaves both as they are at every height. A chain rule: set
+	// the same value on every validator, above the chain tip, with all of them
+	// restarted together. See core.StateProcessor.SetValidatorFlagNonceActivationHeight.
+	ValidatorFlagNonceActivationHeight uint64 `toml:"ValidatorFlagNonceActivationHeight"`
+	// MintRunningChainIDActivationHeight is the first block height from which a mint
+	// voucher is also accepted when its chainId is the running chain's own id (the
+	// genesis-derived id the swap voucher path already uses), as well as the retired
+	// Phase E id core.MintChainID that is the only one accepted today (PL-R5T-58).
+	// Every mint committed so far named the Phase E id, so accepting both is replay-safe;
+	// the Phase E id stays valid until MintPhaseEChainIDRetireHeight. 0 (the default)
+	// leaves the check as it is at every height. A chain rule: set the same value on every
+	// validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetMintRunningChainIDActivationHeight.
+	MintRunningChainIDActivationHeight uint64 `toml:"MintRunningChainIDActivationHeight"`
+	// MintPhaseEChainIDRetireHeight is the first block height from which a mint voucher
+	// that names the retired Phase E chain id (core.MintChainID) is refused and only the
+	// running chain's own id is accepted (PL-R5T-58). It also switches the running-id
+	// acceptance on from that height when MintRunningChainIDActivationHeight is 0 or
+	// later. Whoever signs vouchers must have moved to the running id before the chain
+	// reaches it. 0 (the default) never retires the Phase E id. A chain rule: set the
+	// same value on every validator, above the chain tip, with all of them restarted
+	// together. See core.StateProcessor.SetMintPhaseEChainIDRetireHeight.
+	MintPhaseEChainIDRetireHeight uint64 `toml:"MintPhaseEChainIDRetireHeight"`
+	// TxNetworkChainIDActivationHeight is the first block height from which a
+	// transaction must carry the network's own chain id (the genesis-derived id the node
+	// reports, 18346390202490284624 on the live network) and the legacy constant
+	// 0x4e4842 that every NHB network shares is refused (PL-R5T-29). The id is part of
+	// the signed hash, so a transaction signed for one network no longer verifies on
+	// another. Until the height the legacy constant is the only id accepted, as in every
+	// committed block. Every signer (command line, SDKs, the portal, the off-chain
+	// submitters) must sign with the network id before the chain reaches the height:
+	// nhb_getNetworkStats reports the id a transaction must carry now (txChainId). 0 (the default)
+	// leaves the check as it is at every height. A chain rule: set the same value on
+	// every validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetTxNetworkChainIDActivationHeight.
+	TxNetworkChainIDActivationHeight uint64 `toml:"TxNetworkChainIDActivationHeight"`
+	// VoteChainBindingActivationHeight is the first block height from which a consensus
+	// vote is signed over the network's genesis hash as well as its block hash, round,
+	// type and height (PL-R5T-31). It applies to the votes a validator signs and checks, to
+	// the quorum certificate that a synced block carries and to the two votes of an
+	// equivocation proof: a vote at or above the height verifies only against the bound
+	// digest, a vote below it only against the legacy one, so history and a fresh node's
+	// replay are unchanged. Without it two votes cast by one key on two networks at the
+	// same height, round and type form a valid equivocation proof that forfeits the
+	// validator's stake. 0 (the default) leaves the legacy digest at every height. A chain
+	// rule: set the same value on every validator, above the chain tip, with all of them
+	// restarted together. See core.StateProcessor.SetVoteChainBindingActivationHeight.
+	VoteChainBindingActivationHeight uint64 `toml:"VoteChainBindingActivationHeight"`
+	// SlashEligibilityRefreshActivationHeight is the first block height from which a
+	// validator slashed for equivocation has its eligibility entry and its place in
+	// the validator set re-evaluated in the block that slashes it (PL-R5T-25). Until
+	// then the slasher debits the offender's stake without going through the one place
+	// those are recomputed, so the offender keeps the voting power, the eligibility
+	// basis and the reward and governance weight it had until its account is next
+	// written. 0 (the default) leaves that as it is. A chain rule: set the same value
+	// on every validator, above the chain tip, with all of them restarted together. See
+	// core.ValidatorRules.
+	SlashEligibilityRefreshActivationHeight uint64 `toml:"SlashEligibilityRefreshActivationHeight"`
+	// SlashPendingUnbondsActivationHeight is the first block height from which a proven
+	// equivocation also forfeits the offender's own unclaimed unbonds, after its locked
+	// balance, and the slash is sized on its stake plus those unbonds (PL-R5T-26). Until
+	// then ZNHB a validator moved into an unbond before the report landed (an unbond
+	// lasts 7 days by default, the evidence window is 8,640 blocks) is out of reach and
+	// the offense is still marked penalised with a slash of zero. Stake other wallets
+	// delegated to the validator is not reached by this setting. 0 (the default) leaves
+	// that as it is. A chain rule: set the same value on every validator, above the
+	// chain tip, with all of them restarted together. See core.ValidatorRules.
+	SlashPendingUnbondsActivationHeight uint64 `toml:"SlashPendingUnbondsActivationHeight"`
+	// EvidenceIntakeGuardActivationHeight is the first block height from which the
+	// evidence intake refuses the reports that fill its 256 slots without a proof
+	// behind them (PL-R5T-09): a DOWNTIME or INVALID_BLOCK_PROPOSAL report (it needs only
+	// the reporter's signature and does nothing when processed), an EQUIVOCATION report
+	// whose offender holds less than the minimum validator stake in staking stake (plus
+	// its own pending unbonds), and a report whose reporter's staking stake, not its
+	// locked ZNHB, is under the minimum (a point-of-sale hold raises locked ZNHB and can
+	// be voided at once). 0 (the default) leaves the intake as it is. A chain rule: set
+	// the same value on every validator, above the chain tip, with all of them restarted
+	// together. See core.ValidatorRules.
+	EvidenceIntakeGuardActivationHeight uint64 `toml:"EvidenceIntakeGuardActivationHeight"`
+	// StakeAPRFromStateActivationHeight is the first block height from which the reward
+	// rate used when a stake, unstake or claim executes is the on-chain staking.aprBps
+	// (the fixed default 1250 when none is stored or it cannot be read), read at
+	// execution, and never the value this node cached at start-up from its own
+	// config.toml (PL-R5T-27). Until then the cached value is used and two validators
+	// with different config, or one restarted after a governed change, compute different
+	// state for the same transaction. From the height a change of the parameter is
+	// settled at the old rate in the block that executes it. 0 (the default) leaves the
+	// cached rate in use. A chain rule: set the same value on every validator, above the
+	// chain tip, with all of them restarted together. See core.ValidatorRules.
+	StakeAPRFromStateActivationHeight uint64 `toml:"StakeAPRFromStateActivationHeight"`
+	// ValidatorAdmissionGuardActivationHeight is the first block height from which a
+	// validator that is new to the set that votes is admitted at an epoch boundary only
+	// while the established validators (those that have been in the set for the whole
+	// ValidatorAdmissionProbationSeconds, and those in it when the guard starts) keep
+	// strictly more than two thirds of the power of the established validators plus the
+	// newcomers (PL-VAL-01). Without it any holder of the minimum validator stake can
+	// join, and when the incumbents sit close to a third each their quorum then needs the
+	// newcomer: if it is switched off no block can be finished. Nothing is ever removed
+	// from the set by the rule. 0 (the default) leaves admission as it is. A chain rule:
+	// set the same value on every validator, above the chain tip, with all of them
+	// restarted together. Needs ValidatorAdmissionProbationSeconds above zero. See
+	// core.ValidatorRules.
+	ValidatorAdmissionGuardActivationHeight uint64 `toml:"ValidatorAdmissionGuardActivationHeight"`
+	// ValidatorAdmissionProbationSeconds is how long a validator must have been in the
+	// set before it counts as established for the admission guard (PL-VAL-01). Zero
+	// leaves the guard without effect. A chain rule: the same value on every validator.
+	// See ValidatorAdmissionGuardActivationHeight and core.ValidatorRules.
+	ValidatorAdmissionProbationSeconds uint64 `toml:"ValidatorAdmissionProbationSeconds"`
+	// PotsoTreasuryShortfallActivationHeight is the first block height from which a POTSO
+	// reward epoch that the reward treasury cannot cover is detected before anything is
+	// written and degrades to a recorded zero payout (PL-DC-29): the budget is the
+	// emission, no longer capped at the treasury balance first, so the shortfall check can
+	// fire; the epoch is marked processed and never retried; the meta carries a Shortfall
+	// flag and a potso.reward.shortfall event is emitted. Until then an underfunded
+	// treasury quietly pays a smaller, capped epoch. The claim-mode half of PL-DC-29 is
+	// not changed (there is no claim path). 0 (the default) leaves the capped payout. A
+	// chain rule: set the same value on every validator, above the chain tip, with all of
+	// them restarted together. See core.ValidatorRules.
+	PotsoTreasuryShortfallActivationHeight uint64 `toml:"PotsoTreasuryShortfallActivationHeight"`
+	// LendingAccountingFixesActivationHeight is the first block height from which the
+	// lending engine applies its corrected accounting rules. At present: a fixed-term
+	// borrow accrues the market's interest first, like every other lending entry point,
+	// instead of adding its principal to the pool's borrowed total while the accrual
+	// stamp still dates from before the idle window, so that the next accrual charges the
+	// whole window at a utilisation that already includes the loan (PL-R5T-50); and a
+	// borrow that carries a developer fee no longer also counts that fee as
+	// withdrawable, which would pay it a second time out of the shared pool balance
+	// and the suppliers' total (PL-R5T-52); and a lending position still recorded on
+	// a plain account (collateral, supply shares, debt) is taken by the default pool
+	// only, and cleared from the plain account when taken, instead of being copied
+	// into every pool that touches the account and paid out again from the shared
+	// collateral vault (PL-EXT-16; the per-pool sweep of every account of PL-R5T-13
+	// goes with it). 0 (the default) keeps the behaviour of every earlier release at
+	// every height. A chain rule:
+	// it decides what a lending transaction leaves behind, so set the same non-zero height
+	// on every validator, above the chain tip, with all of them restarted together. As a
+	// top-level key it goes before the first [table] of the file. See
+	// core.StateProcessor.SetLendingAccountingFixesActivationHeight.
+	LendingAccountingFixesActivationHeight uint64 `toml:"LendingAccountingFixesActivationHeight"`
+	// LendingPoolLimitsActivationHeight is the first block height from which creating a
+	// lending pool is bounded (PL-R5T-13). Until then pool creation is free and
+	// unbounded: TxTypeLendingCreatePool needs no pool-count or id-length limit and
+	// ignores the lending pause, and any lending transaction that names a pool the chain
+	// has not seen creates it. From the height: a pool other than the default one exists
+	// only if TxTypeLendingCreatePool created it (naming an unseen pool in any other
+	// lending transaction is refused, without any sweep of accounts); a pool id is made
+	// of letters, digits, '.', '_' and '-' only, at most LendingPoolIDMaxLength long
+	// (0 = no length limit); at most LendingMaxPools pools exist (0 = no limit); and
+	// creating a pool is refused while the lending module is paused. The two sizes are
+	// owner decisions. 0 (the default) keeps the behaviour of every earlier release at
+	// every height. A chain rule: set the same non-zero height, and the same sizes, on
+	// every validator, above the chain tip, with all of them restarted together. As a
+	// top-level key it goes before the first [table] of the file. See
+	// core.StateProcessor.SetLendingPoolLimitsActivationHeight.
+	LendingPoolLimitsActivationHeight uint64 `toml:"LendingPoolLimitsActivationHeight"`
+	// LendingMaxPools is the most lending pools that may exist once
+	// LendingPoolLimitsActivationHeight has been reached; 0 means no limit. The size is an
+	// owner decision. A chain rule: the same value on every validator. As a top-level key
+	// it goes before the first [table] of the file. See core.StateProcessor.SetLendingMaxPools.
+	LendingMaxPools uint64 `toml:"LendingMaxPools"`
+	// LendingPoolIDMaxLength is the longest lending pool id that may be created once
+	// LendingPoolLimitsActivationHeight has been reached; 0 means no limit. The size is an
+	// owner decision. A chain rule: the same value on every validator. As a top-level key
+	// it goes before the first [table] of the file. See core.StateProcessor.SetLendingPoolIDMaxLength.
+	LendingPoolIDMaxLength uint64 `toml:"LendingPoolIDMaxLength"`
+	// LendingRefPriceGuardsActivationHeight is the first block height from which a lending
+	// reference-price bundle is checked against the block that carries it (PL-EXT-13,
+	// PL-R5T-53). Until then it needs only a valid signer quorum and a timestamp newer than
+	// the last accepted one: one validly signed bundle dated far ahead rejects every honest
+	// bundle after it (a timestamp above the largest signed 64-bit number also wraps and can
+	// never be passed again), a signed bundle that never landed can be applied much later and
+	// is stamped fresh, and a rate so small that its 1e18-scaled median is zero switches the
+	// valuation of collateral to 1:1. From the height a bundle is refused when its timestamp
+	// does not fit a signed 64-bit number, is more than LendingRefPriceMaxAheadSeconds after
+	// the block time (0 = no such check), is more than LendingRefPriceMaxAgeSeconds before it
+	// (0 = no such check), or has a median of zero. The two sizes are owner decisions. 0 (the
+	// default) keeps the behaviour of every earlier release at every height. A chain rule: set
+	// the same non-zero height, and the same sizes, on every validator, above the chain tip,
+	// with all of them restarted together. As a top-level key it goes before the first [table]
+	// of the file. See core.StateProcessor.SetLendingRefPriceGuardsActivationHeight.
+	LendingRefPriceGuardsActivationHeight uint64 `toml:"LendingRefPriceGuardsActivationHeight"`
+	// LendingRefPriceMaxAheadSeconds is how far after the block time a lending reference-price
+	// bundle may be dated once LendingRefPriceGuardsActivationHeight has been reached; 0 means
+	// no such check. The size is an owner decision. A chain rule: the same value on every
+	// validator. As a top-level key it goes before the first [table] of the file. See
+	// core.StateProcessor.SetLendingRefPriceMaxAheadSeconds.
+	LendingRefPriceMaxAheadSeconds uint64 `toml:"LendingRefPriceMaxAheadSeconds"`
+	// LendingRefPriceMaxAgeSeconds is how long before the block time a lending reference-price
+	// bundle may be dated once LendingRefPriceGuardsActivationHeight has been reached; 0 means
+	// no such check. The size is an owner decision. A chain rule: the same value on every
+	// validator. As a top-level key it goes before the first [table] of the file. See
+	// core.StateProcessor.SetLendingRefPriceMaxAgeSeconds.
+	LendingRefPriceMaxAgeSeconds uint64 `toml:"LendingRefPriceMaxAgeSeconds"`
+	// LendingRiskActivationHeight is the first block height from which the lending engine
+	// applies the risk limits that the node's [lending] configuration names but the engine
+	// never received (PL-DC-19): the liquidation bonus, the borrow caps (per block, total,
+	// utilisation), the per-action pauses, the circuit breaker, and the supply and collateral
+	// caps of [lending.breaker]. Until then they are zero in the engine whatever the file
+	// says: no liquidator bonus, no cap, no pause. The limits are set in [lending.risk] and
+	// [lending.breaker]; their sizes are owner decisions. 0 (the default) keeps the behaviour
+	// of every earlier release at every height. A chain rule: set the same non-zero height,
+	// and the same limits, on every validator, above the chain tip, with all of them
+	// restarted together. As a top-level key it goes before the first [table] of the file.
+	// See core.StateProcessor.SetLendingRiskActivationHeight.
+	LendingRiskActivationHeight uint64 `toml:"LendingRiskActivationHeight"`
+	// LendingFeeWithdrawActivationHeight is the first block height from which
+	// TxTypeLendingWithdrawProtocolFees (0x4D) is a valid transaction (PL-DC-19). The lending
+	// engine accrues a protocol share of the interest (the reserve factor) in a counter that no
+	// transaction could ever pay out. From the height an account holding ROLE_LENDING_PROTOCOL_ADMIN
+	// may withdraw, in an ordinary signed transaction, up to the counter, and no more than the
+	// pool's own free liquidity, to a recipient it names. Before the height the byte is an unknown
+	// transaction type, exactly as on every earlier release. Developer fees are paid to their
+	// recipient when the loan is drawn and are not withdrawable (see LendingAccountingFixesActivationHeight).
+	// 0 (the default) keeps the behaviour of every earlier release at every height. A chain rule:
+	// it decides which transactions are valid, so set the same non-zero height on every validator,
+	// above the chain tip, with all of them restarted together; before granting the role add its
+	// name to [governance] AllowedRoles on every validator. As a top-level key it goes before the
+	// first [table] of the file. See core.StateProcessor.SetLendingFeeWithdrawActivationHeight.
+	LendingFeeWithdrawActivationHeight uint64 `toml:"LendingFeeWithdrawActivationHeight"`
+	// PaymasterSponsorBindingActivationHeight is the first block height from which
+	// a paymaster's signature on a sponsored transaction must be over a digest that
+	// names the sender (PL-R5T-22). Until then the sponsor signs the same digest as
+	// the sender's own envelope signature, which names no sender: one sponsor
+	// signature is valid for every sender that signs the same fields, and a copy of
+	// it placed in the envelope makes the sponsor the sender. From the height the
+	// signature over that older digest is refused and the sponsor signs
+	// types.Transaction.PaymasterSponsorDigest (the tag, the transaction digest and
+	// the sender); the transaction digest, the sender's signature and transaction
+	// ids do not change. 0 (the default) keeps the older rule at every height. A
+	// chain rule: set the same value on every validator, above the chain tip, with
+	// all of them restarted, and move every sponsor's signer (and any SDK that signs
+	// for a sponsor) to SignPaymasterBound first. See
+	// core.StateProcessor.SetPaymasterSponsorBinding.
+	PaymasterSponsorBindingActivationHeight uint64 `toml:"PaymasterSponsorBindingActivationHeight"`
+	// LoyaltyPaymasterConsentActivationHeight is the first block height from which
+	// a loyalty program reward is paid only out of a wallet that is the business
+	// owner's own or has a standing record that it was assigned with its consent
+	// (PL-R5T-15). Until then the consent rule runs only when an assignment is made,
+	// so an assignment already in state, including one that names the treasury or
+	// admin wallet, keeps paying although that wallet never consented. From the
+	// height such a reward is skipped (reason paymaster_not_consented); an
+	// assignment made from the height on writes the record, a loyalty admin can
+	// re-affirm an older assignment once the wallet has opted in again, the
+	// paymaster can withdraw itself, and a registered merchant address can remove
+	// itself. 0 (the default) keeps every one of these as it was. A chain rule: set
+	// the same value on every validator, above the chain tip, with all of them
+	// restarted together. See core.StateProcessor.SetLoyaltyPaymasterConsent.
+	LoyaltyPaymasterConsentActivationHeight uint64 `toml:"LoyaltyPaymasterConsentActivationHeight"`
+	// LoyaltyCounterpartyCapActivationHeight is the first block height from which a
+	// base-reward cap per pair of accounts per UTC day applies when the stored
+	// loyalty configuration sets none (PL-EXT-17). The code has always had the cap
+	// (DailyCapCounterparty, shared by A to B and B to A), but the relaunch genesis
+	// stores none, so it is off on the live chain. From the height the base reward
+	// path reads the cap LoyaltyCounterpartyCapZNHBWei in its place; a cap the stored
+	// configuration does set is left as it is. It bounds what one pair can earn from
+	// passing the same NHB back and forth; it does NOT stop NHB passed along a
+	// chain of fresh accounts, where every hop is a new pair (the owner's choice of
+	// mitigation for that is open). 0 (the default), or an empty amount, leaves the
+	// rule as it is. A chain rule: set the same values on every validator, above
+	// the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetLoyaltyCounterpartyCap.
+	LoyaltyCounterpartyCapActivationHeight uint64 `toml:"LoyaltyCounterpartyCapActivationHeight"`
+	// BuybackMinAskActivationHeight is the first block height from which the smallest
+	// treasury buyback ask is BuybackMinAskZNHBWei instead of one whole ZNHB
+	// (PL-R5T-33). An epoch holds at most 1,024 pending asks and a seller 8, an ask
+	// costs only ZNHB that is refunded or filled at the settlement, and about 128
+	// addresses with a few ZNHB each can fill every slot and refuse honest sellers for
+	// the epoch. A larger minimum raises the ZNHB that has to be locked to do it by
+	// the same factor; it does not remove the limit (the other option, letting a
+	// larger ask evict the smallest, is not built). A value at or below one ZNHB, an
+	// empty amount or 0 (the default) leaves the minimum as it is. A chain rule: set
+	// the same values on every validator, above the chain tip, with all of them
+	// restarted together. See core.StateProcessor.SetBuybackMinAsk.
+	BuybackMinAskActivationHeight uint64 `toml:"BuybackMinAskActivationHeight"`
+	// SubscriptionsPauseSettlementActivationHeight is the first block height from
+	// which the per-block subscription settlement does nothing while the
+	// subscriptions module is paused (PL-R5T-81). A pause refuses every
+	// subscriptions transaction, a payer's cancel included, but the settlement that
+	// runs every block never looked at the pause, so payers kept being charged each
+	// cycle while unable to cancel. From the height a paused module charges nobody,
+	// records no failed attempt and moves no watermark: the days skipped are found
+	// again on unpause and each due subscription is charged once then. 0 (the
+	// default) keeps the settlement running through a pause. A chain rule: set the
+	// same value on every validator, above the chain tip, with all of them
+	// restarted together. See core.StateProcessor.SetSubscriptionsPauseSettlement.
+	SubscriptionsPauseSettlementActivationHeight uint64 `toml:"SubscriptionsPauseSettlementActivationHeight"`
+	// SubscriptionsChargeHistoryMigrationActivationHeight is the first block height
+	// from which a subscription's charge history that was written under the old key
+	// (one list per subscription, before each attempt was stored under its own key and
+	// a count) is read through and migrated (PL-R5T-82). The newer code never reads
+	// the old key: a subscription holding history there would list as empty, restart
+	// its attempt numbering at 1 and leave the old list orphaned. From the height, a
+	// subscription with no count key reads its history from the old list, and the
+	// first attempt recorded afterwards copies that list into one key per attempt, sets
+	// the count and continues the numbering. The commit that moved the layout says no
+	// subscription was ever charged on the live chain; on a chain that never wrote the
+	// old key this changes nothing, and a read through to an empty key writes nothing.
+	// 0 (the default) keeps the newer layout alone. A chain rule: set the same value on
+	// every validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetSubscriptionsChargeHistoryMigration.
+	SubscriptionsChargeHistoryMigrationActivationHeight uint64 `toml:"SubscriptionsChargeHistoryMigrationActivationHeight"`
+	// BuybackUnpriceableEpochRefundActivationHeight is the first block height from which a buyback epoch whose highest acceptable price cannot be computed is settled like an epoch with no reference price (nothing is bought, every seller is refunded in full) instead of failing the block that closes the epoch (PL-EXT-28). The governed discount and safety margin may be set up to 10,000 basis points, and at exactly 10,000 the highest price is zero: until the height the settlement returns "price must be positive" and every validator rejects the block that closes the epoch, so the chain stops there until the value is changed.
+	// 0 (the default) leaves it off at every height. A chain rule: set the same value on
+	// every validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetBuybackUnpriceableEpochRefund.
+	BuybackUnpriceableEpochRefundActivationHeight uint64 `toml:"BuybackUnpriceableEpochRefundActivationHeight"`
+	// SwapVoucherSignedBudgetActivationHeight is the first block height from which the USD budget a swap voucher mint is held to is read only from what the mint authority signed (PL-EXT-35). Until then it is the submission's own usdAmount, which no signed digest covers, so whoever submits the voucher can write the budget that makes the treasury's curve-price guard pass. From the height the budget is the signed fiat amount of a voucher in USD, a submission whose usdAmount is set and differs from it is refused, and a voucher in any other currency is refused because nothing signed gives its value in USD. Set it only once the voucher issuer sells in USD.
+	// 0 (the default) leaves it off at every height. A chain rule: set the same value on
+	// every validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetSwapVoucherSignedBudget.
+	SwapVoucherSignedBudgetActivationHeight uint64 `toml:"SwapVoucherSignedBudgetActivationHeight"`
+	// SponsoredTransferFeeCreditActivationHeight is the first block height from which the fee a paymaster pays for a sponsored NHB transfer is always credited to the transfer fee collector (PL-EXT-38). Until then the credit is made only while the transfer gas policy is enabled, and the policy is disabled whenever its free-tier spend limit is zero, whatever the fee rate: the sponsor is debited and the fee is destroyed, the shape PL-DC-08 closed in the sender's own branch. From the height the sponsored branch credits any positive fee, as the unsponsored NHB path does.
+	// 0 (the default) leaves it off at every height. A chain rule: set the same value on
+	// every validator, above the chain tip, with all of them restarted together. See
+	// core.StateProcessor.SetSponsoredTransferFeeCredit.
+	SponsoredTransferFeeCreditActivationHeight uint64 `toml:"SponsoredTransferFeeCreditActivationHeight"`
+	// UniformTransferFeeActivationHeight is the first block height from which a transfer that
+	// names a fee domain (the pos, p2p and otc domains of [global.Fees]) pays exactly what an
+	// ordinary transfer pays: the same free allowance per wallet and asset, the same NHB and
+	// ZNHB rates, and nothing on top. Until then such a transfer pays the ordinary fee AND the
+	// domain's merchant rate (MDRBasisPoints, 150 NHB and 200 ZNHB in the live files), which the
+	// first N transfers a month waive (FreeTierTxPerMonth). From the height the fee is still
+	// credited to the domain's route wallet when one is configured for the asset (the fee
+	// collector otherwise), and the domain's fee totals and fee event are still recorded; the
+	// per-domain monthly counters stop advancing. A fee payer of "recipient" is not honoured: the
+	// sender pays, as for any transfer. 0 (the default) leaves the domain fee as it is at every
+	// height. A chain rule: set the same value on every validator, above the chain tip, with all
+	// of them restarted together. See core.StateProcessor.SetUniformTransferFee.
+	UniformTransferFeeActivationHeight uint64 `toml:"UniformTransferFeeActivationHeight"`
+	// TransferFeeGovernanceActivationHeight is the first block height from which the transfer fee
+	// schedule (the NHB and ZNHB rates and the free allowance per wallet and asset) is governed
+	// by proposals of the kind policy.feeParams instead of by this file. Until then no such
+	// proposal is accepted and the values of [global.Fees] (TransferFeeBps, TransferFeeBpsZNHB,
+	// TransferFreeTierSpendWei) apply. From the height a passed proposal, after its timelock, is
+	// stored in chain state as a pending schedule that takes effect TransferFeeGovernanceDelayBlocks
+	// blocks after the block that executed it, the same block on every validator; once in force it
+	// replaces the values of the file. Rates are limited to 100 basis points and an allowance of
+	// zero needs an explicit flag. 0 (the default) leaves the file in charge at every height. A
+	// chain rule: set the same values on every validator, above the chain tip, with all of them
+	// restarted together. See core.StateProcessor.SetTransferFeeGovernance.
+	TransferFeeGovernanceActivationHeight uint64 `toml:"TransferFeeGovernanceActivationHeight"`
+	// TransferFeeGovernanceDelayBlocks is the delay, in blocks, between the block that executes a
+	// fee proposal and the first block that charges its schedule. It is raised to 100 when lower
+	// (governance.MinFeeScheduleDelayBlocks); a value below that is reported at start-up (see
+	// FeeScheduleProblems). It matters only once TransferFeeGovernanceActivationHeight is set.
+	TransferFeeGovernanceDelayBlocks uint64 `toml:"TransferFeeGovernanceDelayBlocks"`
+	// TransferFeeStrictAllowanceActivationHeight is the first block height from which the free allowance of the transfer
+	// fee (TransferFreeTierSpendWei, or the governed allowance) is strict. Until then a transfer is free in full while the
+	// sender's spend so far in the asset is below the allowance, so the transfer that crosses the line is free in full (a
+	// first transfer of 1,000,000 NHB pays no fee). From the height the free part of a transfer is what is left of the
+	// allowance (never below zero, never more than the amount) and the fee is the asset's rate on the rest: a first
+	// transfer of 1,100 NHB against an allowance of 1,000 pays 0.20% of 100. It applies to the ordinary fee of both assets,
+	// so to a transfer that names a fee domain under UniformTransferFeeActivationHeight, and to a governed allowance. It
+	// does not change what is recorded as spent, the window, the monthly free tier (which still waives the whole remaining
+	// fee where it applies) or a sponsored transfer (the sponsor pays the fee on the whole amount, as before). 0 (the
+	// default) leaves the whole-transfer rule at every height. A chain rule: set the same value on every validator, above
+	// the chain tip, with all of them restarted together. See core.StateProcessor.SetTransferFeeStrictAllowance.
+	TransferFeeStrictAllowanceActivationHeight uint64 `toml:"TransferFeeStrictAllowanceActivationHeight"`
+	// RPCSwapOperatorNoHMAC makes nhb_swapMint, nhb_swapBurn and
+	// swap_voucher_get/list/export need the operator role when RPCSwapAuth has no
+	// secrets (PL-R5T-84). Those methods are exempt from the operator gate because the
+	// per-partner HMAC check is the stronger control, but it runs only when secrets
+	// exist; without them any valid bearer token reaches them. false (the default)
+	// keeps the exemption. Not a chain rule: a node setting. Callers that use these
+	// methods with a non-operator token must be moved to operator tokens or to partner
+	// secrets first.
+	RPCSwapOperatorNoHMAC bool `toml:"RPCSwapOperatorNoHMAC"`
+	// BuybackMinAskZNHBWei is the smallest buyback ask, in ZNHB wei, as a decimal
+	// string (the same notations as the other amounts, for example "100e18").
+	BuybackMinAskZNHBWei string `toml:"BuybackMinAskZNHBWei"`
+	// LoyaltyCounterpartyCapZNHBWei is the per-pair daily cap, in ZNHB wei, as a
+	// decimal string (the same notations as the other amounts, for example "50e18").
+	LoyaltyCounterpartyCapZNHBWei string `toml:"LoyaltyCounterpartyCapZNHBWei"`
+	// BuybackPriceGuardActivationHeight is the first block height from which
+	// governance refuses a buyback discount or safety margin of 10000 basis
+	// points (PL-EXT-28). The highest price the buyback may pay is the lower of
+	// the curve price after the discount and the signed reference price after the
+	// margin, so either value at 10000 makes it exactly zero, and the epoch
+	// settlement then refuses the price. The refusal is made when a proposal of
+	// the buyback parameters kind is submitted and again when one is executed,
+	// and by the one function every governance write of those two parameters goes
+	// through; a proposal stored before the height is not looked at again, but
+	// executing it from the height refuses the write and leaves the parameters as
+	// they were. 0 (the default) leaves governance as it was. A chain rule: set
+	// the same value on every validator, above the chain tip, with all of them
+	// restarted together; set EpochSettlementFailsafeActivationHeight to the same
+	// height or lower. See core.StateProcessor.SetBuybackPriceGuard.
+	BuybackPriceGuardActivationHeight uint64 `toml:"BuybackPriceGuardActivationHeight"`
+	// EpochSettlementFailsafeActivationHeight is the first block height from which
+	// two causes of an error in the epoch-closing block degrade instead
+	// (PL-EXT-28, PL-EXT-29 item E-1b). (1) A buyback price that is zero or cannot
+	// be computed means no purchase this epoch: every ask is refunded in full, an
+	// event and a log line say so, and the escrow and accrual balances are
+	// unchanged but for the refunds. (2) When the admin wallet's liquid ZNHB is
+	// below the reward payout, the payout is scaled down to the liquid balance, the
+	// way it already is to the reward pool, and the epoch is recorded as short. 0
+	// (the default) leaves both as they were: an error that fails the block. A
+	// chain rule: set the same value on every validator, above the chain tip, with
+	// all of them restarted together. See core.StateProcessor.SetEpochSettlementFailsafe.
+	EpochSettlementFailsafeActivationHeight uint64 `toml:"EpochSettlementFailsafeActivationHeight"`
+	// SaleReferenceActivationHeight is the first block height from which the price of
+	// every sale from the treasury Sale Pool (the direct purchase, the swap voucher
+	// mint's curve guard and the quote) is the higher of the Genesis curve's cost and
+	// the latest signed outside reference price times the amount (PL-BC-D). The
+	// reference is the one the treasury buyback takes (TxTypeBuybackRefPrice, signed
+	// by the genesis-declared reference-price signers) and is never read from the
+	// native pool or any peer-to-peer price. While the rule is on, a missing reference
+	// or one older than SaleReferenceMaxAgeSeconds PAUSES sales; it never falls back
+	// to the curve. 0 (the default) leaves every sale priced by the curve alone at
+	// every height. Must be in force BEFORE BridgeActivationHeight is set. A chain
+	// rule: set the same value, and the same two sizes below, on every validator,
+	// above the chain tip, with all of them restarted together. See
+	// core.ValidatorRules and core/sale_reference.go.
+	SaleReferenceActivationHeight uint64 `toml:"SaleReferenceActivationHeight"`
+	// SaleReferenceMaxAgeSeconds is how old, in seconds, a reference price may be and
+	// still price a sale; it must be non-zero once the rule is on (zero pauses sales).
+	// A reference older than this at the block that would record it is refused. The
+	// size is an owner decision. A chain rule: the same value on every validator.
+	SaleReferenceMaxAgeSeconds uint64 `toml:"SaleReferenceMaxAgeSeconds"`
+	// SaleReferenceMaxStepBps refuses a new reference that moves more than this many
+	// basis points from the previous one while that one is still fresh (0 = no
+	// bound); a stale previous reference lets any new one in, so a stuck feed can
+	// always be replaced. The size is an owner decision. A chain rule: the same value
+	// on every validator.
+	SaleReferenceMaxStepBps uint64 `toml:"SaleReferenceMaxStepBps"`
 }
 
 // RPCRouteRateLimit captures optional per-method quota overrides for the JSON-RPC server.
@@ -500,6 +997,12 @@ type P2PSection struct {
 	BanDurationSeconds  int      `toml:"BanDurationSeconds"`
 	DialBackoffSeconds  int      `toml:"DialBackoffSeconds"`
 	PEX                 *bool    `toml:"PEX"`
+	// HandshakeChallenge is how this node treats the challenge-response extension of the p2p
+	// handshake (PL-R5T-20, PL-DC-25): "auto" (the default) offers it and proves its key to a peer
+	// that offers it too, treating any other peer as a v1 peer; "off" behaves exactly like a v1
+	// node; "require" refuses a peer that does not offer it, for use once every peer has upgraded.
+	// Not a chain rule: it changes who a node talks to, never what a block holds.
+	HandshakeChallenge string `toml:"HandshakeChallenge"`
 }
 
 // PotsoConfig groups POTSO-specific configuration segments.
@@ -567,6 +1070,13 @@ type GovConfig struct {
 	// differing only in surrounding whitespace, with different values, is
 	// rejected. Zero (the default) leaves the earlier behaviour in place.
 	RejectAmbiguousParamKeysFromUnix uint64 `toml:"RejectAmbiguousParamKeysFromUnix"`
+
+	// EnforceWindowFloors makes the node refuse to start when VotingPeriodSeconds
+	// or TimelockSeconds is below its floor (MinVotingPeriodSeconds,
+	// MinTimelockSeconds; see GovernancePolicyProblems). Off by default: the node
+	// then only warns. It decides nothing about any block, only whether this node
+	// starts, so it needs no coordination between validators.
+	EnforceWindowFloors bool `toml:"EnforceWindowFloors"`
 }
 
 type LoadOption func(*loadOptions)
@@ -843,11 +1353,58 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 	cfg.Swap = cfg.Swap.Normalise()
 	cfg.syncTopLevelToP2P()
 
+	if _, err := ParseAmount(cfg.BuybackMinAskZNHBWei); err != nil {
+		return nil, fmt.Errorf("BuybackMinAskZNHBWei: %w", err)
+	}
+	if _, err := ParseAmount(cfg.LoyaltyCounterpartyCapZNHBWei); err != nil {
+		return nil, fmt.Errorf("LoyaltyCounterpartyCapZNHBWei: %w", err)
+	}
+	if _, err := ParseAmount(cfg.LoyaltyBudgetFloorZNHBWei); err != nil {
+		return nil, fmt.Errorf("LoyaltyBudgetFloorZNHBWei: %w", err)
+	}
+
 	if cfg.NetworkName == "mainnet" && len(cfg.RPCSwapAuth.Secrets) == 0 {
 		return nil, fmt.Errorf("swap RPC authentication secrets are required for mainnet deployment")
 	}
+	if err := cfg.RPCSwapAuth.validatePartnerProviders(); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// validatePartnerProviders refuses a PartnerProviders line that cannot mean what
+// the operator meant: a key the node has no secret for (a typo would leave the
+// partner it was meant for reading nothing), or a list with no provider in it
+// (or a blank one) that would read as "no scope". The error names the key, never
+// a secret.
+func (a RPCSwapAuth) validatePartnerProviders() error {
+	if len(a.PartnerProviders) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{}, len(a.Secrets))
+	for key, secret := range a.Secrets {
+		trimmedKey := strings.TrimSpace(key)
+		if trimmedKey == "" || strings.TrimSpace(secret) == "" {
+			continue
+		}
+		known[trimmedKey] = struct{}{}
+	}
+	for key, providers := range a.PartnerProviders {
+		trimmedKey := strings.TrimSpace(key)
+		if _, ok := known[trimmedKey]; !ok {
+			return fmt.Errorf("RPCSwapAuth.PartnerProviders names the key %q, which is not in RPCSwapAuth.Secrets", key)
+		}
+		if len(providers) == 0 {
+			return fmt.Errorf("RPCSwapAuth.PartnerProviders lists no provider for the key %q", key)
+		}
+		for _, provider := range providers {
+			if strings.TrimSpace(provider) == "" {
+				return fmt.Errorf("RPCSwapAuth.PartnerProviders has a blank provider name for the key %q", key)
+			}
+		}
+	}
+	return nil
 }
 
 func (cfg *Config) ensureMempoolDefaults() {
@@ -1111,6 +1668,9 @@ func (cfg *Config) PotsoRewardConfig() (potso.RewardConfig, error) {
 	}
 
 	if err := result.Validate(); err != nil {
+		return result, err
+	}
+	if err := result.CheckPayoutModeAvailable(); err != nil {
 		return result, err
 	}
 	return result, nil

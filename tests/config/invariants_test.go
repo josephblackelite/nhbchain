@@ -341,6 +341,8 @@ func TestValidateConsensus(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// Not an error: the engine lowers it to half the commit timeout
+			// (ConsensusAdvisories reports it).
 			name: "minimum block interval above half the commit timeout",
 			cfg: config.Consensus{
 				ProposalTimeout:  2 * time.Second,
@@ -348,6 +350,26 @@ func TestValidateConsensus(t *testing.T) {
 				PrecommitTimeout: 2 * time.Second,
 				CommitTimeout:    4 * time.Second,
 				MinBlockInterval: 2*time.Second + time.Millisecond,
+			},
+		},
+		{
+			name: "default minimum block interval with a short commit timeout",
+			cfg: config.Consensus{
+				ProposalTimeout:  time.Second,
+				PrevoteTimeout:   time.Second,
+				PrecommitTimeout: time.Second,
+				CommitTimeout:    time.Second,
+				MinBlockInterval: time.Second,
+			},
+		},
+		{
+			name: "interval above half the commit timeout does not excuse a timer that is not positive",
+			cfg: config.Consensus{
+				ProposalTimeout:  time.Second,
+				PrevoteTimeout:   0,
+				PrecommitTimeout: time.Second,
+				CommitTimeout:    time.Second,
+				MinBlockInterval: time.Second,
 			},
 			wantErr: true,
 		},

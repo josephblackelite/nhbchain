@@ -33,11 +33,24 @@ type registryState interface {
 type Registry struct {
 	st     registryState
 	pauses nativecommon.PauseView
+	// legacyCharges reads a charge history stored under the old key through (PL-R5T-82);
+	// see SetLegacyChargeHistory.
+	legacyCharges bool
 }
 
 // NewRegistry creates a registry backed by the provided state manager.
 func NewRegistry(st registryState) *Registry {
 	return &Registry{st: st}
+}
+
+// SetLegacyChargeHistory switches the read-through of a charge history stored under the
+// old key (one list per subscription) on or off for this registry. Off, the default,
+// never looks at the old key.
+func (r *Registry) SetLegacyChargeHistory(active bool) {
+	if r == nil {
+		return
+	}
+	r.legacyCharges = active
 }
 
 func (r *Registry) SetPauses(p nativecommon.PauseView) {
@@ -70,6 +83,11 @@ func merchantSubIdxKey(m [20]byte) []byte {
 // recording an attempt touches two small keys however long the history is.
 // One list holding every attempt would have to be read and rewritten whole by
 // each of them.
+// legacyChargeListKey is where the charge history lived before it was stored one key
+// per attempt: one list of every attempt (PL-R5T-82).
+func legacyChargeListKey(id SubscriptionID) []byte {
+	return uint64Key("subscriptions/charges/", uint64(id))
+}
 func chargeCountKey(id SubscriptionID) []byte {
 	return uint64Key("subscriptions/chargecount/", uint64(id))
 }
@@ -299,9 +317,24 @@ func (r *Registry) ListSubscriptionsByMerchant(merchant [20]byte) ([]Subscriptio
 // their position in the history distinguishes them. The work is the same for
 // the first attempt and the thousandth.
 func (r *Registry) AppendCharge(subscriptionID SubscriptionID, charge Charge) error {
-	count, err := r.ChargeCount(subscriptionID)
+	count, counted, err := r.chargeCount(subscriptionID)
 	if err != nil {
 		return err
+	}
+	if !counted && r.legacyCharges {
+		// A history stored under the old key moves to one key per attempt before the
+		// new attempt is numbered after it; once the count exists the old list is
+		// never read again (PL-R5T-82).
+		old, err := r.readLegacyCharges(subscriptionID)
+		if err != nil {
+			return err
+		}
+		for i, c := range old {
+			if err := r.st.KVPut(chargeKey(subscriptionID, uint64(i)+1), c); err != nil {
+				return err
+			}
+		}
+		count = uint64(len(old))
 	}
 	if err := r.st.KVPut(chargeKey(subscriptionID, count+1), charge); err != nil {
 		return err
@@ -310,24 +343,59 @@ func (r *Registry) AppendCharge(subscriptionID SubscriptionID, charge Charge) er
 }
 
 // ChargeCount returns how many charge attempts are recorded for a
-// subscription; the next attempt is numbered one more.
+// subscription; the next attempt is numbered one more. With the legacy
+// read-through on, a subscription that has no count yet counts the attempts of the
+// old list.
 func (r *Registry) ChargeCount(subscriptionID SubscriptionID) (uint64, error) {
-	var count uint64
-	if _, err := r.st.KVGet(chargeCountKey(subscriptionID), &count); err != nil {
-		return 0, fmt.Errorf("subscriptions: load charge count for %d: %w", subscriptionID, err)
+	count, counted, err := r.chargeCount(subscriptionID)
+	if err != nil {
+		return 0, err
+	}
+	if !counted && r.legacyCharges {
+		old, err := r.readLegacyCharges(subscriptionID)
+		if err != nil {
+			return 0, err
+		}
+		return uint64(len(old)), nil
 	}
 	return count, nil
+}
+
+// chargeCount reads the count key and reports whether it exists.
+func (r *Registry) chargeCount(subscriptionID SubscriptionID) (uint64, bool, error) {
+	var count uint64
+	found, err := r.st.KVGet(chargeCountKey(subscriptionID), &count)
+	if err != nil {
+		return 0, false, fmt.Errorf("subscriptions: load charge count for %d: %w", subscriptionID, err)
+	}
+	return count, found, nil
+}
+
+// readLegacyCharges reads the charge history stored under the old key.
+func (r *Registry) readLegacyCharges(subscriptionID SubscriptionID) ([]Charge, error) {
+	var old []Charge
+	if err := r.st.KVGetList(legacyChargeListKey(subscriptionID), &old); err != nil {
+		return nil, fmt.Errorf("subscriptions: load the old charge list for %d: %w", subscriptionID, err)
+	}
+	return old, nil
 }
 
 // ListCharges returns every charge attempt recorded for a subscription, in
 // chronological (attempt) order. Returns an empty, non-nil slice if none
 // exist.
 func (r *Registry) ListCharges(subscriptionID SubscriptionID) ([]Charge, error) {
-	count, err := r.ChargeCount(subscriptionID)
+	count, counted, err := r.chargeCount(subscriptionID)
 	if err != nil {
 		return nil, err
 	}
 	charges := []Charge{}
+	if !counted && r.legacyCharges {
+		old, err := r.readLegacyCharges(subscriptionID)
+		if err != nil {
+			return nil, err
+		}
+		return append(charges, old...), nil
+	}
 	for attempt := uint64(1); attempt <= count; attempt++ {
 		var charge Charge
 		found, err := r.st.KVGet(chargeKey(subscriptionID, attempt), &charge)

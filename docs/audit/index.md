@@ -13,7 +13,7 @@
 | `race-tests` | `make bugcheck-race` | `go test -race ./...`. |
 | `fuzz-critical` | `make bugcheck-fuzz` | `scripts/fuzz_all.sh`: every fuzz target, one at a time, 60 seconds each by default (see [fuzzing.md](./fuzzing.md)). |
 | `determinism` | `make bugcheck-determinism` | `make audit:determinism`: `./tests/determinism/...` and `./tests/consensus/...`. |
-| `chaos` | `make bugcheck-chaos` | `make audit:chaos`, which only records the two `pending` checks from `ops/audit/chaos.yaml` via `tools/audit`. It runs no Go test, so `tests/chaos` is not executed by this check (run `go test ./tests/chaos/...`; those tests use the in-process simulation, see [e2e-flows.md](./e2e-flows.md)). |
+| `chaos` | `make bugcheck-chaos` | `make audit:chaos`, which only records the two checks from `ops/audit/chaos.yaml` via `tools/audit` as `not-run` (verdict `no-verdict`). It runs no Go test, so `tests/chaos` is not executed by this check (run `go test ./tests/chaos/...`; those tests use the in-process simulation, see [e2e-flows.md](./e2e-flows.md)). |
 | `gateway-e2e` | `make bugcheck-gateway` | `go test -run TestEndToEndFinancialFlows ./tests/e2e`. |
 | `prod-config` | `scripts/verify_prod_config.sh -c config/prod.toml` | Production configuration safety rails. `config/prod.toml` passes it. |
 | `network-hardening` | `make bugcheck-network` | `make audit:netsec`: `./tests/netsec/...`. |

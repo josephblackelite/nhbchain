@@ -59,11 +59,14 @@ verified ones.
 
 `handleRequest` builds the response from the book:
 
-1. A peer may ask for addresses three times back to back and then once every
-   5 seconds (`pexRequestBurst`, `pexRequestRate`); a request over that is not
-   answered.
-2. Skip unverified entries, the requester, the local node, banned peers and
-   entries older than the TTL.
+1. A connection is answered once. The allowance is kept per remote host and
+   survives reconnects: a host gets `pexHostBurst` (2) answers and then one a
+   minute (`pexHostRate`), whatever identities it connects under; a request
+   over that is not answered. A peer whose host is not known falls back to the
+   earlier per-peer allowance (`pexRequestBurst`, `pexRequestRate`: three back
+   to back, then one every 5 seconds).
+2. Skip unverified entries, the requester, the local node, banned peers, peers
+   the operator configured as persistent and entries older than the TTL.
 3. Shuffle the remaining entries and truncate to `limit` (at most 32).
 4. Send `PexAddresses` with the request's token.
 

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"time"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -390,7 +389,10 @@ func (m *Manager) ClaimableDebit(token string, amt *big.Int, recipient [20]byte)
 	return nil
 }
 
-func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte, chainID string, recipientKind claimable.RecipientKind) (*claimable.Claimable, error) {
+// CreateClaimable stores a new claimable. now is the creation time in Unix seconds: the
+// caller supplies it (inside block execution, the block's timestamp) so that no node
+// reads its own clock while changing state.
+func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int, hashLock [32]byte, deadline int64, hint [32]byte, chainID string, recipientKind claimable.RecipientKind, now int64) (*claimable.Claimable, error) {
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, claimable.ErrInvalidAmount
 	}
@@ -418,7 +420,7 @@ func (m *Manager) CreateClaimable(payer [20]byte, token string, amount *big.Int,
 		RecipientHint: hint,
 		RecipientKind: recipientKind,
 		Deadline:      deadline,
-		CreatedAt:     time.Now().Unix(),
+		CreatedAt:     now,
 		Nonce:         nonce,
 		ExpiresAt:     deadline,
 		ChainID:       strings.TrimSpace(chainID),

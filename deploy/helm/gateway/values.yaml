@@ -20,6 +20,13 @@ ingress:
           pathType: Prefix
   tls: []
 
+# Addresses or CIDR ranges of the proxies in front of the gateway, written into
+# the gateway config as trustedProxies by config.content below. The gateway keys
+# its rate limits on the connecting address, so with an ingress in front it needs
+# the ingress controller's address range here to count clients separately. The
+# chart refuses to render while this list is empty and ingress.enabled is true.
+trustedProxies: []
+
 config:
   enabled: true
   path: /etc/nhb/gateway.yaml
@@ -51,6 +58,7 @@ config:
       - id: consensus
         requestsPerMinute: 240
         burst: 40
+    trustedProxies: {{ toJson .Values.trustedProxies }}
     auth:
       # Authentication defaults to enabled; set `enabled: false` only for tightly controlled development installs.
       hmacSecret: "{{ .Values.secrets.gatewayHMAC }}"

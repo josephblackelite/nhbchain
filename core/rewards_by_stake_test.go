@@ -3,6 +3,7 @@ package core
 import (
 	"math/big"
 	"testing"
+	"time"
 
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
@@ -69,6 +70,18 @@ func requireBalance(t *testing.T, sp *StateProcessor, name string, addr [20]byte
 	t.Helper()
 	if got := balanceOf(t, sp, addr); got.Cmp(big.NewInt(want)) != 0 {
 		t.Fatalf("%s: balance %s, want %d", name, got, want)
+	}
+}
+
+// delegateInBlock runs StakeDelegate the way the chain runs it: inside a block. Outside a block the processor has no block time and stamps the staking
+// index record with the wall clock, which is a property of the test and not of the chain: two builds of the same state then differ whenever they
+// straddle a second. The block's time is the one processEpochBlocks gives the same height.
+func delegateInBlock(t *testing.T, sp *StateProcessor, height uint64, delegator, validator [20]byte, amount int64) {
+	t.Helper()
+	sp.BeginBlock(height, time.Unix(rewardBlockTimestamp1+int64(height), 0))
+	defer sp.EndBlock()
+	if _, err := sp.StakeDelegate(delegator[:], validator[:], big.NewInt(amount)); err != nil {
+		t.Fatalf("delegate: %v", err)
 	}
 }
 
@@ -162,9 +175,7 @@ func TestRewardsByStake_DelegatedValidatorKeepsNothingAndDelegatorReceivesAll(t 
 		seedFixedValidator(t, sp, v, 0, 10) // all of its stake will be delegated in
 		seedFixedValidator(t, sp, w, 3000, 10)
 		writeAccount(t, sp, d, &types.Account{BalanceZNHB: big.NewInt(3000)})
-		if _, err := sp.StakeDelegate(d[:], v[:], big.NewInt(3000)); err != nil {
-			t.Fatalf("delegate: %v", err)
-		}
+		delegateInBlock(t, sp, 1, d, v, 3000)
 		processEpochBlocks(t, sp, 1)
 		return sp, v, w, d
 	}
@@ -201,9 +212,7 @@ func TestRewardsByStake_ValidatorsOwnStakeStillEarnsOnItsOwnAccount(t *testing.T
 	v, d := fixedAddr(1), fixedAddr(3)
 	seedFixedValidator(t, sp, v, 4000, 10)
 	writeAccount(t, sp, d, &types.Account{BalanceZNHB: big.NewInt(1000)})
-	if _, err := sp.StakeDelegate(d[:], v[:], big.NewInt(1000)); err != nil {
-		t.Fatalf("delegate: %v", err)
-	}
+	delegateInBlock(t, sp, 1, d, v, 1000)
 	processEpochBlocks(t, sp, 1)
 	// V holds 4000 of its own and 1000 delegated in: everything V earns (100: it is the only validator) splits 4000:1000 between V and D
 	requireBalance(t, sp, "validator V", v, 80)
@@ -249,9 +258,7 @@ func TestRewardsByStake_PaidNeverExceedsPlannedAndBalancesSumToPaid(t *testing.T
 	}
 	d := fixedAddr(7)
 	writeAccount(t, sp, d, &types.Account{BalanceZNHB: big.NewInt(1777)})
-	if _, err := sp.StakeDelegate(d[:], addrs[0][:], big.NewInt(1777)); err != nil {
-		t.Fatalf("delegate: %v", err)
-	}
+	delegateInBlock(t, sp, 1, d, addrs[0], 1777)
 	processEpochBlocks(t, sp, 1)
 
 	settlement, _ := sp.LatestRewardEpochSettlement()
@@ -275,31 +282,63 @@ func TestRewardsByStake_PaidNeverExceedsPlannedAndBalancesSumToPaid(t *testing.T
 }
 
 func TestRewardsByStake_SameInputsGiveTheSameStateRoot(t *testing.T) {
-	build := func(fromEpoch uint64) []byte {
+	// Every build is given its own wall clock, a day and a half apart. A state root may depend only on the inputs and on the block times, never on when
+	// the processor happens to run. This used to be left to chance: the delegation below was made outside any block, the processor stamped the wall-clock
+	// second into the staking index record, and two identical builds that straddled a second ended on different roots (13 runs in 200 when measured).
+	// With different clocks a leak of the wall clock into the state now fails every run instead of a few in a hundred.
+	early := time.Unix(1_900_000_000, 0)
+	late := early.Add(37 * time.Hour)
+	build := func(fromEpoch uint64, wallClock time.Time) []byte {
 		sp := newFixedRewardState(t, fromEpoch)
+		sp.nowFunc = func() time.Time { return wallClock }
 		seedFixedValidator(t, sp, fixedAddr(1), 9000, 10)
 		seedFixedValidator(t, sp, fixedAddr(2), 1000, 5)
 		d, target := fixedAddr(3), fixedAddr(2)
 		writeAccount(t, sp, d, &types.Account{BalanceZNHB: big.NewInt(2000)})
-		if _, err := sp.StakeDelegate(d[:], target[:], big.NewInt(2000)); err != nil {
-			t.Fatalf("delegate: %v", err)
-		}
+		delegateInBlock(t, sp, 1, d, target, 2000)
 		processEpochBlocks(t, sp, 1)
 		processEpochBlocks(t, sp, 3)
 		return append([]byte(nil), sp.Trie.Hash().Bytes()...)
 	}
-	if first, second := build(1), build(1); string(first) != string(second) {
+	if first, second := build(1, early), build(1, late); string(first) != string(second) {
+		t.Fatalf("two runs that differ only in their wall clock ended on different state roots: %x vs %x", first, second)
+	}
+	if first, second := build(0, early), build(0, late); string(first) != string(second) {
+		t.Fatalf("two earlier-split runs that differ only in their wall clock ended on different state roots: %x vs %x", first, second)
+	}
+	if first, second := build(1, early), build(1, early); string(first) != string(second) {
 		t.Fatalf("two identical runs ended on different state roots: %x vs %x", first, second)
 	}
-	if first, second := build(0), build(0); string(first) != string(second) {
-		t.Fatalf("two identical earlier-split runs ended on different state roots: %x vs %x", first, second)
-	}
-	if string(build(0)) == string(build(1)) {
+	if string(build(0, early)) == string(build(1, early)) {
 		t.Fatalf("the rule changes who is paid, so the state root must differ from the earlier split")
 	}
 	// a setting that has not been reached yet leaves the root exactly as it is with the setting off
-	if string(build(0)) != string(build(99)) {
+	if string(build(0, early)) != string(build(99, late)) {
 		t.Fatalf("an activation epoch that is never reached must not change the state root")
+	}
+}
+
+// The helper must hand the processor back with no block open. A block left open would hide the very thing the test above looks for: code that falls
+// back to the wall clock would be given the stale block time instead, and a leak would go unnoticed.
+func TestRewardsByStake_DelegatingInABlockUsesTheBlockTimeAndLeavesNoBlockOpen(t *testing.T) {
+	sp := newFixedRewardState(t, 1)
+	wallClock := time.Unix(1_900_000_000, 0)
+	sp.nowFunc = func() time.Time { return wallClock }
+	seedFixedValidator(t, sp, fixedAddr(2), 1000, 5)
+	d := fixedAddr(3)
+	writeAccount(t, sp, d, &types.Account{BalanceZNHB: big.NewInt(2000)})
+
+	var during time.Time
+	sp.BeginBlock(7, time.Unix(rewardBlockTimestamp1+7, 0))
+	during = sp.blockTimestamp()
+	sp.EndBlock()
+	if want := time.Unix(rewardBlockTimestamp1+7, 0).UTC(); !during.Equal(want) {
+		t.Fatalf("inside a block the processor's time is %s, want the block's own time %s", during, want)
+	}
+
+	delegateInBlock(t, sp, 1, d, fixedAddr(2), 2000)
+	if got := sp.blockTimestamp(); !got.Equal(wallClock) {
+		t.Fatalf("after the delegation the processor still answers %s: a block was left open (outside a block it must fall back to its clock, %s)", got, wallClock)
 	}
 }
 

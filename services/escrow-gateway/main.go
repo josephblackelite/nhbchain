@@ -88,10 +88,10 @@ func main() {
 	intents := NewPayIntentBuilder()
 	server := NewServer(auth, node, store, queue, intents, cfg.MerchantConfigs)
 
-	srv := &http.Server{
-		Addr:    cfg.ListenAddress,
-		Handler: otelhttp.NewHandler(server, "escrow-gateway"),
-	}
+	shutdownAuditPruner := startAuditPruner(store, cfg.UnauthenticatedAuditRetention, unauthenticatedAuditPruneEvery, time.Now)
+	defer shutdownAuditPruner()
+
+	srv := newHTTPServer(cfg.ListenAddress, otelhttp.NewHandler(server, "escrow-gateway"))
 
 	go func() {
 		log.Printf("escrow gateway listening on %s", cfg.ListenAddress)
@@ -113,6 +113,75 @@ func main() {
 }
 
 const shutdownTimeout = 10 * time.Second
+
+// The limits the gateway's HTTP server puts on a connection. Without them a
+// client could hold a connection open indefinitely by sending a request slowly,
+// and a request line and headers were bounded only by net/http's 1 MiB default.
+// WriteTimeout runs from the end of the request headers, so it covers reading
+// the body and the longest call to the node (20 seconds) as well as the reply.
+const (
+	httpReadHeaderTimeout = 10 * time.Second
+	httpReadTimeout       = 30 * time.Second
+	httpWriteTimeout      = 60 * time.Second
+	httpIdleTimeout       = 60 * time.Second
+	httpMaxHeaderBytes    = 16 << 10
+)
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
+	}
+}
+
+// startAuditPruner deletes the audit rows of failed authentications older than
+// retention, once now and then every interval, until the returned function is
+// called. A retention of zero or less keeps them, and nothing is started.
+func startAuditPruner(store *SQLiteStore, retention, interval time.Duration, nowFn func() time.Time) func() {
+	if store == nil || retention <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	pruneOnce := func() {
+		pruneCtx, pruneCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer pruneCancel()
+		removed, err := store.PruneUnauthenticatedAudit(pruneCtx, nowFn().Add(-retention))
+		if err != nil {
+			slog.Warn("escrow gateway audit prune failed", "error", err.Error())
+			return
+		}
+		if removed > 0 {
+			slog.Info("escrow gateway pruned audit rows of failed authentications", "removed", removed, "retention", retention.String())
+		}
+	}
+
+	go func() {
+		defer close(done)
+		pruneOnce()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pruneOnce()
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
+}
 
 // startRelayerBalanceMonitor checks the relayer's own NHB balance every
 // interval and logs a WARN when it's at or below minBalanceWei -- see

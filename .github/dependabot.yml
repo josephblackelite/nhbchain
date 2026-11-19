@@ -1,0 +1,9 @@
+# Keeps the GitHub Actions references current. The references are pinned to a
+# commit as they are brought up to date (PL-R5T-35); until then this proposes the
+# updates to the tags they use.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

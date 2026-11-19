@@ -17,7 +17,7 @@
 //	nhb-snapshot verify      --manifest FILE --archive FILE --chain-id N --genesis-hash HEX
 //	nhb-snapshot extract     --manifest FILE --archive FILE --target DIR --chain-id N --genesis-hash HEX
 //	nhb-snapshot manifest    show --manifest FILE [--field NAME]
-//	nhb-snapshot wait-synced --rpc URL [--tip-rpc URL] [--min-height N]
+//	nhb-snapshot wait-synced --rpc URL (--tip-rpc URL | --no-reference) [--min-height N]
 package main
 
 import (
@@ -63,6 +63,10 @@ Commands:
   manifest     show a manifest (or one field of it)
   check-config check that a node config carries the consensus-relevant values
                of the network its genesis file describes
+  config-digest print a hash of every consensus setting a node config gives
+               (hashes only; two validators must print the same root)
+  check-parity compare the digest files two validators wrote at start-up and
+               name the sections that differ
   wait-synced  wait until a node's RPC reports a height near the network tip
   version      print the tool version
 
@@ -92,6 +96,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = cmdManifest(rest, stdout, stderr)
 	case "check-config":
 		err = cmdCheckConfig(rest, stdout, stderr)
+	case "config-digest":
+		err = cmdConfigDigest(rest, stdout, stderr)
+	case "check-parity":
+		err = cmdCheckParity(rest, stdout, stderr)
 	case "wait-synced":
 		err = cmdWaitSynced(rest, stdout, stderr)
 	case "version":
@@ -486,12 +494,13 @@ func cmdCheckConfig(args []string, stdout, stderr io.Writer) error {
 func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	fs := newFlagSet("wait-synced", stderr)
 	rpc := fs.String("rpc", "", "the node's own RPC URL (on this host; its operator token, when it needs one, is read from "+envRPCToken+")")
-	tipRPC := fs.String("tip-rpc", "", "RPC URL of a node you trust, measured against (optional)")
+	tipRPC := fs.String("tip-rpc", "", "RPC URL of a node you trust, measured against (required unless --no-reference is given)")
+	noReference := fs.Bool("no-reference", false, "wait without a reference node: the node counts as at the tip on the date of its newest block alone, which does not show that it is on the network's chain")
 	chain := fs.String("chain-id", "", "expected chain id (or "+envChainID+")")
 	genesis := fs.String("genesis-hash", "", "expected genesis hash (or "+envGenesisHash+")")
 	minHeight := fs.Uint64("min-height", 0, "the node must have applied a block above this height, the height of the snapshot it started from (0 = no such requirement)")
 	lagBlocks := fs.Uint64("max-lag-blocks", 3, fmt.Sprintf("with --tip-rpc: how many blocks either side of that node still counts as synced (at most %d)", maxReferenceLag))
-	lagSecs := fs.Int64("max-lag-seconds", 60, "without --tip-rpc: how far from this host's clock, either side, the newest block may be dated")
+	lagSecs := fs.Int64("max-lag-seconds", 60, "with --no-reference: how far from this host's clock, either side, the newest block may be dated")
 	interval := fs.Duration("interval", 5*time.Second, "time between polls")
 	timeout := fs.Duration("timeout", 2*time.Hour, "give up after this long")
 	rpcTimeout := fs.Duration("rpc-timeout", defaultRPCTimeout, "give up when the node's RPC has not answered once after this long, or after --stall-timeout when that is shorter (a node that is starting answers within a minute or two; one that never does is not running or is crash-looping)")
@@ -503,7 +512,17 @@ func cmdWaitSynced(args []string, stdout, stderr io.Writer) error {
 	if *rpc == "" {
 		return usagef("--rpc is required")
 	}
-	if strings.TrimSpace(*tipRPC) != "" && *lagBlocks > maxReferenceLag {
+	hasReference := strings.TrimSpace(*tipRPC) != ""
+	if hasReference && *noReference {
+		return usagef("--tip-rpc and --no-reference exclude each other")
+	}
+	// A node's own newest block, dated close to this host's clock, does not show
+	// that it is on the network's chain: only a reference node can, so going without
+	// one has to be said.
+	if !hasReference && !*noReference {
+		return usagef("no reference node: pass --tip-rpc URL (a node you trust, run by neither the snapshot's host nor the bootnode), or --no-reference to wait without one (see docs/validators/snapshot-onboarding.md)")
+	}
+	if hasReference && *lagBlocks > maxReferenceLag {
 		return usagef("--max-lag-blocks %d is more than the %d blocks that can be compared with the reference node's", *lagBlocks, maxReferenceLag)
 	}
 	opts := waitOptions{

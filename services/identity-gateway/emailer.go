@@ -18,7 +18,10 @@ type Emailer interface {
 	SendVerification(ctx context.Context, msg VerificationMessage) error
 }
 
-// LogEmailer logs verification messages to stdout. Intended for development and testing.
+// LogEmailer is the only Emailer this repository ships. It writes the address a
+// code was meant for to the log and DELIVERS NOTHING: the code itself is never
+// logged, so no user receives it. It exists for development and tests; a
+// deployment that needs real sign-ups supplies its own Emailer.
 type LogEmailer struct {
 	Logger *log.Logger
 }
@@ -29,6 +32,6 @@ func (l *LogEmailer) SendVerification(ctx context.Context, msg VerificationMessa
 	if logger == nil {
 		logger = log.Default()
 	}
-	logger.Printf("identity-gateway: deliver verification code to %s (alias hint=%s, expires=%s)", msg.Email, msg.AliasHint, msg.ExpiresAt)
+	logger.Printf("identity-gateway: verification code for %s (alias hint=%s, expires=%s) was NOT delivered: this build has no email provider and only logs the address", msg.Email, msg.AliasHint, msg.ExpiresAt)
 	return nil
 }

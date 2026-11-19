@@ -328,8 +328,8 @@ func TestHeavyQueryLoadDoesNotStarveBlockProduction(t *testing.T) {
 	t.Cleanup(func() { explorerActivityBatchSize = prevBatch })
 	srv := newTestServer(t, fx.Node, nil, costServerConfig())
 	warmCostServer(t, srv)
-	// Bring the lending index (or, on an older tree, do the one full replay) up to date.
-	if call := doRPC(t, srv, nil, "198.51.100.1:1", "lending_getMarket"); call.Code != http.StatusOK {
+	// Bring the lending index up to date.
+	if call := lendingReadAnswered(t, srv, "198.51.100.1:1"); call.Code != http.StatusOK {
 		t.Fatalf("lending_getMarket: HTTP %d %s", call.Code, call.Body)
 	}
 	producer := newBlockProducer(t, fx)
@@ -360,8 +360,27 @@ func TestHeavyQueryLoadDoesNotStarveBlockProduction(t *testing.T) {
 	}
 
 	// Nothing may be left holding a slot: a heavy query from a new client is served.
-	if call := doRPC(t, srv, nil, "198.51.100.77:1", "lending_getMarket"); call.Code != http.StatusOK {
+	if call := lendingReadAnswered(t, srv, "198.51.100.77:1"); call.Code != http.StatusOK {
 		t.Fatalf("after the load a heavy query was still refused: HTTP %d %s", call.Code, call.Body)
+	}
+}
+
+// lendingReadAnswered sends lending_getMarket as the client until it is
+// answered. A lending read that arrives while the lending index is behind the
+// chain (just after start-up, or after the chain has grown while the reads were
+// being refused) helps the index along for a bounded time and asks to be retried
+// (HTTP 503 with the server error code), so how many calls it takes depends on
+// how fast the machine is. Any other answer, a refusal by the query pool
+// included, is returned at once.
+func lendingReadAnswered(t *testing.T, srv *Server, remote string) rpcCall {
+	t.Helper()
+	deadline := time.Now().Add(time.Minute)
+	for {
+		call := doRPC(t, srv, nil, remote, "lending_getMarket")
+		if call.Code != http.StatusServiceUnavailable || call.errCode() != codeServerError || time.Now().After(deadline) {
+			return call
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

@@ -24,6 +24,8 @@ paid in (`paymasterSponsoredAsset`), so it is the default.
   | `TopUpAmountWei` | Amount credited to the sponsor per top-up. |
   | `DailyCapWei` | Must be positive when `Enabled` is true. Limits the total debited from the funding account per sponsor per UTC day. |
   | `CooldownSeconds` | Minimum time between top-ups for one sponsor. |
+  | `SponsorRole` | The role an address must hold in chain state before it is topped up. Must be set when `Enabled` is true (config parsing refuses otherwise): without it any address that signs a sponsored transfer is topped up and gets its own `DailyCapWei`. A sponsor without the role is refused with `sponsor_not_registered`. Grant the role with an ordinary role proposal; the role name must be in the governance `AllowedRoles` of every validator. |
+  | `AggregateDailyCapWei` | Must be positive when `Enabled` is true. Limits the total debited from the funding account per UTC day over all sponsors together, fee included (state key: the day record whose sponsor key is `aggregate`). Nothing is written for it when unset. |
   | `Governance.FundingAccount` | Account debited. |
   | `Governance.Minter`, `Governance.Approver` | Two different addresses that must both be set. |
   | `Governance.MinterRole`, `Governance.ApproverRole` | Roles the two addresses must hold in chain state. When the value in `config.toml` is empty or absent, the loader replaces it with the built-in default, `ROLE_PAYMASTER_AUTOFUND` and `ROLE_PAYMASTER_ADMIN` (`config/config.go`), so the role checks are on for a node configured from a file. |
@@ -44,7 +46,7 @@ paid in (`paymasterSponsoredAsset`), so it is the default.
   and `day`.
 * Failure reasons in the code: `amount_not_configured`, `paymaster_missing`,
   `treasury_missing` (a fee is set but no escrow fee treasury is configured),
-  `daily_cap_exceeded`, `cooldown_active`, `funding_account_missing`, `operator_missing`,
+  `daily_cap_exceeded`, `global_daily_cap_exceeded` (the aggregate cap), `sponsor_not_registered` (the sponsor lacks `SponsorRole`), `cooldown_active`, `funding_account_missing`, `operator_missing`,
   `operator_role_missing`, `approver_missing` (also used when the minter and approver are the
   same address), `approver_role_missing`, `funding_insufficient`,
   `funding_account_in_use` (the funding account is the sponsor itself or the sender or recipient of

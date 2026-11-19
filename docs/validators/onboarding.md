@@ -29,8 +29,8 @@ Do these four things *before* you run anything:
    stuck on a small box.
 2. **Firewall / security group**, opened *before* you start:
    - `22/tcp` — SSH, your own access.
-   - `6001` **TCP and UDP** — P2P. Both protocols are required; UDP is the
-     one people forget.
+   - `6001` **TCP** — P2P. The node listens on TCP only; UDP is not used, so a
+     UDP rule is harmless but not needed.
    - `8545/tcp` is **optional**. The bootstrap script binds RPC to
      `127.0.0.1` by default (not externally reachable). Only open this if
      you deliberately want direct external RPC/MetaMask access — leaving it
@@ -68,7 +68,8 @@ verifies, how snapshots are made and how old one may be is in
 
 You need two things from whoever operates the network, neither of which is built
 into the script: the location of a snapshot (`--snapshot-url`) and a bootnode
-(`--bootnode`). The snapshot's manifest names the source commit the node has to
+(`--bootnode`), and one of your own choosing: a reference node you trust
+(`--tip-rpc`, below). The snapshot's manifest names the source commit the node has to
 be built from. On a clean machine `nhb-snapshot` does not exist yet, so read it
 from the manifest, which is JSON, with `curl` (the field is
 `producer.binaryCommit`):
@@ -95,8 +96,21 @@ bash scripts/validator-only-bootstrap.sh \
   --snapshot-url https://SNAPSHOT-HOST.example/PATH \
   --bootnode BOOTNODE-HOST.example:6001 \
   --max-snapshot-age 72h \
-  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT
+  --min-release-commit FULL_COMMIT_ID_OF_THE_OLDEST_RELEASE_YOU_ACCEPT \
+  --tip-rpc https://TRUSTED-RPC-HOST.example
 ```
+
+`--tip-rpc` is the RPC URL of a node you trust that neither the snapshot host nor the
+bootnode runs. It is not optional: a snapshot is not signed by anyone, and a run that
+installs one stops before it downloads anything unless something from outside the
+snapshot host and the bootnode can check the result, which is this reference node
+(over https, on another host than theirs), or the block the snapshot must end at
+(`--tip-hash` together with `--state-root`, read from nodes you trust). Only the
+reference node also checks the blocks your node applies after the snapshot: the pins
+show where the snapshot ends and nothing after it, so a run with them and no
+reference node is warned, when it starts and in its closing message, that the node's
+place at the tip rests on the bootnode. Only `--allow-unanchored` goes on without
+either, with the same warnings.
 
 `--max-snapshot-age 72h` refuses a snapshot whose newest block is older than three
 days: a follower has to execute every block after its snapshot, and an old one is
@@ -128,18 +142,19 @@ validator; a snapshot that does not check out changes nothing.
 | `--bootnode` | *(required, or `NHB_BOOTNODE`)* | Plain `host:port`, never an `enode://` URI (see below). |
 | `--wallet-url` | *(none)* | The `https` address of the wallet's Validator Hub page. Only used to print, in the closing text, a link that opens it with this validator's address already filled in (`<url>?node=<address>`), so the delegation is one click. Never fetched. |
 | `--min-release-commit` | *(none, or `NHB_MIN_RELEASE_COMMIT`; advised)* | The full commit id of the oldest release you accept. The script refuses a manifest whose commit is neither that commit nor a descendant of it, so a snapshot host cannot steer you to old consensus code. Needs both commits in your checkout (`git fetch` first). |
-| `--tip-rpc` | *(none, or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust. Used to decide when the node has caught up, and to refuse a node whose newest blocks are not that node's. |
+| `--tip-rpc` | *(required for a run that installs a snapshot, unless `--tip-hash` with `--state-root` or `--allow-unanchored` is given; or `NHB_TIP_RPC_URL`)* | RPC URL of a node you trust, which neither the snapshot host nor the bootnode runs: `https` unless `--allow-insecure-http`, on another host than theirs. Used to decide when the node has caught up, and to refuse a node whose newest blocks are not that node's. |
 | `--max-lag-blocks` | `3` | How far from that node (either side) still counts as caught up; at most 15. |
 | `--sync-timeout` | `7200` | Seconds to wait for the catch-up. |
 | `--rpc-timeout` | `180` | Seconds the node's RPC may stay silent after the service starts. A node that never answers is not running or is crash-looping: the script stops after this long with the commands that show why, and does not wait out `--sync-timeout`. |
 | `--max-snapshot-age` | *(any age; use `72h`)* | Refuse a snapshot whose newest block is older than this, for example `72h`. The limit rests on the date of the newest block, which is checked against the unpacked database; the creation time the manifest states is not signed by anyone and cannot get a stale snapshot past it. Without it a snapshot of any age is accepted and a stale one fails only later, with a stall. |
-| `--tip-hash`, `--state-root` | *(none)* | The tip hash and state root the snapshot must have (32 bytes of hex), as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. |
+| `--tip-hash`, `--state-root` | *(none)* | The tip hash and state root the snapshot must have (32 bytes of hex), as read from nodes you trust. A snapshot with another tip is refused before it is downloaded. Both together let a run that installs a snapshot go on without `--tip-rpc`, but they pin only where the snapshot ends: nothing then checks the blocks the node applies after it, so the node's place at the tip rests on the bootnode, and the run warns about that when it starts and in its closing message. |
 | `--max-snapshot-gib` | `16` | Refuse a snapshot whose archive, or whose unpacked database, is larger than this many GiB, or that the disk has no room for. |
 | `--listen-addr` | `0.0.0.0:6001` | P2P listen address. |
 | `--rpc-addr` | `127.0.0.1:8545` | Not exposed externally by default. |
 | `--external-address` | *(auto-detected)* | Falls back to EC2 IMDSv2, then `https://ifconfig.me`, if omitted. |
 | `--reset-state` | *(off)* | Replace the data directory with a snapshot: unpack it first, then stop the node, move the old directory aside and put the new one in its place. |
-| `--allow-insecure-http` | *(off)* | Accept an `http://` or `file://` snapshot URL. |
+| `--allow-insecure-http` | *(off)* | Accept an `http://` or `file://` snapshot URL, and an `http://` `--tip-rpc`. |
+| `--allow-unanchored` | *(off)* | Go on without any check from outside on the snapshot. The script warns, and the closing message says so again: the node is then reported at the network tip on the word of the snapshot host and the bootnode alone. |
 | `--allow-existing-key` | *(off)* | Use a validator key that was already on this host. Only if that key runs nowhere else. |
 | `--allow-binary-mismatch` | *(off)* | Continue although this build is not the snapshot's. |
 | `--help` | | Prints usage. |

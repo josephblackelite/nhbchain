@@ -8,7 +8,7 @@ Every parameter list is a single JSON object: `"params": [ { ... } ]`. Amounts a
 
 The method is still routed, but the handler always answers HTTP 410 with JSON-RPC code `-32060` and a message saying the method is disabled (`handlePotsoRewardClaim`, `potsoRewardClaimRPCDisabledMessage` in `rpc/potso_reward_handlers.go`; `codeMethodDisabled` in `rpc/http.go`). It performs no authentication and reads no parameters. The reason given in the code comment is that the old implementation debited the treasury and credited the claimant on the live state of the one validator that handled the call, outside block execution, so validators could disagree about the next block.
 
-Consequence: a reward recorded in claim mode cannot be collected on a running node (see [rewards-modes.md](rewards-modes.md)). Auto mode, the mode in the repository's configuration files, needs no claim.
+Consequence: a reward recorded in claim mode cannot be collected on a running node (see [rewards-modes.md](rewards-modes.md)), so a node refuses to select claim mode at start-up. Auto mode, the mode in the repository's configuration files, needs no claim.
 
 ## `potso_rewards_history`
 

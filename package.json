@@ -10,11 +10,11 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:sdk:ts": "tsx --test sdk/ts/test/wallet.test.ts"
+    "test:sdk:ts": "tsx --test sdk/ts/test/wallet.test.ts sdk/ts/test/walletChainId.test.ts sdk/ts/test/txhash.test.ts sdk/ts/test/identityGateway.test.ts"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "type": "commonjs",
   "dependencies": {
     "@noble/hashes": "^1.4.0",

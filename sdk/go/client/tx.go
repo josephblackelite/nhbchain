@@ -9,9 +9,11 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/rpc/txchainid"
 )
 
 const (
@@ -31,7 +33,11 @@ type Client struct {
 	endpoint   string
 	httpClient *http.Client
 	authToken  string
+	// chainID is set only by WithChainID: an id the caller chose. Otherwise a transaction carries the id the node
+	// reports (nhb_getNetworkStats, field txChainId), read through chainIDs; there is no built-in default (PL-R5T-29).
 	chainID    *big.Int
+	chainIDs   *txchainid.Reader
+	chainIDTTL time.Duration
 	gasLimit   uint64
 	gasPrice   *big.Int
 }
@@ -53,11 +59,24 @@ func WithAuthToken(token string) Option {
 	}
 }
 
-// WithChainID overrides the chain identifier embedded in constructed transactions.
+// WithChainID makes every constructed transaction carry chainID and stops the client asking the node. It is an
+// explicit choice by the caller (for a node older than the release that reports the id, or a test): without it the
+// client reads the id the node reports and refuses to sign when the node does not report one. A nil value is ignored.
 func WithChainID(chainID *big.Int) Option {
 	return func(c *Client) {
 		if chainID != nil {
 			c.chainID = new(big.Int).Set(chainID)
+		}
+	}
+}
+
+// WithChainIDExpiry sets how long an id read from the node is reused (default txchainid.DefaultTTL, 15 seconds). The
+// node reports the legacy constant until the chain's activation height and the network's own id from it, so the
+// answer must not be kept for long.
+func WithChainIDExpiry(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.chainIDTTL = d
 		}
 	}
 }
@@ -87,7 +106,6 @@ func New(endpoint string, opts ...Option) (*Client, error) {
 	c := &Client{
 		endpoint:   trimmed,
 		httpClient: http.DefaultClient,
-		chainID:    types.NHBChainID(),
 		gasLimit:   defaultGasLimit,
 		gasPrice:   new(big.Int).Set(defaultGasPrice),
 	}
@@ -99,9 +117,7 @@ func New(endpoint string, opts ...Option) (*Client, error) {
 	if c.httpClient == nil {
 		c.httpClient = http.DefaultClient
 	}
-	if c.chainID == nil {
-		c.chainID = types.NHBChainID()
-	}
+	c.chainIDs = txchainid.NewReader(c.fetchTxChainID, c.chainIDTTL)
 	if c.gasLimit == 0 {
 		c.gasLimit = defaultGasLimit
 	}
@@ -190,20 +206,20 @@ func (c *Client) prepareTransferTx(ctx context.Context, key *crypto.PrivateKey, 
 	if sender == nil || sender.PublicKey == nil {
 		return nil, fmt.Errorf("client: derive sender address: public key unavailable")
 	}
+	chainID, err := c.TxChainID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("client: transaction chain id: %w", err)
+	}
 	nonce, err := c.fetchNonce(ctx, sender.Address().String())
 	if err != nil {
 		return nil, err
-	}
-	chainID := c.chainID
-	if chainID == nil {
-		chainID = types.NHBChainID()
 	}
 	gasPrice := c.gasPrice
 	if gasPrice == nil {
 		gasPrice = defaultGasPrice
 	}
 	tx := &types.Transaction{
-		ChainID:  new(big.Int).Set(chainID),
+		ChainID:  chainID,
 		Type:     txType,
 		Nonce:    nonce,
 		To:       dest.Bytes(),
@@ -223,6 +239,29 @@ func (c *Client) prepareTransferTx(ctx context.Context, key *crypto.PrivateKey, 
 		return nil, fmt.Errorf("client: gas price must be greater than zero")
 	}
 	return tx, nil
+}
+
+// TxChainID returns the chain id a transaction signed now must carry: the id the caller chose with WithChainID, or
+// else the one the node reports as txChainId in the public nhb_getNetworkStats call, reused for a short time. It
+// returns an error, never a default, when the node cannot be asked or reports no usable id. Callers that build
+// transactions with the builders in sdk/lending pass it as their chain id argument.
+func (c *Client) TxChainID(ctx context.Context) (*big.Int, error) {
+	if c == nil {
+		return nil, fmt.Errorf("client: instance required: %w", txchainid.ErrUnavailable)
+	}
+	if c.chainID != nil {
+		return new(big.Int).Set(c.chainID), nil
+	}
+	return c.chainIDs.ChainID(ctx)
+}
+
+// fetchTxChainID is the read behind TxChainID. The call is public, so it is made without the bearer token.
+func (c *Client) fetchTxChainID(ctx context.Context) (*big.Int, error) {
+	var result json.RawMessage
+	if err := c.call(ctx, txchainid.Method, []interface{}{}, false, &result); err != nil {
+		return nil, err
+	}
+	return txchainid.Parse(result)
 }
 
 func (c *Client) fetchNonce(ctx context.Context, address string) (uint64, error) {

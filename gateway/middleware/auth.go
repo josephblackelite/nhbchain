@@ -163,12 +163,18 @@ func validateClaims(claims jwt.MapClaims, issuer, audience string) error {
 			if !matched {
 				return errors.New("audience mismatch")
 			}
+		default:
+			// An absent audience, or one that is neither a string nor a list,
+			// cannot match the configured audience.
+			return errors.New("audience mismatch")
 		}
 	}
-	if exp, ok := claims["exp"].(float64); ok {
-		if int64(exp) < time.Now().Unix() {
-			return errors.New("token expired")
-		}
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return errors.New("token has no expiry")
+	}
+	if int64(exp) < time.Now().Unix() {
+		return errors.New("token expired")
 	}
 	return nil
 }

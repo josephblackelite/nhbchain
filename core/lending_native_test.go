@@ -223,6 +223,7 @@ func seedUnhealthyBorrowerPosition(t *testing.T) (sp *StateProcessor, db storage
 		LiquidationThreshold: 9_000,
 		LiquidationBonus:     1_000,
 	})
+	sp.SetLendingRiskActivationHeight(1)
 	// Zero-rate model: this test asserts exact post-liquidation balances, so
 	// interest accrual (which DefaultInterestModel would apply) is
 	// deliberately excluded -- it's covered by dedicated interest tests
@@ -292,6 +293,7 @@ func seedUnhealthyBorrowerPosition(t *testing.T) (sp *StateProcessor, db storage
 		LiquidationThreshold: 7_000,
 		LiquidationBonus:     1_000,
 	})
+	sp.SetLendingRiskActivationHeight(1)
 	return sp, db, supplierKey, borrowerKey, liquidatorKey
 }
 
@@ -388,6 +390,7 @@ func TestApplyLendingLiquidate_RejectsHealthyPosition(t *testing.T) {
 		LiquidationThreshold: 9_000,
 		LiquidationBonus:     1_000,
 	})
+	sp.SetLendingRiskActivationHeight(1)
 
 	borrowerAddr := crypto.MustNewAddress(crypto.NHBPrefix, borrowerKey.PubKey().Address().Bytes())
 	tx := mustSignLendingLiquidateTx(t, liquidatorKey, 0, borrowerAddr)

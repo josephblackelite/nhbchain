@@ -394,7 +394,8 @@ func TestServerAuthorization(t *testing.T) {
 		grpc.ChainUnaryInterceptor(UnaryAuthInterceptor(authorizer)),
 		grpc.ChainStreamInterceptor(StreamAuthInterceptor(authorizer)),
 	)
-	srv := NewServer(node, WithAuthorizer(authorizer))
+	// Block writes are off by default (TestBlockWritesAreOffUnlessAskedFor); this test is about the credential.
+	srv := NewServer(node, WithAuthorizer(authorizer), WithBlockWrites())
 	if srv.auth == nil {
 		t.Fatalf("expected server authorizer to be configured")
 	}

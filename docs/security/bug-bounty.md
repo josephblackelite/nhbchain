@@ -40,6 +40,3 @@ Send encrypted reports to **security@nhbcoin.com** with the subject line “Bug 
 * **Fingerprint:** `8C12 7674 689A AB92 A4DE  4643 E847 50CA 0E2F 4459`
 * Generated 2026-09-03, no expiration set. Verify the fingerprint above matches what you import before trusting it for an encrypted report.
 
-## Reports and status
-The researchers who have reported to us, and where their reports stand, are on the [status page](bounty-status.md). We credit researchers who report real issues on our [acknowledgments page](acknowledgments.md).
-

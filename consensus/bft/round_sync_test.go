@@ -191,10 +191,15 @@ func TestOnlyEnoughVotingPowerMovesAValidatorToALaterRound(t *testing.T) {
 		{"the other of two", []int64{1, 1}, map[int]int{1: 6}, 6},
 		{"the smaller of two staked two to one", []int64{2, 1}, map[int]int{1: 6}, 6},
 		{"exactly a third is enough", []int64{10, 3, 2}, map[int]int{1: 6, 2: 6}, 6},
-		// A third of the power is the least that moves anyone: a coalition below it
-		// cannot, whatever round it claims and however much power the validator that
-		// would move holds itself.
-		{"a little less than a third is not enough", []int64{6, 2, 1, 1}, map[int]int{1: 6, 2: 6}, 2},
+		// A third of the power is the least that moves anyone by the first rule. Below it a
+		// group moves a validator in one case only (the last rule of supportedRoundLocked):
+		// the validator, with the ones it has heard from, cannot make a quorum, and with the
+		// group ahead it can. Here the validator and the group together hold 6 of 10, which
+		// is not a quorum, so nothing moves it, whatever round the group claims.
+		{"a little less than a third is not enough when they do not make a quorum together", []int64{3, 2, 1, 4}, map[int]int{1: 6, 2: 6}, 2},
+		// The same group is followed when the validator and the group do make a quorum (9 of 10)
+		// and the validator alone does not (6 of 10): no round can decide without them.
+		{"a little less than a third is followed when no quorum can be made without it", []int64{6, 2, 1, 1}, map[int]int{1: 6, 2: 6}, 6},
 		{"a little more than a third is enough", []int64{6, 2, 1, 1}, map[int]int{1: 6, 2: 6, 3: 6}, 6},
 		{"a small validator cannot move a large one", []int64{10, 4}, map[int]int{1: 6}, 2},
 		{"more than a third can", []int64{10, 4, 2}, map[int]int{1: 6, 2: 6}, 6},
@@ -261,6 +266,72 @@ func TestEvidenceBeyondTheWindowMovesAValidatorAtOnce(t *testing.T) {
 	engine.runRound()
 	if got := roundOf(engine); got != far {
 		t.Fatalf("validator is in round %d, want %d", got, far)
+	}
+}
+
+// The rule that follows a validator ahead when no quorum can otherwise be made
+// (the last one in supportedRoundLocked) holds no floor on how little power that
+// validator needs, so a lone validator under a third of the power, real messages
+// and all, is bounded a different way: to maxFutureRounds distinct rounds per
+// height. Validator 1 here holds a quarter of the power and claims, in a real
+// vote, one round further each time this engine's own round catches up; validator
+// 2, also a quarter, is kept fresh alongside it so the shortfall the rule acts on
+// (this validator and one other short of the three of four a quorum needs) never
+// closes on its own. Without the bound the engine follows every claim.
+func TestALoneValidatorCannotDragThisEngineThroughUnboundedRoundsOfRealMessages(t *testing.T) {
+	tv := newWeightedValidators(t, 1, 1, 1, 1)
+	engine, _, _ := engineAt(t, tv, 1)
+	const jumps = 3 * maxFutureRounds
+	for i := 1; i <= jumps; i++ {
+		sendVote(t, engine, tv, 2, roundOf(engine)) // the level peer: always freshly at this validator's own round
+		sendVote(t, engine, tv, 1, 1+i*1000)        // the lone claimant: ever further ahead
+		engine.startNewRound()
+	}
+	if got, want := roundOf(engine), 1+maxFutureRounds*1000+jumps; got > want {
+		t.Fatalf("a lone validator holding a quarter of the power moved this engine to round %d over %d claims of real votes, want at most %d", got, jumps, want)
+	}
+}
+
+// A burst of future-round votes from one validator, delivered with no round of
+// this engine's own actually elapsing between them (no call to startNewRound in
+// between), must not spend any of admitWeakRoundJumpLocked's per-height bound:
+// only a call that actually moves currentState.Round may do that (see
+// previewSupportedRoundLocked's doc comment). Before this was fixed,
+// admitFutureRoundLocked's own preview -- deciding only whether to wake the round
+// loop early -- called supportedRoundLocked itself, so every future-round vote in
+// a burst like this one spent one of the bound's maxFutureRounds slots even
+// though none of them moved this validator's round at all: maxFutureRounds+1
+// ordinary messages, sent in a moment with no restart and no real round-loop
+// progress, exhausted the whole height's bound and permanently refused the one
+// later, real round -- also validator 1's, and the only one that could complete a
+// quorum -- this validator actually needed to follow.
+func TestABurstOfFutureRoundVotesDoesNotSpendTheWeakJumpBudget(t *testing.T) {
+	tv := newWeightedValidators(t, 1, 1, 1, 1)
+	engine, _, _ := engineAt(t, tv, 1)
+
+	// Validator 2 stays exactly level with this engine (the precondition for the
+	// no-floor rule: this validator and its level peers, short of a quorum,
+	// cannot decide without whoever is ahead), so validator 1's claims are what
+	// the no-floor rule acts on.
+	sendVote(t, engine, tv, 2, roundOf(engine))
+
+	const burst = maxFutureRounds + 1
+	for i := 0; i < burst; i++ {
+		sendVote(t, engine, tv, 1, 2+i) // rounds 2..2+maxFutureRounds, no startNewRound between them
+	}
+
+	engine.mu.RLock()
+	spent := len(engine.weakJumpRounds)
+	engine.mu.RUnlock()
+	if spent != 0 {
+		t.Fatalf("a burst of %d future-round votes spent %d of the weak jump bound before any round actually moved, want 0", burst, spent)
+	}
+
+	// The real jump, to the round validator 1 actually needs, must still be
+	// granted once a round genuinely starts.
+	engine.startNewRound()
+	if got, want := roundOf(engine), 2+maxFutureRounds; got != want {
+		t.Fatalf("validator 0 is in round %d after the burst and one real round start, want %d: the bound must not have been exhausted by messages that never moved a round", got, want)
 	}
 }
 

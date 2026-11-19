@@ -106,6 +106,12 @@ const (
 	// dry-run confirmation stops so it cannot starve the rest of the build.
 	sdcBudgetShare = 0.6
 
+	// prefixFitPercent is the share of PrefixBudget that the first-pass cost of
+	// the transactions kept for the prefix fallback may use. The fallback
+	// re-executes them in a fresh wave that costs about what the first pass
+	// did, so the rest is headroom for timing noise.
+	prefixFitPercent = 70
+
 	// maxIsolationCulprits bounds how many transactions one joint-pass
 	// isolation run will bisect out.
 	maxIsolationCulprits = 8
@@ -749,15 +755,6 @@ type buildCtx struct {
 	waves    int
 	fellBack bool
 	included []*types.Transaction
-
-	// skipEvidence omits the evidence stage from a wave. Isolation trials set
-	// it: processPendingEvidenceForState mutates the Node-wide penalty ledger,
-	// which is not scoped to the state copy a trial runs on, so a trial that
-	// ran it could make the ledger believe a penalty was already applied and
-	// change what the node's real passes over the next block compute (see
-	// TestKnownIssueEvidenceSlashingIsNotIdempotentAcrossPasses). Trials give
-	// up detecting evidence-stage failures rather than risk that.
-	skipEvidence bool
 }
 
 func (n *Node) newBuildCtx(txs []*types.Transaction) *buildCtx {
@@ -987,6 +984,13 @@ func (n *Node) buildEmpty(ctx *buildCtx) (*types.Block, error) {
 // against a state polluted only by successful applies; re-verify exactly that
 // prefix in a fresh wave with its own short budget and use it if it comes back
 // clean. Otherwise the caller falls back to the empty block.
+//
+// The verification wave costs about what the first pass cost for the same
+// transactions, yet it only gets PrefixBudget, which is much smaller than the
+// build budget the prefix may have used. The prefix is therefore trimmed to the
+// leading run whose first-pass cost fits (the first transaction alone when it is
+// heavier than that but still within the budget), so a window that is only slow
+// in total still yields a block; the rest stays in the mempool for later rounds.
 func (n *Node) prefixFallback(ctx *buildCtx, last *waveResult) (*types.Block, error) {
 	if last == nil {
 		return nil, errBuildBudget
@@ -995,9 +999,9 @@ func (n *Node) prefixFallback(ctx *buildCtx, last *waveResult) (*types.Block, er
 	if last.BudgetHit || ctx.expired() {
 		exhausted = errBuildBudget
 	}
-	// The prefix of a wave that did not finish may itself be too large for a
-	// block.
-	prefix := ctx.fitBlockBudget(last.CleanPrefix)
+	// The prefix of a wave that did not finish is first trimmed to what its re-check can finish in time
+	// (PL-R5T-38), then to what fits one block (PL-R5T-03): both keep only a leading run of transactions.
+	prefix := ctx.fitBlockBudget(fitPrefixToBudget(last.CleanPrefix, last.KeptAt, ctx.cfg.PrefixBudget))
 	if len(prefix) == 0 {
 		return nil, exhausted
 	}
@@ -1012,6 +1016,32 @@ func (n *Node) prefixFallback(ctx *buildCtx, last *waveResult) (*types.Block, er
 	}
 	n.recordWaveOutcome(ctx, w)
 	return nil, exhausted
+}
+
+// fitPrefixToBudget returns the longest leading run of prefix whose first-pass
+// cost, taken from keptAt (the offset at which each transaction finished in the
+// wave that produced the prefix), is within prefixFitPercent of budget. If keptAt
+// does not cover the prefix, the prefix is returned unchanged.
+//
+// A first transaction that costs more than that share but is still within the
+// budget itself is kept on its own. It is below the per-transaction slow limit,
+// so nothing would ever strike or evict it, and re-checking a single transaction
+// is not cut short by the budget (the budget is only checked between
+// transactions). Without it, a window headed by such a transaction would yield
+// an empty block on every round.
+func fitPrefixToBudget(prefix []*types.Transaction, keptAt []time.Duration, budget time.Duration) []*types.Transaction {
+	if len(keptAt) < len(prefix) {
+		return prefix
+	}
+	limit := budget / 100 * prefixFitPercent
+	n := 0
+	for n < len(prefix) && keptAt[n] <= limit {
+		n++
+	}
+	if n == 0 && len(prefix) > 0 && keptAt[0] <= budget {
+		n = 1
+	}
+	return prefix[:n:n]
 }
 
 // precheck drops candidates that can never be proposed before any state is
@@ -1124,6 +1154,9 @@ type waveResult struct {
 	GraphRoot []byte               // execution graph root of Ordered
 	Kept      []*types.Transaction // candidates that applied cleanly, in order
 	Failures  []txFailure
+	// KeptAt[i] is when Kept[i] finished applying, measured from the start of
+	// the wave so that scheduling and state set-up are included.
+	KeptAt []time.Duration
 	// CleanPrefix is the longest run of Ordered that applied before the first
 	// failure (or before the budget ran out when nothing had failed).
 	CleanPrefix []*types.Transaction
@@ -1159,6 +1192,10 @@ func (n *Node) freshBlockStateLocked(ctx *buildCtx) (*StateProcessor, error) {
 	if err := sp.ReconcileNHBMintSupplyDriftOnce(); err != nil {
 		sp.EndBlock()
 		return nil, &buildStageError{Stage: stageState, Err: fmt.Errorf("reconcile NHB mint supply drift: %w", err)}
+	}
+	if err := sp.ReconcileNHBGenesisShortfallOnce(); err != nil {
+		sp.EndBlock()
+		return nil, &buildStageError{Stage: stageState, Err: fmt.Errorf("reconcile NHB genesis supply shortfall: %w", err)}
 	}
 	return sp, nil
 }
@@ -1203,6 +1240,7 @@ func (n *Node) applyTx(hooks *proposalHooks, sp *StateProcessor, wave, index int
 // applied runs them and returns a finalized State. An error return means the
 // failure is not attributable to a transaction.
 func (n *Node) executeWave(ctx *buildCtx, wave int, cands []*types.Transaction) (*waveResult, error) {
+	waveStart := ctx.now()
 	ordered, graphRoot, err := computeDependencyGraph(cands)
 	if err != nil {
 		return nil, &buildStageError{Stage: stageState, Err: fmt.Errorf("canonical scheduler failed: %w", err)}
@@ -1223,6 +1261,7 @@ func (n *Node) executeWave(ctx *buildCtx, wave int, cands []*types.Transaction) 
 		Ordered:   ordered,
 		GraphRoot: graphRoot,
 		Kept:      make([]*types.Transaction, 0, len(ordered)),
+		KeptAt:    make([]time.Duration, 0, len(ordered)),
 	}
 	for i, tx := range ordered {
 		if ctx.expired() {
@@ -1232,7 +1271,8 @@ func (n *Node) executeWave(ctx *buildCtx, wave int, cands []*types.Transaction) 
 		before := clockReads(reads)
 		started := ctx.now()
 		applyErr := n.applyTx(hooks, sp, wave, i, tx)
-		took := ctx.now().Sub(started)
+		finished := ctx.now()
+		took := finished.Sub(started)
 		if applyErr == nil && clockReads(reads) != before {
 			applyErr = errClockDependent
 		}
@@ -1241,6 +1281,7 @@ func (n *Node) executeWave(ctx *buildCtx, wave int, cands []*types.Transaction) 
 		}
 		if applyErr == nil {
 			res.Kept = append(res.Kept, tx)
+			res.KeptAt = append(res.KeptAt, finished.Sub(waveStart))
 			continue
 		}
 		disposition := classifyWaveFailure(applyErr)
@@ -1278,17 +1319,15 @@ func (n *Node) executeWave(ctx *buildCtx, wave int, cands []*types.Transaction) 
 		sp.EndBlock()
 		return nil, &buildStageError{Stage: stageLifecycle, Err: err}
 	}
-	if !ctx.skipEvidence {
-		if hooks != nil && hooks.evidence != nil {
-			if herr := hooks.evidence(sp, res.Kept); herr != nil {
-				sp.EndBlock()
-				return nil, &buildStageError{Stage: stageEvidence, Err: herr}
-			}
-		}
-		if err := n.processPendingEvidenceForState(sp, ctx.height); err != nil {
+	if hooks != nil && hooks.evidence != nil {
+		if herr := hooks.evidence(sp, res.Kept); herr != nil {
 			sp.EndBlock()
-			return nil, &buildStageError{Stage: stageEvidence, Err: err}
+			return nil, &buildStageError{Stage: stageEvidence, Err: herr}
 		}
+	}
+	if err := n.processPendingEvidenceForState(sp, ctx.height); err != nil {
+		sp.EndBlock()
+		return nil, &buildStageError{Stage: stageEvidence, Err: err}
 	}
 	sp.FinalizeBlock()
 	res.State = sp
@@ -1424,6 +1463,7 @@ const (
 	soloPassed soloOutcome = iota // applied cleanly on its own
 	soloFailed                    // failed (or read the clock, or was slow) on its own
 	soloInfra                     // an infrastructure error: says nothing about the tx
+	soloSkip                      // refused on its own for a designed-transient reason
 )
 
 // soloDryRun applies tx alone against a fresh copy of committed state, with
@@ -1431,6 +1471,13 @@ const (
 // innocent transactions: only a transaction that fails even on its own is
 // evicted for accumulating strikes, so an attacker who arranges for a valid
 // transaction to lose a same-block conflict cannot get it evicted that way.
+//
+// A refusal that classifyProposalError files under proposalDispositionSkip (a
+// paused module, a rolling cap or quota, a role that can still be granted, a
+// prerequisite that can still arrive) is reported as soloSkip rather than
+// soloFailed. Such a transaction stays resident and carries no strike
+// whenever a wave meets it, and the confirmation step holds it to the same
+// rule: it is not evicted for a cause that is expected to pass.
 func (n *Node) soloDryRun(ctx *buildCtx, tx *types.Transaction) soloOutcome {
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
@@ -1446,6 +1493,8 @@ func (n *Node) soloDryRun(ctx *buildCtx, tx *types.Transaction) soloOutcome {
 	switch {
 	case err != nil && isInfrastructureError(err):
 		return soloInfra
+	case err != nil && classifyProposalError(err) == proposalDispositionSkip:
+		return soloSkip
 	case err != nil:
 		return soloFailed
 	case clockReads(reads) != 0:
@@ -1473,6 +1522,9 @@ func (n *Node) confirmAndEvict(ctx *buildCtx, f txFailure) {
 	case soloPassed:
 		n.poison.resetStrikes(key)
 		n.poison.noteSkip(key, ctx.height, ctx.now(), "lost a same-block conflict; passes alone")
+	case soloSkip:
+		n.poison.resetStrikes(key)
+		n.poison.noteSkip(key, ctx.height, ctx.now(), "refused alone for a designed-transient reason")
 	}
 }
 
@@ -1639,12 +1691,22 @@ func (n *Node) maybeStartIsolation(ctx *buildCtx) {
 // build failures, in two passes, and evicts them from the local mempool.
 //
 //  1. Solo pass: every candidate is applied alone against committed state;
-//     one that fails, panics, reads the clock or is slow is evicted.
-//  2. Joint pass: if the survivors together still fail in lifecycle
-//     processing while an empty block builds fine, the smallest failing prefix
-//     is bisected out and its last transaction evicted, up to
-//     maxIsolationCulprits times. The evidence stage is not run by trials
-//     (see buildCtx.skipEvidence).
+//     one that fails, panics, reads the clock or is slow is evicted. A
+//     candidate refused alone only for a designed-transient reason (see
+//     proposalDispositionSkip) is not evicted on that account, as it is not
+//     whenever a wave meets it. The refusal says little about the joint
+//     trials: a transaction queued behind another of the same sender is
+//     refused alone because its nonce is ahead, yet applies in a block that
+//     holds its predecessor, and a role that is granted earlier in the same
+//     block is another such case. These candidates therefore stay in the
+//     joint pass, where the trial set decides whether they apply.
+//  2. Joint pass: the survivors are narrowed to the transactions that apply
+//     together, the way a build narrows them (see settleTrialSet). If that set
+//     still fails in lifecycle or evidence processing while an empty block
+//     builds fine, the smallest failing prefix is bisected out and its last
+//     transaction evicted, up to maxIsolationCulprits times. A candidate that
+//     does not apply in the trial set is only left out of the trials: it stays
+//     in the mempool, and its strike record, if any, is not touched.
 //
 // No lock is held across builds: each trial takes n.stateMu only for its own
 // duration. A failure that persists on the empty block is not attributable to
@@ -1652,7 +1714,6 @@ func (n *Node) maybeStartIsolation(ctx *buildCtx) {
 func (n *Node) isolate(cands []*types.Transaction) {
 	ctx := n.newBuildCtx(nil)
 	ctx.deadline = ctx.started.Add(ctx.cfg.IsolationBudget)
-	ctx.skipEvidence = true
 
 	remaining := make([]*types.Transaction, 0, len(cands))
 	for i, tx := range cands {
@@ -1665,6 +1726,11 @@ func (n *Node) isolate(cands []*types.Transaction) {
 			n.evictFromMempool(ctx, tx, "isolation")
 		case soloInfra:
 			return
+		case soloSkip:
+			// Not evicted for a transient refusal, but still a joint-trial
+			// candidate: the refusal was judged against committed state, with
+			// none of the block's other transactions applied before it.
+			remaining = append(remaining, tx)
 		default:
 			remaining = append(remaining, tx)
 		}
@@ -1687,16 +1753,59 @@ func (n *Node) isolate(cands []*types.Transaction) {
 func (n *Node) trialStageFails(ctx *buildCtx, cands []*types.Transaction) (fails, infra bool) {
 	w, err := n.executeWave(ctx, 0, cands)
 	if err != nil {
-		var stageErr *buildStageError
-		if errors.As(err, &stageErr) && (stageErr.Stage == stageLifecycle || stageErr.Stage == stageEvidence) {
-			return true, false
-		}
-		return false, true
+		late := isLateStageFailure(err)
+		return late, !late
 	}
 	if w != nil && w.State != nil {
 		w.State.EndBlock()
 	}
 	return false, false
+}
+
+// isLateStageFailure reports whether a wave error came from the lifecycle or
+// evidence stage, the two stages a trial exists to attribute. Any other error
+// means the trial could not be evaluated.
+func isLateStageFailure(err error) bool {
+	var stageErr *buildStageError
+	return errors.As(err, &stageErr) && (stageErr.Stage == stageLifecycle || stageErr.Stage == stageEvidence)
+}
+
+// settleTrialSet narrows cands to the transactions that apply together, the
+// way a build does: a wave in which some transactions do not apply is repeated
+// over the ones that did, until a wave has no apply failure, and the lifecycle
+// and evidence stages then run over that set. It returns the set and whether
+// those stages failed on it; infra is true when the trial could not be
+// evaluated (an infrastructure error, the budget, or the wave cap).
+//
+// This is what lets isolation judge a transaction in the company of the others
+// rather than alone: a transaction queued behind another of its own sender
+// applies here once its predecessor has applied, where a solo dry run refuses
+// it for an unreached nonce. A transaction that does not apply even in company
+// (an orphaned nonce, a paused module, a cap that is used up) is only absent
+// from the returned set. Nothing is evicted or struck here, and a trial that
+// holds such a transaction could not otherwise reach the later stages at all.
+func (n *Node) settleTrialSet(ctx *buildCtx, cands []*types.Transaction) (set []*types.Transaction, fails, infra bool) {
+	for wave := 0; wave < ctx.cfg.MaxWaves; wave++ {
+		if len(cands) == 0 {
+			return nil, false, false
+		}
+		w, err := n.executeWave(ctx, 0, cands)
+		if err != nil {
+			if isLateStageFailure(err) {
+				return cands, true, false
+			}
+			return nil, false, true
+		}
+		if w.clean() {
+			w.State.EndBlock()
+			return cands, false, false
+		}
+		if w.BudgetHit {
+			return nil, false, true
+		}
+		cands = w.Kept
+	}
+	return nil, false, true
 }
 
 func (n *Node) isolateJoint(ctx *buildCtx, remaining []*types.Transaction) {
@@ -1707,10 +1816,13 @@ func (n *Node) isolateJoint(ctx *buildCtx, remaining []*types.Transaction) {
 		return // fails even when empty: not attributable to a transaction
 	}
 	for culprits := 0; culprits < maxIsolationCulprits && len(remaining) > 0 && !ctx.expired(); culprits++ {
-		fails, infra := n.trialStageFails(ctx, remaining)
+		// Settle again after every eviction: removing a transaction can leave
+		// a later one of the same sender without the nonce it needs.
+		set, fails, infra := n.settleTrialSet(ctx, remaining)
 		if infra || !fails {
 			return
 		}
+		remaining = set
 		lo, hi := 1, len(remaining)
 		for lo < hi {
 			if ctx.expired() {

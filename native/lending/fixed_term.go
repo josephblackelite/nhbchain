@@ -76,10 +76,32 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 		return nil, err
 	}
 
+	// From the accounting-fixes height the market is accrued first, like every
+	// other entry point (ledger PL-R5T-50). Without it the loan's principal joins
+	// TotalNHBBorrowed while the stamp still dates from the last accrual, and the
+	// next accrual of any kind charges the whole idle window at a utilisation that
+	// already includes this loan. It must come before the liquidity, debt-sync and
+	// health checks below so they all read the market as it is now.
+	var fees *FeeAccrual
+	feesChanged := false
+	if e.accountingFixes {
+		var err error
+		fees, feesChanged, err = e.accrueInterest(market)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if _, exists, err := e.state.GetActiveFixedTermLoanID(e.poolID, borrower); err != nil {
 		return nil, err
 	} else if exists {
 		return nil, errFixedTermLoanAlreadyActive
+	}
+
+	// The same caps the flexible borrow honours (ledger PL-DC-19): a loan of the
+	// fixed-term product draws the same pool and must not slip past them.
+	if err := e.checkBorrowCaps(market, amount); err != nil {
+		return nil, err
 	}
 
 	liquidity := e.AvailableLiquidity(market)
@@ -170,6 +192,7 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 	// actually repaid (see RepayFixedTerm's matching principal-only
 	// TotalNHBBorrowed adjustment).
 	market.TotalNHBBorrowed = new(big.Int).Add(market.TotalNHBBorrowed, amount)
+	e.recordBorrowedThisBlock(market, amount)
 
 	// This loan's full-term interest becomes part of the pool's aggregate
 	// fixed-term "receivable" capacity -- see
@@ -195,6 +218,11 @@ func (e *Engine) BorrowFixedTerm(borrower crypto.Address, loanID [32]byte, tenur
 	}
 	if err := e.state.PutMarket(e.poolID, market); err != nil {
 		return nil, err
+	}
+	if feesChanged {
+		if err := e.state.PutFeeAccrual(e.poolID, fees); err != nil {
+			return nil, err
+		}
 	}
 
 	return loan, nil
@@ -376,6 +404,17 @@ func (e *Engine) RepayFixedTerm(borrower crypto.Address, amount *big.Int) (*big.
 			} else {
 				fees.ProtocolFeesWei = new(big.Int).Add(fees.ProtocolFeesWei, remaining)
 				feesChanged = true
+				if e.accountingFixes {
+					// The fee is cash the pool now holds. Every other protocol fee is
+					// counted in the suppliers' total until it is withdrawn, and the
+					// withdrawal takes it out of that total, so this one is counted
+					// too; without it the withdrawal took the total below zero
+					// (ledger PL-EXT-44).
+					if market.TotalNHBSupplied == nil {
+						market.TotalNHBSupplied = big.NewInt(0)
+					}
+					market.TotalNHBSupplied = new(big.Int).Add(market.TotalNHBSupplied, remaining)
+				}
 			}
 		}
 	}

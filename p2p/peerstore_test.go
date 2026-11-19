@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -149,5 +150,30 @@ func TestPeerstoreViolationClamp(t *testing.T) {
 	}
 	if entry.Score != peerstoreMinScore {
 		t.Fatalf("expected score to reach clamp %v got %v", peerstoreMinScore, entry.Score)
+	}
+}
+
+// A handshake that finishes after the node began shutting down must be refused, not crash the process: Close drops the
+// in-memory maps, and a late Put or RecordViolation for an UNKNOWN peer used to write into a nil map (ledger PL-R5T-18 follow-up).
+func TestPeerstoreRefusesWritesAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewPeerstore(filepath.Join(dir, "peers.db"), 500*time.Millisecond, 5*time.Second)
+	if err != nil {
+		t.Fatalf("new peerstore: %v", err)
+	}
+	if err := store.Put(PeerstoreEntry{Addr: "127.0.0.1:1000", NodeID: "node-known"}); err != nil {
+		t.Fatalf("put before close: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := store.Put(PeerstoreEntry{Addr: "127.0.0.1:2000", NodeID: "node-late"}); !errors.Is(err, errPeerstoreClosed) {
+		t.Fatalf("a Put for a new peer after Close must return errPeerstoreClosed, got %v", err)
+	}
+	if _, err := store.RecordViolation("node-late", time.Now()); !errors.Is(err, errPeerstoreClosed) {
+		t.Fatalf("RecordViolation for a new peer after Close must return errPeerstoreClosed, got %v", err)
+	}
+	if _, err := store.RecordSuccess("node-late", time.Now()); err == nil {
+		t.Fatal("RecordSuccess after Close must report an error for an unknown peer")
 	}
 }

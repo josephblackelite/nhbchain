@@ -139,6 +139,30 @@ func (r *Relay) SetServer(server *p2p.Server) {
 // HandleMessage satisfies p2p.MessageHandler by forwarding gossip to the
 // connected consensus stream. Messages are dropped if no stream is active.
 func (r *Relay) HandleMessage(msg *p2p.Message) error {
+	return r.forward("", msg)
+}
+
+// HandlePeerMessage satisfies p2p.PeerMessageHandler. It forwards gossip like
+// HandleMessage and, for a request for chain data, also names the peer the
+// request came from, so that the consensus service can answer that peer alone
+// instead of every connected peer.
+func (r *Relay) HandlePeerMessage(from p2p.PeerSender, msg *p2p.Message) error {
+	peerID := ""
+	if from != nil && msg != nil && isChainDataRequest(msg.Type) {
+		peerID = from.ID()
+	}
+	return r.forward(peerID, msg)
+}
+
+// isChainDataRequest reports whether a message type asks for chain data that
+// the answer to is meant for the asker only.
+func isChainDataRequest(msgType byte) bool {
+	return msgType == p2p.MsgTypeGetStatus || msgType == p2p.MsgTypeGetBlocks
+}
+
+// forward hands a message to the consensus stream, tagged with the peer it
+// came from when peerID is set.
+func (r *Relay) forward(peerID string, msg *p2p.Message) error {
 	if msg == nil {
 		return nil
 	}
@@ -147,6 +171,7 @@ func (r *Relay) HandleMessage(msg *p2p.Message) error {
 			Gossip: &networkv1.GossipMessage{
 				Type:    uint32(msg.Type),
 				Payload: append([]byte(nil), msg.Payload...),
+				PeerId:  peerID,
 			},
 		},
 	}
@@ -281,7 +306,19 @@ func (r *Relay) GossipStream(stream networkv1.NetworkService_GossipServer) error
 				Type:    byte(event.Gossip.Type),
 				Payload: append([]byte(nil), event.Gossip.Payload...),
 			}
-			if err := r.broadcast(msg); err != nil {
+			if peerID := event.Gossip.PeerId; peerID != "" {
+				// An answer to one peer is never turned into a broadcast: if
+				// that peer is gone or cannot take it, it is dropped.
+				if err := r.sendTo(peerID, msg); err != nil {
+					if logger := r.logger; logger != nil {
+						if errors.Is(err, p2p.ErrPeerUnknown) {
+							logger.Debug("network relay dropped a message for a peer that is no longer connected")
+						} else {
+							logger.Error("network relay send failed", slog.Any("error", err))
+						}
+					}
+				}
+			} else if err := r.broadcast(msg); err != nil {
 				if logger := r.logger; logger != nil {
 					logger.Error("network relay broadcast failed", slog.Any("error", err))
 				}
@@ -360,6 +397,17 @@ func (r *Relay) broadcast(msg *p2p.Message) error {
 		return errors.New("network relay: broadcaster unavailable")
 	}
 	return server.Broadcast(msg)
+}
+
+// sendTo delivers a message to one connected peer only.
+func (r *Relay) sendTo(peerID string, msg *p2p.Message) error {
+	r.mu.RLock()
+	server := r.server
+	r.mu.RUnlock()
+	if server == nil {
+		return errors.New("network relay: broadcaster unavailable")
+	}
+	return server.SendTo(peerID, msg)
 }
 
 // View exposes a snapshot of the current network view and listen addresses

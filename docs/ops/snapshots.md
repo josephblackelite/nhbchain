@@ -124,7 +124,14 @@ Whatever you choose:
 - restrict who can write to the location and monitor its access log;
 - the manifest is not signed: a new node checks the archive against it, and the
   manifest against the chain id and genesis hash the script pins, so tell
-  operators the location out of band.
+  operators the location out of band;
+- a new node's script stops unless something outside the snapshot host and the
+  bootnode checks the result (`--tip-rpc`, a reference node on another host than
+  either, or `--tip-hash` with `--state-root`): do not run the reference node on
+  the host that serves the snapshots, and tell operators which reference nodes you
+  vouch for. The pins check the snapshot only, not the blocks a node applies after
+  it, so a run that has only them is warned that its place at the tip rests on the
+  bootnode; point operators to a reference node.
 
 ## Restoring
 
