@@ -1,6 +1,6 @@
 # Bug Bounty Reports and Their Status
 
-*Last updated: 2026-11-18.*
+*Last updated: 2026-11-20.*
 
 This page lists the researchers who have reported to us through the [bug bounty program](bug-bounty.md) and where their reports stand. It is updated each time we finish a round of triage. It names a researcher only when they have told us how they want to be credited; everyone else is listed without a name. Credits are on the [acknowledgments page](acknowledgments.md).
 
@@ -44,7 +44,7 @@ These researchers have not yet told us how to credit them, or asked to stay unna
 
 ## What to test
 
-Please test against the code the validators run. As of 2026-11-18 the `main` branch carries it: its tree is the tree of the validator release `final-r16` (the `release/final-r16` branch, commit `44b77ce`), which the validators have run since 2026-11-18 20:32 UTC. Before 2026-11-17 `main` was behind the release, and several reports described issues that were already fixed in the running network; between 2026-11-17 and 2026-11-18 it carried release `final-r10` (commit `8428e63`).
+Please test against the code the validators run. As of 2026-11-20 the `main` branch carries it: the code of the validator release `final-r16c` (commit `9c1c8d0`), which the validators have run since 2026-11-20 00:39 UTC. A node built from `main` for linux/amd64 with `CGO_ENABLED=0` and the build flags in [`scripts/build.sh`](../../scripts/build.sh) is byte for byte the binary the validators run. Before 2026-11-17 `main` was behind the release, and several reports described issues that were already fixed in the running network; between 2026-11-17 and 2026-11-18 it carried release `final-r10` (commit `8428e63`), and between 2026-11-18 and 2026-11-20 release `final-r16` (commit `44b77ce`).
 
 The shipped `config.toml` now carries the activation heights the validators run. Earlier versions showed 0 for them, which means off and is not what the validators run, so a report that says a fix is disabled should be checked against the file in `main` first. The repository also still has older and unreleased branches (the `hard/*` branches and the older release branches); they are not the running code, so please test `main`.
 
