@@ -103,7 +103,7 @@ jobs:
         run: bash scripts/publish_bugcheck.sh
       - name: Upload bugcheck artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bugcheck-artifacts
           path: |
@@ -112,7 +112,7 @@ jobs:
           if-no-files-found: ignore
       - name: Upload bugcheck docs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bugcheck-docs
           path: |
