@@ -65,6 +65,31 @@ type ValidatorRules struct {
 	// and degrades to a recorded zero payout, instead of quietly paying a capped epoch.
 	PotsoTreasuryShortfallActivationHeight uint64
 
+	// DelegatorHoldWeightActivationHeight (PL-EXT-25): from the height each indexed
+	// delegator's share of a validator's staker pool is weighed by its locked ZNHB less the
+	// ZNHB its own pending POS authorizations hold, instead of by the whole locked balance
+	// (a hold moves ZNHB into that balance, refundably). A delegator whose locked balance
+	// is all held counts for nothing. See splitStakeShare.
+	DelegatorHoldWeightActivationHeight uint64
+
+	// EscrowEnvelopeChainBindingActivationHeight (PL-EXT-07): from the height the signed
+	// payload of a delegated escrow create, release, refund or dispute and the decision
+	// of an arbitration quorum must carry the network's own chain id ("chainId", a
+	// decimal string), and one that does not, or that carries another network's, is
+	// refused. Until then those payloads signed for one network verify on every other
+	// network that holds an escrow with the same id. See core/escrow_envelope_chain.go.
+	EscrowEnvelopeChainBindingActivationHeight uint64
+
+	// PotsoAbuseGuardsActivationHeight (PL-EXT-39, PL-PO-01): from the height the five
+	// POTSO abuse-guard values of the node's own file are applied as configured:
+	// [potso.weights] MinStakeToWinWei and MinEngagementToWin, [potso.abuse]
+	// MinStakeToEarnWei, QuadraticTxDampenAfter and MaxUserShareBps. Before it they are
+	// applied as 0 whatever the file says, so an operator can set them
+	// on every validator ahead of the height and the history already on the chain stays
+	// replayable. 0 = never, the values are applied as 0, which is what both live
+	// validators run with (all five are 0 in their files).
+	PotsoAbuseGuardsActivationHeight uint64
+
 	// SaleReferenceActivationHeight, SaleReferenceMaxAgeSeconds and
 	// SaleReferenceMaxStepBps (PL-BC-D): from the height the price of every sale from the
 	// treasury Sale Pool is the higher of the Genesis curve's cost and the latest signed

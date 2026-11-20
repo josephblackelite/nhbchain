@@ -150,8 +150,12 @@ func TestEmailVerificationFlow(t *testing.T) {
 
 	// Replay with idempotency should return cached response.
 	current = current.Add(5 * time.Second)
+	// The replay carries the same body as the first call: an idempotency key is bound to the
+	// request it first answered, and the same key with another body is refused (PL-EXT-50, see
+	// hardening_test.go).
 	resp := doRawRequest(t, httpServer.Client(), "POST", httpServer.URL, "/identity/email/register", map[string]any{
-		"email": "Frank.Example@Example.com",
+		"email":     "Frank.Example@Example.com",
+		"aliasHint": "frankrocks",
 	}, "test", "secret", current, "register-key")
 	if got := resp.Header.Get("X-Idempotency-Cache"); got != "hit" {
 		t.Fatalf("expected idempotency cache hit, got %q", got)

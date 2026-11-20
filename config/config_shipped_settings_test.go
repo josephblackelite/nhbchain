@@ -76,6 +76,9 @@ func TestShippedConfigReadsEveryActivationSettingOperatorsTurnOn(t *testing.T) {
 	set("SaleReferenceActivationHeight", "1770000")
 	set("SaleReferenceMaxAgeSeconds", "7200")
 	set("SaleReferenceMaxStepBps", "1500")
+	set("DelegatorHoldWeightActivationHeight", "1771000")
+	set("PotsoAbuseGuardsActivationHeight", "1772000")
+	set("EscrowEnvelopeChainBindingActivationHeight", "1772000")
 	set("PayoutReceiptActivationHeight", "1727000")
 	set("RejectAmbiguousParamKeysFromUnix", "1900000000")
 	if !strings.Contains(text, "LoyaltyCounterpartyCapZNHBWei = \"\"\n") {
@@ -150,6 +153,9 @@ func TestShippedConfigReadsEveryActivationSettingOperatorsTurnOn(t *testing.T) {
 		"SaleReferenceActivationHeight":                       {cfg.SaleReferenceActivationHeight, 1770000},
 		"SaleReferenceMaxAgeSeconds":                          {cfg.SaleReferenceMaxAgeSeconds, 7200},
 		"SaleReferenceMaxStepBps":                             {cfg.SaleReferenceMaxStepBps, 1500},
+		"DelegatorHoldWeightActivationHeight":                 {cfg.DelegatorHoldWeightActivationHeight, 1771000},
+		"PotsoAbuseGuardsActivationHeight":                    {cfg.PotsoAbuseGuardsActivationHeight, 1772000},
+		"EscrowEnvelopeChainBindingActivationHeight":          {cfg.EscrowEnvelopeChainBindingActivationHeight, 1772000},
 		"[swap] PayoutReceiptActivationHeight":                {cfg.Swap.PayoutReceiptActivationHeight, 1727000},
 		"[governance] RejectAmbiguousParamKeysFromUnix":       {cfg.Governance.RejectAmbiguousParamKeysFromUnix, 1900000000},
 	} {

@@ -13,6 +13,7 @@ import (
 	nhbstate "nhbchain/core/state"
 	"nhbchain/core/types"
 	"nhbchain/crypto"
+	"nhbchain/native/pos"
 )
 
 func cloneRewardAccumulator(acc *rewards.Accumulator) *rewards.Accumulator {
@@ -491,6 +492,19 @@ func (sp *StateProcessor) splitStakeShare(manager *nhbstate.Manager, validatorAd
 			validatorBasis = big.NewInt(0)
 		}
 	}
+	// From DelegatorHoldWeightActivationHeight a delegator counts for its locked ZNHB
+	// less what its own pending POS authorizations hold (PL-EXT-25): a hold moves ZNHB
+	// into the locked balance, refundably, and used to count as stake. The holds are
+	// read once for all delegators. A read that fails pays the validator in full, as a
+	// failed lookup above does; every node reads the same state, so every node agrees.
+	var held map[[20]byte]*big.Int
+	if ruleActiveAt(sp.validatorRules.DelegatorHoldWeightActivationHeight, sp.blockHeight()) {
+		held, err = pos.NewLifecycle(manager).PendingHeldByPayer()
+		if err != nil {
+			add(rewardMap, validatorAddr, amount)
+			return
+		}
+	}
 	subWeights := make([]epoch.Weight, 0, len(delegators)+1)
 	if validatorBasis.Sign() > 0 {
 		subWeights = append(subWeights, epoch.Weight{Address: append([]byte(nil), validatorAddr...), Stake: validatorBasis})
@@ -501,7 +515,14 @@ func (sp *StateProcessor) splitStakeShare(manager *nhbstate.Manager, validatorAd
 		if err != nil || delegatorAcc.LockedZNHB == nil || delegatorAcc.LockedZNHB.Sign() <= 0 {
 			continue
 		}
-		subWeights = append(subWeights, epoch.Weight{Address: delegatorAddr, Stake: new(big.Int).Set(delegatorAcc.LockedZNHB)})
+		weight := new(big.Int).Set(delegatorAcc.LockedZNHB)
+		if heldByDelegator := held[delegator]; heldByDelegator != nil {
+			weight.Sub(weight, heldByDelegator)
+			if weight.Sign() <= 0 {
+				continue
+			}
+		}
+		subWeights = append(subWeights, epoch.Weight{Address: delegatorAddr, Stake: weight})
 	}
 	if len(subWeights) == 0 {
 		add(rewardMap, validatorAddr, amount)

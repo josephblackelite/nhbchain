@@ -220,6 +220,28 @@ ValidatorAdmissionProbationSeconds = 0
 # which is what both live validators run with. Set it identically on every validator, to a
 # height above the chain tip, restarting all of them together.
 PotsoTreasuryShortfallActivationHeight = 0
+# First block height from which a delegator's share of a validator's staker pool is
+# weighed by its locked ZNHB less what its own pending POS authorizations hold (see the
+# DelegatorHoldWeightActivationHeight doc comment in config/config.go). 0 = off, the
+# whole locked balance is the weight, which is what both live validators run with. Set
+# it identically on every validator, to a height above the chain tip, restarting all of
+# them together.
+DelegatorHoldWeightActivationHeight = 0
+# First block height from which the five POTSO abuse-guard values of this file are applied
+# (see the PotsoAbuseGuardsActivationHeight doc comment in config/config.go): [potso.weights]
+# MinStakeToWinWei and MinEngagementToWin, [potso.abuse] MinStakeToEarnWei,
+# QuadraticTxDampenAfter and MaxUserShareBps. Before it they are applied as 0 whatever they
+# say here. 0 = never, which is what both live validators run with (all five
+# are 0). Set the values and the height identically on every validator, the height above the
+# chain tip, restarting all of them together.
+PotsoAbuseGuardsActivationHeight = 0
+# First block height from which the signed payload of a delegated escrow create, release,
+# refund or dispute, and the decision of an arbitration quorum, must carry this network's
+# chain id as "chainId" (see the EscrowEnvelopeChainBindingActivationHeight doc comment in
+# config/config.go). 0 = off, which is what both live validators run with. Set it
+# identically on every validator, to a height above the chain tip, restarting all of them
+# together, and only once the wallets and relayers that build these payloads include it.
+EscrowEnvelopeChainBindingActivationHeight = 0
 # First block height from which the lending engine applies its corrected accounting
 # rules (see config/config.go's LendingAccountingFixesActivationHeight doc comment).
 # 0 keeps every earlier behaviour, which is what both live validators run with. It

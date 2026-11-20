@@ -40,6 +40,11 @@ type EmailRecord struct {
 	CodeExpires *time.Time              `json:"codeExpires,omitempty"`
 	Attempts    []time.Time             `json:"attempts,omitempty"`
 	Bindings    map[string]AliasBinding `json:"bindings,omitempty"`
+	// CodeIssuedAt is when the live code was issued; a register call inside the cooldown after
+	// it is refused instead of replacing the code. FailedGuesses counts the wrong codes tried
+	// against the live code; the code is destroyed when it reaches the limit (ledger PL-EXT-50).
+	CodeIssuedAt  *time.Time `json:"codeIssuedAt,omitempty"`
+	FailedGuesses int        `json:"failedGuesses,omitempty"`
 	// BindTokenDigest/BindTokenExpires (NHB-AUDIT-S6) track the single-use
 	// bind token issued by the most recent successful verification.
 	// VerifiedAt alone only proves SOMEONE verified this email at SOME
@@ -64,6 +69,10 @@ type IdempotencyRecord struct {
 	Body       []byte    `json:"body"`
 	StoredAt   time.Time `json:"storedAt"`
 	ExpiresAt  time.Time `json:"expiresAt"`
+	// RequestHash is the sha256 (hex) of the request body the response answers. A reused key
+	// with another body is refused instead of answered with this response. Records written
+	// before this field existed have none and are replayed as before.
+	RequestHash string `json:"requestHash,omitempty"`
 }
 
 // aliasIndexRecord mirrors the alias bucket payload.

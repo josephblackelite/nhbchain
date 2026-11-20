@@ -108,6 +108,9 @@ var digestFieldSections = map[string]string{
 	"SaleReferenceActivationHeight":                       "chain-rules",
 	"SaleReferenceMaxAgeSeconds":                          "chain-rules",
 	"SaleReferenceMaxStepBps":                             "chain-rules",
+	"DelegatorHoldWeightActivationHeight":                 "chain-rules",
+	"PotsoAbuseGuardsActivationHeight":                    "chain-rules",
+	"EscrowEnvelopeChainBindingActivationHeight":          "chain-rules",
 
 	"Potso":         "potso",
 	"Governance":    "governance",

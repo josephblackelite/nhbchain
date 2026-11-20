@@ -3402,7 +3402,11 @@ func limiterIsIdle(l *rateLimiter, now time.Time) bool {
 // keeps it, so churning many distinct sources through the table does not hand a
 // throttled caller a fresh burst unless every entry in the table is in use at
 // the same moment. Only when no entry is idle does it fall back to dropping the
-// single least recently seen one.
+// single least recently seen one, and then a source-address or chain bucket goes
+// before an identity bucket (ledger PL-EXT-55): anyone can create source-address
+// buckets, so filling the table with them must not be able to evict a caller's own
+// drained identity bucket and so hand it a fresh quota. An identity bucket is only
+// dropped when the table holds nothing else that is busy.
 func (s *Server) evictOldestLimiterLocked(now time.Time) {
 	if len(s.rateLimiters) == 0 {
 		return
@@ -3411,27 +3415,28 @@ func (s *Server) evictOldestLimiterLocked(now time.Time) {
 		key      string
 		lastSeen time.Time
 	}
+	type candidate struct {
+		key      string
+		lastSeen time.Time
+		found    bool
+	}
+	consider := func(c *candidate, key string, lastSeen time.Time) {
+		if !c.found || lastSeen.Before(c.lastSeen) {
+			*c = candidate{key: key, lastSeen: lastSeen, found: true}
+		}
+	}
 	var idle []idleEntry
-	var oldestKey string
-	var oldestTime time.Time
-	hasOldest := false
+	var oldestOther, oldestIdentity candidate
 	for key, limiter := range s.rateLimiters {
 		if limiterIsIdle(limiter, now) {
 			idle = append(idle, idleEntry{key: key, lastSeen: limiter.lastSeen})
 			continue
 		}
-		switch {
-		case !hasOldest:
-			oldestKey = key
-			oldestTime = limiter.lastSeen
-			hasOldest = true
-		case limiter.lastSeen.IsZero() && !oldestTime.IsZero():
-			oldestKey = key
-			oldestTime = limiter.lastSeen
-		case limiter.lastSeen.Before(oldestTime):
-			oldestKey = key
-			oldestTime = limiter.lastSeen
+		if strings.HasPrefix(key, limiterKeyPrefixIdentity) || strings.HasPrefix(key, limiterKeyPrefixIdentityChain) {
+			consider(&oldestIdentity, key, limiter.lastSeen)
+			continue
 		}
+		consider(&oldestOther, key, limiter.lastSeen)
 	}
 	if len(idle) > 0 {
 		sort.Slice(idle, func(i, j int) bool { return idle[i].lastSeen.Before(idle[j].lastSeen) })
@@ -3444,8 +3449,11 @@ func (s *Server) evictOldestLimiterLocked(now time.Time) {
 		}
 		return
 	}
-	if hasOldest {
-		delete(s.rateLimiters, oldestKey)
+	switch {
+	case oldestOther.found:
+		delete(s.rateLimiters, oldestOther.key)
+	case oldestIdentity.found:
+		delete(s.rateLimiters, oldestIdentity.key)
 	}
 }
 

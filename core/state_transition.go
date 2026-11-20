@@ -2632,6 +2632,16 @@ func (sp *StateProcessor) maybeProcessPotsoRewards(height uint64, timestamp int6
 	return nil
 }
 
+// withoutPotsoAbuseGuards returns the weight settings with the four abuse-guard values at 0;
+// the input is not modified (its big integers are replaced, not changed).
+func withoutPotsoAbuseGuards(cfg potso.WeightParams) potso.WeightParams {
+	cfg.MinStakeToWinWei = big.NewInt(0)
+	cfg.MinStakeToEarnWei = big.NewInt(0)
+	cfg.MinEngagementToWin = 0
+	cfg.QuadraticTxDampenAfter = 0
+	return cfg
+}
+
 func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg potso.RewardConfig, epochNumber uint64, day string, settledAt int64) error {
 	if manager == nil {
 		return fmt.Errorf("potso: state manager unavailable")
@@ -2779,6 +2789,13 @@ func (sp *StateProcessor) processPotsoRewardEpoch(manager *nhbstate.Manager, cfg
 
 	weightCfg := sp.potsoWeightConfig
 	weightCfg.AlphaStakeBps = cfg.AlphaStakeBps
+	// The five abuse-guard values of the node's file apply only from their height (PL-EXT-39,
+	// PL-PO-01); before it they are 0, whatever the file says, so a file set ahead of the
+	// height cannot change an epoch that closes before it.
+	if !ruleActiveAt(sp.validatorRules.PotsoAbuseGuardsActivationHeight, sp.blockHeight()) {
+		weightCfg = withoutPotsoAbuseGuards(weightCfg)
+		cfg.MaxUserShareBps = 0
+	}
 	outcome, err := potso.ComputeRewards(cfg, weightCfg, snapshot, budget)
 	if err != nil {
 		return err
@@ -5189,6 +5206,9 @@ func (sp *StateProcessor) applyDelegatedCreateEscrow(tx *types.Transaction, send
 	if err := rlp.DecodeBytes(tx.Data, &payload); err != nil {
 		return fmt.Errorf("invalid delegated create escrow payload: %w", err)
 	}
+	if err := sp.requireEscrowEnvelopeChain(payload.Payload); err != nil {
+		return err
+	}
 	sp.configureTradeEngine()
 	if _, err := sp.EscrowEngine.CreateWithSignature(payload.Payload, payload.Signature); err != nil {
 		return err
@@ -5232,6 +5252,9 @@ func (sp *StateProcessor) applyDelegatedEscrowAction(tx *types.Transaction, send
 		return fmt.Errorf("delegated escrow action escrowId must be %d bytes", len(id))
 	}
 	copy(id[:], rawID)
+	if err := sp.requireEscrowEnvelopeChain(payload.Payload); err != nil {
+		return err
+	}
 
 	_, manager := sp.configureTradeEngine()
 	if _, err := sp.ensureEscrowReady(id, manager); err != nil {
@@ -6002,6 +6025,9 @@ func (sp *StateProcessor) applyArbitrate(tx *types.Transaction, sender []byte, s
 			return fmt.Errorf("invalid arbitration signature %d: %w", i, err)
 		}
 		sigs[i] = decoded
+	}
+	if err := sp.requireEscrowEnvelopeChain(payload.Decision); err != nil {
+		return err
 	}
 	_, manager := sp.configureTradeEngine()
 	if _, err := sp.ensureEscrowReady(id, manager); err != nil {

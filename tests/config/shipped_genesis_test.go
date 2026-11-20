@@ -398,6 +398,9 @@ func TestShippedConfigConsensusValuesMatchTheGenesis(t *testing.T) {
 		"SaleReferenceActivationHeight":                       "0",
 		"SaleReferenceMaxAgeSeconds":                          "0",
 		"SaleReferenceMaxStepBps":                             "0",
+		"DelegatorHoldWeightActivationHeight":                 "0",
+		"PotsoAbuseGuardsActivationHeight":                    "0",
+		"EscrowEnvelopeChainBindingActivationHeight":          "0",
 		"PayoutReceiptActivationHeight":                       "0",
 		"RejectAmbiguousParamKeysFromUnix":                    "1792936800",
 	} {

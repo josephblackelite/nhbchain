@@ -85,6 +85,14 @@ type Config struct {
 	// operational problems.
 	RelayerMinBalanceWei        *big.Int
 	RelayerBalanceCheckInterval time.Duration
+
+	// EnvelopeChainID, from ESCROW_GATEWAY_ENVELOPE_CHAIN_ID, is the network's chain
+	// id (nhb_getNetworkStats networkChainId) as a decimal number. When set the
+	// gateway adds it to the create and action envelopes a participant signs, as the
+	// last key "chainId" (ledger PL-EXT-07). Empty, the default, leaves the signed
+	// bytes unchanged. Set it together with the wallets that sign these envelopes and
+	// before the chain's EscrowEnvelopeChainBindingActivationHeight.
+	EnvelopeChainID string
 }
 
 // LoadConfigFromEnv builds a configuration using environment variables.
@@ -173,6 +181,13 @@ func LoadConfigFromEnv() (Config, error) {
 			return Config{}, errors.New("ESCROW_GATEWAY_RELAYER_BALANCE_CHECK_INTERVAL must be positive")
 		}
 		cfg.RelayerBalanceCheckInterval = dur
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_ENVELOPE_CHAIN_ID")); raw != "" {
+		if !validEnvelopeChainID(raw) {
+			return Config{}, errors.New("ESCROW_GATEWAY_ENVELOPE_CHAIN_ID must be a decimal chain id without leading zeros (networkChainId from nhb_getNetworkStats)")
+		}
+		cfg.EnvelopeChainID = raw
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("ESCROW_GATEWAY_QUEUE_CAP")); raw != "" {
