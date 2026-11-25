@@ -101,7 +101,7 @@ escrow returns HTTP `404` with message `escrow not found`.
 
 Params: none, or `[{"prefix": "<event type prefix>", "limit": <int>}]`. Both keys
 are optional. `prefix` defaults to `escrow.` and is matched case-insensitively.
-`limit` keeps the first N matching events (a negative value becomes 0).
+`limit` keeps the first N matching events (a negative value becomes 0). An answer never holds more than 10,000 events (`ListEventsMaxResults`): a call without a limit, or with a larger one, gets the first 10,000 matching events, oldest first.
 
 The events come from the node's in-memory event log (`Node.Events()`), oldest
 first. The log is not persisted, so it is empty after a restart. It keeps the

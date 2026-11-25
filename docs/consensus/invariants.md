@@ -489,6 +489,33 @@ senderless design of `main` is ever brought here, its own registry namespace (co
   values. The values themselves are the owner's choice; the live files hold 0 for all
   five. Changed only with all validators restarted together, to a height above the chain
   tip.
+- `HeartbeatTimestampBoundActivationHeight` must be identical on every validator
+  (`config/config.go`; carried as `core.ValidatorRules`). From the height `applyHeartbeat`
+  refuses a heartbeat transaction whose payload timestamp is more than
+  `heartbeatMaxAheadSeconds` (120) after the block's own time, before it changes anything,
+  with `ErrHeartbeatTooSoon` (so the mempool prunes it as it prunes a replayed heartbeat).
+  A timestamp of 0 still means the block time and a timestamp in the past is still
+  accepted. Before the height (and with the height 0 = never) any signed timestamp is
+  accepted, as on both live validators. The reason: `rolloverEngagement` walks one day at a
+  time from the account's stored day to the heartbeat's day and `emitScoreUpdates` writes
+  one event per day, so a timestamp dated year 9999 made every validator walk about 2.9
+  million days (ledger PL-EXT-71). A heartbeat already on the chain is replayed as it was.
+  Changed only with all validators restarted together, to a height above the chain tip.
+- `LendingClosedDayClampActivationHeight` must be identical on every validator
+  (`config/config.go`; carried as `core.ValidatorRules`). From the height
+  `scheduleNextLendingAutoDebit` and `scheduleNextLendingDepositPayout` put the next cycle
+  of a fixed-term loan's auto-debit or a fixed-term deposit's payout on
+  `max(its due day, the day of the scheduling block)` (`lendingDueDay`); before it (and
+  with the height 0 = never) on its due day, as on both live validators. The settlement
+  scans the days after its watermark up to today and then sets the watermark to
+  yesterday, so an entry on a day at or below the watermark is never scanned again: a cycle
+  that succeeds late schedules the next one by its absolute due time, which for the last
+  two cycles of a tenure of 30k+1 days is one day after the previous, and the final
+  installment of a loan was never collected and the final payout of a deposit, principal
+  included, never made (ledger PL-EXT-83). An entry put on today is scanned by the next
+  block's pass. Cycles already stranded on a closed day before the height stay stranded:
+  the rule does not go back. Changed only with all validators restarted together, to a
+  height above the chain tip.
 - `PotsoTreasuryShortfallActivationHeight` must be identical on every validator
   (`config/config.go`; carried as `core.ValidatorRules`). From the height
   `processPotsoRewardEpoch` takes the reward budget to be the emission instead of capping
@@ -641,7 +668,8 @@ senderless design of `main` is ever brought here, its own registry namespace (co
   inherited); a queued release keeps its due height across a rotation. Neither a lock nor a release creates or destroys ZNHB, neither touches the Sale or Reward pool counters, and the admin wallet can neither lock nor receive, so
   `CheckZNHBSupplyInvariant` is unaffected; `CheckBridgeInvariant` (escrow balance at least locked minus released, and what is waiting at most what is outstanding) is checked by the tests after every operation. New
   transaction types, so every validator is restarted together on the same binary before the height. `bridge_getStatus` is a read-only view of the escrow: escrow, outstanding, pending, `escrowCovered`,
-  the signers, threshold, guardian, caps, the window's use and the next rotation.
+  the signers, threshold, guardian, caps, the window's use and the next rotation. `bridge_getLock` (one lock by id), `bridge_listLocks` (locks above an id, at most 200 per call, with the newest id) and
+  `bridge_getRelease` (a burn id: paid, pending with its due height, cancelled, or none) are read-only too; they add no setting, so the settings digest and every state root are unchanged.
 - `AmmActivationHeight`, `SwapStartHeight`, `FeeBps`, `MaxSwapBps`, `LiquidityProvider`, `MinReserveZNHBWei` and `MinReserveNHBWei` (`[amm]`) must be identical on every validator.
   From `AmmActivationHeight` `TxTypeAmmAddLiquidity` (0x50) and `TxTypeAmmRemoveLiquidity` (0x51) are valid for the configured provider only, and `TxTypeAmmSwap` (0x52) from `SwapStartHeight`
   (0 = swaps never open); before that the bytes are unknown types. One constant-product pool (`native/amm`, exact integer arithmetic, outputs rounded down, so the reserve product never falls)

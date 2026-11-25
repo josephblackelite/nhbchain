@@ -32,6 +32,11 @@ type getSnapshotParams struct {
 	ID string `json:"id"`
 }
 
+// ListEventsMaxResults is the most events one escrow_listEvents answer holds. A call
+// without a limit, or with a larger one, gets this many (the first matching events,
+// oldest first); the node keeps up to 100,000 escrow events and 20,000 others.
+const ListEventsMaxResults = 10000
+
 type listEventsParams struct {
 	Prefix string `json:"prefix,omitempty"`
 	Limit  *int   `json:"limit,omitempty"`
@@ -186,26 +191,26 @@ func (m *EscrowModule) ListEvents(raw json.RawMessage) ([]EscrowEventResult, *Mo
 		prefix = trimmed
 	}
 	normalizedPrefix := strings.ToLower(prefix)
-	events := m.node.Events()
-	results := make([]EscrowEventResult, 0, len(events))
-	for _, evt := range events {
-		if !strings.HasPrefix(strings.ToLower(evt.Type), normalizedPrefix) {
-			continue
+	// The answer is the first limit matching events, and never more than
+	// ListEventsMaxResults: the method is public, and building the whole retained log
+	// into one answer cost about 140 MB per call at full retention (ledger PL-EXT-78).
+	limit := ListEventsMaxResults
+	if params.Limit != nil {
+		requested := *params.Limit
+		if requested < 0 {
+			requested = 0
 		}
+		if requested < limit {
+			limit = requested
+		}
+	}
+	results := make([]EscrowEventResult, 0, 16)
+	for _, evt := range m.node.EventsMatching(normalizedPrefix, limit) {
 		attrs := make(map[string]string, len(evt.Attributes))
 		for k, v := range evt.Attributes {
 			attrs[k] = v
 		}
 		results = append(results, EscrowEventResult{Type: evt.Type, Attributes: attrs})
-	}
-	if params.Limit != nil {
-		limit := *params.Limit
-		if limit < 0 {
-			limit = 0
-		}
-		if limit < len(results) {
-			results = results[:limit]
-		}
 	}
 	for i := range results {
 		results[i].Sequence = int64(i + 1)

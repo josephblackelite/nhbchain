@@ -166,6 +166,16 @@ func main() {
 	if err := node.SetGlobalConfig(cfg.Global); err != nil {
 		panic(fmt.Sprintf("Failed to apply global config: %v", err))
 	}
+	// PL-EXT-73: without an admin wallet in the genesis and without TransferFeeCollector, every node
+	// credits the transfer fee to its OWN validator address and the validators diverge at the first
+	// fee. Refuse to start; a development node on an auto-created genesis only gets a warning.
+	if err := node.CheckTransferFeeCollector(cfg.Global.Fees); err != nil {
+		if allowAutogenesis {
+			fmt.Printf("Warning: %v\n", err)
+		} else {
+			panic(fmt.Sprintf("Refusing to start: %v", err))
+		}
+	}
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	if cfg.QuorumCertActivationHeight > 0 {
 		// See config.Config.QuorumCertActivationHeight's doc comment --
@@ -828,14 +838,10 @@ func startValidatorHeartbeatLoop(node *core.Node, privKey *crypto.PrivateKey, lo
 	if logger == nil {
 		logger = slog.Default()
 	}
-	host, err := os.Hostname()
-	if err != nil || strings.TrimSpace(host) == "" {
-		host = "validator"
-	}
 	validatorAddr := privKey.PubKey().Address()
 	var validatorAddrBytes [20]byte
 	copy(validatorAddrBytes[:], validatorAddr.Bytes())
-	deviceID := fmt.Sprintf("%s-%x", strings.ToLower(strings.TrimSpace(host)), validatorAddr.Bytes()[:4])
+	deviceID := validatorHeartbeatDeviceID(validatorAddr.Bytes())
 	token, err := node.EngagementRegisterDevice(validatorAddrBytes, deviceID)
 	if err != nil {
 		logger.Warn("validator heartbeat registration failed", slog.Any("error", err))

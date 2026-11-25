@@ -289,10 +289,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if errors.Is(err, ErrCodeStillLive) {
+		// No mail was sent and nothing was written: the call must not use up the API key's
+		// budget, which every app on the key shares (ledger PL-EXT-81).
+		s.refundKeyRegister(apiKey.Key, now)
 		s.writeError(w, http.StatusTooManyRequests, "IDN-429", "a verification code was just sent to this address; use it or wait before asking for another", map[string]any{"retryAfter": int(s.registerCooldown.Seconds())})
 		return
 	}
 	if errors.Is(err, ErrRateLimited) {
+		s.refundKeyRegister(apiKey.Key, now)
 		s.writeError(w, http.StatusTooManyRequests, "IDN-429", "too many verification attempts", map[string]any{"retryAfter": int(s.registerWindow.Seconds())})
 		return
 	}
@@ -644,6 +648,21 @@ func (s *Server) allowKeyRegister(apiKey string, now time.Time) bool {
 	}
 	s.keyRegisters[apiKey] = append(kept, now)
 	return true
+}
+
+// refundKeyRegister gives back the slot allowKeyRegister took at 'at' for a call that
+// ended without sending a mail. The key budget exists to bound the mail one API key can
+// cause; a call refused by the per-address cooldown or budget causes none.
+func (s *Server) refundKeyRegister(apiKey string, at time.Time) {
+	s.keyMu.Lock()
+	defer s.keyMu.Unlock()
+	list := s.keyRegisters[apiKey]
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i].Equal(at) {
+			s.keyRegisters[apiKey] = append(list[:i], list[i+1:]...)
+			return
+		}
+	}
 }
 
 func (s *Server) writeCachedResponse(w http.ResponseWriter, record IdempotencyRecord) {

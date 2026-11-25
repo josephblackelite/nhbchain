@@ -173,6 +173,8 @@ type Node struct {
 	// state (see SetQuorumCertActivationHeight for the same reason).
 	feeRouteAliasActivationHeight uint64
 	escrowTreasury                [20]byte
+	adminWalletResolved           bool   // escrowTreasury is a real admin wallet, not the validator-address fallback (CheckTransferFeeCollector)
+	admissionSimulations          uint64 // how many admission simulations (state copies) ran; atomic, read by tests (PL-EXT-91)
 	engagementMgr                 *engagement.Manager
 	govPolicy                     governance.ProposalPolicy
 	govPolicyMu                   sync.RWMutex
@@ -903,6 +905,7 @@ func NewNode(db storage.Database, key *crypto.PrivateKey, genesisPath string, al
 		senderNonces:         make(map[string]map[uint64]time.Time),
 		pendingNonces:        make(map[string]nonceRecord),
 		escrowTreasury:       treasury,
+		adminWalletResolved:  hasAdminWallet,
 		engagementMgr:        engagement.NewManager(stateProcessor.EngagementConfig()),
 		swapCfg:              defaultSwapCfg,
 		swapSanctions:        swap.DefaultSanctionsChecker,
@@ -2921,14 +2924,9 @@ func (n *Node) addTransaction(tx *types.Transaction, broadcast bool) error {
 			expectedNonce = account.Nonce
 		}
 
-		if tx.Type > 0 { // Strict sequencing for Native V3 Executions
-			if nonce != expectedNonce {
-				return fmt.Errorf("%w: strict nonce sequence breached: expected %d, got %d", ErrInvalidTransaction, expectedNonce, nonce)
-			}
-		} else { // Legacy EVM
-			if nonce < expectedNonce {
-				return fmt.Errorf("%w: nonce %d has already been used; current account nonce is %d", ErrInvalidTransaction, nonce, expectedNonce)
-			}
+		// The same rule validateTransaction applies before its simulation (PL-EXT-91).
+		if err := admissionNonceError(tx, expectedNonce); err != nil {
+			return err
 		}
 	}
 	now := n.currentTime()
@@ -3204,17 +3202,32 @@ func (n *Node) validateTransaction(tx *types.Transaction) error {
 	if !n.TxChainIDAcceptedForNextBlock(tx.ChainID) {
 		return fmt.Errorf("%w: unexpected chain id %s", ErrInvalidTransaction, tx.ChainID.String())
 	}
+	var admissionSender []byte
 	if types.RequiresSignature(tx.Type) {
-		if _, err := tx.From(); err != nil {
+		from, err := tx.From()
+		if err != nil {
 			return fmt.Errorf("%w: recover sender: %w", ErrInvalidTransaction, err)
 		}
+		admissionSender = from
 	}
 	if n == nil {
 		return fmt.Errorf("node unavailable")
 	}
+	// PL-EXT-71: a heartbeat dated far from now is refused before any work, whether or not the
+	// admission simulation runs, because executing it walks one day at a time to its date.
+	if err := admissionHeartbeatError(tx, n.currentTime()); err != nil {
+		return err
+	}
 	if !n.transactionSimulationEnabled() {
 		return nil
 	}
+	// PL-EXT-91: what one account read can refuse is refused before the state is copied.
+	if admissionSender != nil {
+		if err := n.admissionPrecheck(tx, admissionSender); err != nil {
+			return err
+		}
+	}
+	atomic.AddUint64(&n.admissionSimulations, 1)
 	n.stateMu.Lock()
 	defer n.stateMu.Unlock()
 	if n.state == nil {
@@ -4393,10 +4406,20 @@ func (n *Node) ValidateBlock(b *types.Block) error {
 
 	n.stateMu.RLock()
 	currentHeight := n.chain.Height()
+	currentTip := n.chain.Tip()
 	n.stateMu.RUnlock()
 	expectedHeight := currentHeight + 1
 	if b.Header.Height != expectedHeight {
 		return fmt.Errorf("block height mismatch: got %d want %d", b.Header.Height, expectedHeight)
+	}
+	// A proposal that does not extend this node's tip can never be committed:
+	// Blockchain.AddBlock refuses it. The parent used to be checked only there, after
+	// the state transition and after the validators had voted, so a proposer could make
+	// honest validators vote for, and lock on, a block that could not be committed
+	// (ledger PL-EXT-72). It is refused here, before any state work, as AddBlock
+	// would later refuse it.
+	if !bytes.Equal(b.Header.PrevHash, currentTip) {
+		return fmt.Errorf("%w: the block names parent %x, the chain tip is %x", errBlockPrevHashMismatch, b.Header.PrevHash, currentTip)
 	}
 
 	n.stateMu.Lock()
@@ -5794,8 +5817,11 @@ func (n *Node) PotsoRewardEpochPayouts(epoch uint64, cursor *[20]byte, limit int
 	if start >= len(winners) {
 		return []potso.RewardPayout{}, nil
 	}
+	// A limit near the largest int wrapped start+limit to a negative number, which
+	// skipped the clamp below and asked make for a capacity of about 2^63: a
+	// panic in the request (ledger PL-EXT-77). The overflow is treated as "to the end".
 	end := start + limit
-	if end > len(winners) {
+	if end < start || end > len(winners) {
 		end = len(winners)
 	}
 	result := make([]potso.RewardPayout, 0, end-start)
@@ -9743,6 +9769,43 @@ func (n *Node) Events() []types.Event {
 	return copyEvents(append(retained, pending...))
 }
 
+// EventsMatching returns deep copies of the first max events, oldest first, whose type
+// begins with prefix (compared without regard to case), taken from the same
+// view of the log as Events. It filters the view before it copies, so what it
+// allocates grows with max and not with the number of events the log holds:
+// Events copied every retained event (up to 120,000, about 140 MB) for each call,
+// which an unauthenticated escrow_listEvents caller could multiply by running calls
+// at the same time (ledger PL-EXT-78). A max below one returns nothing.
+func (n *Node) EventsMatching(prefix string, max int) []types.Event {
+	if n == nil || max < 1 {
+		return nil
+	}
+	n.stateMu.RLock()
+	if n.state == nil {
+		n.stateMu.RUnlock()
+		return nil
+	}
+	retained := n.eventLog.view()
+	pending := n.state.pendingEventsView()
+	n.stateMu.RUnlock()
+
+	prefix = strings.ToLower(prefix)
+	matched := make([]types.Event, 0, 16)
+	collect := func(list []types.Event) {
+		for i := range list {
+			if len(matched) >= max {
+				return
+			}
+			if strings.HasPrefix(strings.ToLower(list[i].Type), prefix) {
+				matched = append(matched, list[i])
+			}
+		}
+	}
+	collect(retained)
+	collect(pending)
+	return copyEvents(matched)
+}
+
 func (n *Node) WithState(fn func(*nhbstate.Manager) error) error {
 	if fn == nil {
 		return fmt.Errorf("state callback required")
@@ -10083,6 +10146,7 @@ func (n *Node) ConfigureAdminWalletForTests(addr [20]byte) error {
 		return fmt.Errorf("state unavailable")
 	}
 	n.state.SetAdminWallet(addr, true)
+	n.adminWalletResolved = true
 	// Keep the Blockchain-level copy in sync too -- a real genesis load
 	// populates both (see blockchain.go's genesis-processing paths), but
 	// this ephemeral test-only path only touched the state processor's

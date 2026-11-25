@@ -482,6 +482,25 @@ type Config struct {
 	// validator, above the chain tip, with all of them restarted together. See
 	// core.ValidatorRules.
 	PotsoAbuseGuardsActivationHeight uint64 `toml:"PotsoAbuseGuardsActivationHeight"`
+	// HeartbeatTimestampBoundActivationHeight is the first block height from which a heartbeat
+	// transaction (TxTypeHeartbeat) whose payload carries a timestamp more than two minutes
+	// after the block's own time is refused (PL-EXT-71). Until then any signed timestamp was
+	// accepted, and one dated far in the future made every validator walk the engagement
+	// rollover one day at a time, with an event for each day, up to millions of days. A
+	// timestamp of 0 still means the block time and is never refused. 0 (the default) =
+	// never. A chain rule: set the same height on every validator, above the chain tip, with
+	// all of them restarted together. See core.ValidatorRules.
+	HeartbeatTimestampBoundActivationHeight uint64 `toml:"HeartbeatTimestampBoundActivationHeight"`
+	// LendingClosedDayClampActivationHeight is the first block height from which the next
+	// cycle of a fixed-term loan's auto-debit or of a fixed-term deposit's payout is put on
+	// the day of the block that schedules it when its own due day has already passed
+	// (PL-EXT-83). The settlement scans the days after the one it last closed up to today
+	// and never goes back, so a cycle put on a day it had closed was never attempted again:
+	// the last installment of a loan was not collected and the last payout of a deposit,
+	// principal included, was never made. 0 (the default) = never. A chain rule: set the
+	// same height on every validator, above the chain tip, with all of them restarted
+	// together. See core.ValidatorRules.
+	LendingClosedDayClampActivationHeight uint64 `toml:"LendingClosedDayClampActivationHeight"`
 	// EscrowEnvelopeChainBindingActivationHeight is the first block height from which
 	// the signed payload of a delegated escrow create, release, refund or dispute, and
 	// the decision payload of an arbitration quorum, must carry the network's own chain
@@ -1320,7 +1339,7 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		cfg.RPCCallerMetadataMaxTTL = int((15 * time.Minute).Seconds())
 	}
 
-	if cfg.NetworkName == "mainnet" || cfg.NetworkName == "nhbchain-1" {
+	if isProductionNetworkName(cfg.NetworkName) {
 		cfg.Governance.BlockTimestampToleranceSeconds = 5
 	} else if cfg.Governance.BlockTimestampToleranceSeconds == 0 {
 		cfg.Governance.BlockTimestampToleranceSeconds = defaultBlockTimestampToleranceSeconds
@@ -1400,7 +1419,10 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		return nil, fmt.Errorf("LoyaltyBudgetFloorZNHBWei: %w", err)
 	}
 
-	if cfg.NetworkName == "mainnet" && len(cfg.RPCSwapAuth.Secrets) == 0 {
+	// The check names the same production networks as the block timestamp
+	// tolerance above. It used to compare with "mainnet" alone, a name no
+	// deployment of this chain uses, so it never fired (ledger PL-EXT-74).
+	if isProductionNetworkName(cfg.NetworkName) && len(cfg.RPCSwapAuth.Secrets) == 0 {
 		return nil, fmt.Errorf("swap RPC authentication secrets are required for mainnet deployment")
 	}
 	if err := cfg.RPCSwapAuth.validatePartnerProviders(); err != nil {

@@ -202,8 +202,27 @@ func (sp *StateProcessor) scheduleNextLendingDepositPayout(manager *nhbstate.Man
 	if nextAttemptAt == 0 {
 		return nil
 	}
-	nextDay := nextAttemptAt / secondsPerDay
-	return manager.LendingDepositPayoutAppendDue(nextDay, depositID)
+	return manager.LendingDepositPayoutAppendDue(sp.lendingDueDay(nextAttemptAt), depositID)
+}
+
+// lendingDueDay is the day bucket a scheduled lending cycle goes into: the day of its due
+// time, and from LendingClosedDayClampActivationHeight never a day before the day of the
+// block that schedules it. The settlement closes every day it has scanned (its watermark
+// is yesterday after a pass) and never scans a closed day again, so a cycle put on one was
+// never attempted (PL-EXT-83): a late success schedules the next cycle by its absolute due
+// time, which for the last two cycles of a tenure of 30k+1 days is one day after the
+// previous one. Putting it on today means the next block's pass scans it.
+func (sp *StateProcessor) lendingDueDay(nextAttemptAt uint64) uint64 {
+	day := nextAttemptAt / secondsPerDay
+	if !ruleActiveAt(sp.validatorRules.LendingClosedDayClampActivationHeight, sp.blockHeight()) {
+		return day
+	}
+	if ts := sp.blockTimestamp().Unix(); ts > 0 {
+		if today := uint64(ts) / secondsPerDay; day < today {
+			return today
+		}
+	}
+	return day
 }
 
 func depositorBytes20(deposit *lending.FixedTermDeposit) [20]byte {

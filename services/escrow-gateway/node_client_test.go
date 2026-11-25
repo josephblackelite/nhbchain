@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/rlp"
@@ -29,6 +31,16 @@ type fakeRPCServer struct {
 	stats      string
 	statsCalls int
 	chainID    string
+	// The fake behaves like the node's admission rule (core/node.go, addTransaction: a native transaction is admitted
+	// only when its nonce EQUALS the account's current on-chain nonce) and, by default, like a block that executes
+	// every admitted transaction at once, so the account nonce then moves up by one. dropNext is the number of the
+	// next admitted transactions that are NOT executed (a competing refund landed first, a module pause): they are
+	// accepted into the mempool and the account nonce stays where it was (ledger PL-EXT-70).
+	dropNext int
+	// balanceErr makes nhb_getBalance fail, so the relayer's nonce cannot be read.
+	balanceErr *jsonRPCErrorObj
+	// sendCalls counts nhb_sendTransaction requests that reached the fake, accepted or not.
+	sendCalls int
 }
 
 // fakeNetworkChainID is the id the fake node reports by default: the network's own, not the shared constant.
@@ -66,8 +78,13 @@ func newFakeRPCServer(t *testing.T) *fakeRPCServer {
 			}
 			resp.Result, _ = json.Marshal(map[string]interface{}{"activeValidators": 2, "txChainId": f.chainID})
 		case "nhb_getBalance":
+			if f.balanceErr != nil {
+				resp.Error = f.balanceErr
+				break
+			}
 			resp.Result, _ = json.Marshal(map[string]interface{}{"nonce": f.nonce})
 		case "nhb_sendTransaction":
+			f.sendCalls++
 			if f.sendErr != nil {
 				resp.Error = f.sendErr
 				break
@@ -79,7 +96,16 @@ func newFakeRPCServer(t *testing.T) *fakeRPCServer {
 			if err := json.Unmarshal(req.Params[0], &tx); err != nil {
 				t.Fatalf("decode submitted tx: %v", err)
 			}
+			if tx.Nonce != f.nonce {
+				resp.Error = &jsonRPCErrorObj{Code: -32000, Message: fmt.Sprintf("mempool: invalid transaction: strict nonce sequence breached: expected %d, got %d", f.nonce, tx.Nonce)}
+				break
+			}
 			f.lastTx = &tx
+			if f.dropNext > 0 {
+				f.dropNext--
+			} else {
+				f.nonce++
+			}
 			resp.Result, _ = json.Marshal(f.txHash)
 		default:
 			t.Fatalf("unexpected rpc method: %s", req.Method)
@@ -180,6 +206,96 @@ func TestEscrowReleaseSubmitsDelegatedTransaction(t *testing.T) {
 	}
 	if fake.lastTx.Nonce != 4 {
 		t.Fatalf("expected relayer nonce to advance to 4, got %d", fake.lastTx.Nonce)
+	}
+}
+
+// TestAnAdmittedButDroppedTransactionDoesNotWedgeTheRelayer is the report of ledger PL-EXT-70: the node admits a
+// transaction only at the account's current on-chain nonce, so when one admitted transaction never executes (a competing
+// refund or dispute landed first, a module pause) a counter kept in the gateway is one ahead of the chain for good and
+// every later mutating call is refused until the process restarts. The relayer must follow the chain, not its own count.
+func TestAnAdmittedButDroppedTransactionDoesNotWedgeTheRelayer(t *testing.T) {
+	fake := newFakeRPCServer(t)
+	defer fake.Close()
+	fake.nonce = 7
+	client := NewRPCNodeClient(fake.URL, "")
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+	payload := []byte(`{"escrowId":"0x` + fixedHex64() + `","action":"release"}`)
+	signature := []byte("participant-signature-placeholder-000000000000000000000000000000")
+
+	// The first call is admitted and then never executes: the chain's nonce stays at 7.
+	fake.dropNext = 1
+	if err := client.EscrowRelease(context.Background(), payload, signature); err != nil {
+		t.Fatalf("first release: %v", err)
+	}
+	if fake.lastTx == nil || fake.lastTx.Nonce != 7 || fake.nonce != 7 {
+		t.Fatalf("setup: the dropped transaction must carry nonce 7 and leave the chain at 7 (tx %v, chain %d)", fake.lastTx, fake.nonce)
+	}
+
+	// Before the fix the cache stood at 8 here: the next call was signed with 8, the node refused it ("expected 7, got 8")
+	// and so did every call after it.
+	for i := 2; i <= 4; i++ {
+		if err := client.EscrowRelease(context.Background(), payload, signature); err != nil {
+			t.Fatalf("release %d after the dropped transaction: %v (the relayer is wedged)", i, err)
+		}
+	}
+	if fake.lastTx.Nonce != 9 || fake.nonce != 10 {
+		t.Fatalf("the later calls must follow the chain (7, 8, 9): last nonce %d, chain %d", fake.lastTx.Nonce, fake.nonce)
+	}
+}
+
+// TestRelayerRefusesToSignWhenItsChainNonceCannotBeRead pins that a failed read of the account nonce signs and sends
+// nothing, and that the relayer works again as soon as the read does.
+func TestRelayerRefusesToSignWhenItsChainNonceCannotBeRead(t *testing.T) {
+	fake := newFakeRPCServer(t)
+	defer fake.Close()
+	fake.nonce = 3
+	client := NewRPCNodeClient(fake.URL, "")
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+	payload := []byte(`{"escrowId":"0x` + fixedHex64() + `","action":"release"}`)
+	signature := []byte("participant-signature-placeholder-000000000000000000000000000000")
+
+	fake.balanceErr = &jsonRPCErrorObj{Code: -32000, Message: "node busy"}
+	err := client.EscrowRelease(context.Background(), payload, signature)
+	if err == nil || !strings.Contains(err.Error(), "read relayer nonce") {
+		t.Fatalf("a failed nonce read must refuse to sign, got %v", err)
+	}
+	if fake.sendCalls != 0 {
+		t.Fatalf("a transaction was sent although the relayer's nonce could not be read (%d sends)", fake.sendCalls)
+	}
+	fake.balanceErr = nil
+	if err := client.EscrowRelease(context.Background(), payload, signature); err != nil {
+		t.Fatalf("release once the nonce can be read again: %v", err)
+	}
+	if fake.lastTx == nil || fake.lastTx.Nonce != 3 {
+		t.Fatalf("expected the chain's nonce 3, got %v", fake.lastTx)
+	}
+}
+
+// TestRelayerFollowsTheChainWhenItsNonceMovedWhileTheGatewayRan covers the other direction of the same desync: the
+// account's nonce moved without this process knowing (another instance, a restart in between), so the cache is BEHIND.
+func TestRelayerFollowsTheChainWhenItsNonceMovedWhileTheGatewayRan(t *testing.T) {
+	fake := newFakeRPCServer(t)
+	defer fake.Close()
+	fake.nonce = 3
+	client := NewRPCNodeClient(fake.URL, "")
+	key := mustGenerateEscrowGatewayKey(t)
+	if err := client.InitRelayer(context.Background(), key); err != nil {
+		t.Fatalf("init relayer: %v", err)
+	}
+	fake.nonce = 10
+	payload := []byte(`{"escrowId":"0x` + fixedHex64() + `","action":"release"}`)
+	signature := []byte("participant-signature-placeholder-000000000000000000000000000000")
+	if err := client.EscrowRelease(context.Background(), payload, signature); err != nil {
+		t.Fatalf("release with the chain ahead of the start value: %v", err)
+	}
+	if fake.lastTx == nil || fake.lastTx.Nonce != 10 || fake.nonce != 11 {
+		t.Fatalf("expected a transaction at the chain's nonce 10, got %v (chain %d)", fake.lastTx, fake.nonce)
 	}
 }
 

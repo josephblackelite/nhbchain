@@ -297,8 +297,7 @@ func (sp *StateProcessor) scheduleNextLendingAutoDebit(manager *nhbstate.Manager
 	if nextAttemptAt == 0 {
 		return nil
 	}
-	nextDay := nextAttemptAt / secondsPerDay
-	return manager.LendingAutoDebitAppendDue(nextDay, loanID)
+	return manager.LendingAutoDebitAppendDue(sp.lendingDueDay(nextAttemptAt), loanID)
 }
 
 func borrowerBytes20(loan *lending.FixedTermLoan) [20]byte {

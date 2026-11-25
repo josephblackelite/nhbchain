@@ -46,6 +46,8 @@ type Server struct {
 	// envelopes this gateway builds for a participant to sign (see
 	// SetEnvelopeChainID). Empty leaves the signed bytes as they always were.
 	envelopeChainID string
+	// walletNonces refuses a second use of the same wallet-signature nonce (ledger PL-EXT-90).
+	walletNonces *walletNonceGuard
 }
 
 // validEnvelopeChainID reports whether id is empty (off) or a canonical decimal
@@ -105,6 +107,7 @@ func NewServer(auth *Authenticator, node NodeClient, store *SQLiteStore, queue *
 		merchants:     clonedMerchants,
 
 		anonymousAudit: newAuditLimiter(unauthenticatedAuditPerSecond, unauthenticatedAuditBurst),
+		walletNonces:   newWalletNonceGuard(),
 	}
 }
 
@@ -605,15 +608,22 @@ func (s *Server) verifyWalletSignature(r *http.Request, body []byte, resourceID 
 	if subtle.ConstantTimeCompare(recovered, decodedAddr.Bytes()) != 1 {
 		return "", errors.New("signature does not match supplied address")
 	}
-	if len(allowed) == 0 {
-		return sigAddr, nil
-	}
+	authorised := len(allowed) == 0
 	for _, candidate := range allowed {
 		if strings.EqualFold(candidate, sigAddr) {
-			return sigAddr, nil
+			authorised = true
+			break
 		}
 	}
-	return "", errors.New("signer is not authorised for this action")
+	if !authorised {
+		return "", errors.New("signer is not authorised for this action")
+	}
+	// Only a signature that verified for an allowed signer is remembered, so the table
+	// cannot be filled by requests that carry no valid wallet signature.
+	if err := s.walletNonces.use(strings.ToLower(sigAddr), nonce, s.nowFn()); err != nil {
+		return "", err
+	}
+	return sigAddr, nil
 }
 
 // escrowActionEnvelopeWire mirrors native/escrow/engine.go's unexported

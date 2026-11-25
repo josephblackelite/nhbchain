@@ -174,6 +174,35 @@ func TestRegisterCooldownDoesNotSpendTheHourlyBudget(t *testing.T) {
 	}
 }
 
+// Ledger PL-EXT-81: a register call refused by the per-address cooldown sent no mail but still
+// used up a slot of the API key's budget, so one address calling inside its cooldown could lock
+// out every other user of the same key. A refused call must leave the key's budget alone.
+func TestRegisterRefusedByTheCooldownDoesNotSpendTheAPIKeyBudget(t *testing.T) {
+	t.Parallel()
+	h := newHardeningHarness(t, Config{KeyRegisterAttempts: 3, RegisterCooldown: time.Minute})
+	if got := h.register("victim@example.com", ""); got != http.StatusOK {
+		t.Fatalf("first register: %d", got)
+	}
+	for i := 0; i < 10; i++ {
+		h.now = h.now.Add(time.Second)
+		if got := h.register("victim@example.com", ""); got != http.StatusTooManyRequests {
+			t.Fatalf("a register inside the cooldown must answer 429, got %d", got)
+		}
+	}
+	// The key has spent one slot of three on a mail that was sent. Two other users must still get theirs.
+	for i := 0; i < 2; i++ {
+		if got := h.register("other"+strconv.Itoa(i)+"@example.com", ""); got != http.StatusOK {
+			t.Fatalf("user %d of the same key was refused (%d) after another address was refused by its cooldown ten times", i, got)
+		}
+	}
+	if h.emailer.sent != 3 {
+		t.Fatalf("mails sent = %d, want 3", h.emailer.sent)
+	}
+	if got := h.register("third@example.com", ""); got != http.StatusTooManyRequests {
+		t.Fatalf("the key's own budget of three must still hold, got %d", got)
+	}
+}
+
 // The per-address budget of the register endpoint ages out: after the window an address can
 // ask again (the budget of five per hour is a rate, not a lifetime cap).
 func TestRegisterBudgetOfAnAddressAgesOut(t *testing.T) {

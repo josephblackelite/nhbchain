@@ -235,6 +235,19 @@ DelegatorHoldWeightActivationHeight = 0
 # are 0). Set the values and the height identically on every validator, the height above the
 # chain tip, restarting all of them together.
 PotsoAbuseGuardsActivationHeight = 0
+# First block height from which a heartbeat transaction whose payload timestamp is more than
+# two minutes after the block's own time is refused (see the
+# HeartbeatTimestampBoundActivationHeight doc comment in config/config.go). Before it any
+# timestamp is accepted, as on both live validators. 0 = never. Set it identically on every
+# validator, to a height above the chain tip, restarting all of them together.
+HeartbeatTimestampBoundActivationHeight = 0
+# First block height from which the next cycle of a fixed-term loan's auto-debit or of a
+# fixed-term deposit's payout is scheduled onto the current day when its own due day has
+# already been closed by the settlement (see the LendingClosedDayClampActivationHeight doc
+# comment in config/config.go). Before it such a cycle is never attempted, as on both live
+# validators. 0 = never. Set it identically on every validator, to a height above the
+# chain tip, restarting all of them together.
+LendingClosedDayClampActivationHeight = 0
 # First block height from which the signed payload of a delegated escrow create, release,
 # refund or dispute, and the decision of an arbitration quorum, must carry this network's
 # chain id as "chainId" (see the EscrowEnvelopeChainBindingActivationHeight doc comment in

@@ -87,6 +87,8 @@ var liveChainRules = []struct {
 	{"", "SaleReferenceMaxStepBps", 0},
 	{"", "DelegatorHoldWeightActivationHeight", 0},
 	{"", "PotsoAbuseGuardsActivationHeight", 0},
+	{"", "HeartbeatTimestampBoundActivationHeight", 0},
+	{"", "LendingClosedDayClampActivationHeight", 0},
 	{"", "EscrowEnvelopeChainBindingActivationHeight", 0},
 	{"swap", "PayoutReceiptActivationHeight", 0},
 	{"bridge", "BridgeActivationHeight", 0},
