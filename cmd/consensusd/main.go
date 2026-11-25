@@ -204,6 +204,16 @@ func main() {
 	if err := node.SetGlobalConfig(cfg.Global); err != nil {
 		log.Fatal("invalid global configuration", "err", err)
 	}
+	// PL-EXT-73: without an admin wallet in the genesis and without TransferFeeCollector, every node
+	// credits the transfer fee to its OWN validator address and the validators diverge at the first
+	// fee. Refuse to start; a development node on an auto-created genesis only gets a warning.
+	if err := node.CheckTransferFeeCollector(cfg.Global.Fees); err != nil {
+		if allowAutogenesis {
+			slog.Warn("transfer fee collector is not configured", slog.Any("error", err))
+		} else {
+			log.Fatal("refusing to start", "err", err)
+		}
+	}
 	node.SetMempoolUnlimitedOptIn(cfg.Mempool.AllowUnlimited)
 	// NHB-AUDIT-C6: this binary's untrusted P2P block-sync path never
 	// enabled the NHB-TRIAGE-C1 quorum-certificate check at all, unlike

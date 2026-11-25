@@ -7,11 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"nhbchain/config"
 	"nhbchain/crypto"
-
-	"github.com/BurntSushi/toml"
 )
 
 const (
@@ -20,20 +19,6 @@ const (
 	defaultConfig   = "./config.toml"
 	defaultKeystore = "validator.keystore"
 )
-
-type fileConfig struct {
-	ListenAddress         string   `toml:"ListenAddress"`
-	RPCAddress            string   `toml:"RPCAddress"`
-	DataDir               string   `toml:"DataDir"`
-	ValidatorKey          string   `toml:"ValidatorKey"`
-	ValidatorKeystorePath string   `toml:"ValidatorKeystorePath"`
-	ValidatorKMSURI       string   `toml:"ValidatorKMSURI"`
-	ValidatorKMSEnv       string   `toml:"ValidatorKMSEnv"`
-	NetworkName           string   `toml:"NetworkName"`
-	Bootnodes             []string `toml:"Bootnodes"`
-	PersistentPeers       []string `toml:"PersistentPeers"`
-	BootstrapPeers        []string `toml:"BootstrapPeers"`
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -64,16 +49,28 @@ func runMigrate(args []string) {
 	}
 }
 
+// migrateKeystore moves a plaintext ValidatorKey out of the config into an
+// encrypted keystore. It changes ONE line of the config file (the ValidatorKey
+// line becomes the ValidatorKeystorePath line) and leaves every other byte as it
+// was; it used to decode the file into an eleven-field struct and write that
+// back, which dropped every other setting and section (ledger PL-EXT-76). A copy
+// of the original is kept beside the config before anything is written, and if
+// the finished config does not load, the original is put back.
 func migrateKeystore(configPath, keystorePath, passEnv string, force bool) error {
-	var cfg fileConfig
-	if _, err := toml.DecodeFile(configPath, &cfg); err != nil {
+	rawBytes, err := os.ReadFile(configPath)
+	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
 	}
+	raw := string(rawBytes)
 
-	if cfg.ValidatorKey == "" {
+	legacyKey, keystoreSet, err := scanTopLevelKeys(raw)
+	if err != nil {
+		return fmt.Errorf("failed to read config %s: %w", configPath, err)
+	}
+	if legacyKey == "" {
 		return fmt.Errorf("config %s does not contain a ValidatorKey field to migrate", configPath)
 	}
-	if cfg.ValidatorKeystorePath != "" {
+	if keystoreSet {
 		return fmt.Errorf("config %s already references a keystore", configPath)
 	}
 
@@ -109,49 +106,38 @@ func migrateKeystore(configPath, keystorePath, passEnv string, force bool) error
 		return fmt.Errorf("validator keystore passphrase must be provided via %s", passEnv)
 	}
 
-	key, err := parseLegacyKey(cfg.ValidatorKey)
+	key, err := parseLegacyKey(legacyKey)
 	if err != nil {
 		return err
+	}
+
+	updated, err := replaceLegacyKeyLine(raw, keystorePath)
+	if err != nil {
+		return err
+	}
+
+	// The copy holds the plaintext key, so it is as private as the key itself.
+	backupPath := configPath + ".bak-premigrate-" + time.Now().UTC().Format("20060102T150405Z")
+	if err := os.WriteFile(backupPath, rawBytes, 0o600); err != nil {
+		return fmt.Errorf("failed to write the backup of the config: %w", err)
 	}
 
 	if err := crypto.SaveToKeystore(keystorePath, key, passphrase); err != nil {
 		return fmt.Errorf("failed to write keystore: %w", err)
 	}
 
-	cfg.ValidatorKey = ""
-	cfg.ValidatorKeystorePath = keystorePath
-	if cfg.ValidatorKMSURI == "" {
-		cfg.ValidatorKMSURI = ""
-	}
-	if cfg.ValidatorKMSEnv == "" {
-		cfg.ValidatorKMSEnv = ""
-	}
-	if cfg.Bootnodes == nil {
-		cfg.Bootnodes = []string{}
-	}
-	if cfg.PersistentPeers == nil {
-		cfg.PersistentPeers = []string{}
-	}
-	if cfg.BootstrapPeers == nil {
-		cfg.BootstrapPeers = []string{}
-	}
-	if len(cfg.Bootnodes) == 0 && len(cfg.BootstrapPeers) > 0 {
-		cfg.Bootnodes = append([]string{}, cfg.BootstrapPeers...)
-	}
-	cfg.BootstrapPeers = nil
-	if strings.TrimSpace(cfg.NetworkName) == "" {
-		cfg.NetworkName = "nhb-local"
-	}
-
-	if err := writeConfig(configPath, cfg); err != nil {
-		return err
+	if err := writeFileKeepingMode(configPath, []byte(updated)); err != nil {
+		return fmt.Errorf("failed to write the updated config (the original is intact or is in %s): %w", backupPath, err)
 	}
 
 	if _, err := config.Load(configPath, config.WithKeystorePassphrase(passphrase)); err != nil {
-		return fmt.Errorf("verification failed after migration: %w", err)
+		if restoreErr := writeFileKeepingMode(configPath, rawBytes); restoreErr != nil {
+			return fmt.Errorf("verification failed after migration (%v) and the original config could not be put back (%v); the original is in %s", err, restoreErr, backupPath)
+		}
+		return fmt.Errorf("verification failed after migration, the original config was put back (the keystore %s was written; the copy is %s): %w", keystorePath, backupPath, err)
 	}
 
-	fmt.Printf("Wrote keystore to %s and updated %s\n", keystorePath, configPath)
+	fmt.Printf("Wrote keystore to %s and updated %s (one line changed; the original is kept in %s)\n", keystorePath, configPath, backupPath)
 	return nil
 }
 
@@ -166,16 +152,6 @@ func parseLegacyKey(value string) (*crypto.PrivateKey, error) {
 		return nil, fmt.Errorf("invalid validator key encoding: %w", err)
 	}
 	return crypto.PrivateKeyFromBytes(bytes)
-}
-
-func writeConfig(path string, cfg fileConfig) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	return toml.NewEncoder(f).Encode(cfg)
 }
 
 func usage() {

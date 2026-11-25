@@ -565,7 +565,13 @@ func TestPotsoRewardReadsReturnWhatTheStateHolds(t *testing.T) {
 		if err != nil || len(next) != 3 || next[0].Address != fixtureAddress(3) || next[2].Address != fixtureAddress(5) {
 			t.Fatalf("page after a cursor: %v, error %v; want the third to fifth winners", next, err)
 		}
-		if all, err := node.PotsoRewardEpochPayouts(3, nil, 0); err != nil || len(all) != 25 {
+		// Ledger PL-EXT-77: with a cursor, start+limit used to wrap negative for a limit
+			// near the largest int and make panicked. It must return the rest of the list.
+			hugeLimit := int(^uint(0) >> 1)
+			if tail, err := node.PotsoRewardEpochPayouts(3, &cursor, hugeLimit); err != nil || len(tail) != 23 || tail[0].Address != fixtureAddress(3) {
+				t.Fatalf("page after a cursor with the largest limit: %d payouts, error %v; want the 23 winners after the cursor", len(tail), err)
+			}
+			if all, err := node.PotsoRewardEpochPayouts(3, nil, 0); err != nil || len(all) != 25 {
 			t.Fatalf("default page: %d payouts, error %v; want the 25 winners", len(all), err)
 		}
 		last := fixtureAddress(25)

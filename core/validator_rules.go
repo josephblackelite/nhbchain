@@ -90,6 +90,22 @@ type ValidatorRules struct {
 	// validators run with (all five are 0 in their files).
 	PotsoAbuseGuardsActivationHeight uint64
 
+	// HeartbeatTimestampBoundActivationHeight (PL-EXT-71): from the height a heartbeat
+	// transaction whose payload timestamp is more than two minutes after the block's own
+	// time is refused (a timestamp of 0 means the block time and is never refused). Before
+	// it any timestamp is accepted: one dated far in the future makes every validator walk
+	// the engagement rollover one day at a time, with an event for each day. 0 = never,
+	// which is what both live validators run with. See applyHeartbeat.
+	HeartbeatTimestampBoundActivationHeight uint64
+
+	// LendingClosedDayClampActivationHeight (PL-EXT-83): from the height the next cycle of a
+	// fixed-term loan's auto-debit or of a fixed-term deposit's payout is put on the day of
+	// the scheduling block when its own due day is already behind it. The settlement scans
+	// the days after the last one it closed up to today and never goes back, so before the
+	// height such a cycle sits on a closed day and is never attempted. 0 = never, which is
+	// what both live validators run with. See lendingDueDay.
+	LendingClosedDayClampActivationHeight uint64
+
 	// SaleReferenceActivationHeight, SaleReferenceMaxAgeSeconds and
 	// SaleReferenceMaxStepBps (PL-BC-D): from the height the price of every sale from the
 	// treasury Sale Pool is the higher of the Genesis curve's cost and the latest signed
@@ -101,6 +117,11 @@ type ValidatorRules struct {
 	SaleReferenceMaxAgeSeconds    uint64
 	SaleReferenceMaxStepBps       uint64
 }
+
+// heartbeatMaxAheadSeconds is how far after the block's own time a heartbeat's timestamp may
+// be once HeartbeatTimestampBoundActivationHeight has passed (two minutes, the same skew the
+// validator activation check uses for a validator's last heartbeat).
+const heartbeatMaxAheadSeconds = 120
 
 // ruleActiveAt reports whether a rule whose first height is from applies at height. A
 // zero from is off at every height.

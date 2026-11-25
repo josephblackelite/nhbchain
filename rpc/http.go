@@ -2325,6 +2325,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		s.handleGovernanceParams(recorder, r, req)
 	case "bridge_getStatus":
 		s.handleBridgeStatus(recorder, r, req)
+	case "bridge_getLock":
+		s.handleBridgeGetLock(recorder, r, req)
+	case "bridge_listLocks":
+		s.handleBridgeListLocks(recorder, r, req)
+	case "bridge_getRelease":
+		s.handleBridgeGetRelease(recorder, r, req)
 	case "amm_getPool":
 		s.handleAmmPool(recorder, r, req)
 	case "amm_quote":
@@ -3983,15 +3989,11 @@ func (s *Server) handleSendTransaction(w http.ResponseWriter, r *http.Request, r
 	now := time.Now()
 	source := s.clientSource(r)
 	identity, _ := r.Context().Value(clientIdentityContextKey).(string)
-	chainKey := ""
-	if tx.ChainID != nil {
-		chainKey = strings.TrimSpace(tx.ChainID.String())
-	}
-	nonceKey := strconv.FormatUint(tx.Nonce, 10)
-	if chainKey != "" {
-		nonceKey = chainKey + ":" + nonceKey
-	}
-	if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, nonceKey, req.Method, now); !allowed {
+	// The chain scope and the identity-chain scope are keyed by the chain alone.
+	// They used to be keyed by "chain:nonce", which gave every nonce its own
+	// bucket, so the per-chain cap never accumulated (ledger PL-EXT-79).
+	chainKey := transactionLimiterChainKey(&tx)
+	if allowed, retryAfter := s.allowSourceWithRetryAfter(source, identity, chainKey, req.Method, now); !allowed {
 		w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(retryAfter), 10))
 		writeError(w, http.StatusTooManyRequests, req.ID, codeRateLimited, "transaction rate limit exceeded", source)
 		return

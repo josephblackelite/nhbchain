@@ -147,10 +147,12 @@ func (c *RPCNodeClient) fetchTxChainID(ctx context.Context) (*big.Int, error) {
 	return txchainid.Parse(result)
 }
 
-// InitRelayer configures the gateway's own signing key and fetches its
-// current on-chain nonce once via nhb_getBalance. Must be called before any
-// mutating escrow endpoint is served -- see RPCNodeClient.relayerMu's doc
-// comment for why the nonce is then only ever advanced under that mutex.
+// InitRelayer configures the gateway's own signing key and checks that the
+// relayer's on-chain nonce can be read (nhb_getBalance). Must be called before
+// any mutating escrow endpoint is served -- see RPCNodeClient.relayerMu's doc
+// comment for why submissions are serialized under that mutex. The nonce read
+// here is only a start value: every submission reads the chain's current nonce
+// again before it signs (submitEscrowTx, ledger PL-EXT-70).
 func (c *RPCNodeClient) InitRelayer(ctx context.Context, key *nhbcrypto.PrivateKey) error {
 	if key == nil {
 		return fmt.Errorf("relayer key required")
@@ -220,10 +222,20 @@ func (c *RPCNodeClient) submitEscrowTx(ctx context.Context, txType types.TxType,
 	if err != nil {
 		return "", fmt.Errorf("refusing to sign: %w", err)
 	}
+	// The node admits a transaction only when its nonce equals the account's CURRENT on-chain nonce (core/node.go,
+	// addTransaction: "strict nonce sequence"), so that is the only nonce a transaction signed now can carry. A counter
+	// kept here and advanced on admission runs ahead of the chain for good the moment one admitted transaction is
+	// dropped before it executes (a competing refund or dispute lands first, a module pause), and then every later
+	// mutating call is rejected until the process restarts (ledger PL-EXT-70). So the nonce is read from the chain, under
+	// relayerMu, right before each signature; a read that fails signs nothing.
+	nonce, err := c.chainNonceLocked(ctx)
+	if err != nil {
+		return "", err
+	}
 	tx := &types.Transaction{
 		ChainID:  chainID,
 		Type:     txType,
-		Nonce:    c.relayerNonce,
+		Nonce:    nonce,
 		GasLimit: escrowRelayerGasLimit,
 		GasPrice: new(big.Int).Set(escrowRelayerGasPrice),
 		Data:     data,
@@ -235,12 +247,23 @@ func (c *RPCNodeClient) submitEscrowTx(ctx context.Context, txType types.TxType,
 	if err := c.call(ctx, "nhb_sendTransaction", []interface{}{tx}, &txHash); err != nil {
 		return "", err
 	}
-	// Only advance the cached nonce after a successful submission -- a
-	// failed call (rejected by the node before it ever reached the
-	// mempool) must not burn a nonce slot, mirroring
-	// SendAttestRedemption's exact same reasoning.
-	c.relayerNonce++
+	// relayerNonce only records the next nonce after the last admitted transaction (it is no longer what a transaction is
+	// signed with, see above); a failed call, rejected before it reached the mempool, leaves it alone.
+	c.relayerNonce = nonce + 1
 	return txHash, nil
+}
+
+// chainNonceLocked reads the relayer account's current nonce from the node (nhb_getBalance, the same read InitRelayer
+// makes). The caller holds relayerMu, so the read and the signature that follows it cannot interleave with another
+// submission from this client.
+func (c *RPCNodeClient) chainNonceLocked(ctx context.Context) (uint64, error) {
+	var resp struct {
+		Nonce uint64 `json:"nonce"`
+	}
+	if err := c.call(ctx, "nhb_getBalance", []interface{}{c.relayerAddress}, &resp); err != nil {
+		return 0, fmt.Errorf("refusing to sign: read relayer nonce: %w", err)
+	}
+	return resp.Nonce, nil
 }
 
 type delegatedCreateEscrowPayload struct {

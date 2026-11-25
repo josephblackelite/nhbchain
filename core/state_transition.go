@@ -7883,6 +7883,16 @@ func (sp *StateProcessor) applyHeartbeat(tx *types.Transaction, sender []byte, s
 		// the private incident log.
 		payload.Timestamp = sp.blockTimestamp().Unix()
 	}
+	// From HeartbeatTimestampBoundActivationHeight a timestamp more than two minutes after the
+	// block's own time is refused before anything is changed (PL-EXT-71): the rollover below
+	// walks one day at a time from the account's day to the timestamp's day, so a timestamp
+	// dated far ahead made every validator loop over millions of days. It is refused the way
+	// a replayed heartbeat is, so the mempool prunes it.
+	if payload.Timestamp > sp.blockTimestamp().Unix()+heartbeatMaxAheadSeconds &&
+		ruleActiveAt(sp.validatorRules.HeartbeatTimestampBoundActivationHeight, sp.blockHeight()) {
+		return fmt.Errorf("heartbeat timestamp %d is more than %d seconds after the block time %d: %w",
+			payload.Timestamp, heartbeatMaxAheadSeconds, sp.blockTimestamp().Unix(), ErrHeartbeatTooSoon)
+	}
 	now := time.Unix(payload.Timestamp, 0).UTC()
 
 	updates := sp.rolloverEngagement(senderAccount, now)

@@ -110,6 +110,8 @@ var digestFieldSections = map[string]string{
 	"SaleReferenceMaxStepBps":                             "chain-rules",
 	"DelegatorHoldWeightActivationHeight":                 "chain-rules",
 	"PotsoAbuseGuardsActivationHeight":                    "chain-rules",
+	"HeartbeatTimestampBoundActivationHeight":             "chain-rules",
+	"LendingClosedDayClampActivationHeight":               "chain-rules",
 	"EscrowEnvelopeChainBindingActivationHeight":          "chain-rules",
 
 	"Potso":         "potso",
